@@ -293,7 +293,7 @@ class RealSharedMemory:
         Returns:
             (detection_result_dict | None, version)
         """
-        detection_struct = self._read_detection_struct()
+        detection_struct = self._read_detection_struct(update_version_only=True)
         if detection_struct is None:
             return (None, self.last_detection_version)
 
