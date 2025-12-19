@@ -48,16 +48,16 @@ AI物体検出技術を活用し、ペット（猫）の日常行動を自動的
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 2. プロジェクトルートに移動
-cd /app/smart-pet-camera
+cd smart-pet-camera
 
-# 3. モック環境に移動
-cd src/mock
+# 3. pyproject.tomlの作成（初回のみ）
+uv init
 
 # 4. 依存関係のインストール
-uv pip install flask opencv-python numpy
+uv sync
 
 # 5. モック環境の起動
-python main.py
+uv run src/mock/main.py
 
 # 6. ブラウザで確認
 # http://localhost:8080 を開く
@@ -67,16 +67,16 @@ python main.py
 
 ```bash
 # Webカメラを使用
-python main.py --source webcam
+uv run src/mock/main.py --source webcam
 
 # テスト動画を使用
-python main.py --source video --source-path /path/to/video.mp4
+uv run src/mock/main.py --source video --source-path /path/to/video.mp4
 
 # 検出頻度を調整
-python main.py --detection-prob 0.5
+uv run src/mock/main.py --detection-prob 0.5
 
 # ポート変更
-python main.py --port 9000
+uv run src/mock/main.py --port 9000
 ```
 
 詳細は [src/mock/README.md](src/mock/README.md) を参照してください。
@@ -101,7 +101,7 @@ python main.py --port 9000
 ### 1. 依存関係のインストール
 
 ```bash
-cd /app/smart-pet-camera
+cd smart-pet-camera
 chmod +x scripts/install_deps.sh
 ./scripts/install_deps.sh
 ```
@@ -146,10 +146,10 @@ make
 ./build/capture_main
 
 # ターミナル2: 物体検出
-python3 src/detection/main_detection.py
+uv run src/detection/main_detection.py
 
 # ターミナル3: データ記録
-python3 src/recording/main_recording.py
+uv run src/recording/main_recording.py
 ```
 
 ### プロダクションモード（systemdサービス）
@@ -210,7 +210,7 @@ sudo systemctl status smart-pet-camera-*
 ### ディレクトリ構造
 
 ```
-/app/smart-pet-camera/
+smart-pet-camera/
 ├── docs/           # ドキュメント
 ├── src/            # ソースコード
 │   ├── capture/    # カメラキャプチャ (C)
@@ -234,24 +234,24 @@ sudo systemctl status smart-pet-camera-*
   # uvのインストール
   curl -LsSf https://astral.sh/uv/install.sh | sh
 
-  # 依存関係のインストール
-  uv pip install -r requirements.txt
+  # pyproject.tomlの作成（初回のみ）
+  uv init
 
-  # 仮想環境の作成
-  uv venv
-  source .venv/bin/activate
+  # 依存関係のインストール
+  uv sync
+
+  # 依存パッケージの追加
+  uv add <package>
+
+  # 開発ツールの追加
+  uv add --dev pyright pylint pytest
   ```
 
 #### 型チェック
 - **pyright** - 型付け強制（厳格な型チェック）
   ```bash
-  # pyrightのインストール
-  npm install -g pyright
-  # または
-  uv pip install pyright
-
   # 型チェック実行
-  pyright src/
+  PYTHONPATH=src:src/common/src:src/mock:src/monitor uv run pyright src/
   ```
 
 #### テストフレームワーク
@@ -261,32 +261,32 @@ sudo systemctl status smart-pet-camera-*
 #### 推奨開発フロー
 ```bash
 # 1. 型チェック
-pyright src/
+PYTHONPATH=src:src/common/src:src/mock:src/monitor uv run pyright src/
 
 # 2. リンター
-pylint src/
+PYTHONPATH=src:src/common/src:src/mock:src/monitor uv run pylint src/
 
 # 3. テスト実行
-pytest tests/
+uv run pytest tests/
 
 # 4. カバレッジ確認
-pytest --cov=src tests/
+uv run pytest --cov=src tests/
 ```
 
 ### テストの実行
 
 ```bash
 # Pythonユニットテスト
-pytest tests/unit/
+uv run pytest tests/unit/
 
 # 統合テスト
-pytest tests/integration/
+uv run pytest tests/integration/
 
 # カバレッジ付き実行
-pytest --cov=src tests/
+uv run pytest --cov=src tests/
 
 # 型チェック
-pyright src/
+PYTHONPATH=src:src/common/src:src/mock:src/monitor uv run pyright src/
 ```
 
 ### コーディング規約
@@ -321,7 +321,7 @@ sudo usermod -a -G video $USER
 ls -l models/
 
 # Pythonパッケージの確認
-pip3 list | grep -E "tensorflow|onnx|opencv"
+uv run python -m pip list | grep -E "tensorflow|onnx|opencv"
 
 # ログの確認
 journalctl -u smart-pet-camera-detection -n 100
