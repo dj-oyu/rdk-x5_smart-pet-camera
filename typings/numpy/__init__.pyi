@@ -1,0 +1,13 @@
+from typing import Any
+ndarray = Any
+uint8 = Any
+
+def frombuffer(buffer: Any, dtype: Any, count: int = ..., offset: int = ...) -> ndarray: ...
+def zeros(shape: Any, dtype: Any = ...) -> ndarray: ...
+def random(*args: Any, **kwargs: Any) -> Any: ...
+
+class random:
+    @staticmethod
+    def randint(low: Any, high: Any = ..., size: Any = ..., dtype: Any = ...) -> ndarray: ...
+
+__all__ = ['ndarray', 'frombuffer', 'zeros', 'random', 'uint8', 'random']
