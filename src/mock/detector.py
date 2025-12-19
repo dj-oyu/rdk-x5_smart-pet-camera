@@ -6,7 +6,6 @@
 """
 
 import random
-from typing import Optional
 from pathlib import Path
 import sys
 

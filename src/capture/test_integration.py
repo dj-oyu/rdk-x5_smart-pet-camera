@@ -59,24 +59,25 @@ def main():
 
     args = parser.parse_args()
 
+    output_path = Path(args.output_dir)
+
     # Create output directory if saving frames
     if args.save_frames:
-        output_path = Path(args.output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         print(f"[Info] Saving frames to: {output_path}")
 
     # Open shared memory
     shm = RealSharedMemory()
 
+    frame_count = 0
+    start_time = time.time()
+    last_fps_time = start_time
+    last_fps_count = 0
+
     try:
         shm.open()
         print("[Info] Connected to shared memory")
         print("[Info] Waiting for frames (Ctrl+C to stop)...\n")
-
-        frame_count = 0
-        start_time = time.time()
-        last_fps_time = start_time
-        last_fps_count = 0
 
         while True:
             # Get latest frame
