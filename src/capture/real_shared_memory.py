@@ -128,6 +128,7 @@ class RealSharedMemory:
         self.detection_mmap: Optional[mmap.mmap] = None
         self.last_read_frame_number = -1
         self.last_detection_version = 0
+        self.total_frames_read = 0
 
     def open(self):
         """Open existing shared memory segments."""
@@ -211,6 +212,7 @@ class RealSharedMemory:
             return None  # Same frame as before
 
         self.last_read_frame_number = c_frame.frame_number
+        self.total_frames_read += 1
 
         # Convert to Python Frame
         timestamp_sec = c_frame.timestamp.tv_sec + c_frame.timestamp.tv_nsec / 1e9
@@ -242,19 +244,13 @@ class RealSharedMemory:
         Returns:
             Tuple of (version, detections) or None if no new detections
         """
-        if not self.detection_mmap:
+        detection_struct = self._read_detection_struct()
+        if detection_struct is None:
             return None
 
-        # Read entire detection structure
-        self.detection_mmap.seek(0)
-        det_data = self.detection_mmap.read(sizeof(CLatestDetectionResult))
-        c_det = CLatestDetectionResult.from_buffer_copy(det_data)
-
-        # Check version
-        if c_det.version == self.last_detection_version:
-            return None  # No new detections
-
-        self.last_detection_version = c_det.version
+        c_det, has_new_version = detection_struct
+        if not has_new_version:
+            return None
 
         # Convert to Python Detection objects
         detections = []
@@ -274,6 +270,101 @@ class RealSharedMemory:
             detections.append(detection)
 
         return (c_det.version, detections)
+
+    def read_latest_frame(self) -> Optional[Frame]:
+        """Alias for compatibility with MockSharedMemory."""
+        return self.get_latest_frame()
+
+    def get_detection_version(self) -> int:
+        """Return the last observed detection version (polls shared memory if available)."""
+        if not self.detection_mmap:
+            return self.last_detection_version
+
+        detection_struct = self._read_detection_struct(update_version_only=True)
+        if detection_struct is None:
+            return self.last_detection_version
+
+        c_det, _ = detection_struct
+        return c_det.version
+
+    def read_detection(self) -> tuple[Optional[dict], int]:
+        """
+        Return the latest detection result as a JSON-serializable dict and its version.
+
+        Returns:
+            (detection_result_dict | None, version)
+        """
+        detection_struct = self._read_detection_struct()
+        if detection_struct is None:
+            return (None, self.last_detection_version)
+
+        c_det, _ = detection_struct
+
+        detections = []
+        for i in range(c_det.num_detections):
+            c_detection = c_det.detections[i]
+            detections.append(
+                {
+                    "class_name": c_detection.class_name.decode("utf-8").rstrip("\x00"),
+                    "confidence": float(c_detection.confidence),
+                    "bbox": {
+                        "x": int(c_detection.bbox.x),
+                        "y": int(c_detection.bbox.y),
+                        "w": int(c_detection.bbox.w),
+                        "h": int(c_detection.bbox.h),
+                    },
+                }
+            )
+
+        detection_result = {
+            "frame_number": int(c_det.frame_number),
+            "timestamp": float(c_det.timestamp.tv_sec + c_det.timestamp.tv_nsec / 1e9),
+            "detections": detections,
+            "version": int(c_det.version),
+        }
+
+        return (detection_result, c_det.version)
+
+    def get_stats(self) -> dict[str, int]:
+        """Return stats compatible with MockSharedMemory for the monitor API."""
+        write_index = self.get_write_index()
+        frame_count = min(write_index, RING_BUFFER_SIZE) if write_index > 0 else 0
+        detection_version = self.get_detection_version()
+        return {
+            "frame_count": frame_count,
+            "total_frames_written": write_index,
+            "detection_version": detection_version,
+            "has_detection": 1 if detection_version > 0 else 0,
+        }
+
+    def _read_detection_struct(
+        self, update_version_only: bool = False
+    ) -> Optional[tuple[CLatestDetectionResult, bool]]:
+        """
+        Read the detection shared memory structure.
+
+        Args:
+            update_version_only: If True, don't check version change for callers that only
+                want the latest version number.
+
+        Returns:
+            Tuple of (CLatestDetectionResult, has_new_version) or None if unavailable.
+        """
+        if not self.detection_mmap:
+            return None
+
+        self.detection_mmap.seek(0)
+        det_data = self.detection_mmap.read(sizeof(CLatestDetectionResult))
+        c_det = CLatestDetectionResult.from_buffer_copy(det_data)
+
+        has_new_version = c_det.version != self.last_detection_version
+
+        if has_new_version:
+            self.last_detection_version = c_det.version
+        elif not update_version_only:
+            return None
+
+        return (c_det, has_new_version)
 
     def decode_jpeg(self, jpeg_data: bytes) -> np.ndarray:
         """
