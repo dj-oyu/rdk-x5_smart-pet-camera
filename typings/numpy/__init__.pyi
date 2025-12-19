@@ -10,4 +10,4 @@ class random:
     @staticmethod
     def randint(low: Any, high: Any = ..., size: Any = ..., dtype: Any = ...) -> ndarray: ...
 
-__all__ = ['ndarray', 'frombuffer', 'zeros', 'random', 'uint8', 'random']
+__all__ = ['ndarray', 'frombuffer', 'zeros', 'random', 'uint8']
