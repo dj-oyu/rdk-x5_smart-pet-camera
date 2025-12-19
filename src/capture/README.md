@@ -293,6 +293,25 @@ make switcher-runtime-lib  # ../../build/libcamera_switcher_runtime.a を生成
 
 ライブラリをリンクする際は `-lpthread -ljpeg` を追加してください。
 
+### 既存 camera_daemon_drobotics をプロセスごと切り替えるリファレンス
+
+`camera_switcher_daemon.c` は、ビルド済み `camera_daemon_drobotics` バイナリをカメラIDごとに起動/停止しながら、共有メモリ経由で明るさを測り、自動切替を行うリファレンス実装です。
+
+- ビルド＆実行:
+  ```bash
+  cd src/capture
+  make switcher-daemon
+  # ../../build/camera_daemon_drobotics が存在し、shared_memory に書き込むことが前提
+  ./../../build/camera_switcher_daemon
+  ```
+- 仕組み:
+  - `switch_camera`: 既存デーモンを `--daemon` でフォーク起動し、切替時に既存 PID を SIGTERM/ wait で終了
+  - `capture_frame`: shared_memory から指定 camera_id のフレームをポーリング取得
+  - `publish_frame`: ウォームアップ＆ダブルバッファ後のフレームを書き戻し（例として同じ shared_memory を使用）
+- 注意:
+  - 実機固有の初期化や ISP 設定が必要な場合は `switch_camera` / `capture_frame` 内で適宜拡張してください。
+  - `CAPTURE_BIN` パス（デフォルト `../../build/camera_daemon_drobotics`）を環境に合わせて調整可能です。
+
 ### デバッグ: 低依存のインタラクティブデモ
 
 実機なしで切り替えロジックを試す場合は、Cのみで完結するデモを用意しています。
