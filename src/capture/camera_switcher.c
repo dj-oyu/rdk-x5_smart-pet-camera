@@ -215,13 +215,13 @@ double frame_calculate_mean_luma(const Frame* frame) {
         }
         
         jpeg_mem_src(&cinfo, frame->data, frame->data_size);
+        /* jpeg_read_header will trigger error handler (longjmp) on failure */
         jpeg_read_header(&cinfo, TRUE);
 
         jpeg_start_decompress(&cinfo);
         
         /* Verify the JPEG is in RGB format (3 components) */
         if (cinfo.output_components != 3) {
-            jpeg_finish_decompress(&cinfo);
             jpeg_destroy_decompress(&cinfo);
             return -1.0;
         }
