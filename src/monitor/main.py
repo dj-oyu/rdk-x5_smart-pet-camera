@@ -17,7 +17,7 @@ CAPTURE_SRC = PROJECT_ROOT / "capture"
 for path in (COMMON_SRC, MOCK_SRC, CAPTURE_SRC):
     sys.path.insert(0, str(path))
 
-from web_monitor import WebMonitor, create_app
+from monitor.web_monitor import WebMonitor, create_app
 from shared_memory import MockSharedMemory
 from real_shared_memory import RealSharedMemory
 
