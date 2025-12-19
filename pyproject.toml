@@ -4,8 +4,9 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = [
+dependencies = [ 
     "flask>=3.1.2",
+    "monitor",
     "numpy>=2.2.6",
     "opencv-python>=4.11.0.86",
 ]
@@ -17,7 +18,13 @@ dev = [
     "pytest>=9.0.2",
 ]
 
-[tool.pytest.ini_options]
-testpaths = [
-    "tests",
+[tool.uv.workspace]
+members = [
+    "src/common",
+    "src/common/src/detection",
+    "src/mock",
+    "src/monitor",
 ]
+
+[tool.uv.sources]
+monitor = { workspace = true }
