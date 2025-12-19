@@ -229,6 +229,109 @@ top -p $(pgrep camera_daemon)
 ./build/camera_daemon -f 15
 ```
 
+## カメラ切り替えコントローラ（C実装）
+
+明るさに基づく昼夜カメラ切り替えをCで実装したモジュールです。ダブルバッファリングで切り替え直後のフレームを安定化させます。
+
+- コード: `camera_switcher.c`, `camera_switcher.h`
+- 特徴:
+  - 明るさ平均 + ヒステリシス（`day_to_night_threshold`/`night_to_day_threshold` と滞留秒数）
+  - 手動固定（デバッグ）/自動切り替えモード
+  - 切り替え後のウォームアップフレーム破棄
+  - `frame_calculate_mean_luma` で JPEG / NV12 / RGB から輝度平均を算出し、`camera_switcher_handle_frame` でサンプル採取〜公開を一括実行
+  - 共有メモリへの書き込み時にダブルバッファリングでフレーム整合性を維持
+- 代表的な呼び出しフロー:
+  1. `camera_switcher_init` で初期化（閾値・ウォームアップ数を設定）
+  2. プローブした明るさを `camera_switcher_record_brightness` に渡し、戻り値が `TO_DAY/TO_NIGHT` ならハードを切り替える
+  3. 切り替え後に `camera_switcher_notify_active_camera` を呼び、ウォームアップカウンタをリセット
+  4. キャプチャしたフレームは `camera_switcher_publish_frame` に渡して共有メモリへ書き込む（ウォームアップ中は破棄）
+
+### captureデーモン統合用のランタイム
+
+`camera_switcher_runtime.c/.h` は実際の capture デーモンを想定したオーケストレーション層です。以下のコールバックを渡すだけで、アクティブ/プローブ周期の管理と切り替えが行えます。
+
+- `switch_camera(CameraMode, user_data)`: ハード/デーモン側のカメラ切替（例: ISP設定変更、デバイス切替）
+- `capture_frame(CameraMode, Frame*, user_data)`: 指定カメラからフレーム取得（Active/Probeの両方で使用）
+- `publish_frame(const Frame*, user_data)`: 共有メモリなどへの書き込み
+
+ランタイム設定例:
+
+```c
+CameraSwitchConfig cfg = {
+    .day_to_night_threshold = 40.0,
+    .night_to_day_threshold = 70.0,
+    .day_to_night_hold_seconds = 10.0,
+    .night_to_day_hold_seconds = 10.0,
+    .warmup_frames = 3,
+};
+
+CameraSwitchRuntimeConfig rt_cfg = {
+    .probe_interval_sec = 2.0,      // 非アクティブカメラのプローブ周期
+    .active_interval_sec = 1.0/30., // アクティブカメラの目標間隔 (30fps想定)
+};
+
+CameraCaptureOps ops = {
+    .switch_camera = hw_switch_fn,      // 実カメラ切替
+    .capture_frame = daemon_capture_fn, // 共有メモリに書く前の生フレーム取得
+    .publish_frame = shm_publish_fn,    // 共有メモリ書き込み
+    .user_data = ctx,                   // 上記のコンテキスト
+};
+
+CameraSwitchRuntime rt;
+camera_switch_runtime_init(&rt, &cfg, &rt_cfg, &ops, CAMERA_MODE_DAY);
+camera_switch_runtime_start(&rt);
+// ... シグナル等で停止 ...
+camera_switch_runtime_stop(&rt);
+```
+
+ビルド:
+
+```bash
+cd src/capture
+make switcher-runtime-lib  # ../../build/libcamera_switcher_runtime.a を生成
+```
+
+ライブラリをリンクする際は `-lpthread -ljpeg` を追加してください。
+
+### 既存 camera_daemon_drobotics をプロセスごと切り替えるリファレンス
+
+`camera_switcher_daemon.c` は、ビルド済み `camera_daemon_drobotics` バイナリをカメラIDごとに起動/停止しながら、共有メモリ経由で明るさを測り、自動切替を行うリファレンス実装です。
+
+- ビルド＆実行:
+  ```bash
+  cd src/capture
+  make switcher-daemon
+  # ../../build/camera_daemon_drobotics が存在し、shared_memory に書き込むことが前提
+  ./../../build/camera_switcher_daemon
+  ```
+- 仕組み:
+  - `switch_camera`: 既存デーモンを `--daemon` でフォーク起動し、切替時に既存 PID を SIGTERM/ wait で終了
+  - `capture_frame`: shared_memory から指定 camera_id のフレームをポーリング取得
+  - `publish_frame`: ウォームアップ＆ダブルバッファ後のフレームを書き戻し（例として同じ shared_memory を使用）
+- 注意:
+  - 実機固有の初期化や ISP 設定が必要な場合は `switch_camera` / `capture_frame` 内で適宜拡張してください。
+  - `CAPTURE_BIN` パス（デフォルト `../../build/camera_daemon_drobotics`）を環境に合わせて調整可能です。
+
+### デバッグ: 低依存のインタラクティブデモ
+
+実機なしで切り替えロジックを試す場合は、Cのみで完結するデモを用意しています。
+
+```bash
+cd src/capture
+make switcher-demo
+./../../build/camera_switcher_demo
+```
+
+標準入力コマンド例:
+
+- `day 30` / `night 80`: 明るさサンプルを投入（0-255）
+- `manual day` / `manual night`: 指定カメラに固定
+- `auto`: 自動切り替えに戻す
+- `status`: 現在の状態を表示
+- `quit`: 終了
+
+ダブルバッファリング越しに publish されるフレーム情報が標準出力に表示されるため、切り替え直後のウォームアップ破棄も確認できます。
+
 ## 次のステップ
 
 Phase 1完了後の予定:
@@ -267,6 +370,9 @@ src/capture/
 ├── Makefile                    # ビルド設定
 ├── shared_memory.h             # 共有メモリヘッダ
 ├── shared_memory.c             # 共有メモリ実装
+├── camera_switcher.h           # 昼夜切り替えコントローラ（C）
+├── camera_switcher.c           # 昼夜切り替えロジック本体（C）
+├── camera_switcher_demo.c      # デバッグ・動作確認用の対話デモ
 ├── camera_daemon.c             # カメラデーモン
 ├── test_shm.c                  # Cテストプログラム
 ├── real_shared_memory.py       # Pythonラッパー
