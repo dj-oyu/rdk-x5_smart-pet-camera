@@ -4,11 +4,11 @@ Webモニター実装
 Flask + MJPEGストリーミングでBBox合成映像をブラウザに表示
 """
 
-from flask import Flask, Response, jsonify, render_template_string
+from flask import Flask, Response, jsonify, render_template_string, request
 import cv2
 import numpy as np
 import json
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 import queue
 import threading
 import time
@@ -22,6 +22,11 @@ from common.types import Frame, DetectionResult, Detection, BoundingBox, Detecti
 # MockSharedMemoryをインポート（型ヒント用）
 sys.path.insert(0, str(Path(__file__).parent.parent / "mock"))
 from shared_memory import MockSharedMemory
+from camera_switcher import SwitchMode
+from common.types import CameraType
+
+if TYPE_CHECKING:
+    from camera_switcher import CameraSwitchController
 
 
 # 色定義（BGR）
@@ -388,7 +393,12 @@ def _detection_to_dict(detection_result: DetectionResult) -> dict[str, object]:
     }
 
 
-def create_app(shm: MockSharedMemory, monitor: WebMonitor) -> Flask:
+def create_app(
+    shm: MockSharedMemory,
+    monitor: WebMonitor,
+    *,
+    switch_controller: Optional["CameraSwitchController"] = None,
+) -> Flask:
     """Flaskアプリケーションを作成"""
     app = Flask(__name__)
 
@@ -751,6 +761,42 @@ def create_app(shm: MockSharedMemory, monitor: WebMonitor) -> Flask:
         </html>
         """
         return render_template_string(html)
+
+    @app.route("/api/camera_status", methods=["GET"])
+    def camera_status() -> Response:
+        """カメラ切り替えステータスを返す"""
+        switch_status = (
+            switch_controller.get_status()  # type: ignore[union-attr]
+            if switch_controller
+            else {"mode": "unavailable"}
+        )
+        payload = {
+            "camera": switch_status,
+            "monitor": monitor.get_stats_snapshot(),
+            "shared_memory": shm.get_stats(),
+        }
+        return jsonify(payload)
+
+    @app.route("/api/debug/switch-camera", methods=["POST"])
+    def debug_switch_camera() -> Response:
+        """デバッグ用: 手動切り替え/自動復帰"""
+        if switch_controller is None:
+            return jsonify({"error": "switch controller is not configured"}), 400
+
+        data = request.get_json(silent=True) or {}
+        mode = str(data.get("mode", "manual")).lower()
+        if mode == SwitchMode.AUTO.value:
+            switch_controller.resume_auto()
+            return jsonify({"ok": True, "mode": "auto", "status": switch_controller.get_status()})
+
+        camera_raw = str(data.get("camera", "")).lower()
+        if camera_raw not in (CameraType.DAY.value, CameraType.NIGHT.value):
+            return jsonify({"error": "camera must be 'day' or 'night'"}), 400
+
+        camera = CameraType.DAY if camera_raw == CameraType.DAY.value else CameraType.NIGHT
+        reason = str(data.get("reason", "debug"))
+        switch_controller.force_camera(camera, reason=reason)
+        return jsonify({"ok": True, "mode": "manual", "status": switch_controller.get_status()})
 
     # pyright: ignore[reportUnusedFunction]
     @app.route('/stream')

@@ -17,12 +17,13 @@ from pathlib import Path
 
 # 共通型定義をインポート
 sys.path.insert(0, str(Path(__file__).parent.parent / "common" / "src"))
-from common.types import Frame, DetectionResult
+from common.types import Frame, DetectionResult, CameraType
 
 # モックモジュールをインポート
 from shared_memory import MockSharedMemory
 from camera import MockCamera
 from detector import MockDetector
+from camera_switcher import CameraSwitchController
 
 # モニターモジュールをインポート
 sys.path.insert(0, str(Path(__file__).parent.parent / "monitor"))
@@ -163,6 +164,24 @@ def main() -> None:
         help="Camera FPS (default: 30)"
     )
     parser.add_argument(
+        "--night-source",
+        type=str,
+        default=None,
+        choices=["random", "video", "webcam", "image", None],
+        help="Night camera source type (default: follow --source)"
+    )
+    parser.add_argument(
+        "--night-source-path",
+        type=str,
+        help="Path to video/image file for night camera"
+    )
+    parser.add_argument(
+        "--night-fps",
+        type=int,
+        default=None,
+        help="Night camera FPS (default: follow --fps)"
+    )
+    parser.add_argument(
         "--detection-prob",
         type=float,
         default=0.3,
@@ -179,6 +198,49 @@ def main() -> None:
         type=str,
         default="0.0.0.0",
         help="Web server host (default: 0.0.0.0)"
+    )
+    parser.add_argument(
+        "--day-to-night-threshold",
+        type=float,
+        default=40.0,
+        help="Brightness threshold to switch from day to night (default: 40)"
+    )
+    parser.add_argument(
+        "--night-to-day-threshold",
+        type=float,
+        default=70.0,
+        help="Brightness threshold to switch from night to day (default: 70)"
+    )
+    parser.add_argument(
+        "--day-to-night-hold",
+        type=float,
+        default=10.0,
+        help="Seconds brightness must stay low before switching to night (default: 10)"
+    )
+    parser.add_argument(
+        "--night-to-day-hold",
+        type=float,
+        default=10.0,
+        help="Seconds brightness must stay high before switching to day (default: 10)"
+    )
+    parser.add_argument(
+        "--probe-interval",
+        type=float,
+        default=2.0,
+        help="Seconds between brightness probes on inactive camera (default: 2.0)"
+    )
+    parser.add_argument(
+        "--warmup-frames",
+        type=int,
+        default=3,
+        help="Frames to drop after switching camera to allow exposure to stabilize (default: 3)"
+    )
+    parser.add_argument(
+        "--initial-camera",
+        type=str,
+        choices=["day", "night"],
+        default="day",
+        help="Initial active camera (default: day)"
     )
 
     args = parser.parse_args()
@@ -205,12 +267,19 @@ def main() -> None:
 
     # カメラ作成
     try:
-        camera = MockCamera(
+        day_camera = MockCamera(
             source=args.source,  # type: ignore
             source_path=args.source_path,
             fps=args.fps,
+            camera_id=0,
         )
-        print(f"✓ Camera initialized: {camera}")
+        night_camera = MockCamera(
+            source=(args.night_source or args.source),  # type: ignore[arg-type]
+            source_path=(args.night_source_path or args.source_path),
+            fps=(args.night_fps or args.fps),
+            camera_id=1,
+        )
+        print(f"✓ Cameras initialized: day={day_camera}, night={night_camera}")
     except Exception as e:
         print(f"✗ Camera initialization failed: {e}")
         return
@@ -224,25 +293,35 @@ def main() -> None:
     monitor.start()
     print("✓ Web monitor started")
 
+    # カメラ切り替えコントローラ
+    switch_controller = CameraSwitchController(
+        shared_memory=shm,
+        day_camera=day_camera,
+        night_camera=night_camera,
+        day_to_night_threshold=args.day_to_night_threshold,
+        night_to_day_threshold=args.night_to_day_threshold,
+        day_to_night_hold_seconds=args.day_to_night_hold,
+        night_to_day_hold_seconds=args.night_to_day_hold,
+        probe_interval_seconds=args.probe_interval,
+        warmup_frames=args.warmup_frames,
+        initial_camera=CameraType.DAY if args.initial_camera == "day" else CameraType.NIGHT,
+    )
+    switch_controller.start()
+    print("✓ Camera switch controller started")
+
     # Flaskアプリ作成
-    app = create_app(shm, monitor)
+    app = create_app(shm, monitor, switch_controller=switch_controller)
     print("✓ Flask app created")
 
     # スレッド起動
-    camera_thread = threading.Thread(
-        target=camera_thread_func,
-        args=(camera, shm),
-        daemon=True
-    )
     detection_thread = threading.Thread(
         target=detection_thread_func,
         args=(detector, shm),
         daemon=True
     )
 
-    camera_thread.start()
     detection_thread.start()
-    print("✓ Camera and detection threads started")
+    print("✓ Detection thread started")
 
     print()
     print("=" * 60)
@@ -261,7 +340,7 @@ def main() -> None:
         print("\nCleaning up...")
         running = False
         monitor.stop()
-        camera.release()
+        switch_controller.stop()
         print("✓ Resources released")
         print("Goodbye!")
 
