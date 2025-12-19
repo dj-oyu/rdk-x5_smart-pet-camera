@@ -1,1 +1,0 @@
-/app/cdev_demo/vio_capture/tests/probe_modes.sh

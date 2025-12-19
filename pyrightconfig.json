@@ -1,0 +1,24 @@
+{
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    ".venv",
+    "venv"
+  ],
+  "ignore": [],
+  "defineConstant": {},
+  "stubPath": "typings",
+  "reportMissingImports": true,
+  "reportMissingTypeStubs": false,
+  "pythonVersion": "3.8",
+  "pythonPlatform": "Linux",
+  "typeCheckingMode": "strict",
+  "reportUnknownMemberType": false,
+  "reportUnknownArgumentType": false,
+  "reportUnknownVariableType": false,
+  "reportUnknownLambdaType": false,
+  "reportImplicitStringConcatenation": false
+}

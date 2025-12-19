@@ -64,6 +64,9 @@ venv.bak/
 
 # Project specific
 
+# Sample code directory (symlinks to external project)
+docs/sample/
+
 # Configuration files (local settings)
 config/config.yaml
 config/local_*.yaml
@@ -80,8 +83,12 @@ models/*.pb
 *.mp4
 *.avi
 *.mkv
-*.json
-*.jsonl
+
+# Data files (not config files)
+/data/**/*.json
+/data/**/*.jsonl
+**/events.jsonl
+**/*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_*.json
 
 # Temporary files
 /tmp/
@@ -101,7 +108,6 @@ bin/
 cmake-build-*/
 CMakeCache.txt
 CMakeFiles/
-Makefile
 cmake_install.cmake
 
 # Debug files

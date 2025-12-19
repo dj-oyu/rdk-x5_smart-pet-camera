@@ -1,1 +1,0 @@
-/app/cdev_demo/vio_capture/view_v2.sh

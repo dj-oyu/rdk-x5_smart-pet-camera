@@ -1,1 +1,0 @@
-/app/cdev_demo/vio_capture/capture_v2.c

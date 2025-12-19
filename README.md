@@ -19,10 +19,18 @@ AI物体検出技術を活用し、ペット（猫）の日常行動を自動的
 
 詳細な設計ドキュメントは `docs/` ディレクトリに格納されています：
 
-- [01_project_goals.md](docs/01_project_goals.md) - プロジェクトのゴールと背景
-- [02_requirements.md](docs/02_requirements.md) - 機能要件・非機能要件
-- [03_functional_design.md](docs/03_functional_design.md) - コンポーネント設計と処理フロー
-- [04_architecture.md](docs/04_architecture.md) - システムアーキテクチャとデプロイメント
+### 設計ドキュメント
+- **[01_project_goals.md](docs/01_project_goals.md)** - プロジェクトのゴールと背景
+- **[02_requirements.md](docs/02_requirements.md)** - 機能要件・非機能要件
+- **[03_functional_design.md](docs/03_functional_design.md)** - コンポーネント設計と処理フロー
+- **[04_architecture.md](docs/04_architecture.md)** - システムアーキテクチャとデプロイメント
+
+### 議事録・開発計画
+- **[meeting_notes_20251219.md](docs/meeting_notes_20251219.md)** - アーキテクチャ検討会議事録
+  - 技術的課題の検討（レイテンシー対策）
+  - IPC方式の選定（共有メモリ採用）
+  - 非同期実行方式の決定（マルチプロセス + ポーリング）
+  - 開発計画（Phase 1-4）
 
 ## システム要件
 
@@ -169,6 +177,53 @@ sudo systemctl status smart-pet-camera-*
 └── scripts/        # 運用スクリプト
 ```
 
+### 開発ツール
+
+#### Python環境管理
+- **uv** - 高速なPythonパッケージマネージャー
+  ```bash
+  # uvのインストール
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+
+  # 依存関係のインストール
+  uv pip install -r requirements.txt
+
+  # 仮想環境の作成
+  uv venv
+  source .venv/bin/activate
+  ```
+
+#### 型チェック
+- **pyright** - 型付け強制（厳格な型チェック）
+  ```bash
+  # pyrightのインストール
+  npm install -g pyright
+  # または
+  uv pip install pyright
+
+  # 型チェック実行
+  pyright src/
+  ```
+
+#### テストフレームワーク
+- **pytest** - Pythonユニットテスト・統合テスト
+- **Google Test** - Cコンポーネントのユニットテスト（方針決まり次第導入）
+
+#### 推奨開発フロー
+```bash
+# 1. 型チェック
+pyright src/
+
+# 2. リンター
+pylint src/
+
+# 3. テスト実行
+pytest tests/
+
+# 4. カバレッジ確認
+pytest --cov=src tests/
+```
+
 ### テストの実行
 
 ```bash
@@ -180,14 +235,18 @@ pytest tests/integration/
 
 # カバレッジ付き実行
 pytest --cov=src tests/
+
+# 型チェック
+pyright src/
 ```
 
 ### コーディング規約
 
 - **C**: GNU Coding Standards
-- **Python**: PEP 8
+- **Python**: PEP 8 + 型ヒント必須（pyright準拠）
 - **命名規則**: snake_case（関数・変数）、PascalCase（クラス）
 - **コメント**: 日本語OK、複雑なロジックには必ず説明を追加
+- **型アノテーション**: すべての関数に型ヒントを追加
 
 ## トラブルシューティング
 
