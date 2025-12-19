@@ -1,0 +1,19 @@
+version = 1
+revision = 3
+requires-python = ">=3.13"
+
+[manifest]
+members = [
+    "common",
+    "detection",
+]
+
+[[package]]
+name = "common"
+version = "0.1.0"
+source = { editable = "." }
+
+[[package]]
+name = "detection"
+version = "0.1.0"
+source = { virtual = "src/detection" }

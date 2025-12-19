@@ -28,10 +28,11 @@ CLASS_PROBS = {
 
 
 def generate_dummy_detections(frame_width: int, frame_height: int, num_detections: int = None):
-    """Generate dummy detection results"""
+    """Generate dummy detection results with random variations"""
     if num_detections is None:
         # Randomly decide number of detections (0-3)
-        num_detections = random.choices([0, 1, 2, 3], weights=[0.3, 0.4, 0.2, 0.1])[0]
+        # 検出なし/1個/2個/3個の確率を調整（より変化が見えるように）
+        num_detections = random.choices([0, 1, 2, 3], weights=[0.2, 0.5, 0.2, 0.1])[0]
 
     detections = []
 
@@ -40,29 +41,32 @@ def generate_dummy_detections(frame_width: int, frame_height: int, num_detection
         class_name = random.choices(list(CLASS_PROBS.keys()),
                                     weights=list(CLASS_PROBS.values()))[0]
 
-        # Generate random bounding box
+        # Generate random bounding box with more variation
         if class_name == "cat":
-            # Cat: medium size, anywhere
-            w = random.randint(80, 200)
-            h = random.randint(80, 200)
+            # Cat: medium to large size, anywhere
+            w = random.randint(60, 250)
+            h = random.randint(60, 250)
         elif class_name == "food_bowl":
-            # Food bowl: small, usually bottom area
-            w = random.randint(40, 80)
-            h = random.randint(40, 80)
+            # Food bowl: small to medium
+            w = random.randint(30, 100)
+            h = random.randint(30, 100)
         else:  # water_bowl
-            # Water bowl: small, usually bottom area
-            w = random.randint(40, 80)
-            h = random.randint(40, 80)
+            # Water bowl: small to medium
+            w = random.randint(30, 100)
+            h = random.randint(30, 100)
 
+        # Position varies across the entire frame for visibility
         x = random.randint(0, max(0, frame_width - w))
 
         if class_name in ["food_bowl", "water_bowl"]:
-            # Bowls are usually in bottom half
-            y = random.randint(frame_height // 2, max(frame_height // 2, frame_height - h))
+            # Bowls are usually in bottom 2/3
+            y = random.randint(frame_height // 3, max(frame_height // 3, frame_height - h))
         else:
+            # Cat can be anywhere
             y = random.randint(0, max(0, frame_height - h))
 
-        confidence = random.uniform(0.7, 0.99)
+        # Vary confidence more dramatically
+        confidence = random.uniform(0.65, 0.99)
 
         detections.append({
             "class_name": class_name,
@@ -123,20 +127,24 @@ def main():
             # Generate dummy detections
             detections = generate_dummy_detections(frame.width, frame.height)
 
-            # Write to shared memory
-            if detections:
-                shm.write_detection_result(
-                    frame_number=frame.frame_number,
-                    timestamp_sec=frame.timestamp_sec,
-                    detections=detections
-                )
-                detection_count += 1
+            # Write to shared memory (ALWAYS, even if no detections)
+            # This ensures the monitor sees the change
+            shm.write_detection_result(
+                frame_number=frame.frame_number,
+                timestamp_sec=frame.timestamp_sec,
+                detections=detections
+            )
+            detection_count += 1
 
-                if detection_count % 30 == 0:
-                    print(f"[Info] Wrote {detection_count} detection results")
+            # Log periodically with detection info
+            if detection_count % 10 == 0:
+                num_dets = len(detections)
+                classes = [d["class_name"] for d in detections]
+                print(f"[Info] Frame #{detection_count}: {num_dets} detections {classes if classes else '(none)'}")
 
-            # Simulate detection processing time
-            time.sleep(0.033)  # ~30 fps
+            # Simulate detection processing time (10-15 fps)
+            # Random delay between 0.067s (15fps) and 0.1s (10fps) for variation
+            time.sleep(random.uniform(0.067, 0.1))
 
     except KeyboardInterrupt:
         print("\n[Info] Interrupted")

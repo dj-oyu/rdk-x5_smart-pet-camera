@@ -385,9 +385,9 @@ class RealSharedMemory:
 
         if has_new_version:
             self.last_detection_version = c_det.version
-        elif not update_version_only:
-            return None
 
+        # Always return the detection structure (don't filter by version here)
+        # Version filtering should be done by the caller if needed
         return (c_det, has_new_version)
 
     def decode_jpeg(self, jpeg_data: bytes) -> np.ndarray:
