@@ -185,18 +185,18 @@ static char doc[] =
 static char args_doc[] = "";
 static struct argp_option options[] = {
     {"preset", 'P', "N", 0,
-     "Resolution/FPS preset: 1=640x480@30, 2=1920x1080@30"},
-    {"width", 'w', "PIXELS", 0, "YUV output width (default: 640)"},
-    {"height", 'h', "PIXELS", 0, "YUV output height (default: 480)"},
+     "Resolution/FPS preset: 1=640x480@30, 2=1920x1080@30", 0},
+    {"width", 'w', "PIXELS", 0, "YUV output width (default: 640)", 1},
+    {"height", 'h', "PIXELS", 0, "YUV output height (default: 480)", 2},
     {"sensor-width", OPT_SENSOR_WIDTH, "PIXELS", 0,
-     "Sensor raw width (default: 0 = auto)"},
+     "Sensor raw width (default: 0 = auto)", 3},
     {"sensor-height", OPT_SENSOR_HEIGHT, "PIXELS", 0,
-     "Sensor raw height (default: 0 = auto)"},
-    {"fps", 'f', "FPS", 0, "Sensor FPS (default: 30)"},
-    {"camera", 'C', "INDEX", 0, "Camera index: 0 or 1 (default: 0)"},
-    {"daemon", OPT_DAEMON, 0, 0, "Run as daemon (infinite loop)"},
+     "Sensor raw height (default: 0 = auto)", 4},
+    {"fps", 'f', "FPS", 0, "Sensor FPS (default: 30)", 10},
+    {"camera", 'C', "INDEX", 0, "Camera index: 0 or 1 (default: 0)", 5},
+    {"daemon", OPT_DAEMON, 0, 0, "Run as daemon (infinite loop)", 10},
     {"count", 'c', "N", 0,
-     "Number of frames to capture (default: 0 = infinite)"},
+     "Number of frames to capture (default: 0 = infinite)", 10},
     {0}};
 
 static error_t parse_opt(int key, char *arg, struct argp_state *state) {
@@ -247,7 +247,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
   return 0;
 }
 
-static struct argp argp = {options, parse_opt, args_doc, doc};
+static struct argp argp = {options, parse_opt, args_doc, doc, NULL, NULL, NULL};
 
 // Initialize camera configuration (from capture_v2.c)
 static int init_camera_config(camera_context_t *ctx) {
