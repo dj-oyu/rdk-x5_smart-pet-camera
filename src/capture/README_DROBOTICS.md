@@ -78,7 +78,7 @@ sudo apt-get install -y libjpeg-dev
 
 ```bash
 cd src/capture
-make -f Makefile.drobotics check-sdk
+make check-sdk
 ```
 
 ### コンパイル
@@ -87,10 +87,10 @@ make -f Makefile.drobotics check-sdk
 cd src/capture
 
 # D-Robotics専用ビルド
-make -f Makefile.drobotics
+make
 
 # テスト実行
-make -f Makefile.drobotics test
+make test
 ```
 
 ### ビルド成果物
@@ -103,7 +103,10 @@ make -f Makefile.drobotics test
 ### 1. 共有メモリテストの実行
 
 ```bash
-./build/test_shm
+cd src/capture
+
+# 共有メモリのユニットテストを実行
+make test
 
 # 期待される出力:
 # === Shared Memory Test Suite ===
@@ -115,21 +118,34 @@ make -f Makefile.drobotics test
 
 ### 2. カメラデーモンの起動
 
+#### Makefileを使用（推奨）
+
 ```bash
+cd src/capture
+
+# フォアグラウンドで起動（Ctrl+Cで停止）
+make run
+
+# バックグラウンドで起動
+make run-daemon
+
+# プロセスと共有メモリをクリーンアップ
+make cleanup
+```
+
+#### 直接実行
+
+```bash
+cd src/capture
+
 # プリセット1: 640x480@30fps（推奨：開発・テスト用）
 ./build/camera_daemon_drobotics -C 0 -P 1
 
 # プリセット2: 1920x1080@30fps（本番用）
 ./build/camera_daemon_drobotics -C 0 -P 2
 
-# カスタム設定
-./build/camera_daemon_drobotics -C 0 -w 1280 -h 720 -f 30
-
 # デーモンモード（無限ループ）
 ./build/camera_daemon_drobotics -C 0 -P 1 --daemon
-
-# カメラ1を使用
-./build/camera_daemon_drobotics -C 1 -P 1
 
 # オプション:
 #   -C <id>       カメラID (0 or 1, デフォルト: 0)
@@ -141,33 +157,37 @@ make -f Makefile.drobotics test
 #   --daemon      デーモンモード
 ```
 
-### 3. Python統合テストの実行
+### 3. デーモンの動作確認
 
-別のターミナルで:
+別のターミナルで以下を実行：
 
 ```bash
-# カメラデーモンが起動していることを確認してから実行
-PYTHONPATH=src:src/common/src:src/capture uv run python src/capture/test_integration.py
+cd src/capture
 
-# FPS統計を表示
-uv run python src/capture/test_integration.py --fps-stats
+# C言語でフレームを読み取るテスト
+make test-daemon
 
-# フレームを保存
-uv run python src/capture/test_integration.py --save-frames --output-dir /tmp/frames
+# Pythonでフレームを読み取るテスト（uv run）
+make test-daemon-py
 
-# 最大100フレームをキャプチャ
-uv run python src/capture/test_integration.py --max-frames 100
+# または直接実行
+./build/test_daemon_reader -n 100 -v
+
+# フレームを保存して確認
+./build/test_daemon_reader -n 30 -s
+# -> ./frames/ ディレクトリにJPEGファイルが保存される
 ```
 
 ### 4. Webモニターとの統合
 
 ```bash
 # Terminal 1: カメラデーモン
-./build/camera_daemon_drobotics -C 0 -P 1 --daemon
+cd src/capture
+make run-daemon
 
 # Terminal 2: Webモニター
-cd ../..
-USE_REAL_CAMERA=1 uv run python src/monitor/main.py
+cd src/monitor
+USE_REAL_CAMERA=1 uv run main.py
 
 # ブラウザで確認
 # http://localhost:8080
@@ -239,7 +259,7 @@ camera_config_t camera_config = {
 ls -l /dev/video*
 
 # D-Robotics SDK確認
-make -f Makefile.drobotics check-sdk
+make check-sdk
 
 # センサー設定確認
 cat /usr/hobot/lib/sensor/imx219_1920x1080_tuning.json
@@ -266,6 +286,31 @@ rm -f /dev/shm/pet_camera_*
 
 # カメラデーモンを再起動
 ```
+
+### Pythonでフレームが読み取れない/データが壊れている
+
+Pythonから共有メモリを読み取る際にデータが壊れている場合、構造体のアライメント問題の可能性があります。
+
+#### 症状
+- フレーム番号が異常に大きい値
+- 解像度が `0x640` のような不正な値
+- ドロップフレーム数が異常に多い
+
+#### 原因と解決方法
+
+Cコンパイラは構造体のアライメントのために自動的にパディングを挿入します。
+`real_shared_memory.py` の `CSharedFrameBuffer` 定義に正しいパディングが含まれていることを確認してください：
+
+```python
+class CSharedFrameBuffer(Structure):
+    _fields_ = [
+        ("write_index", c_uint32),
+        ("_padding", c_uint32),  # ← 4バイトのパディング（重要！）
+        ("frames", CFrame * RING_BUFFER_SIZE),
+    ]
+```
+
+このパディングがないと、Python側のオフセット計算がC側とずれてしまい、データが正しく読み取れません。
 
 ### パフォーマンス問題
 
@@ -347,6 +392,97 @@ Phase 1完了後の予定:
 - 元の実装: `docs/sample/capture_v2.c`
 - IMX219データシート: [Sony公式](https://www.sony-semicon.co.jp/products/common/pdf/IMX219PQ_ProductBrief.pdf)
 
+## テスト方法
+
+### 1. 共有メモリのユニットテスト
+
+```bash
+cd src/capture
+make test
+```
+
+このテストでは以下を確認します：
+- 共有メモリの作成と破棄
+- フレームの書き込みと読み取り
+- リングバッファの巡回動作
+- 検出結果の書き込みと読み取り
+
+### 2. デーモンの動作確認
+
+#### ステップ1: デーモンを起動
+
+```bash
+cd src/capture
+make run-daemon
+```
+
+デーモンが起動し、"xx frames captured" のようなログが表示されることを確認します。
+
+#### ステップ2: C言語でフレームを読み取る
+
+別のターミナルで以下を実行：
+
+```bash
+cd src/capture
+
+# 100フレーム読み取り（詳細表示）
+make test-daemon
+
+# または直接実行
+./build/test_daemon_reader -n 100 -v
+
+# 無限に読み取り（Ctrl+Cで停止）
+./build/test_daemon_reader -n 0
+
+# フレームを保存
+./build/test_daemon_reader -n 30 -s
+# -> ./frames/ にJPEGファイルが保存される
+```
+
+#### ステップ3: Pythonでフレームを読み取る
+
+```bash
+cd src/capture
+
+# Makefileを使用（uv run）
+make test-daemon-py
+
+# または直接実行（uvを使用、推奨）
+cd ../..
+uv run src/capture/test_daemon_python.py -n 100 -v
+
+# または直接Python実行
+cd src/capture
+python3 test_daemon_python.py -n 100 -v
+
+# 無限に読み取り（Ctrl+Cで停止）
+python3 test_daemon_python.py -n 0
+
+# フレームを保存
+python3 test_daemon_python.py -n 30 -s
+# -> ./frames_py/ にJPEGファイルが保存される
+```
+
+### 3. FPS確認
+
+デーモンが30fpsで動作していることを確認：
+
+```bash
+./build/test_daemon_reader -n 300
+# -> 平均FPSが約30であることを確認
+
+python3 test_daemon_python.py -n 300
+# -> 平均FPSが約30であることを確認
+```
+
+### 4. クリーンアップ
+
+テスト終了後、プロセスと共有メモリをクリーンアップ：
+
+```bash
+make cleanup
+```
+
 ## 開発メモ
 
 ### なぜD-Robotics専用実装を作成したか
@@ -370,13 +506,13 @@ Phase 1完了後の予定:
 ```
 src/capture/
 ├── README_DROBOTICS.md         # このファイル
+├── Makefile                    # D-Robotics用ビルド設定
 ├── shared_memory.h             # 共有メモリヘッダ
 ├── shared_memory.c             # 共有メモリ実装
-├── camera_daemon_drobotics.c   # D-Robotics専用デーモン ⭐推奨
-├── camera_daemon.c             # V4L2汎用版（参考用）
-├── Makefile.drobotics          # D-Robotics用ビルド設定 ⭐推奨
-├── Makefile                    # V4L2用（参考用）
-├── test_shm.c                  # Cテストプログラム
+├── camera_daemon_drobotics.c   # D-Robotics専用デーモン
+├── test_shm.c                  # 共有メモリユニットテスト
+├── test_daemon_reader.c        # デーモンフレーム読み取りテスト（C）
+├── test_daemon_python.py       # デーモンフレーム読み取りテスト（Python）
 ├── real_shared_memory.py       # Pythonラッパー
 └── test_integration.py         # 統合テスト
 ```

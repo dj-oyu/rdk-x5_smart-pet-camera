@@ -72,6 +72,7 @@ class CFrame(Structure):
 class CSharedFrameBuffer(Structure):
     _fields_ = [
         ("write_index", c_uint32),
+        ("_padding", c_uint32),  # Alignment padding (4 bytes)
         ("frames", CFrame * RING_BUFFER_SIZE),
     ]
 
@@ -197,8 +198,8 @@ class RealSharedMemory:
         latest_idx = (write_index - 1) % RING_BUFFER_SIZE
 
         # Calculate offset to the frame
-        # Offset = sizeof(write_index) + sizeof(Frame) * latest_idx
-        frame_offset = sizeof(c_uint32) + sizeof(CFrame) * latest_idx
+        # Offset = sizeof(write_index) + sizeof(padding) + sizeof(Frame) * latest_idx
+        frame_offset = sizeof(c_uint32) * 2 + sizeof(CFrame) * latest_idx
 
         # Read the frame
         self.frame_mmap.seek(frame_offset)
