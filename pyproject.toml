@@ -1,0 +1,30 @@
+[project]
+name = "smart-pet-camera"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "flask>=3.1.2",
+    "monitor",
+    "numpy>=2.2.6",
+    "opencv-python>=4.11.0.86",
+]
+
+[dependency-groups]
+dev = [
+    "pylint>=4.0.4",
+    "pyright>=1.1.407",
+    "pytest>=9.0.2",
+]
+
+[tool.uv.workspace]
+members = [
+    "src/common",
+    "src/common/src/detection",
+    "src/mock",
+    "src/monitor",
+]
+
+[tool.uv.sources]
+monitor = { workspace = true }
