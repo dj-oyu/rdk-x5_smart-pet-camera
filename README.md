@@ -31,6 +31,55 @@ AI物体検出技術を活用し、ペット（猫）の日常行動を自動的
   - IPC方式の選定（共有メモリ採用）
   - 非同期実行方式の決定（マルチプロセス + ポーリング）
   - 開発計画（Phase 1-4）
+- **[development_roadmap.md](docs/development_roadmap.md)** - 開発ロードマップとタスク管理
+
+## クイックスタート（Phase 0: モック環境）
+
+実機なしでローカルPC上で動作確認できます。
+
+### 必要なもの
+- Python 3.13以上
+- uv（Pythonパッケージマネージャー）
+
+### 実行手順
+
+```bash
+# 1. uvのインストール（未インストールの場合）
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 2. プロジェクトルートに移動
+cd /app/smart-pet-camera
+
+# 3. モック環境に移動
+cd src/mock
+
+# 4. 依存関係のインストール
+uv pip install flask opencv-python numpy
+
+# 5. モック環境の起動
+python main.py
+
+# 6. ブラウザで確認
+# http://localhost:8080 を開く
+```
+
+### オプション
+
+```bash
+# Webカメラを使用
+python main.py --source webcam
+
+# テスト動画を使用
+python main.py --source video --source-path /path/to/video.mp4
+
+# 検出頻度を調整
+python main.py --detection-prob 0.5
+
+# ポート変更
+python main.py --port 9000
+```
+
+詳細は [src/mock/README.md](src/mock/README.md) を参照してください。
 
 ## システム要件
 
