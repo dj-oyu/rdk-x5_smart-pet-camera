@@ -28,30 +28,31 @@ Browser (http://localhost:8080)
 ### 1. 依存関係のインストール
 
 ```bash
-cd /app/smart-pet-camera/src/mock
-uv pip install flask opencv-python numpy
+cd smart-pet-camera
+uv add flask opencv-python numpy
+uv sync
 ```
 
 ### 2. 実行
 
 ```bash
 # ランダムパターンソース（デフォルト）
-python main.py
+uv run src/mock/main.py
 
 # Webカメラソース
-python main.py --source webcam
+uv run src/mock/main.py --source webcam
 
 # テスト動画ファイル
-python main.py --source video --source-path /path/to/video.mp4
+uv run src/mock/main.py --source video --source-path /path/to/video.mp4
 
 # 静止画像
-python main.py --source image --source-path /path/to/image.jpg
+uv run src/mock/main.py --source image --source-path /path/to/image.jpg
 
 # カスタムFPSと検出確率
-python main.py --fps 60 --detection-prob 0.5
+uv run src/mock/main.py --fps 60 --detection-prob 0.5
 
 # カスタムポート
-python main.py --port 9000
+uv run src/mock/main.py --port 9000
 ```
 
 ### 3. ブラウザで確認
@@ -121,7 +122,7 @@ WebMonitor - Webモニター
 
 ```bash
 # 1. モック環境起動
-python main.py
+uv run src/mock/main.py
 
 # 2. ブラウザで http://localhost:8080 を開く
 
@@ -131,13 +132,13 @@ python main.py
 ### Webカメラでテスト
 
 ```bash
-python main.py --source webcam --fps 30
+uv run src/mock/main.py --source webcam --fps 30
 ```
 
 ### 高頻度検出でテスト
 
 ```bash
-python main.py --detection-prob 0.8
+uv run src/mock/main.py --detection-prob 0.8
 ```
 
 ## トラブルシューティング
@@ -145,20 +146,21 @@ python main.py --detection-prob 0.8
 ### OpenCVがインストールされていない
 
 ```bash
-uv pip install opencv-python
+uv add opencv-python
+uv sync
 ```
 
 ### Webカメラが使えない
 
 ```bash
 # ランダムパターンソースを使用
-python main.py --source random
+uv run src/mock/main.py --source random
 ```
 
 ### ポート8080が使用中
 
 ```bash
-python main.py --port 9000
+uv run src/mock/main.py --port 9000
 ```
 
 ## 次のステップ
