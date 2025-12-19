@@ -1,0 +1,71 @@
+# Makefile for camera capture daemon
+#
+# Usage:
+#   make            - Build all targets
+#   make clean      - Remove build artifacts
+#   make test       - Build and run tests
+#   make install    - Install to system (requires root)
+
+CC = gcc
+CFLAGS = -Wall -Wextra -O2 -std=c11 -D_GNU_SOURCE
+LDFLAGS = -lrt -ljpeg -lpthread
+
+# Targets
+TARGET = camera_daemon
+TEST_TARGET = test_shm
+
+# Source files
+SRC = camera_daemon.c shared_memory.c
+TEST_SRC = test_shm.c shared_memory.c
+
+# Object files
+OBJ = $(SRC:.c=.o)
+TEST_OBJ = $(TEST_SRC:.c=.o)
+
+# Build directory
+BUILD_DIR = ../../build
+
+.PHONY: all clean test install
+
+all: $(BUILD_DIR)/$(TARGET)
+
+$(BUILD_DIR)/$(TARGET): $(OBJ)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "[Build] Camera daemon built: $@"
+
+$(BUILD_DIR)/$(TEST_TARGET): $(TEST_OBJ)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "[Build] Test program built: $@"
+
+%.o: %.c shared_memory.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+test: $(BUILD_DIR)/$(TEST_TARGET)
+	@echo "[Test] Running shared memory test..."
+	@$(BUILD_DIR)/$(TEST_TARGET)
+
+clean:
+	rm -f $(OBJ) $(TEST_OBJ)
+	rm -f $(BUILD_DIR)/$(TARGET) $(BUILD_DIR)/$(TEST_TARGET)
+	@echo "[Clean] Build artifacts removed"
+
+install: $(BUILD_DIR)/$(TARGET)
+	install -m 755 $(BUILD_DIR)/$(TARGET) /usr/local/bin/
+	@echo "[Install] Camera daemon installed to /usr/local/bin/"
+
+# Help target
+help:
+	@echo "Smart Pet Camera - Camera Daemon Build"
+	@echo ""
+	@echo "Targets:"
+	@echo "  make            Build camera daemon"
+	@echo "  make test       Build and run tests"
+	@echo "  make clean      Remove build artifacts"
+	@echo "  make install    Install to /usr/local/bin (requires root)"
+	@echo ""
+	@echo "Dependencies:"
+	@echo "  - libjpeg-dev"
+	@echo "  - librt (POSIX shared memory)"
+	@echo "  - V4L2 headers (linux/videodev2.h)"
