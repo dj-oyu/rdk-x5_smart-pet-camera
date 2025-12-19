@@ -246,6 +246,53 @@ top -p $(pgrep camera_daemon)
   3. 切り替え後に `camera_switcher_notify_active_camera` を呼び、ウォームアップカウンタをリセット
   4. キャプチャしたフレームは `camera_switcher_publish_frame` に渡して共有メモリへ書き込む（ウォームアップ中は破棄）
 
+### captureデーモン統合用のランタイム
+
+`camera_switcher_runtime.c/.h` は実際の capture デーモンを想定したオーケストレーション層です。以下のコールバックを渡すだけで、アクティブ/プローブ周期の管理と切り替えが行えます。
+
+- `switch_camera(CameraMode, user_data)`: ハード/デーモン側のカメラ切替（例: ISP設定変更、デバイス切替）
+- `capture_frame(CameraMode, Frame*, user_data)`: 指定カメラからフレーム取得（Active/Probeの両方で使用）
+- `publish_frame(const Frame*, user_data)`: 共有メモリなどへの書き込み
+
+ランタイム設定例:
+
+```c
+CameraSwitchConfig cfg = {
+    .day_to_night_threshold = 40.0,
+    .night_to_day_threshold = 70.0,
+    .day_to_night_hold_seconds = 10.0,
+    .night_to_day_hold_seconds = 10.0,
+    .warmup_frames = 3,
+};
+
+CameraSwitchRuntimeConfig rt_cfg = {
+    .probe_interval_sec = 2.0,      // 非アクティブカメラのプローブ周期
+    .active_interval_sec = 1.0/30., // アクティブカメラの目標間隔 (30fps想定)
+};
+
+CameraCaptureOps ops = {
+    .switch_camera = hw_switch_fn,      // 実カメラ切替
+    .capture_frame = daemon_capture_fn, // 共有メモリに書く前の生フレーム取得
+    .publish_frame = shm_publish_fn,    // 共有メモリ書き込み
+    .user_data = ctx,                   // 上記のコンテキスト
+};
+
+CameraSwitchRuntime rt;
+camera_switch_runtime_init(&rt, &cfg, &rt_cfg, &ops, CAMERA_MODE_DAY);
+camera_switch_runtime_start(&rt);
+// ... シグナル等で停止 ...
+camera_switch_runtime_stop(&rt);
+```
+
+ビルド:
+
+```bash
+cd src/capture
+make switcher-runtime-lib  # ../../build/libcamera_switcher_runtime.a を生成
+```
+
+ライブラリをリンクする際は `-lpthread -ljpeg` を追加してください。
+
 ### デバッグ: 低依存のインタラクティブデモ
 
 実機なしで切り替えロジックを試す場合は、Cのみで完結するデモを用意しています。

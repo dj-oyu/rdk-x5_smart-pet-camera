@@ -23,18 +23,21 @@ TARGET = camera_daemon_drobotics
 TEST_TARGET = test_shm
 READER_TARGET = test_daemon_reader
 SWITCH_TARGET = camera_switcher_demo
+SWITCH_RUNTIME_LIB = libcamera_switcher_runtime.a
 
 # Source files
 SRC = camera_daemon_drobotics.c shared_memory.c
 TEST_SRC = test_shm.c shared_memory.c
 READER_SRC = test_daemon_reader.c shared_memory.c
 SWITCH_SRC = camera_switcher_demo.c camera_switcher.c shared_memory.c
+SWITCH_RUNTIME_SRC = camera_switcher_runtime.c camera_switcher.c shared_memory.c
 
 # Object files
 OBJ = $(SRC:.c=.o)
 TEST_OBJ = $(TEST_SRC:.c=.o)
 READER_OBJ = $(READER_SRC:.c=.o)
 SWITCH_OBJ = $(SWITCH_SRC:.c=.o)
+SWITCH_RUNTIME_OBJ = $(SWITCH_RUNTIME_SRC:.c=.o)
 
 # Build directory
 BUILD_DIR = ../../build
@@ -84,6 +87,11 @@ $(BUILD_DIR)/$(SWITCH_TARGET): $(SWITCH_OBJ)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^ $(LDFLAGS_BASIC)
 	@echo "[Build] Camera switcher demo built: $@"
 
+$(BUILD_DIR)/$(SWITCH_RUNTIME_LIB): $(SWITCH_RUNTIME_OBJ)
+	@mkdir -p $(BUILD_DIR)
+	ar rcs $@ $^
+	@echo "[Build] Camera switcher runtime static library built: $@"
+
 %.o: %.c shared_memory.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
 
@@ -104,6 +112,9 @@ test-daemon-py:
 switcher-demo: $(BUILD_DIR)/$(SWITCH_TARGET)
 	@echo "[Run] Starting interactive switcher demo..."
 	@$(BUILD_DIR)/$(SWITCH_TARGET)
+
+switcher-runtime-lib: $(BUILD_DIR)/$(SWITCH_RUNTIME_LIB)
+	@echo "[Info] Static library ready. Link with -lpthread -ljpeg when embedding in a daemon."
 
 # Run daemon with automatic cleanup
 run: cleanup $(BUILD_DIR)/$(TARGET)
