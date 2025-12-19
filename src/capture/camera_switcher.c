@@ -203,6 +203,9 @@ double frame_calculate_mean_luma(const Frame* frame) {
         cinfo.err = jpeg_std_error(&jerr.pub);
         jerr.pub.error_exit = jpeg_error_exit;
         
+        /* Initialize the JPEG decompress object before setjmp */
+        jpeg_create_decompress(&cinfo);
+        
         /* Establish the setjmp return context for jpeg_error_exit to use */
         if (setjmp(jerr.setjmp_buffer)) {
             /* If we get here, the JPEG code has signaled an error.
@@ -211,7 +214,6 @@ double frame_calculate_mean_luma(const Frame* frame) {
             return -1.0;
         }
         
-        jpeg_create_decompress(&cinfo);
         jpeg_mem_src(&cinfo, frame->data, frame->data_size);
         jpeg_read_header(&cinfo, TRUE);
 
