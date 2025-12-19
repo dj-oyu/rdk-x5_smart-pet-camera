@@ -37,8 +37,8 @@ all: $(BUILD_DIR)/$(TARGET)
 # Kill existing camera processes
 kill-processes:
 	@echo "[Cleanup] Checking for existing camera processes..."
-	@-pkill -9 camera_daemon_drobotics 2>/dev/null && echo "[Cleanup] Killed camera_daemon_drobotics" || true
-	@-pkill -9 cam-service 2>/dev/null && echo "[Cleanup] Killed cam-service" || true
+	@-pkill -9 -f camera_daemon_drobotics 2>/dev/null && echo "[Cleanup] Killed camera_daemon_drobotics" || true
+	@-pkill -9 -f cam-service 2>/dev/null && echo "[Cleanup] Killed cam-service" || true
 	@sleep 1
 	@echo "[Cleanup] Process cleanup complete"
 
