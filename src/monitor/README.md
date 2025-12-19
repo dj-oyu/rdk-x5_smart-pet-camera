@@ -44,7 +44,7 @@ CLI引数は以下の環境変数でも指定できます（引数が優先さ�
   # モニター単体起動（MockSharedMemoryを内部で生成）
   uv run src/monitor/main.py --shm-type mock --host 0.0.0.0 --port 8080
   ```
-- **実機共有メモリ（将来の切り替え想定）**: 共有メモリ名は `/dev/shm/pet_camera_frames` と `/dev/shm/pet_camera_detections` を使用する想定で、`src/capture/real_shared_memory.py` の `RealSharedMemory` が対応します。`--shm-type real` を追加実装することで、カメラデーモンが立ち上げたPOSIX shmを読むモードに拡張できます（現状は `mock` のみ実装済み）。
+- **実機共有メモリ（captureデーモンと統合）**: 共有メモリ名は `/dev/shm/pet_camera_frames` と `/dev/shm/pet_camera_detections` を使用し、`src/capture/real_shared_memory.py` の `RealSharedMemory` が読み取りに対応します。CLIの `--shm-type real` は未実装ですが、アプリ組み込みで `RealSharedMemory` を渡せば capture デーモンが配信するフレームをそのままストリーミングできます（例: `shm = RealSharedMemory(); shm.open(); monitor = WebMonitor(shm); create_app(shm, monitor)`）。
 
 ## Web UI概要
 
@@ -55,5 +55,23 @@ CLI引数は以下の環境変数でも指定できます（引数が優先さ�
 
 ## 運用メモ
 
-- 共有メモリは `MockSharedMemory` のみ対応です。実機用共有メモリが実装された場合は `--shm-type` で切り替えられるよう拡張してください。
+- 共有メモリは `MockSharedMemory` のみ対応です。実機用共有メモリが実装された場合は `--shm-type` で切り替えられるよう拡張してください（`RealSharedMemory` を直接渡すプログラム的な統合は利用可能）。
 - 停止は `Ctrl+C` で行えます。内部スレッドはシグナルで安全に停止します。
+
+## 実機統合テスト（RealSharedMemory + captureデーモン）
+
+capture デーモンが `/dev/shm/pet_camera_frames` を更新している状態で、モニターが共有メモリを読んでMJPEGを返せることを自動テストできます。
+
+### 前提
+
+- `numpy`（必要に応じて `opencv-python`）がインストールされていること
+- `build/camera_daemon` が起動済みで共有メモリを書き込んでいること（検出結果を検証したい場合は `/dev/shm/pet_camera_detections` を更新するプロセスも起動）
+
+### 実行例
+
+```bash
+# capture デーモンが動作しているターミナルとは別で実行
+pytest tests/test_monitor_real_integration.py
+```
+
+共有メモリやフレームが存在しない場合はテストが `skip` されます。実機確認したい場合は前提プロセスが動作していることを確認してください。
