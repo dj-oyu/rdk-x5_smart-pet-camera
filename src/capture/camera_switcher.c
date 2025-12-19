@@ -213,11 +213,7 @@ double frame_calculate_mean_luma(const Frame* frame) {
         
         jpeg_create_decompress(&cinfo);
         jpeg_mem_src(&cinfo, frame->data, frame->data_size);
-
-        if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
-            jpeg_destroy_decompress(&cinfo);
-            return -1.0;
-        }
+        jpeg_read_header(&cinfo, TRUE);
 
         jpeg_start_decompress(&cinfo);
         size_t row_stride = cinfo.output_width * cinfo.output_components;
