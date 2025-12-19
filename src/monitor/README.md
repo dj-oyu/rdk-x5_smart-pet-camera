@@ -10,7 +10,7 @@
 # uv 経由で実行
 uv run src/monitor/main.py --host 0.0.0.0 --port 8080 --jpeg-quality 85 --fps 30
 # またはエントリーポイント経由
-uv run -m monitor --shm-type mock --host 127.0.0.1 --port 8080
+uv run python -m monitor --shm-type mock --host 127.0.0.1 --port 8080
 ```
 
 起動後は `http://<host>:<port>/` にアクセスしてください。
@@ -65,13 +65,13 @@ capture デーモンが `/dev/shm/pet_camera_frames` を更新している状態
 ### 前提
 
 - `numpy`（必要に応じて `opencv-python`）がインストールされていること
-- `build/camera_daemon` が起動済みで共有メモリを書き込んでいること（検出結果を検証したい場合は `/dev/shm/pet_camera_detections` を更新するプロセスも起動）
+- `build/camera_daemon_drobotics` が起動済みで共有メモリを書き込んでいること（検出結果を検証したい場合は `/dev/shm/pet_camera_detections` を更新するプロセスも起動）
 
 ### 実行例
 
 ```bash
 # capture デーモンが動作しているターミナルとは別で実行
-pytest tests/test_monitor_real_integration.py
+uv run python -m pytest tests/test_monitor_real_integration.py
 ```
 
 共有メモリやフレームが存在しない場合はテストが `skip` されます。実機確認したい場合は前提プロセスが動作していることを確認してください。

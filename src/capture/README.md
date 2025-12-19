@@ -7,9 +7,9 @@ V4L2カメラキャプチャデーモンと共有メモリインターフェー�
 このディレクトリには以下のコンポーネントが含まれています:
 
 1. **共有メモリ実装** (`shared_memory.c/h`) - POSIX共有メモリによるプロセス間通信
-2. **カメラデーモン** (`camera_daemon.c`) - V4L2カメラキャプチャとJPEGエンコーディング
-3. **Pythonラッパー** (`real_shared_memory.py`) - Python from C shared memory access
-4. **テストプログラム** (`test_shm.c`, `test_integration.py`) - 動作確認用
+2. **カメラデーモン** (`camera_daemon_drobotics.c`) - V4L2キャプチャとJPEGエンコーディング
+3. **Pythonラッパー** (`real_shared_memory.py`) - C実装された共有メモリのPythonバインディング
+4. **テストプログラム** (`test_shm.c`, `test_integration.py`, `test_daemon_python.py`) - 動作確認用
 
 ## アーキテクチャ
 
@@ -57,20 +57,40 @@ v4l2-ctl --list-devices
 ### コンパイル
 
 ```bash
-# プロジェクトルートから
 cd src/capture
 
-# ビルド
+# camera_daemon_drobotics と共有メモリテストのビルド
 make
 
-# テスト実行
+# 共有メモリテストの実行
 make test
+
+# カメラデーモンの起動（前回プロセスと共有メモリをクリーンアップ）
+make run
+
+# バックグラウンド起動（--daemon 付き、停止は make kill-processes）
+make run-daemon
+
+# 昼夜切り替えデモ
+make switcher-demo
+
+# capture デーモンへ組み込むための静的ライブラリ
+make switcher-runtime-lib
+
+# 共有メモリ経由で既存デーモンを切り替えるリファレンス（ビルドして起動）
+make switcher-daemon
+
+# 後片付け
+make clean
 ```
 
 ### ビルド成果物
 
-- `../../build/camera_daemon` - カメラキャプチャデーモン
+- `../../build/camera_daemon_drobotics` - カメラキャプチャデーモン
 - `../../build/test_shm` - 共有メモリテストプログラム
+- `../../build/camera_switcher_demo` - 昼夜切り替えデモ
+- `../../build/libcamera_switcher_runtime.a` - 昼夜切り替えランタイム静的ライブラリ
+- `../../build/camera_switcher_daemon` - プロセス切り替え型リファレンスデーモン
 
 ## 使用方法
 
@@ -96,10 +116,10 @@ make test
 
 ```bash
 # デフォルト設定 (640x480@30fps)
-./build/camera_daemon
+./build/camera_daemon_drobotics
 
 # カスタム設定
-./build/camera_daemon -d /dev/video0 -w 1280 -h 720 -f 30 -c 0
+./build/camera_daemon_drobotics -d /dev/video0 -w 1280 -h 720 -f 30 -c 0
 
 # オプション:
 #   -d <device>   カメラデバイス (デフォルト: /dev/video0)
@@ -108,6 +128,9 @@ make test
 #   -h <height>   フレーム高さ (デフォルト: 480)
 #   -f <fps>      フレームレート (デフォルト: 30)
 #   --help        ヘルプを表示
+
+# Makefile 経由で起動（前回プロセス/共有メモリを掃除してから実行）
+make run
 ```
 
 ### 3. Python統合テストの実行
@@ -116,16 +139,16 @@ make test
 
 ```bash
 # カメラデーモンが起動していることを確認してから実行
-python3 src/capture/test_integration.py
+uv run src/capture/test_integration.py
 
 # FPS統計を表示
-python3 src/capture/test_integration.py --fps-stats
+uv run src/capture/test_integration.py --fps-stats
 
 # フレームを保存
-python3 src/capture/test_integration.py --save-frames --output-dir /tmp/frames
+uv run src/capture/test_integration.py --save-frames --output-dir /tmp/frames
 
 # 最大100フレームをキャプチャ
-python3 src/capture/test_integration.py --max-frames 100
+uv run src/capture/test_integration.py --max-frames 100
 ```
 
 ### 4. 既存のWebモニターとの統合
@@ -220,13 +243,13 @@ sudo apt-get install --reinstall libjpeg-dev
 
 ```bash
 # CPU使用率の確認
-top -p $(pgrep camera_daemon)
+top -p $(pgrep camera_daemon_drobotics)
 
 # 解像度を下げる
-./build/camera_daemon -w 320 -h 240
+./build/camera_daemon_drobotics -w 320 -h 240
 
 # フレームレートを下げる
-./build/camera_daemon -f 15
+./build/camera_daemon_drobotics -f 15
 ```
 
 ## カメラ切り替えコントローラ（C実装）
@@ -302,7 +325,7 @@ make switcher-runtime-lib  # ../../build/libcamera_switcher_runtime.a を生成
   cd src/capture
   make switcher-daemon
   # ../../build/camera_daemon_drobotics が存在し、shared_memory に書き込むことが前提
-  ./../../build/camera_switcher_daemon
+  ./../../build/camera_switcher_daemon  # switcher-daemon はビルド後にそのまま起動します
   ```
 - 仕組み:
   - `switch_camera`: 既存デーモンを `--daemon` でフォーク起動し、切替時に既存 PID を SIGTERM/ wait で終了
@@ -373,7 +396,8 @@ src/capture/
 ├── camera_switcher.h           # 昼夜切り替えコントローラ（C）
 ├── camera_switcher.c           # 昼夜切り替えロジック本体（C）
 ├── camera_switcher_demo.c      # デバッグ・動作確認用の対話デモ
-├── camera_daemon.c             # カメラデーモン
+├── camera_daemon.c             # 共通V4L2カメラデーモン（参考実装）
+├── camera_daemon_drobotics.c   # D-Robotics SDK向けカメラデーモン
 ├── test_shm.c                  # Cテストプログラム
 ├── real_shared_memory.py       # Pythonラッパー
 └── test_integration.py         # 統合テスト
