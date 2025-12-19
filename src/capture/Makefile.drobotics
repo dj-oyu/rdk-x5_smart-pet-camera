@@ -1,0 +1,153 @@
+# Makefile for D-Robotics camera daemon
+#
+# Usage:
+#   make -f Makefile.drobotics        - Build D-Robotics daemon
+#   make -f Makefile.drobotics clean  - Remove build artifacts
+#   make -f Makefile.drobotics test   - Build and run tests
+#
+# Requirements:
+#   - D-Robotics SDK installed
+#   - libcam.so, libvpf.so, libhbmem.so available
+#   - IMX219 sensor configured
+
+CC = gcc
+CFLAGS = -Wall -Wextra -O2 -std=c11 -D_GNU_SOURCE
+INCLUDES = -I/usr/include
+LDFLAGS = -L/usr/hobot/lib -lrt -ljpeg -lpthread -lcam -lvpf -lhbmem
+
+# Targets
+TARGET = camera_daemon_drobotics
+TEST_TARGET = test_shm
+
+# Source files
+SRC = camera_daemon_drobotics.c shared_memory.c
+TEST_SRC = test_shm.c shared_memory.c
+
+# Object files
+OBJ = $(SRC:.c=.o)
+TEST_OBJ = $(TEST_SRC:.c=.o)
+
+# Build directory
+BUILD_DIR = ../../build
+
+.PHONY: all clean test install help check-sdk kill-processes cleanup
+
+all: $(BUILD_DIR)/$(TARGET)
+
+# Kill existing camera processes
+kill-processes:
+	@echo "[Cleanup] Checking for existing camera processes..."
+	@-pkill -9 camera_daemon_drobotics 2>/dev/null && echo "[Cleanup] Killed camera_daemon_drobotics" || true
+	@-pkill -9 cam-service 2>/dev/null && echo "[Cleanup] Killed cam-service" || true
+	@sleep 1
+	@echo "[Cleanup] Process cleanup complete"
+
+# Clean up shared memory segments
+cleanup: kill-processes
+	@echo "[Cleanup] Removing shared memory segments..."
+	@-rm -f /dev/shm/pet_camera_frames 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_frames" || true
+	@-rm -f /dev/shm/pet_camera_detections 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_detections" || true
+	@echo "[Cleanup] Shared memory cleanup complete"
+
+$(BUILD_DIR)/$(TARGET): $(OBJ)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^ $(LDFLAGS)
+	@echo "[Build] D-Robotics camera daemon built: $@"
+	@echo ""
+	@echo "Next steps:"
+	@echo "  1. Check camera device: v4l2-ctl --list-devices"
+	@echo "  2. Run daemon: ./build/camera_daemon_drobotics -C 0 -P 1"
+	@echo "  3. In another terminal: python3 test_with_mock.py (for verification)"
+
+$(BUILD_DIR)/$(TEST_TARGET): $(TEST_OBJ)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^ $(LDFLAGS)
+	@echo "[Build] Test program built: $@"
+
+%.o: %.c shared_memory.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+test: $(BUILD_DIR)/$(TEST_TARGET)
+	@echo "[Test] Running shared memory test..."
+	@$(BUILD_DIR)/$(TEST_TARGET)
+
+# Run daemon with automatic cleanup
+run: cleanup $(BUILD_DIR)/$(TARGET)
+	@echo "[Run] Starting camera daemon (Camera 0, 640x480@30fps)..."
+	@echo "[Run] Press Ctrl+C to stop"
+	@$(BUILD_DIR)/$(TARGET) -C 0 -P 1
+
+# Run daemon in daemon mode
+run-daemon: cleanup $(BUILD_DIR)/$(TARGET)
+	@echo "[Run] Starting camera daemon in background mode..."
+	@$(BUILD_DIR)/$(TARGET) -C 0 -P 1 --daemon &
+	@echo "[Run] Daemon started (PID: $$!)"
+	@echo "[Run] Use 'make kill-processes' to stop"
+
+clean: kill-processes
+	rm -f $(OBJ) $(TEST_OBJ)
+	rm -f $(BUILD_DIR)/$(TARGET) $(BUILD_DIR)/$(TEST_TARGET)
+	@echo "[Clean] Build artifacts removed"
+
+install: $(BUILD_DIR)/$(TARGET)
+	install -m 755 $(BUILD_DIR)/$(TARGET) /usr/local/bin/
+	@echo "[Install] Camera daemon installed to /usr/local/bin/"
+	@echo ""
+	@echo "To run as systemd service:"
+	@echo "  sudo cp ../../systemd/smart-pet-camera-capture.service /etc/systemd/system/"
+	@echo "  sudo systemctl daemon-reload"
+	@echo "  sudo systemctl start smart-pet-camera-capture"
+
+# Check D-Robotics SDK
+check-sdk:
+	@echo "[Check] Verifying D-Robotics SDK..."
+	@if [ ! -f /usr/lib/libcam.so ]; then \
+		echo "[Error] libcam.so not found"; \
+		echo "Please install D-Robotics SDK"; \
+		exit 1; \
+	fi
+	@if [ ! -f /usr/lib/libvpf.so ]; then \
+		echo "[Error] libvpf.so not found"; \
+		exit 1; \
+	fi
+	@if [ ! -f /usr/lib/libhbmem.so ]; then \
+		echo "[Error] libhbmem.so not found"; \
+		exit 1; \
+	fi
+	@echo "[OK] D-Robotics SDK libraries found"
+
+# Help target
+help:
+	@echo "Smart Pet Camera - D-Robotics Camera Daemon Build"
+	@echo ""
+	@echo "Targets:"
+	@echo "  make -f Makefile.drobotics              Build D-Robotics daemon"
+	@echo "  make -f Makefile.drobotics test         Build and run tests"
+	@echo "  make -f Makefile.drobotics run          Run daemon with auto-cleanup"
+	@echo "  make -f Makefile.drobotics run-daemon   Run daemon in background"
+	@echo "  make -f Makefile.drobotics cleanup      Kill processes and clean shared memory"
+	@echo "  make -f Makefile.drobotics kill-processes Kill camera processes"
+	@echo "  make -f Makefile.drobotics clean        Remove build artifacts"
+	@echo "  make -f Makefile.drobotics install      Install to /usr/local/bin"
+	@echo "  make -f Makefile.drobotics check-sdk    Verify D-Robotics SDK"
+	@echo ""
+	@echo "Dependencies:"
+	@echo "  - D-Robotics SDK (libcam.so, libvpf.so, libhbmem.so)"
+	@echo "  - libjpeg-dev"
+	@echo "  - librt (POSIX shared memory)"
+	@echo ""
+	@echo "Usage examples:"
+	@echo "  # Build and run with automatic cleanup"
+	@echo "  make -f Makefile.drobotics run"
+	@echo ""
+	@echo "  # Run in background (daemon mode)"
+	@echo "  make -f Makefile.drobotics run-daemon"
+	@echo ""
+	@echo "  # Clean up stuck processes and shared memory"
+	@echo "  make -f Makefile.drobotics cleanup"
+	@echo ""
+	@echo "  # Manual execution"
+	@echo "  ./build/camera_daemon_drobotics -C 0 -P 1"
+	@echo ""
+	@echo "  # Stop running daemon"
+	@echo "  make -f Makefile.drobotics kill-processes"
