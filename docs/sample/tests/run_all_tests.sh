@@ -1,0 +1,1 @@
+/app/cdev_demo/vio_capture/tests/run_all_tests.sh

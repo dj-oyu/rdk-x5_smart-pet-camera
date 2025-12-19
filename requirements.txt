@@ -1,0 +1,52 @@
+# Python dependencies for Smart Pet Camera
+
+# Core dependencies
+numpy>=1.19.0,<2.0.0
+opencv-python>=4.5.0
+PyYAML>=5.4.0
+python-dateutil>=2.8.0
+
+# Object Detection
+# TensorFlow Lite (推奨 - 軽量)
+tflite-runtime>=2.8.0; platform_machine == "armv7l" or platform_machine == "aarch64"
+tensorflow>=2.8.0,<2.16.0; platform_machine != "armv7l" and platform_machine != "aarch64"
+
+# または ONNX Runtime（クロスプラットフォーム）
+# onnxruntime>=1.10.0
+
+# IPC (Inter-Process Communication)
+pyzmq>=22.0.0
+
+# System monitoring
+psutil>=5.8.0
+
+# Testing
+pytest>=6.2.0
+pytest-cov>=2.12.0
+pytest-mock>=3.6.0
+
+# Development tools
+pylint>=2.8.0
+black>=21.5b0
+mypy>=0.910
+
+# Logging
+colorlog>=6.6.0
+
+# Data handling
+dataclasses-json>=0.5.7; python_version < "3.10"
+
+# Async/concurrency (将来的に使用)
+# asyncio is built-in
+
+# Image processing utilities
+Pillow>=8.2.0
+
+# Retry logic
+tenacity>=8.0.0
+
+# Configuration validation
+pydantic>=1.9.0
+
+# CLI tools (開発用)
+click>=8.0.0

@@ -1,0 +1,146 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+*.o
+*.a
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.pytest_cache/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project specific
+
+# Configuration files (local settings)
+config/config.yaml
+config/local_*.yaml
+
+# Models (large files, should be downloaded separately)
+models/*.tflite
+models/*.onnx
+models/*.pt
+models/*.pth
+models/*.pb
+
+# Data directories
+/data/
+*.mp4
+*.avi
+*.mkv
+*.json
+*.jsonl
+
+# Temporary files
+/tmp/
+*.tmp
+*.temp
+
+# Logs
+logs/
+*.log
+/var/log/smart-pet-camera/
+
+# Build artifacts
+*.exe
+*.out
+build/
+bin/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+
+# Debug files
+debug_frames/
+debug_output/
+*.png
+*.jpg
+*.jpeg
+!docs/**/*.png
+!docs/**/*.jpg
+
+# System files
+.swp
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# OS generated files
+Thumbs.db
+.directory
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Documentation build
+docs/_build/
+docs/.doctrees/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Profiling data
+*.prof
+*.lprof
+
+# Core dumps
+core
+core.*

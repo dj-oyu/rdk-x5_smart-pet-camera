@@ -1,0 +1,316 @@
+# スマートペットカメラ設定ファイル（サンプル）
+# このファイルをコピーして config.yaml として使用してください
+# cp config.example.yaml config.yaml
+
+system:
+  name: "Smart Pet Camera"
+  version: "1.0.0"
+  log_level: "INFO"  # DEBUG, INFO, WARN, ERROR, CRITICAL
+
+  # データディレクトリ
+  data_directory: "/data/smart-pet-camera"
+
+  # 一時ディレクトリ
+  temp_directory: "/tmp/smart-pet-camera"
+
+# カメラ設定
+cameras:
+  # 昼間カメラ（通常カメラ）
+  - id: 0
+    name: "Day Camera"
+    device: "/dev/video0"  # V4L2デバイスパス
+    type: "day"            # day または night
+    enabled: true
+    resolution:
+      width: 1280
+      height: 720
+    fps: 30
+    format: "MJPEG"        # MJPEG, YUYV等
+
+  # 夜間カメラ（赤外線対応）
+  - id: 1
+    name: "Night Camera"
+    device: "/dev/video1"
+    type: "night"
+    enabled: true
+    resolution:
+      width: 1280
+      height: 720
+    fps: 30
+    format: "MJPEG"
+
+# カメラ選択戦略
+camera_selection:
+  mode: "auto"  # auto, day_only, night_only, both
+
+  # autoモード時の切り替え閾値（明るさ）
+  auto_switch:
+    brightness_threshold: 50  # 0-255
+    hysteresis: 10            # ヒステリシス幅（チャタリング防止）
+
+  # 両方のカメラを使用する場合のフュージョン方法
+  fusion_method: "confidence_based"  # confidence_based, voting
+
+# 物体検出設定
+object_detection:
+  # モデルファイルパス
+  model_path: "/app/smart-pet-camera/models/pet_detector_v1.tflite"
+
+  # モデルタイプ
+  model_type: "tflite"  # tflite, onnx, pytorch
+
+  # 入力サイズ（モデルに合わせて調整）
+  input_size: [320, 320]  # [width, height]
+
+  # 信頼度閾値
+  confidence_threshold: 0.6
+
+  # NMS（Non-Maximum Suppression）閾値
+  nms_threshold: 0.5
+
+  # 検出対象クラス
+  classes:
+    - name: "cat"
+      id: 0
+      enabled: true
+    - name: "food_bowl"
+      id: 1
+      enabled: true
+    - name: "water_bowl"
+      id: 2
+      enabled: true
+
+  # 推論間隔（フレームスキップによる負荷軽減）
+  inference_interval_frames: 1  # 1 = 全フレーム、2 = 1フレームおき
+
+  # ハードウェアアクセラレータ
+  accelerator:
+    enabled: false          # GPU/NPU使用
+    device: "GPU"           # GPU, NPU, EdgeTPU
+    num_threads: 4          # CPUスレッド数（accelerator無効時）
+
+# 行動推定設定
+behavior_estimation:
+  # 重なり判定の閾値（IoU: Intersection over Union）
+  iou_threshold: 0.3
+
+  # 重なり判定方法
+  overlap_method: "iou"  # iou, overlap_ratio, center_distance
+
+  # 行動として記録する最小継続時間（秒）
+  min_duration_seconds: 3.0
+
+  # 行動終了と判定するまでの猶予時間（秒）
+  end_grace_period_seconds: 2.0
+
+  # プリレコーディング時間（行動開始前に記録する秒数）
+  pre_record_seconds: 5.0
+
+  # ポストレコーディング時間（行動終了後に記録する秒数）
+  post_record_seconds: 3.0
+
+  # 各行動タイプの個別設定
+  behaviors:
+    eating:
+      enabled: true
+      iou_threshold: 0.3          # この行動専用の閾値（省略時は共通設定を使用）
+      min_duration_seconds: 3.0
+
+    drinking:
+      enabled: true
+      iou_threshold: 0.25         # 水飲みは重なりが少ないので閾値を下げる
+      min_duration_seconds: 2.0
+
+# データ記録設定
+recording:
+  # 記録ベースディレクトリ
+  base_directory: "/data/smart-pet-camera"
+
+  # 日次ディレクトリ形式
+  daily_directory_format: "%Y-%m-%d"  # strftime形式
+
+  # 動画記録設定
+  video:
+    enabled: true
+    codec: "mp4v"           # mp4v, avc1, h264等（OpenCV VideoWriter対応コーデック）
+    extension: "mp4"
+    fps: 30                 # 記録FPS（キャプチャFPSと同じが推奨）
+    quality: 80             # 0-100（高いほど高品質）
+
+    # 動画サイズ（省略時はキャプチャ解像度を使用）
+    # width: 1280
+    # height: 720
+
+  # JSON記録設定
+  json:
+    enabled: true
+
+    # 個別JSONファイル
+    individual_files: true
+
+    # 日次ログファイル（JSON Lines形式）
+    daily_log: true
+    daily_log_filename: "events.jsonl"
+
+    # インデント（可読性向上、ファイルサイズ増加）
+    indent: 2              # null = コンパクト
+
+  # フレームバッファ設定
+  frame_buffer:
+    max_duration_seconds: 10.0  # バッファする最大時間
+    max_memory_mb: 500          # 最大メモリ使用量（目安）
+
+  # データ保持ポリシー
+  retention:
+    video_days: 7          # 動画ファイルの保持日数
+    json_days: 90          # JSONファイルの保持日数
+    log_days: 30           # システムログの保持日数
+
+    # 自動クリーンアップ
+    auto_cleanup:
+      enabled: true
+      schedule: "daily"    # daily, weekly
+      time: "03:00"        # HH:MM形式
+
+# ストレージ管理
+storage:
+  # 最小空き容量（GB）
+  min_free_gb: 5.0
+
+  # 空き容量不足時の動作
+  on_low_space:
+    action: "warn"         # warn, stop_recording, cleanup_old
+
+  # ディスク使用率の警告閾値（%）
+  warning_threshold_percent: 80
+
+# プロセス間通信（IPC）設定
+ipc:
+  # ZeroMQ設定
+  zeromq:
+    # Captureプロセス（Publisher）
+    capture_endpoint: "tcp://127.0.0.1:5555"
+
+    # Detectionプロセス（Publisher）
+    detection_endpoint: "tcp://127.0.0.1:5556"
+
+    # 送受信タイムアウト（ms）
+    send_timeout_ms: 1000
+    recv_timeout_ms: 1000
+
+    # High Water Mark（キューサイズ）
+    hwm: 10
+
+# システム監視設定
+monitoring:
+  # ヘルスチェック間隔（秒）
+  health_check_interval_seconds: 60
+
+  # リソース監視
+  resource_monitoring:
+    enabled: true
+    interval_seconds: 30
+
+    # CPU使用率の警告閾値（%）
+    cpu_warning_threshold: 80
+
+    # メモリ使用率の警告閾値（%）
+    memory_warning_threshold: 85
+
+  # カメラ監視
+  camera_monitoring:
+    enabled: true
+    check_interval_seconds: 10
+
+    # カメラ切断時のリトライ
+    reconnect:
+      enabled: true
+      max_retries: 5
+      retry_interval_seconds: 5
+
+  # ウォッチドッグ
+  watchdog:
+    enabled: false         # 将来的に実装
+    timeout_seconds: 120
+
+# ロギング設定
+logging:
+  # ログレベル（モジュール別）
+  level:
+    root: "INFO"
+    capture: "INFO"
+    detection: "INFO"
+    behavior: "INFO"
+    recording: "INFO"
+    monitor: "INFO"
+
+  # ログ出力先
+  handlers:
+    # コンソール出力
+    console:
+      enabled: true
+      level: "INFO"
+      format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+    # ファイル出力
+    file:
+      enabled: true
+      level: "DEBUG"
+      path: "/var/log/smart-pet-camera/app.log"
+      max_bytes: 10485760   # 10MB
+      backup_count: 5
+      format: "%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s"
+
+    # syslog出力
+    syslog:
+      enabled: false
+      level: "WARNING"
+      address: "/dev/log"
+      facility: "daemon"
+
+# 開発・デバッグ設定
+debug:
+  # デバッグモード
+  enabled: false
+
+  # フレーム保存（デバッグ用）
+  save_frames:
+    enabled: false
+    directory: "/tmp/smart-pet-camera/debug_frames"
+    interval_frames: 30    # 30フレームに1枚保存
+
+  # バウンディングボックス可視化
+  visualize_detections:
+    enabled: false
+    save_images: false
+    display_window: false  # GUI環境でのみ有効
+
+  # パフォーマンス測定
+  performance_profiling:
+    enabled: false
+    log_interval_seconds: 10
+
+# 通知設定（将来的な機能）
+notifications:
+  enabled: false
+
+  # 通知チャネル
+  channels:
+    email:
+      enabled: false
+      smtp_server: "smtp.example.com"
+      smtp_port: 587
+      from_address: "camera@example.com"
+      to_addresses:
+        - "owner@example.com"
+
+    webhook:
+      enabled: false
+      url: "https://example.com/webhook"
+
+  # 通知イベント
+  events:
+    system_error: true
+    low_disk_space: true
+    camera_disconnected: true
+    behavior_detected: false  # 行動検出ごとの通知（うるさいのでデフォルト無効）
