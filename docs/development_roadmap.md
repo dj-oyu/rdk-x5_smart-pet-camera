@@ -107,12 +107,92 @@ python main.py
 
 ---
 
-## Phase 1: 実機Captureデーモン化 🔄 次のステップ
+## Phase 1: 実機Captureデーモン化 🔄 進行中
 
 **目的**: `capture_v2.c`を共有メモリ対応デーモンに改造
 
-**ブランチ**: `phase-1-capture` (予定)
-**開始予定**: 2025-12-19
+**ブランチ**: `codex/add-cli-to-monitor-and-update-documentation` (作業中)
+**開始日**: 2025-12-19
+**最終更新**: 2025-12-19 19:30
+
+### 進捗状況
+
+#### ✅ 完了したタスク
+
+1. **共有メモリ構造体の実装（C）**
+   - POSIX共有メモリ（shm_open/mmap）実装完了
+   - atomic操作（`__atomic_fetch_add`）によるロックフリー実装
+   - リングバッファ（30フレーム）実装
+   - ファイル: `src/capture/shared_memory.{h,c}`
+   - テスト: **5/5 テスト成功** (`test_shm.c`)
+
+2. **D-Robotics APIベースのデーモン実装**
+   - 当初V4L2で実装を開始したが、ユーザーから「`docs/sample/capture_v2.c`をそのまま模倣すべき」との指摘
+   - **方針転換**: D-Robotics ネイティブAPI（libcam.so/libvpf.so）を使用
+   - VIN/ISP/VSEパイプライン構築
+   - NV12→RGB→JPEG変換実装（libjpeg使用）
+   - 共有メモリへのフレーム書き込み実装
+   - ファイル: `src/capture/camera_daemon_drobotics.c`
+   - V4L2版は参考用に `reference_v4l2/` へ移動
+
+3. **ビルド環境の整備**
+   - D-Robotics SDK確認（/usr/hobot/lib）
+   - Makefile.drobotics作成
+   - プロセス管理機能追加：
+     - `make cleanup`: プロセス終了 + 共有メモリクリーンアップ
+     - `make kill-processes`: カメラプロセス強制終了
+     - `make run`: 自動クリーンアップ後にデーモン起動
+     - `make run-daemon`: バックグラウンド起動
+   - ビルド成功（警告のみ、エラーなし）
+
+4. **Python統合ラッパー**
+   - `real_shared_memory.py`: C共有メモリへのPythonアクセス
+   - MockSharedMemoryと同じインターフェース
+   - `test_integration.py`: モックとの統合テスト成功
+
+5. **ハードウェア確認**
+   - IMX219センサー検出確認（1920x1080@30fps, MIPI 2-lane）
+   - D-Roboticsデバイスノード確認:
+     - vin0-3_cap (VIN capture)
+     - vs-isp0_cap (ISP)
+     - vs-vse0_cap0-5 (VSE outputs)
+     - ion (メモリアロケータ)
+
+#### ⚠️ 現在の問題
+
+**カメラデーモンが初期化時にハング**
+
+- 症状: `./build/camera_daemon_drobotics -C 0 -P 1` 実行時、出力なしでタイムアウト
+- 調査結果:
+  - プロセスは起動するが、標準出力への出力がない
+  - strace でも追跡困難（長時間ハング）
+  - 共有メモリテストは成功しているため、共有メモリ自体の問題ではない
+  - カメラハードウェアは検出されている（dmesg確認済み）
+
+- 仮説:
+  1. カメラ初期化（hbn_camera_create/attach）でハング
+  2. 別プロセス（cam-service等）がカメラデバイスをロック中
+  3. バッファリング問題で出力が見えていない
+
+- 次のステップ:
+  1. リファレンス `capture_v2` を実機でビルド・実行して動作確認
+  2. 初期化の各ステップで強制フラッシュして出力確認
+  3. lsof で /dev/vin*, /dev/vs-* の使用状況確認
+  4. strace -f で詳細トレース
+
+### 成果ファイル
+
+| ファイル | 行数 | 状態 | 説明 |
+|---------|------|------|------|
+| `src/capture/shared_memory.h` | 146 | ✅ | POSIX共有メモリ構造体定義 |
+| `src/capture/shared_memory.c` | 270 | ✅ | 共有メモリ実装（atomic操作含む） |
+| `src/capture/test_shm.c` | 239 | ✅ | ユニットテスト（5/5成功） |
+| `src/capture/camera_daemon_drobotics.c` | 683 | ⚠️ | D-Robotics カメラデーモン（ハング中） |
+| `src/capture/Makefile.drobotics` | 153 | ✅ | ビルド設定（プロセス管理含む） |
+| `src/capture/real_shared_memory.py` | 175 | ✅ | Python共有メモリアクセス |
+| `src/capture/test_integration.py` | 200 | ✅ | 統合テスト |
+| `src/capture/README_DROBOTICS.md` | 416 | ✅ | D-Robotics実装ドキュメント |
+| `reference_v4l2/camera_daemon.c` | 589 | 📁 | V4L2版（参考用） |
 
 ### タスク
 
@@ -283,10 +363,17 @@ class RealDetector:
 | Phase | 目標 | 完了予定 | ステータス |
 |-------|------|---------|-----------|
 | Phase 0 | モック環境構築 | 2025-12-19 | ✅ 完了 |
-| Phase 1 | 実機Capture | TBD | 🔄 次のステップ |
+| Phase 1 | 実機Capture | TBD | 🔄 進行中（70%）|
 | Phase 2 | 実機統合 | TBD | 📋 計画中 |
 | Phase 3 | 検出モデル | TBD | 📋 計画中 |
 | Phase 4 | 行動推定 | TBD | 📋 計画中 |
+
+### Phase 1 進捗詳細
+- ✅ 共有メモリ実装・テスト完了
+- ✅ D-Robotics デーモン実装完了（コード）
+- ✅ ビルド環境整備完了
+- ✅ Python統合ラッパー完了
+- ⚠️ デーモン実行時の初期化ハング（デバッグ中）
 
 ---
 
@@ -313,4 +400,10 @@ class RealDetector:
 
 ## 変更履歴
 
-- 2025-12-19: Phase 0完了、ドキュメント作成
+- 2025-12-19 19:30: Phase 1 進捗報告
+  - 共有メモリ実装完了（5/5テスト成功）
+  - D-Roboticsデーモン実装完了（カメラ初期化でハング中）
+  - V4L2版は参考用に移動
+  - Makefileにプロセス管理機能追加
+  - Python統合ラッパー完了
+- 2025-12-19 00:00: Phase 0完了、ドキュメント作成
