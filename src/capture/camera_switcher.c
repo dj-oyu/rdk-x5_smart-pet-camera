@@ -222,6 +222,7 @@ double frame_calculate_mean_luma(const Frame* frame) {
         
         /* Verify the JPEG is in RGB format (3 components) */
         if (cinfo.output_components != 3) {
+            jpeg_abort_decompress(&cinfo);
             jpeg_destroy_decompress(&cinfo);
             return -1.0;
         }
