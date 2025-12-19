@@ -70,6 +70,16 @@ http://localhost:8080 にアクセスし、リアルタイムBBox合成映像を
 --detection-prob 検出発生確率 (デフォルト: 0.3)
 --port           Webサーバーポート (デフォルト: 8080)
 --host           Webサーバーホスト (デフォルト: 0.0.0.0)
+--night-source   夜間カメラのソースタイプ（デフォルト: --sourceと同じ）
+--night-source-path 夜間カメラ用の動画/画像ファイルパス
+--night-fps      夜間カメラFPS（デフォルト: --fpsと同じ）
+--day-to-night-threshold 昼→夜切替の明るさ閾値（デフォルト: 40）
+--night-to-day-threshold 夜→昼切替の明るさ閾値（デフォルト: 70）
+--day-to-night-hold 低輝度が継続してから切替えるまでの秒数（デフォルト: 10）
+--night-to-day-hold 高輝度が継続してから切替えるまでの秒数（デフォルト: 10）
+--probe-interval 非アクティブカメラの明るさプローブ間隔秒（デフォルト: 2.0）
+--warmup-frames  カメラ切替後に破棄するフレーム数（デフォルト: 3）
+--initial-camera 起動時のアクティブカメラ（day/night、デフォルト: day）
 ```
 
 ## モジュール構成
@@ -145,6 +155,35 @@ uv run src/monitor/main.py --shm-type mock --host 0.0.0.0 --port 8080
 
 ```bash
 uv run src/mock/main.py --source webcam --fps 30
+```
+
+### 明るさでの昼夜自動切り替えを確認
+
+```bash
+uv run src/mock/main.py \
+  --source random \
+  --night-source random \
+  --day-to-night-threshold 40 \
+  --night-to-day-threshold 70 \
+  --probe-interval 2
+```
+
+`/api/camera_status` で現在の明るさとアクティブカメラを確認できます。
+
+### デバッグ用に手動でカメラを切り替える
+
+手動で day/night を固定したい場合は HTTP POST を使用します。
+
+```bash
+# 夜間カメラに固定
+curl -X POST http://localhost:8080/api/debug/switch-camera \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "manual", "camera": "night", "reason": "manual-test"}'
+
+# 自動切り替えに戻す
+curl -X POST http://localhost:8080/api/debug/switch-camera \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "auto"}'
 ```
 
 ### 高頻度検出でテスト

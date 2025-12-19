@@ -229,6 +229,43 @@ top -p $(pgrep camera_daemon)
 ./build/camera_daemon -f 15
 ```
 
+## カメラ切り替えコントローラ（C実装）
+
+明るさに基づく昼夜カメラ切り替えをCで実装したモジュールです。ダブルバッファリングで切り替え直後のフレームを安定化させます。
+
+- コード: `camera_switcher.c`, `camera_switcher.h`
+- 特徴:
+  - 明るさ平均 + ヒステリシス（`day_to_night_threshold`/`night_to_day_threshold` と滞留秒数）
+  - 手動固定（デバッグ）/自動切り替えモード
+  - 切り替え後のウォームアップフレーム破棄
+  - `frame_calculate_mean_luma` で JPEG / NV12 / RGB から輝度平均を算出し、`camera_switcher_handle_frame` でサンプル採取〜公開を一括実行
+  - 共有メモリへの書き込み時にダブルバッファリングでフレーム整合性を維持
+- 代表的な呼び出しフロー:
+  1. `camera_switcher_init` で初期化（閾値・ウォームアップ数を設定）
+  2. プローブした明るさを `camera_switcher_record_brightness` に渡し、戻り値が `TO_DAY/TO_NIGHT` ならハードを切り替える
+  3. 切り替え後に `camera_switcher_notify_active_camera` を呼び、ウォームアップカウンタをリセット
+  4. キャプチャしたフレームは `camera_switcher_publish_frame` に渡して共有メモリへ書き込む（ウォームアップ中は破棄）
+
+### デバッグ: 低依存のインタラクティブデモ
+
+実機なしで切り替えロジックを試す場合は、Cのみで完結するデモを用意しています。
+
+```bash
+cd src/capture
+make switcher-demo
+./../../build/camera_switcher_demo
+```
+
+標準入力コマンド例:
+
+- `day 30` / `night 80`: 明るさサンプルを投入（0-255）
+- `manual day` / `manual night`: 指定カメラに固定
+- `auto`: 自動切り替えに戻す
+- `status`: 現在の状態を表示
+- `quit`: 終了
+
+ダブルバッファリング越しに publish されるフレーム情報が標準出力に表示されるため、切り替え直後のウォームアップ破棄も確認できます。
+
 ## 次のステップ
 
 Phase 1完了後の予定:
@@ -267,6 +304,9 @@ src/capture/
 ├── Makefile                    # ビルド設定
 ├── shared_memory.h             # 共有メモリヘッダ
 ├── shared_memory.c             # 共有メモリ実装
+├── camera_switcher.h           # 昼夜切り替えコントローラ（C）
+├── camera_switcher.c           # 昼夜切り替えロジック本体（C）
+├── camera_switcher_demo.c      # デバッグ・動作確認用の対話デモ
 ├── camera_daemon.c             # カメラデーモン
 ├── test_shm.c                  # Cテストプログラム
 ├── real_shared_memory.py       # Pythonラッパー
