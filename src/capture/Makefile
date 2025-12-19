@@ -1,9 +1,12 @@
 # Makefile for D-Robotics camera daemon
 #
 # Usage:
-#   make -f Makefile.drobotics        - Build D-Robotics daemon
-#   make -f Makefile.drobotics clean  - Remove build artifacts
-#   make -f Makefile.drobotics test   - Build and run tests
+#   make              - Build D-Robotics daemon
+#   make clean        - Remove build artifacts
+#   make test         - Build and run shared memory tests
+#   make test-daemon  - Test reading from running daemon
+#   make run          - Run daemon with auto-cleanup
+#   make run-daemon   - Run daemon in background
 #
 # Requirements:
 #   - D-Robotics SDK installed
@@ -18,19 +21,22 @@ LDFLAGS = -L/usr/hobot/lib -lrt -ljpeg -lpthread -lcam -lvpf -lhbmem
 # Targets
 TARGET = camera_daemon_drobotics
 TEST_TARGET = test_shm
+READER_TARGET = test_daemon_reader
 
 # Source files
 SRC = camera_daemon_drobotics.c shared_memory.c
 TEST_SRC = test_shm.c shared_memory.c
+READER_SRC = test_daemon_reader.c shared_memory.c
 
 # Object files
 OBJ = $(SRC:.c=.o)
 TEST_OBJ = $(TEST_SRC:.c=.o)
+READER_OBJ = $(READER_SRC:.c=.o)
 
 # Build directory
 BUILD_DIR = ../../build
 
-.PHONY: all clean test install help check-sdk kill-processes cleanup
+.PHONY: all clean test install help check-sdk kill-processes cleanup test-daemon test-daemon-py
 
 all: $(BUILD_DIR)/$(TARGET)
 
@@ -55,14 +61,19 @@ $(BUILD_DIR)/$(TARGET): $(OBJ)
 	@echo "[Build] D-Robotics camera daemon built: $@"
 	@echo ""
 	@echo "Next steps:"
-	@echo "  1. Check camera device: v4l2-ctl --list-devices"
-	@echo "  2. Run daemon: ./build/camera_daemon_drobotics -C 0 -P 1"
-	@echo "  3. In another terminal: python3 test_with_mock.py (for verification)"
+	@echo "  1. Run daemon: make run-daemon"
+	@echo "  2. In another terminal: make test-daemon"
+	@echo "  3. Or test with Python: python3 test_daemon_python.py"
 
 $(BUILD_DIR)/$(TEST_TARGET): $(TEST_OBJ)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^ $(LDFLAGS)
 	@echo "[Build] Test program built: $@"
+
+$(BUILD_DIR)/$(READER_TARGET): $(READER_OBJ)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^ $(LDFLAGS)
+	@echo "[Build] Daemon reader built: $@"
 
 %.o: %.c shared_memory.h
 	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
@@ -70,6 +81,16 @@ $(BUILD_DIR)/$(TEST_TARGET): $(TEST_OBJ)
 test: $(BUILD_DIR)/$(TEST_TARGET)
 	@echo "[Test] Running shared memory test..."
 	@$(BUILD_DIR)/$(TEST_TARGET)
+
+test-daemon: $(BUILD_DIR)/$(READER_TARGET)
+	@echo "[Test] Reading frames from camera daemon..."
+	@echo "[Test] Make sure daemon is running: make run-daemon"
+	@$(BUILD_DIR)/$(READER_TARGET) -n 100 -v
+
+test-daemon-py:
+	@echo "[Test] Reading frames from camera daemon (Python)..."
+	@echo "[Test] Make sure daemon is running: make run-daemon"
+	@cd ../.. && PYTHONPATH=src:src/capture uv run src/capture/test_daemon_python.py -n 100 -v
 
 # Run daemon with automatic cleanup
 run: cleanup $(BUILD_DIR)/$(TARGET)
@@ -85,8 +106,8 @@ run-daemon: cleanup $(BUILD_DIR)/$(TARGET)
 	@echo "[Run] Use 'make kill-processes' to stop"
 
 clean: kill-processes
-	rm -f $(OBJ) $(TEST_OBJ)
-	rm -f $(BUILD_DIR)/$(TARGET) $(BUILD_DIR)/$(TEST_TARGET)
+	rm -f $(OBJ) $(TEST_OBJ) $(READER_OBJ)
+	rm -f $(BUILD_DIR)/$(TARGET) $(BUILD_DIR)/$(TEST_TARGET) $(BUILD_DIR)/$(READER_TARGET)
 	@echo "[Clean] Build artifacts removed"
 
 install: $(BUILD_DIR)/$(TARGET)
@@ -121,15 +142,18 @@ help:
 	@echo "Smart Pet Camera - D-Robotics Camera Daemon Build"
 	@echo ""
 	@echo "Targets:"
-	@echo "  make -f Makefile.drobotics              Build D-Robotics daemon"
-	@echo "  make -f Makefile.drobotics test         Build and run tests"
-	@echo "  make -f Makefile.drobotics run          Run daemon with auto-cleanup"
-	@echo "  make -f Makefile.drobotics run-daemon   Run daemon in background"
-	@echo "  make -f Makefile.drobotics cleanup      Kill processes and clean shared memory"
-	@echo "  make -f Makefile.drobotics kill-processes Kill camera processes"
-	@echo "  make -f Makefile.drobotics clean        Remove build artifacts"
-	@echo "  make -f Makefile.drobotics install      Install to /usr/local/bin"
-	@echo "  make -f Makefile.drobotics check-sdk    Verify D-Robotics SDK"
+	@echo "  make                Build D-Robotics daemon"
+	@echo "  make test           Build and run shared memory tests"
+	@echo "  make test-daemon    Test reading from running daemon (C)"
+	@echo "  make test-daemon-py Test reading from running daemon (Python with uv)"
+	@echo "  make run            Run daemon with auto-cleanup"
+	@echo "  make run-daemon     Run daemon in background"
+	@echo "  make cleanup        Kill processes and clean shared memory"
+	@echo "  make kill-processes Kill camera processes"
+	@echo "  make clean          Remove build artifacts"
+	@echo "  make install        Install to /usr/local/bin"
+	@echo "  make check-sdk      Verify D-Robotics SDK"
+	@echo "  make help           Show this help message"
 	@echo ""
 	@echo "Dependencies:"
 	@echo "  - D-Robotics SDK (libcam.so, libvpf.so, libhbmem.so)"
@@ -138,16 +162,19 @@ help:
 	@echo ""
 	@echo "Usage examples:"
 	@echo "  # Build and run with automatic cleanup"
-	@echo "  make -f Makefile.drobotics run"
+	@echo "  make run"
 	@echo ""
 	@echo "  # Run in background (daemon mode)"
-	@echo "  make -f Makefile.drobotics run-daemon"
+	@echo "  make run-daemon"
+	@echo ""
+	@echo "  # Test daemon in another terminal"
+	@echo "  make test-daemon"
 	@echo ""
 	@echo "  # Clean up stuck processes and shared memory"
-	@echo "  make -f Makefile.drobotics cleanup"
+	@echo "  make cleanup"
 	@echo ""
 	@echo "  # Manual execution"
 	@echo "  ./build/camera_daemon_drobotics -C 0 -P 1"
 	@echo ""
 	@echo "  # Stop running daemon"
-	@echo "  make -f Makefile.drobotics kill-processes"
+	@echo "  make kill-processes"
