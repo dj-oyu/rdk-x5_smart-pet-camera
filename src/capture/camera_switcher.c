@@ -218,6 +218,14 @@ double frame_calculate_mean_luma(const Frame* frame) {
         jpeg_read_header(&cinfo, TRUE);
 
         jpeg_start_decompress(&cinfo);
+        
+        /* Verify the JPEG is in RGB format (3 components) */
+        if (cinfo.output_components != 3) {
+            jpeg_finish_decompress(&cinfo);
+            jpeg_destroy_decompress(&cinfo);
+            return -1.0;
+        }
+        
         size_t row_stride = cinfo.output_width * cinfo.output_components;
         JSAMPARRAY buffer = (*cinfo.mem->alloc_sarray)(
             (j_common_ptr)&cinfo, JPOOL_IMAGE, row_stride, 1);
