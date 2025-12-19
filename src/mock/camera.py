@@ -138,18 +138,21 @@ class MockCamera:
         else:
             raise ValueError(f"Unknown source type: {source}")
 
-    def capture_frame(self) -> Frame:
+    def capture_frame(self, *, skip_rate_limit: bool = False) -> Frame:
         """
         フレームをキャプチャ
+        Args:
+            skip_rate_limit: Trueの場合、フレームレート制御をスキップして即座に取得する。
 
         Returns:
             キャプチャされたフレーム
         """
         # フレームレート制御
-        current_time = time.time()
-        elapsed = current_time - self._last_capture_time
-        if elapsed < self.frame_interval:
-            time.sleep(self.frame_interval - elapsed)
+        if not skip_rate_limit:
+            current_time = time.time()
+            elapsed = current_time - self._last_capture_time
+            if elapsed < self.frame_interval:
+                time.sleep(self.frame_interval - elapsed)
 
         # フレーム生成
         if self.source_type == "random":
