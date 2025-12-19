@@ -193,10 +193,23 @@ double frame_calculate_mean_luma(const Frame* frame) {
         while (cinfo.output_scanline < cinfo.output_height) {
             jpeg_read_scanlines(&cinfo, buffer, 1);
             for (size_t x = 0; x < cinfo.output_width; ++x) {
-                uint8_t r = buffer[0][x * cinfo.output_components + 0];
-                uint8_t g = buffer[0][x * cinfo.output_components + 1];
-                uint8_t b = buffer[0][x * cinfo.output_components + 2];
-                sum += 0.299 * r + 0.587 * g + 0.114 * b;
+                size_t idx = x * cinfo.output_components;
+
+                if (cinfo.output_components == 1) {
+                    /* Grayscale JPEG: single component is already luminance. */
+                    uint8_t y = buffer[0][idx];
+                    sum += (double)y;
+                } else if (cinfo.output_components >= 3) {
+                    /* Assume first three components correspond to RGB. */
+                    uint8_t r = buffer[0][idx + 0];
+                    uint8_t g = buffer[0][idx + 1];
+                    uint8_t b = buffer[0][idx + 2];
+                    sum += 0.299 * r + 0.587 * g + 0.114 * b;
+                } else {
+                    /* Fallback for unexpected component counts. */
+                    uint8_t y = buffer[0][idx];
+                    sum += (double)y;
+                }
             }
         }
 
