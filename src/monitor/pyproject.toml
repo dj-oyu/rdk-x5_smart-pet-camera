@@ -4,4 +4,19 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "flask",
+    "numpy>=2.0.0",
+    "opencv-python>=4.5.0",
+]
+
+[project.scripts]
+smart-pet-monitor = "monitor.main:main"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["monitor"]
+package-dir = {"monitor" = "."}

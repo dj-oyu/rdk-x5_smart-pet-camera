@@ -7,6 +7,7 @@ Flask + MJPEGストリーミングでBBox合成映像をブラウザに表示
 from flask import Flask, Response, render_template_string
 import cv2
 import numpy as np
+import json
 from typing import Optional
 import queue
 import threading
@@ -14,9 +15,9 @@ import time
 from pathlib import Path
 import sys
 
-# 共通型定義をインポート
 sys.path.insert(0, str(Path(__file__).parent.parent / "common" / "src"))
-from common.types import Frame, DetectionResult, Detection, BoundingBox
+# 共通型定義をインポート
+from common.types import Frame, DetectionResult, Detection, BoundingBox, DetectionClass
 
 # MockSharedMemoryをインポート（型ヒント用）
 sys.path.insert(0, str(Path(__file__).parent.parent / "mock"))
@@ -115,8 +116,9 @@ class WebMonitor:
             current_version = self.shm.get_detection_version()
             if current_version != cached_version:
                 detection_result, cached_version = self.shm.read_detection()
-                if detection_result:
-                    cached_detections = detection_result
+                parsed = self._parse_detection_result(detection_result)
+                if parsed:
+                    cached_detections = parsed
 
             # BBox合成
             overlay_frame = self._draw_overlay(frame, cached_detections)
@@ -151,6 +153,61 @@ class WebMonitor:
             elapsed = time.time() - start_time
             if elapsed < self.frame_interval:
                 time.sleep(self.frame_interval - elapsed)
+
+    def _parse_detection_result(
+        self, detection_result_raw: Optional[object]
+    ) -> Optional[DetectionResult]:
+        """
+        検出結果をデシリアライズし、DetectionResultに変換する。
+
+        共有メモリからJSON文字列/辞書で渡されたケースにも対応する。
+        """
+        if detection_result_raw is None:
+            return None
+
+        if isinstance(detection_result_raw, DetectionResult):
+            return detection_result_raw
+
+        try:
+            if isinstance(detection_result_raw, (str, bytes, bytearray)):
+                detection_dict = json.loads(detection_result_raw)
+            elif isinstance(detection_result_raw, dict):
+                detection_dict = detection_result_raw
+            else:
+                print(f"[WARN] Unsupported detection result type: {type(detection_result_raw)}")
+                return None
+
+            detections = []
+            for det in detection_dict.get("detections", []):
+                bbox_data = det.get("bbox", {})
+                bbox = BoundingBox(
+                    x=int(bbox_data.get("x", 0)),
+                    y=int(bbox_data.get("y", 0)),
+                    w=int(bbox_data.get("w", 0)),
+                    h=int(bbox_data.get("h", 0)),
+                )
+                try:
+                    class_enum = DetectionClass(det.get("class_name"))
+                except ValueError:
+                    # class_nameが未定義ならスキップ
+                    continue
+                detections.append(
+                    Detection(
+                        class_name=class_enum,
+                        confidence=float(det.get("confidence", 0.0)),
+                        bbox=bbox,
+                    )
+                )
+
+            return DetectionResult(
+                frame_number=int(detection_dict.get("frame_number", 0)),
+                timestamp=float(detection_dict.get("timestamp", time.time())),
+                detections=detections,
+                version=int(detection_dict.get("version", 0)),
+            )
+        except Exception as exc:
+            print(f"[WARN] Failed to parse detection result: {exc}")
+            return None
 
     def _draw_overlay(
         self,
