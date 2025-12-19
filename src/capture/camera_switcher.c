@@ -7,7 +7,32 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <setjmp.h>
 #include <jpeglib.h>
+
+/**
+ * Custom JPEG error manager that uses setjmp/longjmp for error handling
+ * instead of exit() to gracefully handle JPEG errors.
+ */
+struct jpeg_error_mgr_ext {
+    struct jpeg_error_mgr pub;  /* "public" fields */
+    jmp_buf setjmp_buffer;      /* for return to caller */
+};
+
+/**
+ * Custom error_exit function that replaces the default libjpeg error handler.
+ * Instead of calling exit(), it longjmps back to the setjmp point.
+ */
+static void jpeg_error_exit(j_common_ptr cinfo) {
+    /* cinfo->err really points to a jpeg_error_mgr_ext struct */
+    struct jpeg_error_mgr_ext* myerr = (struct jpeg_error_mgr_ext*)cinfo->err;
+    
+    /* Always display the message (optional, can be removed for silent errors) */
+    (*cinfo->err->output_message)(cinfo);
+    
+    /* Return control to the setjmp point */
+    longjmp(myerr->setjmp_buffer, 1);
+}
 
 static double now_seconds(void) {
     struct timespec ts;
@@ -172,8 +197,20 @@ double frame_calculate_mean_luma(const Frame* frame) {
         return sum / (double)pixels;
     } else if (frame->format == 0) {  // JPEG
         struct jpeg_decompress_struct cinfo;
-        struct jpeg_error_mgr jerr;
-        cinfo.err = jpeg_std_error(&jerr);
+        struct jpeg_error_mgr_ext jerr;
+        
+        /* Set up the custom error handler */
+        cinfo.err = jpeg_std_error(&jerr.pub);
+        jerr.pub.error_exit = jpeg_error_exit;
+        
+        /* Establish the setjmp return context for jpeg_error_exit to use */
+        if (setjmp(jerr.setjmp_buffer)) {
+            /* If we get here, the JPEG code has signaled an error.
+             * We need to clean up the JPEG object and return error. */
+            jpeg_destroy_decompress(&cinfo);
+            return -1.0;
+        }
+        
         jpeg_create_decompress(&cinfo);
         jpeg_mem_src(&cinfo, frame->data, frame->data_size);
 
