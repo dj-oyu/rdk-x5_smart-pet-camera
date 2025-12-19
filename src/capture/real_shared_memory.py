@@ -129,6 +129,7 @@ class RealSharedMemory:
         self.last_read_frame_number = -1
         self.last_detection_version = 0
         self.total_frames_read = 0
+        self.detection_write_mode = False
 
     def open(self):
         """Open existing shared memory segments."""
@@ -165,6 +166,29 @@ class RealSharedMemory:
                 f"[Warn] Detection shared memory {SHM_NAME_DETECTIONS} not found "
                 "(will be created by detection process)"
             )
+
+    def open_detection_write(self):
+        """Open detection shared memory in write mode (creates if not exists)."""
+        import ctypes.util
+
+        shm_path_detections = f"/dev/shm{SHM_NAME_DETECTIONS}"
+
+        try:
+            # Try to open existing
+            self.detection_fd = os.open(shm_path_detections, os.O_RDWR)
+        except FileNotFoundError:
+            # Create new shared memory
+            self.detection_fd = os.open(
+                shm_path_detections, os.O_CREAT | os.O_RDWR, 0o666
+            )
+            # Resize to correct size
+            os.ftruncate(self.detection_fd, sizeof(CLatestDetectionResult))
+
+        self.detection_mmap = mmap.mmap(
+            self.detection_fd, sizeof(CLatestDetectionResult), mmap.MAP_SHARED, mmap.PROT_WRITE | mmap.PROT_READ
+        )
+        self.detection_write_mode = True
+        print(f"[Info] Opened detection shared memory for writing: {shm_path_detections}")
 
     def close(self):
         """Close shared memory."""
@@ -385,6 +409,52 @@ class RealSharedMemory:
         # OpenCV loads as BGR, convert to RGB
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         return img
+
+    def write_detection_result(
+        self,
+        frame_number: int,
+        timestamp_sec: float,
+        detections: list[dict],
+    ) -> None:
+        """
+        Write detection result to shared memory.
+
+        Args:
+            frame_number: Frame number this detection corresponds to
+            timestamp_sec: Timestamp in seconds
+            detections: List of detection dicts with 'class_name', 'confidence', 'bbox'
+        """
+        if not self.detection_write_mode or not self.detection_mmap:
+            raise RuntimeError("Detection shared memory not opened for writing")
+
+        # Create C structure
+        c_det = CLatestDetectionResult()
+        c_det.frame_number = frame_number
+
+        # Convert timestamp
+        c_det.timestamp.tv_sec = int(timestamp_sec)
+        c_det.timestamp.tv_nsec = int((timestamp_sec - int(timestamp_sec)) * 1e9)
+
+        # Fill detections
+        c_det.num_detections = min(len(detections), MAX_DETECTIONS)
+        for i, det in enumerate(detections[:MAX_DETECTIONS]):
+            c_detection = c_det.detections[i]
+            class_name = det["class_name"].encode("utf-8")
+            c_detection.class_name = class_name
+            c_detection.confidence = det["confidence"]
+            c_detection.bbox.x = det["bbox"]["x"]
+            c_detection.bbox.y = det["bbox"]["y"]
+            c_detection.bbox.w = det["bbox"]["w"]
+            c_detection.bbox.h = det["bbox"]["h"]
+
+        # Increment version
+        c_det.version = self.last_detection_version + 1
+        self.last_detection_version = c_det.version
+
+        # Write to shared memory
+        self.detection_mmap.seek(0)
+        self.detection_mmap.write(bytes(c_det))
+        self.detection_mmap.flush()
 
 
 if __name__ == "__main__":
