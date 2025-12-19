@@ -8,7 +8,7 @@
 - 静止画像
 """
 
-from typing import Optional, Literal
+from typing import Optional, Literal, TYPE_CHECKING, cast, Any
 from pathlib import Path
 import sys
 import time
@@ -17,13 +17,21 @@ import time
 sys.path.insert(0, str(Path(__file__).parent.parent / "common" / "src"))
 from common.types import Frame, DEFAULT_FRAME_WIDTH, DEFAULT_FRAME_HEIGHT, DEFAULT_FPS
 
+import numpy as np
+
+if TYPE_CHECKING:
+    import cv2 as cv2_type  # pragma: no cover
+
 try:
-    import cv2
-    import numpy as np
-    HAS_CV2 = True
-except ImportError:
-    HAS_CV2 = False
-    print("Warning: opencv-python not installed. Only random pattern source available.")
+    import cv2 as _cv2  # type: ignore[import]
+except ImportError:  # pragma: no cover - runtime guard
+    _cv2 = None  # type: ignore[assignment]
+    print(
+        "Warning: opencv-python is not installed. "
+        "Install it (e.g. `uv pip install opencv-python`) to enable mock streaming."
+    )
+
+cv2 = cast("cv2_type", _cv2)
 
 
 SourceType = Literal["random", "video", "webcam", "image"]
@@ -71,7 +79,13 @@ class MockCamera:
         self.camera_id = camera_id
         self.frame_interval = 1.0 / fps
 
-        self._cap: Optional[cv2.VideoCapture] = None
+        if cv2 is None:
+            raise ImportError(
+                "MockCamera requires opencv-python for frame generation and JPEG encode. "
+                "Install with: uv pip install opencv-python"
+            )
+
+        self._cap: Optional[Any] = None
         self._static_image: Optional[np.ndarray] = None
         self._frame_count = 0
         self._last_capture_time = 0.0
@@ -81,18 +95,14 @@ class MockCamera:
 
     def _initialize_source(self, source: SourceType, source_path: Optional[str]) -> None:
         """ソースを初期化"""
-        if not HAS_CV2 and source != "random":
-            raise ImportError(
-                "opencv-python is required for video/webcam/image sources. "
-                "Install with: uv pip install opencv-python"
-            )
-
         if source == "video":
             if not source_path:
                 raise ValueError("source_path is required for video source")
             if not Path(source_path).exists():
                 raise FileNotFoundError(f"Video file not found: {source_path}")
             self._cap = cv2.VideoCapture(source_path)
+            if self._cap is None:
+                raise RuntimeError(f"Failed to open video: {source_path}")
             if not self._cap.isOpened():
                 raise RuntimeError(f"Failed to open video: {source_path}")
             print(f"MockCamera: Using video source: {source_path}")
@@ -100,6 +110,8 @@ class MockCamera:
         elif source == "webcam":
             webcam_id = int(source_path) if source_path else 0
             self._cap = cv2.VideoCapture(webcam_id)
+            if self._cap is None:
+                raise RuntimeError(f"Failed to open webcam: {webcam_id}")
             if not self._cap.isOpened():
                 raise RuntimeError(f"Failed to open webcam: {webcam_id}")
             # Webカメラの解像度を設定
@@ -170,23 +182,19 @@ class MockCamera:
 
     def _generate_random_pattern(self) -> np.ndarray:
         """ランダムパターンを生成"""
-        if HAS_CV2:
-            # カラフルなランダムパターン
-            pattern = np.random.randint(0, 255, (self.height, self.width, 3), dtype=np.uint8)
-            # テキストを追加（フレーム番号）
-            cv2.putText(
-                pattern,
-                f"Frame #{self._frame_count + 1}",
-                (50, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.5,
-                (255, 255, 255),
-                3,
-            )
-            return pattern
-        else:
-            # OpenCV なしの場合はダミーデータ
-            return np.zeros((self.height, self.width, 3), dtype=np.uint8)
+        # カラフルなランダムパターン
+        pattern = np.random.randint(0, 255, (self.height, self.width, 3), dtype=np.uint8)
+        # テキストを追加（フレーム番号）
+        cv2.putText(
+            pattern,
+            f"Frame #{self._frame_count + 1}",
+            (50, 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.5,
+            (255, 255, 255),
+            3,
+        )
+        return pattern
 
     def _capture_video_frame(self) -> np.ndarray:
         """動画からフレームをキャプチャ"""
@@ -257,7 +265,7 @@ if __name__ == "__main__":
     print(f"\n{camera}")
 
     # Webカメラソース（利用可能な場合）
-    if HAS_CV2:
+    if cv2 is not None:
         try:
             print("\n2. Webcam source:")
             with MockCamera(source="webcam", fps=10) as camera:

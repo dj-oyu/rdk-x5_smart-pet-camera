@@ -33,6 +33,8 @@ uv add flask opencv-python numpy
 uv sync
 ```
 
+> ⚠️ `opencv-python` はモックカメラのフレーム生成とJPEGエンコードに必須です。未インストールだとWebモニターに映像が出ません。
+
 ### 2. 実行
 
 ```bash
@@ -121,13 +123,23 @@ WebMonitor - Webモニター
 ### 基本的な使用
 
 ```bash
-# 1. モック環境起動
+# 1. モック環境起動（カメラ/検出/共有メモリ/Webモニターを一括起動）
 uv run src/mock/main.py
 
 # 2. ブラウザで http://localhost:8080 を開く
 
 # 3. ランダムにBBoxが表示されることを確認
 ```
+
+### モニターだけを単体で使う場合
+
+モニターだけ別プロセスで立ち上げたい場合は、`MockSharedMemory` を使う `--shm-type mock` オプションを指定します。現状 `mock` のみ実装済みです。
+
+```bash
+uv run src/monitor/main.py --shm-type mock --host 0.0.0.0 --port 8080
+```
+
+実機向けのPOSIX shmは `/dev/shm/pet_camera_frames` `/dev/shm/pet_camera_detections` を想定しており、`src/capture/real_shared_memory.py` の `RealSharedMemory` が読み取り側になります。`--shm-type real` 追加実装で切り替えられる構造です。
 
 ### Webカメラでテスト
 
