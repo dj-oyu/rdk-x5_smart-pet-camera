@@ -110,7 +110,7 @@ if [[ "${SKIP_BUILD}" -ne 1 ]]; then
   make -C "${CAPTURE_DIR}"
 
   echo "[build] building camera_switcher_daemon..."
-  make -C "${CAPTURE_DIR}" switcher-daemon
+  make -C "${CAPTURE_DIR}" switcher-daemon-build
 else
   echo "[info] skipping build (using existing build artifacts)"
 fi
