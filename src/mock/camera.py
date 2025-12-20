@@ -101,8 +101,6 @@ class MockCamera:
             if not Path(source_path).exists():
                 raise FileNotFoundError(f"Video file not found: {source_path}")
             self._cap = cv2.VideoCapture(source_path)
-            if self._cap is None:
-                raise RuntimeError(f"Failed to open video: {source_path}")
             if not self._cap.isOpened():
                 raise RuntimeError(f"Failed to open video: {source_path}")
             print(f"MockCamera: Using video source: {source_path}")
@@ -110,8 +108,6 @@ class MockCamera:
         elif source == "webcam":
             webcam_id = int(source_path) if source_path else 0
             self._cap = cv2.VideoCapture(webcam_id)
-            if self._cap is None:
-                raise RuntimeError(f"Failed to open webcam: {webcam_id}")
             if not self._cap.isOpened():
                 raise RuntimeError(f"Failed to open webcam: {webcam_id}")
             # Webカメラの解像度を設定
