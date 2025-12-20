@@ -13,9 +13,16 @@
   "stubPath": "typings",
   "reportMissingImports": true,
   "reportMissingTypeStubs": false,
-  "pythonVersion": "3.8",
+  "pythonVersion": "3.11",
   "pythonPlatform": "Linux",
   "typeCheckingMode": "strict",
+  "extraPaths": [
+    "src",
+    "src/common/src",
+    "src/mock",
+    "src/monitor"
+  ],
+  "reportUnusedFunction": false,
   "reportUnknownMemberType": false,
   "reportUnknownArgumentType": false,
   "reportUnknownVariableType": false,

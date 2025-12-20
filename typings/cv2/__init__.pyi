@@ -1,0 +1,39 @@
+from typing import Any, Tuple
+
+IMWRITE_JPEG_QUALITY: int
+CAP_PROP_FRAME_WIDTH: int
+CAP_PROP_FRAME_HEIGHT: int
+CAP_PROP_FPS: int
+CAP_PROP_POS_FRAMES: int
+IMREAD_COLOR: int
+COLOR_BGR2RGB: int
+FONT_HERSHEY_SIMPLEX: int
+
+class VideoCapture:
+    def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+    def isOpened(self) -> bool: ...
+    def read(self) -> Tuple[bool, Any]: ...
+    def set(self, propId: int, value: Any) -> bool: ...
+
+__all__ = [
+    'IMWRITE_JPEG_QUALITY',
+    'CAP_PROP_FRAME_WIDTH',
+    'CAP_PROP_FRAME_HEIGHT',
+    'CAP_PROP_FPS',
+    'CAP_PROP_POS_FRAMES',
+    'IMREAD_COLOR',
+    'COLOR_BGR2RGB',
+    'VideoCapture',
+    'FONT_HERSHEY_SIMPLEX',
+]
+
+# functions
+
+def imencode(ext: str, img: Any, params: Any = ...) -> Tuple[bool, Any]: ...
+def imdecode(buf: Any, flags: int) -> Any: ...
+def imread(filename: str, flags: int = ...) -> Any: ...
+def resize(src: Any, dsize: Any, *args: Any, **kwargs: Any) -> Any: ...
+def cvtColor(src: Any, code: int) -> Any: ...
+def putText(img: Any, text: str, org: Any, fontFace: int, fontScale: float, color: Any, thickness: int = ..., lineType: int = ...) -> Any: ...
+def rectangle(img: Any, pt1: Any, pt2: Any, color: Any, thickness: int = ...) -> Any: ...
+def getTextSize(text: str, fontFace: int, fontScale: float, thickness: int) -> Tuple[Any, int]: ...
