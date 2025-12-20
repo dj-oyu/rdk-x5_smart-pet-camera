@@ -59,10 +59,6 @@ void camera_switcher_init(CameraSwitchController *ctrl,
   ctrl->mode = SWITCH_MODE_AUTO;
   ctrl->active_camera = CAMERA_MODE_DAY;
   ctrl->manual_target = -1;
-  ctrl->publisher.active_slot = 0;
-  ctrl->publisher.warmup_remaining = 0;
-  ctrl->publisher.buffers[0] = calloc(1, sizeof(Frame));
-  ctrl->publisher.buffers[1] = calloc(1, sizeof(Frame));
   reset_stats(&ctrl->brightness[0]);
   reset_stats(&ctrl->brightness[1]);
   ctrl->below_threshold_since = -1.0;
@@ -74,10 +70,7 @@ void camera_switcher_destroy(CameraSwitchController *ctrl) {
   if (!ctrl) {
     return;
   }
-  free(ctrl->publisher.buffers[0]);
-  free(ctrl->publisher.buffers[1]);
-  ctrl->publisher.buffers[0] = NULL;
-  ctrl->publisher.buffers[1] = NULL;
+  ctrl->frame_buf = NULL;
 }
 
 void camera_switcher_force_manual(CameraSwitchController *ctrl,
@@ -291,7 +284,7 @@ double frame_calculate_mean_luma(const Frame *frame) {
 }
 
 CameraSwitchDecision
-camera_switcher_handle_frame(CameraSwitchController *ctrl, const Frame *frame,
+camera_switcher_handle_frame(CameraSwitchController *ctrl, Frame const *frame,
                              CameraMode camera, bool is_active_camera,
                              camera_publish_fn publish_cb, void *user_data) {
   if (!ctrl || !frame) {
@@ -325,8 +318,6 @@ void camera_switcher_notify_active_camera(CameraSwitchController *ctrl,
     return;
   }
   ctrl->active_camera = camera;
-  ctrl->publisher.warmup_remaining = ctrl->cfg.warmup_frames;
-  ctrl->publisher.active_slot = 0;
   ctrl->below_threshold_since = -1.0;
   ctrl->above_threshold_since = -1.0;
   snprintf(ctrl->last_switch_reason, sizeof(ctrl->last_switch_reason), "%s",
@@ -334,26 +325,16 @@ void camera_switcher_notify_active_camera(CameraSwitchController *ctrl,
 }
 
 int camera_switcher_publish_frame(CameraSwitchController *ctrl,
-                                  const Frame *frame,
+                                  Frame const *frame,
                                   camera_publish_fn publish_cb,
                                   void *user_data) {
   if (!ctrl || !frame || !publish_cb) {
     return -1;
   }
 
-  if (ctrl->publisher.warmup_remaining > 0) {
-    ctrl->publisher.warmup_remaining--;
-    return 0; // drop warmup frames
-  }
+  ctrl->frame_buf = frame;
 
-  int next_slot = 1 - ctrl->publisher.active_slot;
-  if (!ctrl->publisher.buffers[next_slot]) {
-    return -1;
-  }
-  memcpy(ctrl->publisher.buffers[next_slot], frame, sizeof(Frame));
-  ctrl->publisher.active_slot = next_slot;
-
-  return publish_cb(ctrl->publisher.buffers[next_slot], user_data);
+  return publish_cb(ctrl->frame_buf, user_data);
 }
 
 void camera_switcher_get_status(const CameraSwitchController *ctrl,

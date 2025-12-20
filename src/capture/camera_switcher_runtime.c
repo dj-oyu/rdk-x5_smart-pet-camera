@@ -92,16 +92,13 @@ static void *probe_thread_main(void *arg) {
       if (capture_result == 0) {
         // Copy probe frame to FrameDoubleBuffer inactive slot to avoid
         // shared memory race with active camera writing at 30fps
-        int inactive_slot = 1 - rt->controller.publisher.active_slot;
-
-        if (rt->controller.publisher.buffers[inactive_slot]) {
-          memcpy(rt->controller.publisher.buffers[inactive_slot], &probe_frame,
-                 sizeof(Frame));
+        if (1) {
+          rt->controller.frame_buf = &probe_frame;
 
           // Calculate brightness from inactive slot (safe from race conditions)
           CameraSwitchDecision decision = camera_switcher_handle_frame(
-              &rt->controller, rt->controller.publisher.buffers[inactive_slot],
-              CAMERA_MODE_DAY, false, NULL, NULL);
+              &rt->controller, rt->controller.frame_buf, CAMERA_MODE_DAY, false,
+              NULL, NULL);
 
           if (decision == CAMERA_SWITCH_DECISION_TO_DAY) {
             do_switch(rt, CAMERA_MODE_DAY, "auto-day");
