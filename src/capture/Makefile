@@ -31,7 +31,7 @@ LDLIBS_SWITCHER_DAEMON := $(LDLIBS_COMMON) -lpthread
 
 DAEMON_ARGS ?= -C 0 -P 1
 
-.PHONY: all clean test switcher-demo switcher-runtime-lib switcher-daemon run run-daemon cleanup kill-processes help
+.PHONY: all clean test switcher-demo switcher-runtime-lib switcher-daemon switcher-daemon-build run run-daemon cleanup kill-processes help
 
 all: $(DAEMON_BINARY) $(SHM_TEST_BINARY)
 
@@ -67,7 +67,10 @@ switcher-demo: $(SWITCHER_DEMO_BINARY)
 switcher-runtime-lib: $(SWITCHER_RUNTIME_LIBRARY)
 	@echo "[Info] Static library ready. Link with -lpthread -ljpeg when embedding in a daemon."
 
-switcher-daemon: $(SWITCHER_DAEMON_BINARY)
+switcher-daemon-build: $(SWITCHER_DAEMON_BINARY)
+	@echo "[Build] camera_switcher_daemon ready at $(SWITCHER_DAEMON_BINARY)"
+
+switcher-daemon: switcher-daemon-build
 	@echo "[Run] Starting camera switcher orchestration daemon..."
 	@$(SWITCHER_DAEMON_BINARY)
 
@@ -105,6 +108,7 @@ help:
 	@echo "  make (default)       Build camera_daemon_drobotics and shared memory test binary"
 	@echo "  make test            Run shared memory tests"
 	@echo "  make switcher-demo   Build and run the brightness-based camera switcher demo"
+	@echo "  make switcher-daemon-build  Build the camera switcher orchestration daemon only"
 	@echo "  make switcher-daemon Build and run the camera switcher orchestration daemon"
 	@echo "  make switcher-runtime-lib Build libcamera_switcher_runtime.a"
 	@echo "  make run             Run camera_daemon_drobotics in the foreground (cleans stale processes and shm first)"
