@@ -113,6 +113,43 @@ void shm_frame_buffer_destroy(SharedFrameBuffer* shm) {
     }
 }
 
+SharedFrameBuffer* shm_frame_buffer_create_named(const char* name) {
+    SharedFrameBuffer* shm = (SharedFrameBuffer*)shm_create_or_open(
+        name,
+        sizeof(SharedFrameBuffer),
+        true  // create
+    );
+
+    if (shm) {
+        printf("[Info] Shared memory created: %s (size=%zu bytes)\n",
+               name, sizeof(SharedFrameBuffer));
+    }
+
+    return shm;
+}
+
+SharedFrameBuffer* shm_frame_buffer_open_named(const char* name) {
+    SharedFrameBuffer* shm = (SharedFrameBuffer*)shm_create_or_open(
+        name,
+        sizeof(SharedFrameBuffer),
+        false  // open existing
+    );
+
+    if (shm) {
+        printf("[Info] Shared memory opened: %s\n", name);
+    }
+
+    return shm;
+}
+
+void shm_frame_buffer_destroy_named(SharedFrameBuffer* shm, const char* name) {
+    if (shm) {
+        munmap(shm, sizeof(SharedFrameBuffer));
+        shm_unlink(name);
+        printf("[Info] Shared memory destroyed: %s\n", name);
+    }
+}
+
 int shm_frame_buffer_write(SharedFrameBuffer* shm, const Frame* frame) {
     if (!shm || !frame) {
         return -1;

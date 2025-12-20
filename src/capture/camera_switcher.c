@@ -300,9 +300,14 @@ CameraSwitchDecision camera_switcher_handle_frame(CameraSwitchController* ctrl,
     }
 
     double brightness = frame_calculate_mean_luma(frame);
+    printf("[camera_switcher] frame_calculate_mean_luma returned: %.1f (camera=%d, format=%d, data_size=%u)\n",
+           brightness, (int)camera, frame->format, frame->data_size);
+
     CameraSwitchDecision decision = CAMERA_SWITCH_DECISION_NONE;
     if (brightness >= 0) {
         decision = camera_switcher_record_brightness(ctrl, camera, brightness);
+    } else {
+        printf("[camera_switcher] WARNING: brightness calculation failed (returned -1)\n");
     }
 
     if (is_active_camera && publish_cb) {

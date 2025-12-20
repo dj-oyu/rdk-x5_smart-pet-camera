@@ -75,16 +75,26 @@ static void* probe_thread_main(void* arg) {
             memset(&probe_frame, 0, sizeof(Frame));
             probe_frame.camera_id = CAMERA_MODE_DAY;
 
-            if (rt->ops.capture_frame &&
-                rt->ops.capture_frame(CAMERA_MODE_DAY, &probe_frame, rt->ops.user_data) == 0) {
+            int capture_result = rt->ops.capture_frame ?
+                rt->ops.capture_frame(CAMERA_MODE_DAY, &probe_frame, rt->ops.user_data) : -1;
 
+            printf("[probe] capture_frame result=%d, data_size=%u, format=%d\n",
+                   capture_result, probe_frame.data_size, probe_frame.format);
+
+            if (capture_result == 0) {
                 // Copy probe frame to FrameDoubleBuffer inactive slot to avoid
                 // shared memory race with active camera writing at 30fps
                 int inactive_slot = 1 - rt->controller.publisher.active_slot;
+                printf("[probe] inactive_slot=%d, buffer=%p\n",
+                       inactive_slot, (void*)rt->controller.publisher.buffers[inactive_slot]);
+
                 if (rt->controller.publisher.buffers[inactive_slot]) {
                     memcpy(rt->controller.publisher.buffers[inactive_slot],
                            &probe_frame,
                            sizeof(Frame));
+
+                    printf("[probe] copied frame to inactive slot: data_size=%u\n",
+                           rt->controller.publisher.buffers[inactive_slot]->data_size);
 
                     // Calculate brightness from inactive slot (safe from race conditions)
                     CameraSwitchDecision decision = camera_switcher_handle_frame(
@@ -100,7 +110,11 @@ static void* probe_thread_main(void* arg) {
                     } else if (decision == CAMERA_SWITCH_DECISION_TO_NIGHT) {
                         do_switch(rt, CAMERA_MODE_NIGHT, "auto-night");
                     }
+                } else {
+                    printf("[probe] ERROR: inactive slot buffer is NULL\n");
                 }
+            } else {
+                printf("[probe] ERROR: capture_frame failed with result=%d\n", capture_result);
             }
         }
 

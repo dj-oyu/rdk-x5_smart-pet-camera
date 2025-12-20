@@ -129,6 +129,34 @@ void shm_frame_buffer_close(SharedFrameBuffer* shm);
 void shm_frame_buffer_destroy(SharedFrameBuffer* shm);
 
 /**
+ * Create shared memory with custom name (for probe)
+ *
+ * Creates a temporary shared memory segment with a custom name.
+ * Useful for probe captures to avoid ring buffer conflicts.
+ *
+ * Returns:
+ *   Pointer to mapped SharedFrameBuffer, or NULL on error
+ */
+SharedFrameBuffer* shm_frame_buffer_create_named(const char* name);
+
+/**
+ * Open shared memory with custom name (for probe)
+ *
+ * Opens an existing shared memory segment with a custom name.
+ *
+ * Returns:
+ *   Pointer to mapped SharedFrameBuffer, or NULL on error
+ */
+SharedFrameBuffer* shm_frame_buffer_open_named(const char* name);
+
+/**
+ * Destroy shared memory with custom name (for probe)
+ *
+ * Unmaps and deletes a custom-named shared memory segment.
+ */
+void shm_frame_buffer_destroy_named(SharedFrameBuffer* shm, const char* name);
+
+/**
  * Write a frame to the ring buffer (camera daemon only)
  *
  * Atomically increments write_index and copies frame data.

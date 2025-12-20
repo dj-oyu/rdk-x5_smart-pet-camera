@@ -97,6 +97,7 @@ struct arguments {
 static volatile sig_atomic_t g_running = 1;
 static volatile sig_atomic_t g_preserve_shm = 0; // set by SIGUSR1 for shm close only
 static SharedFrameBuffer *g_shm = NULL;
+static const char *g_shm_name = NULL;  // Custom shared memory name (if set via SHM_NAME env)
 
 // -----------------------------
 // Argument and context helpers
@@ -625,7 +626,14 @@ static int open_memory_manager(void) {
 }
 
 static int create_shared_memory(void) {
-  g_shm = shm_frame_buffer_create();
+  // Check for custom shared memory name via environment variable
+  g_shm_name = getenv("SHM_NAME");
+  if (g_shm_name) {
+    g_shm = shm_frame_buffer_create_named(g_shm_name);
+  } else {
+    g_shm = shm_frame_buffer_create();
+  }
+
   if (!g_shm) {
     fprintf(stderr, "[Error] Failed to create shared memory\n");
     return -1;
@@ -634,7 +642,14 @@ static int create_shared_memory(void) {
 }
 
 static int open_or_create_shared_memory(void) {
-  g_shm = shm_frame_buffer_open();
+  // Check for custom shared memory name via environment variable
+  g_shm_name = getenv("SHM_NAME");
+  if (g_shm_name) {
+    g_shm = shm_frame_buffer_open_named(g_shm_name);
+  } else {
+    g_shm = shm_frame_buffer_open();
+  }
+
   if (g_shm) {
     return 0;
   }
@@ -713,6 +728,13 @@ static uint64_t run_capture_loop(camera_context_t *ctx, const struct arguments *
     // Write to shared memory
     if (shm_frame_buffer_write(g_shm, &shm_frame) < 0) {
       fprintf(stderr, "[Error] Failed to write frame to shared memory\n");
+    } else {
+      // For probe captures (count=1), always log the captured frame
+      if (frame_counter == 0 && args->count == 1) {
+        printf("[probe-daemon] Wrote frame: camera=%d, %dx%d, format=%d, data_size=%zu\n",
+               ctx->camera_index, shm_frame.width, shm_frame.height,
+               shm_frame.format, shm_frame.data_size);
+      }
     }
 
     hbn_vnode_releaseframe(ctx->vse_node_handle, 0, &vnode_frame);
@@ -757,7 +779,11 @@ int main(int argc, char **argv) {
 
   // Initialize camera configuration
   if (initialize_camera(&ctx) != 0) {
-    shm_frame_buffer_destroy(g_shm);
+    if (g_shm_name) {
+      shm_frame_buffer_destroy_named(g_shm, g_shm_name);
+    } else {
+      shm_frame_buffer_destroy(g_shm);
+    }
     hb_mem_module_close();
     return 1;
   }
@@ -765,7 +791,11 @@ int main(int argc, char **argv) {
   // Create and start pipeline
   if (start_pipeline(&ctx) != 0) {
     cleanup_pipeline(&ctx);
-    shm_frame_buffer_destroy(g_shm);
+    if (g_shm_name) {
+      shm_frame_buffer_destroy_named(g_shm, g_shm_name);
+    } else {
+      shm_frame_buffer_destroy(g_shm);
+    }
     hb_mem_module_close();
     return 1;
   }
@@ -782,8 +812,14 @@ int main(int argc, char **argv) {
   // Cleanup
   cleanup_pipeline(&ctx);
   if (g_shm) {
-    if (g_preserve_shm) {
-      printf("[Info] Preserving shared memory (SIGUSR1)\n");
+    // Custom-named shared memory is managed by the orchestrator;
+    // we only close (not destroy) since we didn't create it
+    if (g_preserve_shm || g_shm_name) {
+      if (g_preserve_shm) {
+        printf("[Info] Preserving shared memory (SIGUSR1)\n");
+      } else {
+        printf("[Info] Preserving custom-named shared memory: %s\n", g_shm_name);
+      }
       shm_frame_buffer_close(g_shm);
     } else {
       shm_frame_buffer_destroy(g_shm);
