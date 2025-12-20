@@ -107,7 +107,7 @@ static int capture_frame_cb(CameraMode camera, Frame* out_frame, void* user_data
 
     // Scan newly written frames after start_write_index for the requested camera
     uint32_t last_scanned = start_write_index;
-    const int max_attempts = 5;
+    const int max_attempts = 20;       // allow ~400ms total (20 * 20ms)
     for (int attempt = 0; attempt < max_attempts; ++attempt) {
         uint32_t current_write_index = shm_frame_buffer_get_write_index(ctx->shm);
         for (uint32_t i = last_scanned; i < current_write_index; ++i) {
@@ -120,7 +120,7 @@ static int capture_frame_cb(CameraMode camera, Frame* out_frame, void* user_data
         }
         last_scanned = current_write_index;
         if (attempt < max_attempts - 1) {
-            usleep(1000 * 10);  // 10ms between retries
+            usleep(1000 * 20);  // 20ms between retries
         }
     }
     return -1;
