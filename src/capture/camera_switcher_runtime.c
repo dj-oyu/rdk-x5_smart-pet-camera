@@ -86,22 +86,17 @@ static void *probe_thread_main(void *arg) {
                                       rt->ops.user_data)
               : -1;
 
-      printf("[probe] capture_frame result=%d, data_size=%u, format=%d\n",
-             capture_result, probe_frame.data_size, probe_frame.format);
+      // printf("[probe] capture_frame result=%d, data_size=%u, format=%d\n",
+      //        capture_result, probe_frame.data_size, probe_frame.format);
 
       if (capture_result == 0) {
         // Copy probe frame to FrameDoubleBuffer inactive slot to avoid
         // shared memory race with active camera writing at 30fps
         int inactive_slot = 1 - rt->controller.publisher.active_slot;
-        printf("[probe] inactive_slot=%d, buffer=%p\n", inactive_slot,
-               (void *)rt->controller.publisher.buffers[inactive_slot]);
 
         if (rt->controller.publisher.buffers[inactive_slot]) {
           memcpy(rt->controller.publisher.buffers[inactive_slot], &probe_frame,
                  sizeof(Frame));
-
-          printf("[probe] copied frame to inactive slot: data_size=%u\n",
-                 rt->controller.publisher.buffers[inactive_slot]->data_size);
 
           // Calculate brightness from inactive slot (safe from race conditions)
           CameraSwitchDecision decision = camera_switcher_handle_frame(

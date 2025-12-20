@@ -25,7 +25,7 @@ MONITOR_HOST="${MONITOR_HOST:-0.0.0.0}"
 MONITOR_PORT="${MONITOR_PORT:-8080}"
 
 # YOLO設定
-YOLO_MODEL="${YOLO_MODEL:-v13n}"
+YOLO_MODEL="${YOLO_MODEL:-v11n}"
 YOLO_SCORE_THRESHOLD="${YOLO_SCORE_THRESHOLD:-0.6}"
 YOLO_NMS_THRESHOLD="${YOLO_NMS_THRESHOLD:-0.7}"
 
@@ -43,7 +43,7 @@ Options:
   --no-monitor      Webモニターを起動しない
   --monitor-host H  Webモニターのバインドホスト (default: 0.0.0.0)
   --monitor-port P  Webモニターのポート (default: 8080)
-  --yolo-model M    YOLOモデル (v8n/v11n/v13n, default: v13n)
+  --yolo-model M    YOLOモデル (v8n/v11n/v13n, default: v11n)
   --score-thres T   検出スコア閾値 (default: 0.6)
   --nms-thres T     NMS IoU閾値 (default: 0.7)
   -h, --help        このヘルプを表示
@@ -61,7 +61,7 @@ Examples:
   ./scripts/run_camera_switcher_yolo.sh
 
   # YOLO11nを使用（高速）
-  ./scripts/run_camera_switcher_yolo.sh --yolo-model v11n
+  ./scripts/run_camera_switcher_yolo.sh --yolo-model v13n
 
   # 閾値を調整
   ./scripts/run_camera_switcher_yolo.sh --score-thres 0.5
