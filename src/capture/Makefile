@@ -70,7 +70,10 @@ switcher-runtime-lib: $(SWITCHER_RUNTIME_LIBRARY)
 switcher-daemon-build: $(SWITCHER_DAEMON_BINARY)
 	@echo "[Build] camera_switcher_daemon ready at $(SWITCHER_DAEMON_BINARY)"
 
-switcher-daemon: switcher-daemon-build
+switcher-daemon: cleanup
+	@echo "[Build] Rebuilding camera_daemon_drobotics and camera_switcher_daemon..."
+	@rm -f $(DAEMON_OBJECTS) $(SWITCHER_DAEMON_OBJECTS)
+	@$(MAKE) $(SWITCHER_DAEMON_BINARY) $(DAEMON_BINARY)
 	@echo "[Run] Starting camera switcher orchestration daemon..."
 	@$(SWITCHER_DAEMON_BINARY)
 
@@ -88,11 +91,13 @@ run-daemon: cleanup $(DAEMON_BINARY)
 cleanup: kill-processes
 	@echo "[Cleanup] Removing shared memory segments..."
 	@-rm -f /dev/shm/pet_camera_frames 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_frames" || true
+	@-rm -f /dev/shm/pet_camera_frames_probe 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_frames_probe" || true
 	@-rm -f /dev/shm/pet_camera_detections 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_detections" || true
 	@echo "[Cleanup] Shared memory cleanup complete"
 
 kill-processes:
 	@echo "[Cleanup] Checking for existing camera processes..."
+	@-pkill -9 -f camera_switcher_daemon 2>/dev/null && echo "[Cleanup] Killed camera_switcher_daemon" || true
 	@-pkill -9 -f camera_daemon_drobotics 2>/dev/null && echo "[Cleanup] Killed camera_daemon_drobotics" || true
 	@-pkill -9 -f cam-service 2>/dev/null && echo "[Cleanup] Killed cam-service" || true
 	@sleep 1
