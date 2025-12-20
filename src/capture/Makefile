@@ -88,9 +88,11 @@ run-daemon: cleanup $(DAEMON_BINARY)
 	@echo "[Run] Daemon started (PID: $$!)"
 	@echo "[Run] Use 'make kill-processes' to stop"
 
-cleanup: kill-processes
+cleanup: kill-processes clean
 	@echo "[Cleanup] Removing shared memory segments..."
 	@-rm -f /dev/shm/pet_camera_frames 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_frames" || true
+	@-rm -f /dev/shm/pet_camera_frames_day 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_frames_day" || true
+	@-rm -f /dev/shm/pet_camera_frames_night 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_frames_night" || true
 	@-rm -f /dev/shm/pet_camera_frames_probe 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_frames_probe" || true
 	@-rm -f /dev/shm/pet_camera_detections 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_detections" || true
 	@echo "[Cleanup] Shared memory cleanup complete"

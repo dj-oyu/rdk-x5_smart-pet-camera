@@ -31,9 +31,9 @@ if TYPE_CHECKING:
 
 # 色定義（BGR）
 COLORS = {
-    "cat": (0, 255, 0),          # 緑
+    "cat": (0, 255, 0),  # 緑
     "food_bowl": (0, 165, 255),  # オレンジ
-    "water_bowl": (255, 0, 0),   # 青
+    "water_bowl": (255, 0, 0),  # 青
 }
 
 
@@ -133,9 +133,7 @@ class WebMonitor:
 
             # JPEGエンコード
             _, encoded = cv2.imencode(
-                '.jpg',
-                overlay_frame,
-                [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
+                ".jpg", overlay_frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
             )
             jpeg_data = encoded.tobytes()
 
@@ -182,7 +180,9 @@ class WebMonitor:
             elif isinstance(detection_result_raw, dict):
                 detection_dict = detection_result_raw
             else:
-                print(f"[WARN] Unsupported detection result type: {type(detection_result_raw)}")
+                print(
+                    f"[WARN] Unsupported detection result type: {type(detection_result_raw)}"
+                )
                 return None
 
             detections = []
@@ -224,9 +224,7 @@ class WebMonitor:
             return None
 
     def _draw_overlay(
-        self,
-        frame: Frame,
-        detection_result: Optional[DetectionResult]
+        self, frame: Frame, detection_result: Optional[DetectionResult]
     ) -> np.ndarray:
         """
         BBoxを合成
@@ -238,12 +236,46 @@ class WebMonitor:
         Returns:
             BBox合成済みのフレーム（BGR）
         """
-        # JPEG デコード
-        np_arr = np.frombuffer(frame.data, np.uint8)
-        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        if img is None:
-            # 共有メモリ側のJPEGが壊れている場合でもUIが止まらないようにする
-            print("[WARN] Failed to decode frame; using blank fallback")
+        # フォーマットに応じてデコード
+        if frame.format == 0:  # JPEG
+            np_arr = np.frombuffer(frame.data, np.uint8)
+            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if img is None:
+                print("[WARN] Failed to decode JPEG frame; using blank fallback")
+                img = np.zeros((frame.height, frame.width, 3), dtype=np.uint8)
+        elif frame.format == 1:  # NV12
+            # NV12: Y plane + UV plane (interleaved)
+            y_size = frame.width * frame.height
+            uv_size = y_size // 2
+
+            if len(frame.data) < y_size + uv_size:
+                print(
+                    f"[WARN] NV12 frame too small: {len(frame.data)} < {y_size + uv_size}"
+                )
+                img = np.zeros((frame.height, frame.width, 3), dtype=np.uint8)
+            else:
+                try:
+                    # NV12を1次元配列として準備
+                    yuv_data = np.frombuffer(
+                        frame.data[: y_size + uv_size], dtype=np.uint8
+                    )
+
+                    # NV12形式: [Y: height x width] [UV: height/2 x width (interleaved)]
+                    # reshapeして (height * 3/2, width) にする
+                    yuv_img = yuv_data.reshape((frame.height * 3 // 2, frame.width))
+
+                    # NV12 → BGR変換（OpenCVネイティブ）
+                    img = cv2.cvtColor(yuv_img, cv2.COLOR_YUV2BGR_NV12)
+                except Exception as e:
+                    print(f"[ERROR] NV12 conversion failed: {e}")
+                    import traceback
+
+                    traceback.print_exc()
+                    img = np.zeros((frame.height, frame.width, 3), dtype=np.uint8)
+        else:
+            print(
+                f"[WARN] Unsupported frame format: {frame.format}; using blank fallback"
+            )
             img = np.zeros((frame.height, frame.width, 3), dtype=np.uint8)
 
         if detection_result is None or not detection_result.detections:
@@ -274,21 +306,12 @@ class WebMonitor:
 
         # バウンディングボックスを描画
         cv2.rectangle(
-            img,
-            (bbox.x, bbox.y),
-            (bbox.x + bbox.w, bbox.y + bbox.h),
-            color,
-            2
+            img, (bbox.x, bbox.y), (bbox.x + bbox.w, bbox.y + bbox.h), color, 2
         )
 
         # ラベルを描画
         label = f"{class_name}: {confidence:.2f}"
-        label_size, baseline = cv2.getTextSize(
-            label,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            1
-        )
+        label_size, baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         label_y = max(bbox.y - 10, label_size[1] + 10)
 
         # ラベル背景
@@ -297,25 +320,16 @@ class WebMonitor:
             (bbox.x, label_y - label_size[1] - baseline),
             (bbox.x + label_size[0], label_y + baseline),
             color,
-            -1
+            -1,
         )
 
         # ラベルテキスト
         cv2.putText(
-            img,
-            label,
-            (bbox.x, label_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 0, 0),
-            1
+            img, label, (bbox.x, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1
         )
 
     def _draw_info_text(
-        self,
-        img: np.ndarray,
-        frame: Frame,
-        detection_result: Optional[DetectionResult]
+        self, img: np.ndarray, frame: Frame, detection_result: Optional[DetectionResult]
     ) -> None:
         """情報テキストを描画"""
         info_lines = [
@@ -336,7 +350,7 @@ class WebMonitor:
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
                 (0, 255, 255),
-                2
+                2,
             )
             y_offset += 25
 
@@ -345,8 +359,7 @@ class WebMonitor:
         while True:
             try:
                 frame = self.frame_queue.get(timeout=1.0)
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
             except queue.Empty:
                 continue
 
@@ -403,7 +416,7 @@ def create_app(
     app = Flask(__name__)
 
     # pyright: ignore[reportUnusedFunction]
-    @app.route('/')
+    @app.route("/")
     def index():
         """メインページ"""
         html = """
@@ -787,28 +800,34 @@ def create_app(
         mode = str(data.get("mode", "manual")).lower()
         if mode == SwitchMode.AUTO.value:
             switch_controller.resume_auto()
-            return jsonify({"ok": True, "mode": "auto", "status": switch_controller.get_status()})
+            return jsonify(
+                {"ok": True, "mode": "auto", "status": switch_controller.get_status()}
+            )
 
         camera_raw = str(data.get("camera", "")).lower()
         if camera_raw not in (CameraType.DAY.value, CameraType.NIGHT.value):
             return jsonify({"error": "camera must be 'day' or 'night'"}), 400
 
-        camera = CameraType.DAY if camera_raw == CameraType.DAY.value else CameraType.NIGHT
+        camera = (
+            CameraType.DAY if camera_raw == CameraType.DAY.value else CameraType.NIGHT
+        )
         reason = str(data.get("reason", "debug"))
         switch_controller.force_camera(camera, reason=reason)
-        return jsonify({"ok": True, "mode": "manual", "status": switch_controller.get_status()})
+        return jsonify(
+            {"ok": True, "mode": "manual", "status": switch_controller.get_status()}
+        )
 
     # pyright: ignore[reportUnusedFunction]
-    @app.route('/stream')
+    @app.route("/stream")
     def video_stream():
         """MJPEGストリーム"""
         return Response(
             monitor.generate_mjpeg(),
-            mimetype='multipart/x-mixed-replace; boundary=frame'
+            mimetype="multipart/x-mixed-replace; boundary=frame",
         )
 
     # pyright: ignore[reportUnusedFunction]
-    @app.route('/api/status')
+    @app.route("/api/status")
     def api_status():
         """統計情報と最新検出結果を返すシンプルなAPI"""
         latest_detection = monitor.get_latest_detection()

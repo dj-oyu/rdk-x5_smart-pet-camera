@@ -95,9 +95,10 @@ struct arguments {
 
 // Global state
 static volatile sig_atomic_t g_running = 1;
-static volatile sig_atomic_t g_preserve_shm = 0; // set by SIGUSR1 for shm close only
+static volatile uint32_t g_current_interval_ms = 0; // Current frame interval, updated by SIGUSR1
 static SharedFrameBuffer *g_shm = NULL;
 static const char *g_shm_name = NULL;  // Custom shared memory name (if set via SHM_NAME env)
+static int g_use_nv12 = 0;  // 0=JPEG (default), 1=NV12 (set via USE_NV12 env for probe)
 
 // -----------------------------
 // Argument and context helpers
@@ -134,11 +135,16 @@ static void populate_context_from_args(camera_context_t *ctx,
 // Signal handler
 static void signal_handler(int signum) {
   if (signum == SIGUSR1) {
-    g_preserve_shm = 1;
+    // Reload frame interval from shared memory (push notification)
+    if (g_shm) {
+      uint32_t old_interval = g_current_interval_ms;
+      g_current_interval_ms = __atomic_load_n(&g_shm->frame_interval_ms, __ATOMIC_ACQUIRE);
+      // Note: printf in signal handler is technically unsafe, but useful for debugging
+      printf("[Signal] SIGUSR1 received: interval %u -> %u ms\n", old_interval, g_current_interval_ms);
+    }
+  } else {
+    g_running = 0;
   }
-  g_running = 0;
-  printf("\n[Info] Shutdown signal received (signal=%d, preserve_shm=%d)\n",
-         signum, g_preserve_shm);
 }
 
 // Setup signal handlers
@@ -148,7 +154,7 @@ static void setup_signals(void) {
   sa.sa_handler = signal_handler;
   sigaction(SIGINT, &sa, NULL);
   sigaction(SIGTERM, &sa, NULL);
-  sigaction(SIGUSR1, &sa, NULL);
+  sigaction(SIGUSR1, &sa, NULL);  // For dynamic frame interval control
 }
 
 // JPEG encoding from YUV (NV12)
@@ -685,6 +691,20 @@ static uint64_t run_capture_loop(camera_context_t *ctx, const struct arguments *
   uint64_t frame_counter = 0;
   int ret = 0;
 
+  // Initialize frame interval from environment variable
+  const char *interval_env = getenv("FRAME_INTERVAL_MS");
+  if (interval_env) {
+    g_current_interval_ms = atoi(interval_env);
+    if (g_current_interval_ms > 0) {
+      printf("[Info] Initial frame interval: %d ms\n", g_current_interval_ms);
+    }
+  }
+
+  // Set initial interval in shared memory for dynamic control
+  if (g_shm) {
+    __atomic_store_n(&g_shm->frame_interval_ms, g_current_interval_ms, __ATOMIC_RELEASE);
+  }
+
   while (g_running &&
          ((frame_limit == 0) || (frame_counter < (uint64_t)frame_limit))) {
     ret = hbn_vnode_getframe(ctx->vse_node_handle, 0, 2000, &vnode_frame);
@@ -709,20 +729,40 @@ static uint64_t run_capture_loop(camera_context_t *ctx, const struct arguments *
     shm_frame.camera_id = ctx->camera_index;
     shm_frame.width = ctx->out_width;
     shm_frame.height = ctx->out_height;
-    shm_frame.format = 0; // JPEG
 
-    // Convert NV12 to JPEG
     uint8_t *y_plane = vnode_frame.buffer.virt_addr[0];
     uint8_t *uv_plane = vnode_frame.buffer.virt_addr[1];
     int y_stride = ctx->out_width;
     int uv_stride = ctx->out_width;
 
-    if (encode_nv12_to_jpeg(y_plane, uv_plane, ctx->out_width, ctx->out_height,
-                            y_stride, uv_stride, shm_frame.data,
-                            &shm_frame.data_size, MAX_FRAME_SIZE) < 0) {
-      fprintf(stderr, "[Error] JPEG encoding failed\n");
-      hbn_vnode_releaseframe(ctx->vse_node_handle, 0, &vnode_frame);
-      continue;
+    if (g_use_nv12) {
+      // NV12 format (for probe - fast, no encoding)
+      shm_frame.format = 1;
+
+      size_t y_size = ctx->out_width * ctx->out_height;
+      size_t uv_size = y_size / 2;
+
+      if (y_size + uv_size > MAX_FRAME_SIZE) {
+        fprintf(stderr, "[Error] NV12 frame too large: %zu bytes > %d\n",
+                y_size + uv_size, MAX_FRAME_SIZE);
+        hbn_vnode_releaseframe(ctx->vse_node_handle, 0, &vnode_frame);
+        continue;
+      }
+
+      memcpy(shm_frame.data, y_plane, y_size);
+      memcpy(shm_frame.data + y_size, uv_plane, uv_size);
+      shm_frame.data_size = y_size + uv_size;
+    } else {
+      // JPEG format (for active camera - better for web streaming)
+      shm_frame.format = 0;
+
+      if (encode_nv12_to_jpeg(y_plane, uv_plane, ctx->out_width, ctx->out_height,
+                              y_stride, uv_stride, shm_frame.data,
+                              &shm_frame.data_size, MAX_FRAME_SIZE) < 0) {
+        fprintf(stderr, "[Error] JPEG encoding failed\n");
+        hbn_vnode_releaseframe(ctx->vse_node_handle, 0, &vnode_frame);
+        continue;
+      }
     }
 
     // Write to shared memory
@@ -746,6 +786,12 @@ static uint64_t run_capture_loop(camera_context_t *ctx, const struct arguments *
       printf("[Info] Frame %lu captured (%zu bytes)\n", frame_counter,
              shm_frame.data_size);
     }
+
+    // Sleep between frames if configured (for inactive camera)
+    // g_current_interval_ms is updated by SIGUSR1 handler
+    if (g_current_interval_ms > 0) {
+      usleep(g_current_interval_ms * 1000);
+    }
   }
 
   return frame_counter;
@@ -762,6 +808,13 @@ int main(int argc, char **argv) {
 
   // Setup signals
   setup_signals();
+
+  // Check for NV12 mode (for probe captures)
+  const char *use_nv12_env = getenv("USE_NV12");
+  if (use_nv12_env && strcmp(use_nv12_env, "1") == 0) {
+    g_use_nv12 = 1;
+    printf("[Info] Using NV12 format (probe mode)\n");
+  }
 
   // Initialize context
   populate_context_from_args(&ctx, &args);
@@ -812,16 +865,13 @@ int main(int argc, char **argv) {
   // Cleanup
   cleanup_pipeline(&ctx);
   if (g_shm) {
-    // Custom-named shared memory is managed by the orchestrator;
-    // we only close (not destroy) since we didn't create it
-    if (g_preserve_shm || g_shm_name) {
-      if (g_preserve_shm) {
-        printf("[Info] Preserving shared memory (SIGUSR1)\n");
-      } else {
-        printf("[Info] Preserving custom-named shared memory: %s\n", g_shm_name);
-      }
+    if (g_shm_name) {
+      // Custom-named shared memory is managed by the orchestrator;
+      // we only close (not destroy)
+      printf("[Info] Preserving custom-named shared memory: %s\n", g_shm_name);
       shm_frame_buffer_close(g_shm);
     } else {
+      // Default shared memory - we created it, so we destroy it
       shm_frame_buffer_destroy(g_shm);
     }
   }

@@ -51,9 +51,11 @@ typedef struct {
  * - Writer (camera daemon) atomically updates write_index
  * - Readers poll write_index to detect new frames
  * - No locks required (lock-free design)
+ * - frame_interval_ms can be updated by external process for dynamic FPS control
  */
 typedef struct {
     volatile uint32_t write_index; // Atomic write pointer (wraps at RING_BUFFER_SIZE)
+    volatile uint32_t frame_interval_ms; // Dynamic frame interval control (0 = 30fps, 500 = ~2fps)
     Frame frames[RING_BUFFER_SIZE]; // Ring buffer of frames
 } SharedFrameBuffer;
 
