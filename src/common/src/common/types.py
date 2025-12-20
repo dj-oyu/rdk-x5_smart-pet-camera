@@ -21,7 +21,10 @@ class DetectionClass(Enum):
     """検出対象クラス"""
     CAT = "cat"
     FOOD_BOWL = "food_bowl"
-    WATER_BOWL = "water_bowl"
+    DISH = "dish"
+    PERSON = "person"
+    BOOK = "book"
+    CELL_PHONE = "cell_phone"
 
 
 class BehaviorType(Enum):

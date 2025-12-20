@@ -302,7 +302,10 @@ class RealSharedMemory:
     def get_detection_version(self) -> int:
         """Return the last observed detection version (polls shared memory if available)."""
         if not self.detection_mmap:
-            return self.last_detection_version
+            # Try to open detection shared memory if not already opened
+            self._try_open_detection_readonly()
+            if not self.detection_mmap:
+                return self.last_detection_version
 
         detection_struct = self._read_detection_struct(update_version_only=True)
         if detection_struct is None:
@@ -318,6 +321,10 @@ class RealSharedMemory:
         Returns:
             (detection_result_dict | None, version)
         """
+        # Try to open detection shared memory if not already opened
+        if not self.detection_mmap:
+            self._try_open_detection_readonly()
+
         detection_struct = self._read_detection_struct()
         if detection_struct is None:
             return (None, self.last_detection_version)
@@ -360,6 +367,25 @@ class RealSharedMemory:
             "detection_version": detection_version,
             "has_detection": 1 if detection_version > 0 else 0,
         }
+
+    def _try_open_detection_readonly(self) -> None:
+        """Try to open detection shared memory in read-only mode (for lazy initialization)."""
+        if self.detection_mmap or self.detection_write_mode:
+            return  # Already opened
+
+        try:
+            shm_path_detections = f"/dev/shm{SHM_NAME_DETECTIONS}"
+            self.detection_fd = os.open(shm_path_detections, os.O_RDONLY)
+            self.detection_mmap = mmap.mmap(
+                self.detection_fd,
+                sizeof(CLatestDetectionResult),
+                mmap.MAP_SHARED,
+                mmap.PROT_READ,
+            )
+            print(f"[Info] Opened detection shared memory: {shm_path_detections}")
+        except FileNotFoundError:
+            # Detection shared memory still doesn't exist
+            pass
 
     def _read_detection_struct(
         self, update_version_only: bool = False
