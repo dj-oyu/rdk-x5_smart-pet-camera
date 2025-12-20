@@ -95,13 +95,49 @@ struct arguments {
 
 // Global state
 static volatile sig_atomic_t g_running = 1;
+static volatile sig_atomic_t g_preserve_shm = 0; // set by SIGUSR1 for shm close only
 static SharedFrameBuffer *g_shm = NULL;
+
+// -----------------------------
+// Argument and context helpers
+// -----------------------------
+static void init_default_arguments(struct arguments *args) {
+  memset(args, 0, sizeof(*args));
+  args->out_width = 640;
+  args->out_height = 480;
+  args->sensor_width = 0;
+  args->sensor_height = 0;
+  args->fps = 30;
+  args->camera_index = 0;
+  args->count = 0; // Default: infinite
+  args->daemon_mode = 0;
+}
+
+static void apply_sensor_defaults(struct arguments *args) {
+  if (args->sensor_width <= 0)
+    args->sensor_width = SENSOR_WIDTH_DEFAULT;
+  if (args->sensor_height <= 0)
+    args->sensor_height = SENSOR_HEIGHT_DEFAULT;
+}
+
+static void populate_context_from_args(camera_context_t *ctx,
+                                       const struct arguments *args) {
+  ctx->camera_index = args->camera_index;
+  ctx->sensor_width = args->sensor_width;
+  ctx->sensor_height = args->sensor_height;
+  ctx->out_width = args->out_width;
+  ctx->out_height = args->out_height;
+  ctx->fps = args->fps;
+}
 
 // Signal handler
 static void signal_handler(int signum) {
-  (void)signum;
+  if (signum == SIGUSR1) {
+    g_preserve_shm = 1;
+  }
   g_running = 0;
-  printf("\n[Info] Shutdown signal received\n");
+  printf("\n[Info] Shutdown signal received (signal=%d, preserve_shm=%d)\n",
+         signum, g_preserve_shm);
 }
 
 // Setup signal handlers
@@ -111,6 +147,7 @@ static void setup_signals(void) {
   sa.sa_handler = signal_handler;
   sigaction(SIGINT, &sa, NULL);
   sigaction(SIGTERM, &sa, NULL);
+  sigaction(SIGUSR1, &sa, NULL);
 }
 
 // JPEG encoding from YUV (NV12)
@@ -575,89 +612,67 @@ static void cleanup_pipeline(camera_context_t *ctx) {
     hbn_camera_destroy(ctx->cam_fd);
 }
 
-int main(int argc, char **argv) {
-  int ret = 0;
-  struct arguments args;
-  camera_context_t ctx = {0};
-
-  // Parse arguments
-  memset(&args, 0, sizeof(args));
-  args.out_width = 640;
-  args.out_height = 480;
-  args.sensor_width = 0;
-  args.sensor_height = 0;
-  args.fps = 30;
-  args.camera_index = 0;
-  args.count = 0; // Default: infinite
-  args.daemon_mode = 0;
-
-  argp_parse(&argp, argc, argv, 0, 0, &args);
-
-  if (args.sensor_width <= 0)
-    args.sensor_width = SENSOR_WIDTH_DEFAULT;
-  if (args.sensor_height <= 0)
-    args.sensor_height = SENSOR_HEIGHT_DEFAULT;
-
-  // Setup signals
-  setup_signals();
-
-  // Initialize context
-  ctx.camera_index = args.camera_index;
-  ctx.sensor_width = args.sensor_width;
-  ctx.sensor_height = args.sensor_height;
-  ctx.out_width = args.out_width;
-  ctx.out_height = args.out_height;
-  ctx.fps = args.fps;
-
-  // Initialize memory manager
-  ret = hb_mem_module_open();
+// -----------------------------
+// Initialization helpers
+// -----------------------------
+static int open_memory_manager(void) {
+  int ret = hb_mem_module_open();
   if (ret != 0) {
     fprintf(stderr, "[Error] hb_mem_module_open failed: %d\n", ret);
-    return 1;
+    return -1;
   }
+  return 0;
+}
 
-  // Create shared memory
+static int create_shared_memory(void) {
   g_shm = shm_frame_buffer_create();
   if (!g_shm) {
     fprintf(stderr, "[Error] Failed to create shared memory\n");
-    hb_mem_module_close();
-    return 1;
+    return -1;
+  }
+  return 0;
+}
+
+static int open_or_create_shared_memory(void) {
+  g_shm = shm_frame_buffer_open();
+  if (g_shm) {
+    return 0;
   }
 
-  // Initialize camera configuration
-  ret = init_camera_config(&ctx);
+  // Fall back to creation when the segment does not yet exist
+  return create_shared_memory();
+}
+
+static int initialize_camera(camera_context_t *ctx) {
+  int ret = init_camera_config(ctx);
   if (ret != 0) {
     fprintf(stderr, "[Error] Failed to initialize camera config\n");
-    shm_frame_buffer_destroy(g_shm);
-    hb_mem_module_close();
-    return 1;
+    return -1;
   }
+  return 0;
+}
 
-  // Create and start pipeline
-  ret = create_and_start_pipeline(&ctx);
+static int start_pipeline(camera_context_t *ctx) {
+  int ret = create_and_start_pipeline(ctx);
   if (ret != 0) {
     fprintf(stderr, "[Error] Failed to create pipeline\n");
-    cleanup_pipeline(&ctx);
-    shm_frame_buffer_destroy(g_shm);
-    hb_mem_module_close();
-    return 1;
+    return -1;
   }
+  return 0;
+}
 
-  // Wait for ISP to stabilize
-  sleep(2);
-  printf("[Info] Camera daemon started (Ctrl+C to stop)\n");
-  if (args.daemon_mode || args.count == 0) {
-    printf("[Info] Running in daemon mode (infinite loop)\n");
-  }
-
-  // Capture loop
+// -----------------------------
+// Capture loop
+// -----------------------------
+static uint64_t run_capture_loop(camera_context_t *ctx, const struct arguments *args) {
   hbn_vnode_image_t vnode_frame = {0};
-  int frame_limit = args.count;
+  int frame_limit = args->count;
   uint64_t frame_counter = 0;
+  int ret = 0;
 
   while (g_running &&
          ((frame_limit == 0) || (frame_counter < (uint64_t)frame_limit))) {
-    ret = hbn_vnode_getframe(ctx.vse_node_handle, 0, 2000, &vnode_frame);
+    ret = hbn_vnode_getframe(ctx->vse_node_handle, 0, 2000, &vnode_frame);
     if (ret != 0) {
       fprintf(stderr, "[Warn] Failed to get frame, ret=%d\n", ret);
       continue;
@@ -676,22 +691,22 @@ int main(int argc, char **argv) {
     Frame shm_frame = {0};
     shm_frame.frame_number = frame_counter;
     clock_gettime(CLOCK_MONOTONIC, &shm_frame.timestamp);
-    shm_frame.camera_id = ctx.camera_index;
-    shm_frame.width = ctx.out_width;
-    shm_frame.height = ctx.out_height;
+    shm_frame.camera_id = ctx->camera_index;
+    shm_frame.width = ctx->out_width;
+    shm_frame.height = ctx->out_height;
     shm_frame.format = 0; // JPEG
 
     // Convert NV12 to JPEG
     uint8_t *y_plane = vnode_frame.buffer.virt_addr[0];
     uint8_t *uv_plane = vnode_frame.buffer.virt_addr[1];
-    int y_stride = ctx.out_width;
-    int uv_stride = ctx.out_width;
+    int y_stride = ctx->out_width;
+    int uv_stride = ctx->out_width;
 
-    if (encode_nv12_to_jpeg(y_plane, uv_plane, ctx.out_width, ctx.out_height,
+    if (encode_nv12_to_jpeg(y_plane, uv_plane, ctx->out_width, ctx->out_height,
                             y_stride, uv_stride, shm_frame.data,
                             &shm_frame.data_size, MAX_FRAME_SIZE) < 0) {
       fprintf(stderr, "[Error] JPEG encoding failed\n");
-      hbn_vnode_releaseframe(ctx.vse_node_handle, 0, &vnode_frame);
+      hbn_vnode_releaseframe(ctx->vse_node_handle, 0, &vnode_frame);
       continue;
     }
 
@@ -700,7 +715,7 @@ int main(int argc, char **argv) {
       fprintf(stderr, "[Error] Failed to write frame to shared memory\n");
     }
 
-    hbn_vnode_releaseframe(ctx.vse_node_handle, 0, &vnode_frame);
+    hbn_vnode_releaseframe(ctx->vse_node_handle, 0, &vnode_frame);
 
     frame_counter++;
 
@@ -711,9 +726,69 @@ int main(int argc, char **argv) {
     }
   }
 
+  return frame_counter;
+}
+
+int main(int argc, char **argv) {
+  struct arguments args;
+  camera_context_t ctx = {0};
+  uint64_t frame_counter = 0;
+
+  init_default_arguments(&args);
+  argp_parse(&argp, argc, argv, 0, 0, &args);
+  apply_sensor_defaults(&args);
+
+  // Setup signals
+  setup_signals();
+
+  // Initialize context
+  populate_context_from_args(&ctx, &args);
+
+  // Initialize memory manager
+  if (open_memory_manager() != 0) {
+    return 1;
+  }
+
+  // Create shared memory
+  if (open_or_create_shared_memory() != 0) {
+    hb_mem_module_close();
+    return 1;
+  }
+
+  // Initialize camera configuration
+  if (initialize_camera(&ctx) != 0) {
+    shm_frame_buffer_destroy(g_shm);
+    hb_mem_module_close();
+    return 1;
+  }
+
+  // Create and start pipeline
+  if (start_pipeline(&ctx) != 0) {
+    cleanup_pipeline(&ctx);
+    shm_frame_buffer_destroy(g_shm);
+    hb_mem_module_close();
+    return 1;
+  }
+
+  // Wait for ISP to stabilize
+  sleep(2);
+  printf("[Info] Camera daemon started (Ctrl+C to stop)\n");
+  if (args.daemon_mode || args.count == 0) {
+    printf("[Info] Running in daemon mode (infinite loop)\n");
+  }
+
+  frame_counter = run_capture_loop(&ctx, &args);
+
   // Cleanup
   cleanup_pipeline(&ctx);
-  shm_frame_buffer_destroy(g_shm);
+  if (g_shm) {
+    if (g_preserve_shm) {
+      printf("[Info] Preserving shared memory (SIGUSR1)\n");
+      shm_frame_buffer_close(g_shm);
+    } else {
+      shm_frame_buffer_destroy(g_shm);
+    }
+  }
   hb_mem_module_close();
 
   printf("[Info] Camera daemon stopped (captured %lu frames)\n", frame_counter);
