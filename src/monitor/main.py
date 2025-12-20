@@ -12,12 +12,14 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 COMMON_SRC = PROJECT_ROOT / "common" / "src"
 MOCK_SRC = PROJECT_ROOT / "mock"
+CAPTURE_SRC = PROJECT_ROOT / "capture"
 
-for path in (COMMON_SRC, MOCK_SRC):
+for path in (COMMON_SRC, MOCK_SRC, CAPTURE_SRC):
     sys.path.insert(0, str(path))
 
 from monitor.web_monitor import WebMonitor, create_app
 from shared_memory import MockSharedMemory
+from real_shared_memory import RealSharedMemory
 
 
 def _env_int(key: str, default: int) -> int:
@@ -47,8 +49,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--shm-type",
         default=os.getenv("MONITOR_SHM_TYPE", "mock"),
-        choices=["mock"],
-        help="使用する共有メモリ種別（現在は'mock'のみ対応）",
+        choices=["mock", "real"],
+        help="使用する共有メモリ種別（mock: モック環境, real: 実機共有メモリ）",
     )
     parser.add_argument(
         "--host",
@@ -77,12 +79,16 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _create_shared_memory(shm_type: str) -> MockSharedMemory:
+def _create_shared_memory(shm_type: str) -> MockSharedMemory | RealSharedMemory:
     """共有メモリ実装を生成する。"""
 
     normalized = shm_type.lower()
     if normalized == "mock":
         return MockSharedMemory()
+    elif normalized == "real":
+        shm = RealSharedMemory()
+        shm.open()
+        return shm
 
     raise ValueError(f"Unsupported shared memory type: {shm_type}")
 

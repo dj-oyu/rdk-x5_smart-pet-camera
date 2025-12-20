@@ -2,7 +2,7 @@
 
 スマートペットカメラプロジェクトの開発計画とタスク管理
 
-**最終更新**: 2025-12-19
+**最終更新**: 2025-12-20
 
 ---
 
@@ -107,12 +107,94 @@ python main.py
 
 ---
 
-## Phase 1: 実機Captureデーモン化 🔄 次のステップ
+## Phase 1: 実機Captureデーモン化 ✅ 完了
 
 **目的**: `capture_v2.c`を共有メモリ対応デーモンに改造
 
-**ブランチ**: `phase-1-capture` (予定)
-**開始予定**: 2025-12-19
+**ブランチ**: `claude/mipi-camera-dev`
+**開始日**: 2025-12-19
+**完了日**: 2025-12-20
+
+### 進捗状況
+
+#### ✅ 完了したタスク
+
+1. **共有メモリ構造体の実装（C）**
+   - POSIX共有メモリ（shm_open/mmap）実装完了
+   - atomic操作（`__atomic_fetch_add`）によるロックフリー実装
+   - リングバッファ（30フレーム）実装
+   - ファイル: `src/capture/shared_memory.{h,c}`
+   - テスト: **5/5 テスト成功** (`test_shm.c`)
+
+2. **D-Robotics APIベースのデーモン実装**
+   - 当初V4L2で実装を開始したが、ユーザーから「`docs/sample/capture_v2.c`をそのまま模倣すべき」との指摘
+   - **方針転換**: D-Robotics ネイティブAPI（libcam.so/libvpf.so）を使用
+   - VIN/ISP/VSEパイプライン構築
+   - NV12→RGB→JPEG変換実装（libjpeg使用）
+   - 共有メモリへのフレーム書き込み実装
+   - ファイル: `src/capture/camera_daemon_drobotics.c`
+   - V4L2版は参考用に `reference_v4l2/` へ移動
+
+3. **ビルド環境の整備**
+   - D-Robotics SDK確認（/usr/hobot/lib）
+   - Makefile.drobotics作成
+   - プロセス管理機能追加：
+     - `make cleanup`: プロセス終了 + 共有メモリクリーンアップ
+     - `make kill-processes`: カメラプロセス強制終了
+     - `make run`: 自動クリーンアップ後にデーモン起動
+     - `make run-daemon`: バックグラウンド起動
+   - ビルド成功（警告のみ、エラーなし）
+
+4. **Python統合ラッパー**
+   - `real_shared_memory.py`: C共有メモリへのPythonアクセス
+   - MockSharedMemoryと同じインターフェース
+   - `test_integration.py`: モックとの統合テスト成功
+
+5. **ハードウェア確認**
+   - IMX219センサー検出確認（1920x1080@30fps, MIPI 2-lane）
+   - D-Roboticsデバイスノード確認:
+     - vin0-3_cap (VIN capture)
+     - vs-isp0_cap (ISP)
+     - vs-vse0_cap0-5 (VSE outputs)
+     - ion (メモリアロケータ)
+
+6. **カメラデーモン動作確認** ✅
+   - カメラデーモン初期化ハング問題を解決
+   - D-Robotics カメラデーモンが正常に起動・動作
+   - 共有メモリへのフレーム書き込みが安定稼働中
+
+7. **ダミー検出デーモン実装** ✅
+   - `mock_detector_daemon.py` 実装完了
+   - ランダムなBBox生成（cat/food_bowl/water_bowl）
+   - 10-15fpsで検出結果を共有メモリに書き込み
+   - 検出数・位置・サイズ・クラスがランダムに変化
+
+8. **バウンディングボックス合成機能実装** ✅
+   - WebMonitorでBBox描画処理実装
+   - クラス別色分け（cat=緑、food_bowl=オレンジ、water_bowl=青）
+   - 信頼度スコア表示
+   - リアルタイムMJPEGストリーミング（30fps）
+   - ブラウザでの動作確認完了
+
+9. **RealSharedMemory バグ修正** ✅
+   - `read_detection()` が2回目以降`None`を返すバグを修正
+   - バージョンフィルタリングロジックを改善
+   - 検出結果の正常な読み取りを確認
+
+### 成果ファイル
+
+| ファイル | 行数 | 状態 | 説明 |
+|---------|------|------|------|
+| `src/capture/shared_memory.h` | 146 | ✅ | POSIX共有メモリ構造体定義 |
+| `src/capture/shared_memory.c` | 270 | ✅ | 共有メモリ実装（atomic操作含む） |
+| `src/capture/test_shm.c` | 239 | ✅ | ユニットテスト（5/5成功） |
+| `src/capture/camera_daemon_drobotics.c` | ~700 | ✅ | D-Robotics カメラデーモン（動作中） |
+| `src/capture/Makefile.drobotics` | 153 | ✅ | ビルド設定（プロセス管理含む） |
+| `src/capture/real_shared_memory.py` | ~200 | ✅ | Python共有メモリアクセス |
+| `src/capture/mock_detector_daemon.py` | 153 | ✅ | ダミー検出デーモン |
+| `src/capture/test_integration.py` | 200 | ✅ | 統合テスト |
+| `src/capture/README_DROBOTICS.md` | 416 | ✅ | D-Robotics実装ドキュメント |
+| `reference_v4l2/camera_daemon.c` | 589 | 📁 | V4L2版（参考用） |
 
 ### タスク
 
@@ -280,13 +362,25 @@ class RealDetector:
 
 ## マイルストーン
 
-| Phase | 目標 | 完了予定 | ステータス |
+| Phase | 目標 | 完了日 | ステータス |
 |-------|------|---------|-----------|
 | Phase 0 | モック環境構築 | 2025-12-19 | ✅ 完了 |
-| Phase 1 | 実機Capture | TBD | 🔄 次のステップ |
-| Phase 2 | 実機統合 | TBD | 📋 計画中 |
+| Phase 1 | 実機Capture + BBox合成 | 2025-12-20 | ✅ 完了 |
+| Phase 2 | 実機統合 | TBD | 📋 次のステップ |
 | Phase 3 | 検出モデル | TBD | 📋 計画中 |
 | Phase 4 | 行動推定 | TBD | 📋 計画中 |
+
+### Phase 1 達成内容（100%完了）
+- ✅ 共有メモリ実装・テスト完了（POSIX shm、atomic操作）
+- ✅ D-Robotics カメラデーモン実装・動作確認
+- ✅ ビルド環境整備完了（Makefile、プロセス管理）
+- ✅ Python統合ラッパー完了（RealSharedMemory）
+- ✅ ダミー検出デーモン実装完了（10-15fps）
+- ✅ バウンディングボックス合成機能実装完了
+- ✅ WebMonitorでのリアルタイム表示確認
+- ✅ ブラウザでの動作確認完了（http://192.168.1.33:8080）
+
+**デモ**: カメラ映像にランダムなBBoxが10-15fpsで変化しながら表示
 
 ---
 
@@ -313,4 +407,19 @@ class RealDetector:
 
 ## 変更履歴
 
-- 2025-12-19: Phase 0完了、ドキュメント作成
+- 2025-12-20: **Phase 1 完了** 🎉
+  - カメラデーモン初期化ハング問題を解決
+  - カメラデーモンが正常に動作（D-Robotics MIPI）
+  - ダミー検出デーモン実装完了（10-15fps、ランダム変化）
+  - バウンディングボックス合成機能実装完了
+  - RealSharedMemory.read_detection() バグ修正
+  - WebMonitorでのリアルタイム表示確認
+  - ブラウザでの動作確認完了
+  - **成果**: http://192.168.1.33:8080 でBBox合成映像を配信中
+- 2025-12-19 19:30: Phase 1 進捗報告
+  - 共有メモリ実装完了（5/5テスト成功）
+  - D-Roboticsデーモン実装完了（カメラ初期化でハング中）
+  - V4L2版は参考用に移動
+  - Makefileにプロセス管理機能追加
+  - Python統合ラッパー完了
+- 2025-12-19 00:00: Phase 0完了、ドキュメント作成
