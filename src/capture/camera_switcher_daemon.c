@@ -48,17 +48,19 @@ static int spawn_daemon(CameraMode camera) {
     return pid;
 }
 
-static void kill_daemon(pid_t pid) {
+static void kill_daemon(pid_t pid, bool preserve_shm) {
     if (pid <= 0) {
         return;
     }
-    kill(pid, SIGTERM);
+    int sig = preserve_shm ? SIGUSR1 : SIGTERM;
+    kill(pid, sig);
     waitpid(pid, NULL, 0);
 }
 
 static int switch_camera_cb(CameraMode camera, void* user_data) {
     DaemonContext* ctx = (DaemonContext*)user_data;
-    kill_daemon(ctx->current_pid);
+    // Preserve shared memory during camera swap; the daemon will close (not unlink)
+    kill_daemon(ctx->current_pid, true);
     ctx->current_pid = spawn_daemon(camera);
     ctx->active_camera = camera;
     return ctx->current_pid > 0 ? 0 : -1;
@@ -169,7 +171,7 @@ int main(void) {
 
     if (camera_switch_runtime_start(&rt) != 0) {
         fprintf(stderr, "[switcher-daemon] failed to start runtime threads\n");
-        kill_daemon(ctx.current_pid);
+        kill_daemon(ctx.current_pid, false);
         return 1;
     }
 
@@ -180,7 +182,8 @@ int main(void) {
 
     printf("[switcher-daemon] stopping...\n");
     camera_switch_runtime_stop(&rt);
-    kill_daemon(ctx.current_pid);
+    // Send SIGUSR1 to preserve shared memory when stopping the orchestrator
+    kill_daemon(ctx.current_pid, true);
     if (ctx.shm) {
         shm_frame_buffer_close(ctx.shm);
     }
