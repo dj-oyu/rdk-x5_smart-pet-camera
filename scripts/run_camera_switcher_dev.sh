@@ -12,7 +12,7 @@ set -euo pipefail
 #
 # 使い方:
 #   ./scripts/run_camera_switcher_dev.sh
-#   MONITOR_PORT=9000 ./scripts/run_camera_switcher_dev.sh
+#   MONITOR_PORT=<port> ./scripts/run_camera_switcher_dev.sh
 #   ./scripts/run_camera_switcher_dev.sh --skip-build --no-detector
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
