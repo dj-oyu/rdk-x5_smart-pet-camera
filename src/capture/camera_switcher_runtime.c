@@ -68,28 +68,39 @@ static void* probe_thread_main(void* arg) {
     CameraSwitchRuntime* rt = (CameraSwitchRuntime*)arg;
 
     while (!rt->stop_flag) {
-        CameraMode inactive = (rt->active_camera == CAMERA_MODE_DAY)
-                                  ? CAMERA_MODE_NIGHT
-                                  : CAMERA_MODE_DAY;
+        // Always probe the DAY camera for brightness checking
+        // Skip if DAY camera is already active (handled by active_thread)
+        if (rt->active_camera != CAMERA_MODE_DAY) {
+            Frame probe_frame;
+            memset(&probe_frame, 0, sizeof(Frame));
+            probe_frame.camera_id = CAMERA_MODE_DAY;
 
-        Frame frame;
-        memset(&frame, 0, sizeof(Frame));
-        frame.camera_id = inactive;
+            if (rt->ops.capture_frame &&
+                rt->ops.capture_frame(CAMERA_MODE_DAY, &probe_frame, rt->ops.user_data) == 0) {
 
-        if (rt->ops.capture_frame &&
-            rt->ops.capture_frame(inactive, &frame, rt->ops.user_data) == 0) {
-            CameraSwitchDecision decision = camera_switcher_handle_frame(
-                &rt->controller,
-                &frame,
-                inactive,
-                false,
-                NULL,
-                NULL);
+                // Copy probe frame to FrameDoubleBuffer inactive slot to avoid
+                // shared memory race with active camera writing at 30fps
+                int inactive_slot = 1 - rt->controller.publisher.active_slot;
+                if (rt->controller.publisher.buffers[inactive_slot]) {
+                    memcpy(rt->controller.publisher.buffers[inactive_slot],
+                           &probe_frame,
+                           sizeof(Frame));
 
-            if (decision == CAMERA_SWITCH_DECISION_TO_DAY) {
-                do_switch(rt, CAMERA_MODE_DAY, "auto-day");
-            } else if (decision == CAMERA_SWITCH_DECISION_TO_NIGHT) {
-                do_switch(rt, CAMERA_MODE_NIGHT, "auto-night");
+                    // Calculate brightness from inactive slot (safe from race conditions)
+                    CameraSwitchDecision decision = camera_switcher_handle_frame(
+                        &rt->controller,
+                        rt->controller.publisher.buffers[inactive_slot],
+                        CAMERA_MODE_DAY,
+                        false,
+                        NULL,
+                        NULL);
+
+                    if (decision == CAMERA_SWITCH_DECISION_TO_DAY) {
+                        do_switch(rt, CAMERA_MODE_DAY, "auto-day");
+                    } else if (decision == CAMERA_SWITCH_DECISION_TO_NIGHT) {
+                        do_switch(rt, CAMERA_MODE_NIGHT, "auto-night");
+                    }
+                }
             }
         }
 

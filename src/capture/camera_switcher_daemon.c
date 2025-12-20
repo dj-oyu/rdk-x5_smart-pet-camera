@@ -26,7 +26,8 @@
 #define CAPTURE_BIN "../../build/camera_daemon_drobotics"
 
 typedef struct {
-    pid_t current_pid;
+    pid_t current_pid;    // PID of currently active daemon
+    CameraMode active_camera;  // Currently active camera
     SharedFrameBuffer* shm;
 } DaemonContext;
 
@@ -59,6 +60,7 @@ static int switch_camera_cb(CameraMode camera, void* user_data) {
     DaemonContext* ctx = (DaemonContext*)user_data;
     kill_daemon(ctx->current_pid);
     ctx->current_pid = spawn_daemon(camera);
+    ctx->active_camera = camera;
     return ctx->current_pid > 0 ? 0 : -1;
 }
 
@@ -70,6 +72,34 @@ static int capture_frame_cb(CameraMode camera, Frame* out_frame, void* user_data
             fprintf(stderr, "[switcher-daemon] failed to open shared memory\n");
             return -1;
         }
+    }
+
+    // If requested camera is inactive (probe), do 1-shot capture
+    if (camera != ctx->active_camera) {
+        printf("[switcher-daemon] probing inactive camera=%d with 1-shot capture\n", (int)camera);
+
+        // Spawn 1-shot daemon for probe
+        pid_t probe_pid = fork();
+        if (probe_pid < 0) {
+            perror("fork");
+            return -1;
+        }
+        if (probe_pid == 0) {
+            // Suppress verbose logs from 1-shot probe by redirecting to /dev/null
+            freopen("/dev/null", "w", stdout);
+            freopen("/dev/null", "w", stderr);
+
+            char camera_arg[16];
+            snprintf(camera_arg, sizeof(camera_arg), "%d", (int)camera);
+            execl(CAPTURE_BIN, CAPTURE_BIN, "-C", camera_arg, "-P", "1", "-c", "1", NULL);
+            _exit(1);
+        }
+
+        // Wait for probe daemon to capture 1 frame
+        int status;
+        waitpid(probe_pid, &status, 0);
+
+        printf("[switcher-daemon] 1-shot capture completed\n");
     }
 
     // Poll for a frame belonging to the requested camera
@@ -118,7 +148,7 @@ int main(void) {
         .active_interval_sec = 1.0 / 30.0,
     };
 
-    DaemonContext ctx = {.current_pid = -1, .shm = NULL};
+    DaemonContext ctx = {.current_pid = -1, .active_camera = CAMERA_MODE_DAY, .shm = NULL};
 
     CameraCaptureOps ops = {
         .switch_camera = switch_camera_cb,
@@ -130,9 +160,10 @@ int main(void) {
     CameraSwitchRuntime rt;
     camera_switch_runtime_init(&rt, &cfg, &rt_cfg, &ops, CAMERA_MODE_DAY);
 
-    // Start initial daemon
+    // Start initial daemon (day camera)
     ctx.current_pid = spawn_daemon(CAMERA_MODE_DAY);
     if (ctx.current_pid <= 0) {
+        fprintf(stderr, "[switcher-daemon] failed to start initial daemon\n");
         return 1;
     }
 

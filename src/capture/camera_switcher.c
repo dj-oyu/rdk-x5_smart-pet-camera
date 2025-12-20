@@ -137,23 +137,43 @@ CameraSwitchDecision camera_switcher_record_brightness(CameraSwitchController* c
     CameraSwitchDecision decision = CAMERA_SWITCH_DECISION_NONE;
 
     if (ctrl->active_camera == CAMERA_MODE_DAY) {
+        // Active camera is DAY: check if we should switch to NIGHT
+        // Only consider brightness from the DAY camera itself
+        if (camera != CAMERA_MODE_DAY) {
+            return CAMERA_SWITCH_DECISION_NONE;  // Ignore probe from night camera
+        }
+        printf("[DEBUG] active=DAY, camera=%d, brightness=%.1f, threshold=%.1f\n",
+               (int)camera, brightness, ctrl->cfg.day_to_night_threshold);
         if (brightness < ctrl->cfg.day_to_night_threshold) {
             if (ctrl->below_threshold_since < 0) {
                 ctrl->below_threshold_since = now;
+                printf("[DEBUG] started timer for DAY->NIGHT\n");
             }
-            if ((now - ctrl->below_threshold_since) >= ctrl->cfg.day_to_night_hold_seconds) {
+            double elapsed = now - ctrl->below_threshold_since;
+            if (elapsed >= ctrl->cfg.day_to_night_hold_seconds) {
                 decision = CAMERA_SWITCH_DECISION_TO_NIGHT;
+                printf("[DEBUG] DECISION: switch to NIGHT (elapsed=%.1fs)\n", elapsed);
             }
         } else {
             ctrl->below_threshold_since = -1.0;
         }
     } else {  // active is night
+        // Active camera is NIGHT: check if we should switch to DAY
+        // Only consider brightness from the DAY camera (probe)
+        if (camera != CAMERA_MODE_DAY) {
+            return CAMERA_SWITCH_DECISION_NONE;  // Ignore night camera brightness
+        }
+        printf("[DEBUG] active=NIGHT, probing DAY camera=%d, brightness=%.1f, threshold=%.1f\n",
+               (int)camera, brightness, ctrl->cfg.night_to_day_threshold);
         if (brightness > ctrl->cfg.night_to_day_threshold) {
             if (ctrl->above_threshold_since < 0) {
                 ctrl->above_threshold_since = now;
+                printf("[DEBUG] started timer for NIGHT->DAY\n");
             }
-            if ((now - ctrl->above_threshold_since) >= ctrl->cfg.night_to_day_hold_seconds) {
+            double elapsed = now - ctrl->above_threshold_since;
+            if (elapsed >= ctrl->cfg.night_to_day_hold_seconds) {
                 decision = CAMERA_SWITCH_DECISION_TO_DAY;
+                printf("[DEBUG] DECISION: switch to DAY (elapsed=%.1fs)\n", elapsed);
             }
         } else {
             ctrl->above_threshold_since = -1.0;
