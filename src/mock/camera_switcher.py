@@ -30,7 +30,13 @@ class SwitchMode(str, Enum):
 
 @dataclass
 class BrightnessSnapshot:
-    """明るさサンプル"""
+    """
+    明るさサンプル
+
+    Attributes:
+        value: 明るさの平均値などのスカラー値。
+        timestamp: サンプル取得時刻を表すUNIXエポック秒（time.time() の戻り値）。
+    """
     value: float
     timestamp: float
 
