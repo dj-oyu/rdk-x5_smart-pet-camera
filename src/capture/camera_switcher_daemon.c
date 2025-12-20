@@ -74,6 +74,9 @@ static int capture_frame_cb(CameraMode camera, Frame* out_frame, void* user_data
         }
     }
 
+    // Snapshot current write_index before triggering any probe captures
+    uint32_t start_write_index = shm_frame_buffer_get_write_index(ctx->shm);
+
     // If requested camera is inactive (probe), do 1-shot capture
     if (camera != ctx->active_camera) {
         printf("[switcher-daemon] probing inactive camera=%d with 1-shot capture\n", (int)camera);
@@ -102,13 +105,23 @@ static int capture_frame_cb(CameraMode camera, Frame* out_frame, void* user_data
         printf("[switcher-daemon] 1-shot capture completed\n");
     }
 
-    // Poll for a frame belonging to the requested camera
-    for (int attempt = 0; attempt < 5; ++attempt) {
-        if (shm_frame_buffer_read_latest(ctx->shm, out_frame) >= 0 &&
-            out_frame->camera_id == (int)camera) {
-            return 0;
+    // Scan newly written frames after start_write_index for the requested camera
+    uint32_t last_scanned = start_write_index;
+    const int max_attempts = 20;       // allow ~400ms total (20 * 20ms)
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+        uint32_t current_write_index = shm_frame_buffer_get_write_index(ctx->shm);
+        for (uint32_t i = last_scanned; i < current_write_index; ++i) {
+            uint32_t idx = i % RING_BUFFER_SIZE;
+            Frame* candidate = &ctx->shm->frames[idx];
+            if (candidate->camera_id == (int)camera) {
+                memcpy(out_frame, candidate, sizeof(Frame));
+                return 0;
+            }
         }
-        usleep(1000 * 10);  // 10ms
+        last_scanned = current_write_index;
+        if (attempt < max_attempts - 1) {
+            usleep(1000 * 20);  // 20ms between retries
+        }
     }
     return -1;
 }
