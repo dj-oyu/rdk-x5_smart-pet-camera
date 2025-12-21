@@ -10,6 +10,9 @@ DEBUG_FLAGS = -g -DDEBUG -O0
 SRC_DIR = src/capture
 BUILD_DIR = build
 BIN_DIR = bin
+WEB_SRC_DIR = src/monitor/web_assets
+WEB_BUILD_DIR = $(BUILD_DIR)/web
+ESBUILD_LOCAL = ./node_modules/.bin/esbuild
 
 # Source files
 SOURCES = $(wildcard $(SRC_DIR)/*.c)
@@ -17,10 +20,10 @@ OBJECTS = $(SOURCES:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 TARGET = $(BIN_DIR)/capture_main
 
 # Phony targets
-.PHONY: all clean debug install test help
+.PHONY: all clean debug install test help web
 
 # Default target
-all: $(TARGET)
+all: $(TARGET) web
 
 # Create directories
 $(BUILD_DIR):
@@ -37,6 +40,16 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 $(TARGET): $(OBJECTS) | $(BIN_DIR)
 	$(CC) $(OBJECTS) $(LDFLAGS) -o $@
 	@echo "Build complete: $(TARGET)"
+
+# Build web assets (optional)
+web:
+	@mkdir -p $(WEB_BUILD_DIR)
+	@ESBUILD=""; \
+	if command -v esbuild >/dev/null 2>&1; then ESBUILD="esbuild"; \
+	elif [ -x "$(ESBUILD_LOCAL)" ]; then ESBUILD="$(ESBUILD_LOCAL)"; \
+	else echo "esbuild not found. Skipping web assets build."; exit 0; fi; \
+	$$ESBUILD $(WEB_SRC_DIR)/monitor.js --bundle --outfile=$(WEB_BUILD_DIR)/monitor.js --minify --log-level=warning; \
+	$$ESBUILD $(WEB_SRC_DIR)/monitor.css --outfile=$(WEB_BUILD_DIR)/monitor.css --minify --log-level=warning
 
 # Debug build
 debug: CFLAGS += $(DEBUG_FLAGS)

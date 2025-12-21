@@ -4,7 +4,7 @@ Webモニター実装
 Flask + MJPEGストリーミングでBBox合成映像をブラウザに表示
 """
 
-from flask import Flask, Response, jsonify, render_template_string, request
+from flask import Flask, Response, jsonify, render_template_string, request, send_from_directory
 import cv2
 import numpy as np
 import json
@@ -14,6 +14,7 @@ import threading
 import time
 from pathlib import Path
 import sys
+from collections import deque
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "common" / "src"))
 # 共通型定義をインポート
@@ -32,12 +33,23 @@ if TYPE_CHECKING:
 # 色定義（BGR）
 COLORS = {
     "cat": (0, 255, 0),        # 緑
+    "dog": (0, 200, 255),      # オレンジ寄り
+    "bird": (255, 150, 0),     # 青寄り
     "food_bowl": (0, 165, 255),  # オレンジ
+    "water_bowl": (0, 120, 255), # 青
     "dish": (255, 0, 0),         # 青
     "person": (255, 255, 0),     # シアン
     "book": (0, 255, 255),       # 黄色
     "cell_phone": (255, 0, 255), # マゼンタ
+    "chair": (140, 180, 255),
+    "couch": (180, 140, 255),
+    "tv": (200, 255, 120),
+    "laptop": (200, 200, 255),
+    "remote": (255, 200, 120),
 }
+
+ASSET_SRC_DIR = Path(__file__).parent / "web_assets"
+ASSET_BUILD_DIR = Path(__file__).resolve().parents[2] / "build" / "web"
 
 
 class WebMonitor:
@@ -88,6 +100,8 @@ class WebMonitor:
         self._overlay_thread: Optional[threading.Thread] = None
         self._latest_detection: Optional[DetectionResult] = None
         self._latest_detection_lock = threading.Lock()
+        self._latest_detection_key: Optional[tuple[int, int]] = None
+        self._detection_history: deque[DetectionResult] = deque(maxlen=8)
 
     def start(self) -> None:
         """Overlayスレッドを開始"""
@@ -216,9 +230,12 @@ class WebMonitor:
                     )
                 )
 
+            timestamp_raw = float(detection_dict.get("timestamp", 0.0))
+            if timestamp_raw < 1_000_000_000:
+                timestamp_raw = time.time()
             return DetectionResult(
                 frame_number=int(detection_dict.get("frame_number", 0)),
-                timestamp=float(detection_dict.get("timestamp", time.time())),
+                timestamp=timestamp_raw,
                 detections=detections,
                 version=int(detection_dict.get("version", 0)),
             )
@@ -370,11 +387,21 @@ class WebMonitor:
         """最新検出結果を保存（API用）"""
         with self._latest_detection_lock:
             self._latest_detection = detection_result
+            detection_key = (detection_result.frame_number, detection_result.version)
+            if detection_key != self._latest_detection_key:
+                self._latest_detection_key = detection_key
+                if detection_result.num_detections > 0:
+                    self._detection_history.appendleft(detection_result)
 
     def get_latest_detection(self) -> Optional[DetectionResult]:
         """最新検出結果を取得"""
         with self._latest_detection_lock:
             return self._latest_detection
+
+    def get_detection_history(self) -> list[DetectionResult]:
+        """検出履歴を取得"""
+        with self._latest_detection_lock:
+            return list(self._detection_history)
 
     def get_stats_snapshot(self) -> dict[str, float | int]:
         """統計情報のスナップショットを返す"""
@@ -428,207 +455,12 @@ def create_app(
         <head>
             <title>Smart Pet Camera Monitor</title>
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <style>
-                body {
-                    font-family: 'Inter', 'Noto Sans JP', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-                    background: radial-gradient(circle at 20% 20%, #1f2a44, #0f1628 35%, #0b0f1d 65%, #070a12 100%);
-                    color: #e8ecf5;
-                    margin: 0;
-                    padding: 32px 18px 48px;
-                    min-height: 100vh;
-                }
-                * { box-sizing: border-box; }
-                a { color: inherit; }
-                .app {
-                    max-width: 1400px;
-                    margin: 0 auto;
-                    display: flex;
-                    flex-direction: column;
-                    gap: 18px;
-                }
-                .header {
-                    display: flex;
-                    align-items: center;
-                    gap: 16px;
-                    flex-wrap: wrap;
-                }
-                .title {
-                    font-size: 26px;
-                    font-weight: 700;
-                    letter-spacing: 0.2px;
-                }
-                .badge {
-                    display: inline-flex;
-                    align-items: center;
-                    gap: 6px;
-                    background: linear-gradient(135deg, #2a8fff, #7bd0ff);
-                    color: #061326;
-                    padding: 6px 10px;
-                    border-radius: 12px;
-                    font-weight: 700;
-                    font-size: 12px;
-                    box-shadow: 0 8px 24px rgba(45, 140, 255, 0.4);
-                }
-                .badge-secondary {
-                    background: rgba(255,255,255,0.05);
-                    color: #b8c4d9;
-                    box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
-                }
-                .grid {
-                    display: grid;
-                    grid-template-columns: 2fr 1fr;
-                    gap: 18px;
-                }
-                .panel {
-                    background: rgba(255,255,255,0.04);
-                    border: 1px solid rgba(255,255,255,0.06);
-                    border-radius: 16px;
-                    padding: 16px;
-                    box-shadow: 0 12px 50px rgba(0,0,0,0.28);
-                    backdrop-filter: blur(4px);
-                }
-                .panel h2 {
-                    margin: 0 0 12px;
-                    font-size: 16px;
-                    font-weight: 700;
-                    color: #f4f7ff;
-                    letter-spacing: 0.2px;
-                }
-                .panel-subtitle {
-                    color: #9aaccc;
-                    font-size: 13px;
-                    margin: 0 0 14px;
-                }
-                #video-panel {
-                    position: relative;
-                    background: linear-gradient(145deg, rgba(35,47,76,0.9), rgba(11,16,30,0.9));
-                    border-radius: 14px;
-                    overflow: hidden;
-                    min-height: 380px;
-                    border: 1px solid rgba(255,255,255,0.06);
-                }
-                #stream {
-                    width: 100%;
-                    display: block;
-                    background: #05070d;
-                    object-fit: contain;
-                }
-                .stat-grid {
-                    display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-                    gap: 12px;
-                    margin: 12px 0 6px;
-                }
-                .stat {
-                    background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02));
-                    padding: 12px;
-                    border-radius: 12px;
-                    border: 1px solid rgba(255,255,255,0.08);
-                    display: flex;
-                    flex-direction: column;
-                    gap: 6px;
-                }
-                .stat-label {
-                    color: #95a5c7;
-                    font-size: 12px;
-                    letter-spacing: 0.1px;
-                }
-                .stat-value {
-                    font-size: 22px;
-                    font-weight: 700;
-                    color: #7cd8ff;
-                }
-                .stat-sub {
-                    color: #7ad97f;
-                    font-weight: 700;
-                    font-size: 13px;
-                }
-                .list {
-                    display: flex;
-                    flex-direction: column;
-                    gap: 10px;
-                    margin-top: 12px;
-                }
-                .list-item {
-                    background: rgba(255,255,255,0.04);
-                    border: 1px solid rgba(255,255,255,0.05);
-                    border-radius: 12px;
-                    padding: 12px;
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                    gap: 12px;
-                }
-                .list-label {
-                    color: #b9c6dd;
-                    font-size: 13px;
-                }
-                .list-value {
-                    font-weight: 700;
-                    color: #f6f8ff;
-                }
-                .detections {
-                    display: flex;
-                    flex-direction: column;
-                    gap: 8px;
-                }
-                .det-card {
-                    background: rgba(0, 0, 0, 0.25);
-                    border: 1px solid rgba(255,255,255,0.08);
-                    border-radius: 12px;
-                    padding: 12px;
-                    display: grid;
-                    grid-template-columns: 1fr auto;
-                    gap: 6px;
-                }
-                .det-title {
-                    font-weight: 700;
-                    color: #f7fbff;
-                }
-                .det-meta {
-                    color: #9fb0d1;
-                    font-size: 12px;
-                    text-align: right;
-                }
-                .tag-row {
-                    display: flex;
-                    gap: 8px;
-                    flex-wrap: wrap;
-                }
-                .tag {
-                    padding: 4px 10px;
-                    border-radius: 10px;
-                    font-size: 12px;
-                    font-weight: 700;
-                    background: rgba(255,255,255,0.08);
-                    border: 1px solid rgba(255,255,255,0.08);
-                    color: #dfe8ff;
-                }
-                .tag.cat { background: rgba(0, 255, 0, 0.08); border-color: rgba(0,255,0,0.14); color: #9df9a5; }
-                .tag.food_bowl { background: rgba(0, 165, 255, 0.1); border-color: rgba(0,165,255,0.18); color: #9ad7ff; }
-                .tag.water_bowl { background: rgba(255, 0, 0, 0.1); border-color: rgba(255,0,0,0.2); color: #ff9c9c; }
-                .muted {
-                    color: #8c9bbb;
-                    font-size: 13px;
-                    margin: 0;
-                }
-                .footer-note {
-                    color: #6d7a9b;
-                    font-size: 12px;
-                    margin-top: 6px;
-                }
-                @media (max-width: 960px) {
-                    .grid {
-                        grid-template-columns: 1fr;
-                    }
-                }
-            </style>
+            <link rel="stylesheet" href="/assets/monitor.css">
         </head>
         <body>
             <div class="app">
                 <div class="header">
                     <div class="title">🐱 Smart Pet Camera Monitor</div>
-                    <span class="badge">Live stream</span>
                     <span class="badge badge-secondary" id="status-badge">Waiting for data...</span>
                 </div>
 
@@ -648,6 +480,10 @@ def create_app(
                         <div id="video-panel">
                             <img id="stream" src="/stream" alt="Live stream from Smart Pet Camera">
                         </div>
+                        <div class="trajectory-card" id="trajectory-card">
+                            <div class="trajectory-title">Trajectory</div>
+                            <canvas class="trajectory-canvas" id="trajectory-canvas"></canvas>
+                        </div>
                         <p class="footer-note">共有メモリの最新フレームにバウンディングボックスを合成したMJPEGストリームを配信しています。</p>
                     </div>
 
@@ -659,11 +495,6 @@ def create_app(
                                 <span class="stat-label">Camera FPS</span>
                                 <span class="stat-value" id="fps">--</span>
                                 <span class="stat-sub" id="target-fps">目標: -- fps</span>
-                            </div>
-                            <div class="stat">
-                                <span class="stat-label">Frames processed</span>
-                                <span class="stat-value" id="frames">--</span>
-                                <span class="stat-sub" id="frames-total">---</span>
                             </div>
                             <div class="stat">
                                 <span class="stat-label">Detections</span>
@@ -681,102 +512,50 @@ def create_app(
                                 <div class="list-label">Latest update</div>
                                 <div class="list-value" id="last-updated">--</div>
                             </div>
+                            <div class="list-item">
+                                <div class="list-label">Frames buffered</div>
+                                <div class="list-value" id="frames-total">--</div>
+                            </div>
                         </div>
                     </div>
 
                     <div class="panel">
-                        <h2>最新の検出結果</h2>
-                        <p class="panel-subtitle">直近のフレームで検出されたオブジェクト一覧</p>
-                        <div class="detections" id="detection-list">
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+                            <div>
+                                <h2>検出インサイト</h2>
+                                <p class="panel-subtitle">履歴・ランキング・タイムラインを切り替えて把握</p>
+                            </div>
+                            <div class="view-toggle" id="view-toggle">
+                                <button type="button" data-view="history" class="active">履歴</button>
+                                <button type="button" data-view="ranking">ランキング</button>
+                                <button type="button" data-view="timeline">タイムライン</button>
+                            </div>
+                        </div>
+                        <div class="detections" id="history-list">
                             <p class="muted">まだ検出結果はありません。カメラ入力を待機しています。</p>
+                        </div>
+                        <div class="rank-list" id="ranking-list" style="display:none;"></div>
+                        <div class="timeline" id="timeline-list" style="display:none;"></div>
+                        <div class="timeline-chart" id="timeline-chart" style="display:none;">
+                            <canvas class="timeline-canvas" id="timeline-canvas"></canvas>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <script>
-                const fpsEl = document.getElementById('fps');
-                const framesEl = document.getElementById('frames');
-                const detectionsEl = document.getElementById('detections');
-                const shmBufferEl = document.getElementById('shm-buffer');
-                const framesTotalEl = document.getElementById('frames-total');
-                const detectionVersionEl = document.getElementById('detection-version');
-                const detectionListEl = document.getElementById('detection-list');
-                const statusBadge = document.getElementById('status-badge');
-                const lastUpdatedEl = document.getElementById('last-updated');
-                const targetFpsEl = document.getElementById('target-fps');
-
-                function formatNumber(value) {
-                    return value.toLocaleString(undefined, { maximumFractionDigits: 1 });
-                }
-
-                function renderDetections(latestDetection) {
-                    if (!latestDetection) {
-                        detectionListEl.innerHTML = '<p class="muted">まだ検出結果はありません。カメラ入力を待機しています。</p>';
-                        return;
-                    }
-
-                    const ts = new Date(latestDetection.timestamp * 1000);
-                    const header = `Frame #${latestDetection.frame_number} / ${latestDetection.num_detections} detections`;
-                    const meta = `${ts.toLocaleString()} / v${latestDetection.version}`;
-
-                    const detections = latestDetection.detections.map(det => {
-                        const bbox = det.bbox;
-                        return `
-                            <div class="det-card">
-                                <div>
-                                    <div class="det-title">${det.class_name}</div>
-                                    <div class="tag-row" style="margin-top:4px;">
-                                        <span class="tag ${det.class_name}">${(det.confidence * 100).toFixed(1)}%</span>
-                                        <span class="tag badge-secondary">x:${bbox.x} y:${bbox.y} w:${bbox.w} h:${bbox.h}</span>
-                                    </div>
-                                </div>
-                                <div class="det-meta">${meta}</div>
-                            </div>
-                        `;
-                    }).join("");
-
-                    detectionListEl.innerHTML = `
-                        <div class="det-card">
-                            <div class="det-title">${header}</div>
-                            <div class="det-meta">${meta}</div>
-                        </div>
-                        ${detections}
-                    `;
-                }
-
-                async function fetchStatus() {
-                    try {
-                        const res = await fetch('/api/status');
-                        if (!res.ok) return;
-                        const data = await res.json();
-
-                        fpsEl.textContent = `${formatNumber(data.monitor.current_fps)} fps`;
-                        framesEl.textContent = formatNumber(data.monitor.frames_processed);
-                        detectionsEl.textContent = formatNumber(data.monitor.detection_count);
-                        targetFpsEl.textContent = `目標: ${data.monitor.target_fps} fps`;
-
-                        framesTotalEl.textContent = `buffer: ${data.shared_memory.frame_count} / total: ${formatNumber(data.shared_memory.total_frames_written)}`;
-                        detectionVersionEl.textContent = `version: ${data.shared_memory.detection_version}`;
-                        shmBufferEl.textContent = data.shared_memory.has_detection ? '🟢 receiving detections' : '🟡 waiting for detections';
-                        statusBadge.textContent = data.shared_memory.has_detection ? 'Receiving data' : 'Live stream active';
-
-                        const updatedAt = new Date(data.timestamp * 1000);
-                        lastUpdatedEl.textContent = updatedAt.toLocaleTimeString();
-
-                        renderDetections(data.latest_detection);
-                    } catch (error) {
-                        statusBadge.textContent = 'Waiting for data...';
-                    }
-                }
-
-                fetchStatus();
-                setInterval(fetchStatus, 1500);
-            </script>
+            <script src="/assets/monitor.js" defer></script>
         </body>
         </html>
         """
         return render_template_string(html)
+
+    @app.route("/assets/<path:filename>")
+    def assets(filename: str):
+        """Web UIアセットを返す"""
+        build_path = ASSET_BUILD_DIR / filename
+        if build_path.exists():
+            return send_from_directory(ASSET_BUILD_DIR, filename)
+        return send_from_directory(ASSET_SRC_DIR, filename)
 
     @app.route("/api/camera_status", methods=["GET"])
     def camera_status() -> Response:
@@ -834,6 +613,7 @@ def create_app(
     def api_status():
         """統計情報と最新検出結果を返すシンプルなAPI"""
         latest_detection = monitor.get_latest_detection()
+        detection_history = monitor.get_detection_history()
         return jsonify(
             {
                 "monitor": monitor.get_stats_snapshot(),
@@ -841,8 +621,60 @@ def create_app(
                 "latest_detection": (
                     _detection_to_dict(latest_detection) if latest_detection else None
                 ),
+                "detection_history": [
+                    _detection_to_dict(item) for item in detection_history
+                ],
                 "timestamp": time.time(),
             }
+        )
+
+    # pyright: ignore[reportUnusedFunction]
+    @app.route("/api/status/stream")
+    def api_status_stream():
+        """SSEで統計情報と最新検出結果を配信"""
+        def generate():
+            last_frame_count = -1
+            last_detection_version = -1
+            last_monitor_frames = -1
+            last_sent = 0.0
+            while True:
+                monitor_stats = monitor.get_stats_snapshot()
+                shm_stats = shm.get_stats()
+                now = time.time()
+
+                changed = (
+                    shm_stats["frame_count"] != last_frame_count
+                    or shm_stats["detection_version"] != last_detection_version
+                    or monitor_stats["frames_processed"] != last_monitor_frames
+                )
+                if changed or now - last_sent > 2.0:
+                    latest_detection = monitor.get_latest_detection()
+                    detection_history = monitor.get_detection_history()
+                    payload = {
+                        "monitor": monitor_stats,
+                        "shared_memory": shm_stats,
+                        "latest_detection": (
+                            _detection_to_dict(latest_detection)
+                            if latest_detection
+                            else None
+                        ),
+                        "detection_history": [
+                            _detection_to_dict(item) for item in detection_history
+                        ],
+                        "timestamp": now,
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    last_frame_count = shm_stats["frame_count"]
+                    last_detection_version = shm_stats["detection_version"]
+                    last_monitor_frames = monitor_stats["frames_processed"]
+                    last_sent = now
+
+                time.sleep(0.02)
+
+        return Response(
+            generate(),
+            mimetype="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
 
     return app

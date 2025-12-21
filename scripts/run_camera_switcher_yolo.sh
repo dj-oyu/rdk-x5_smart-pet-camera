@@ -169,6 +169,9 @@ if [[ "${SKIP_BUILD}" -ne 1 ]]; then
 
   echo "[build] building camera_switcher_daemon..."
   make -C "${CAPTURE_DIR}" switcher-daemon-build
+
+  echo "[build] building web assets (esbuild)..."
+  make -C "${REPO_ROOT}" web
 else
   echo "[info] skipping build (using existing build artifacts)"
 fi
