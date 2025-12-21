@@ -49,11 +49,54 @@ COCO_CLASS_NAMES = [
 
 # COCO class ID → DetectionClass マッピング
 COCO_TO_DETECTION_CLASS = {
-    0: DetectionClass.PERSON,      # person
-    15: DetectionClass.CAT,        # cat
-    46: DetectionClass.FOOD_BOWL,  # bowl → food_bowl
-    67: DetectionClass.CELL_PHONE, # cell phone
-    73: DetectionClass.BOOK,       # book
+    0: DetectionClass.PERSON,          # person
+    14: DetectionClass.BIRD,           # bird
+    15: DetectionClass.CAT,            # cat
+    16: DetectionClass.DOG,            # dog
+    24: DetectionClass.BACKPACK,       # backpack
+    25: DetectionClass.UMBRELLA,       # umbrella
+    26: DetectionClass.HANDBAG,        # handbag
+    28: DetectionClass.SUITCASE,       # suitcase
+    39: DetectionClass.BOTTLE,         # bottle
+    40: DetectionClass.WINE_GLASS,     # wine glass
+    41: DetectionClass.CUP,            # cup
+    42: DetectionClass.FORK,           # fork
+    43: DetectionClass.KNIFE,          # knife
+    44: DetectionClass.SPOON,          # spoon
+    45: DetectionClass.FOOD_BOWL,      # bowl → food_bowl
+    46: DetectionClass.BANANA,         # banana
+    47: DetectionClass.APPLE,          # apple
+    48: DetectionClass.SANDWICH,       # sandwich
+    49: DetectionClass.ORANGE,         # orange
+    50: DetectionClass.BROCCOLI,       # broccoli
+    51: DetectionClass.CARROT,         # carrot
+    52: DetectionClass.HOT_DOG,        # hot dog
+    53: DetectionClass.PIZZA,          # pizza
+    54: DetectionClass.DONUT,          # donut
+    55: DetectionClass.CAKE,           # cake
+    56: DetectionClass.CHAIR,          # chair
+    57: DetectionClass.COUCH,          # couch
+    58: DetectionClass.POTTED_PLANT,   # potted plant
+    59: DetectionClass.BED,            # bed
+    60: DetectionClass.DINING_TABLE,   # dining table
+    61: DetectionClass.TOILET,         # toilet
+    62: DetectionClass.TV,             # tv
+    63: DetectionClass.LAPTOP,         # laptop
+    64: DetectionClass.MOUSE,          # mouse
+    65: DetectionClass.REMOTE,         # remote
+    66: DetectionClass.KEYBOARD,       # keyboard
+    67: DetectionClass.CELL_PHONE,     # cell phone
+    68: DetectionClass.MICROWAVE,      # microwave
+    69: DetectionClass.OVEN,           # oven
+    70: DetectionClass.TOASTER,        # toaster
+    71: DetectionClass.SINK,           # sink
+    72: DetectionClass.REFRIGERATOR,   # refrigerator
+    73: DetectionClass.BOOK,           # book
+    74: DetectionClass.CLOCK,          # clock
+    75: DetectionClass.VASE,           # vase
+    77: DetectionClass.TEDDY_BEAR,     # teddy bear
+    78: DetectionClass.HAIR_DRIER,     # hair drier
+    79: DetectionClass.TOOTHBRUSH,     # toothbrush
     # dishは複数のbowlを検出する場合などに使用
     # または別途カスタムモデルで定義
 }
