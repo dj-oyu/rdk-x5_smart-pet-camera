@@ -405,6 +405,9 @@ class RealSharedMemory:
 
         self.detection_mmap.seek(0)
         det_data = self.detection_mmap.read(sizeof(CLatestDetectionResult))
+        if len(det_data) < sizeof(CLatestDetectionResult):
+            # Shared memory not ready or truncated; treat as no data.
+            return None
         c_det = CLatestDetectionResult.from_buffer_copy(det_data)
 
         has_new_version = c_det.version != self.last_detection_version
