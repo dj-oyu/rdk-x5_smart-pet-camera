@@ -292,6 +292,16 @@ class WebMonitor:
 
                     traceback.print_exc()
                     img = np.zeros((frame.height, frame.width, 3), dtype=np.uint8)
+        elif frame.format == 3:  # H.264
+            # H.264 フレームはMJPEGストリーミングではサポートされません
+            # WebRTCストリーミングを使用してください
+            # （H.264デコード → オーバーレイ → JPEG再エンコードは非効率的なため）
+            print("[INFO] H.264 frame detected. Use WebRTC streaming for H.264.")
+            img = np.zeros((frame.height, frame.width, 3), dtype=np.uint8)
+            # 代わりに "H.264 Mode - Use WebRTC" というメッセージを表示
+            cv2.putText(img, "H.264 Mode - Use WebRTC Streaming",
+                       (frame.width//4, frame.height//2),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
         else:
             print(
                 f"[WARN] Unsupported frame format: {frame.format}; using blank fallback"
@@ -599,6 +609,101 @@ def create_app(
         switch_controller.force_camera(camera, reason=reason)
         return jsonify(
             {"ok": True, "mode": "manual", "status": switch_controller.get_status()}
+        )
+
+    # pyright: ignore[reportUnusedFunction]
+    @app.route("/api/recording/start", methods=["POST"])
+    def start_recording():
+        """H.264録画開始"""
+        if not hasattr(monitor, 'recorder'):
+            from h264_recorder import H264Recorder
+            monitor.recorder = H264Recorder(shm, Path("./recordings"))
+
+        data = request.get_json() or {}
+        filename = data.get("filename")
+
+        if monitor.recorder.is_recording():
+            return jsonify({"error": "Already recording"}), 400
+
+        filepath = monitor.recorder.start_recording(filename)
+        return jsonify({
+            "status": "recording",
+            "file": str(filepath),
+            "started_at": time.time()
+        })
+
+    # pyright: ignore[reportUnusedFunction]
+    @app.route("/api/recording/stop", methods=["POST"])
+    def stop_recording():
+        """H.264録画停止"""
+        if not hasattr(monitor, 'recorder'):
+            return jsonify({"error": "Recorder not initialized"}), 400
+
+        if not monitor.recorder.is_recording():
+            return jsonify({"error": "Not recording"}), 400
+
+        filepath = monitor.recorder.stop_recording()
+        stats = monitor.recorder.get_stats()
+
+        return jsonify({
+            "status": "stopped",
+            "file": str(filepath),
+            "stats": stats,
+            "stopped_at": time.time()
+        })
+
+    # pyright: ignore[reportUnusedFunction]
+    @app.route("/api/recording/status", methods=["GET"])
+    def recording_status():
+        """録画状態取得"""
+        if not hasattr(monitor, 'recorder'):
+            return jsonify({"recording": False})
+
+        stats = monitor.recorder.get_stats()
+        return jsonify(stats)
+
+    # pyright: ignore[reportUnusedFunction]
+    @app.route("/api/detections/stream")
+    def detections_stream():
+        """
+        Server-Sent Events で検出結果をリアルタイム配信
+        ブラウザ側でオーバーレイ描画するために使用
+        """
+        def generate():
+            last_version = -1
+            while True:
+                current_version = shm.get_detection_version()
+                if current_version != last_version:
+                    detection_result, last_version = shm.read_detection()
+                    parsed = monitor._parse_detection_result(detection_result)
+
+                    if parsed:
+                        # JSON形式で検出結果を送信
+                        data = {
+                            'frame_number': parsed.frame_number,
+                            'timestamp': parsed.timestamp,
+                            'detections': [
+                                {
+                                    'class_name': d.class_name.value,
+                                    'confidence': d.confidence,
+                                    'bbox': {
+                                        'x': d.bbox.x,
+                                        'y': d.bbox.y,
+                                        'w': d.bbox.w,
+                                        'h': d.bbox.h
+                                    }
+                                }
+                                for d in parsed.detections
+                            ]
+                        }
+                        yield f"data: {json.dumps(data)}\n\n"
+
+                time.sleep(0.033)  # 30fps
+
+        return Response(
+            generate(),
+            mimetype='text/event-stream',
+            headers={'Cache-Control': 'no-cache', 'Connection': 'keep-alive'}
         )
 
     # pyright: ignore[reportUnusedFunction]

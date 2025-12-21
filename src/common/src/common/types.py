@@ -139,6 +139,14 @@ class Detection:
     bbox: BoundingBox
 
 
+class FrameFormat(Enum):
+    """フレームフォーマット"""
+    JPEG = 0  # JPEG圧縮
+    NV12 = 1  # NV12 YUV (raw)
+    RGB = 2   # RGB (raw)
+    H264 = 3  # H.264 encoded (NAL units)
+
+
 @dataclass
 class Frame:
     """
@@ -153,14 +161,16 @@ class Frame:
         int camera_id;
         int width;
         int height;
+        int format;  // 0=JPEG, 1=NV12, 2=RGB, 3=H264
     } Frame;
     """
-    data: bytes  # JPEG エンコード済みデータ
+    data: bytes  # フレームデータ（フォーマットに応じて可変）
     frame_number: int
     timestamp: float  # UNIXタイムスタンプ
     camera_id: int
     width: int
     height: int
+    format: int = 0  # デフォルトはJPEG（FrameFormat.JPEG）
 
     @property
     def size(self) -> int:

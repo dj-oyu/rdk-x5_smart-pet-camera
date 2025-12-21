@@ -39,7 +39,7 @@ typedef struct {
     int camera_id;              // Camera index (0 or 1)
     int width;                  // Frame width in pixels
     int height;                 // Frame height in pixels
-    int format;                 // 0=JPEG, 1=NV12, 2=RGB
+    int format;                 // 0=JPEG, 1=NV12, 2=RGB, 3=H264
     size_t data_size;           // Actual data size in bytes
     uint8_t data[MAX_FRAME_SIZE]; // Frame data
 } Frame;

@@ -24,8 +24,8 @@ SWITCHER_DEMO_BINARY := $(BUILD_DIR)/camera_switcher_demo
 SWITCHER_RUNTIME_LIBRARY := $(BUILD_DIR)/libcamera_switcher_runtime.a
 SWITCHER_DAEMON_BINARY := $(BUILD_DIR)/camera_switcher_daemon
 
-LDLIBS_COMMON := -lrt -ljpeg
-LDLIBS_DROBOTICS := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem
+LDLIBS_COMMON := -lrt
+LDLIBS_DROBOTICS := $(LDLIBS_COMMON) -lpthread -lspcdev
 LDLIBS_SWITCHER_DEMO := $(LDLIBS_COMMON)
 LDLIBS_SWITCHER_DAEMON := $(LDLIBS_COMMON) -lpthread
 
