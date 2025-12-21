@@ -156,9 +156,8 @@ camera_switcher_record_brightness(CameraSwitchController *ctrl,
     if (camera != CAMERA_MODE_DAY) {
       return CAMERA_SWITCH_DECISION_NONE; // Ignore night camera brightness
     }
-    // printf("[DEBUG] active=NIGHT, probing DAY camera=%d, brightness=%.1f,
-    // threshold=%.1f\n", (int)camera, brightness,
-    // ctrl->cfg.night_to_day_threshold);
+    printf("[DEBUG] active=NIGHT, probing DAY camera=%d, brightness=%.1f, threshold=%.1f\n",
+           (int)camera, brightness, ctrl->cfg.night_to_day_threshold);
     if (brightness > ctrl->cfg.night_to_day_threshold) {
       if (ctrl->above_threshold_since < 0) {
         ctrl->above_threshold_since = now;

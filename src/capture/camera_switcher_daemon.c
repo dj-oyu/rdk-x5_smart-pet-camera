@@ -186,7 +186,7 @@ int main(void) {
       .day_to_night_threshold = 40.0,
       .night_to_day_threshold =
           60.0, // Lowered from 70.0 to match typical indoor brightness
-      .day_to_night_hold_seconds = 0.5, // Reduced from 10.0 for faster response
+      .day_to_night_hold_seconds = 0.5, // Back to original for testing
       .night_to_day_hold_seconds = 3.0, // Reduced from 10.0 for faster response
       .warmup_frames = 3,
   };
