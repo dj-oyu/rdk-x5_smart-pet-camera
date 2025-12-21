@@ -483,6 +483,7 @@ def create_app(
                         <div class="trajectory-card" id="trajectory-card">
                             <div class="trajectory-title">Trajectory</div>
                             <canvas class="trajectory-canvas" id="trajectory-canvas"></canvas>
+                            <div class="legend" id="trajectory-legend"></div>
                         </div>
                         <p class="footer-note">共有メモリの最新フレームにバウンディングボックスを合成したMJPEGストリームを配信しています。</p>
                     </div>
@@ -538,6 +539,7 @@ def create_app(
                         <div class="timeline" id="timeline-list" style="display:none;"></div>
                         <div class="timeline-chart" id="timeline-chart" style="display:none;">
                             <canvas class="timeline-canvas" id="timeline-canvas"></canvas>
+                            <div class="legend" id="timeline-legend"></div>
                         </div>
                     </div>
                 </div>

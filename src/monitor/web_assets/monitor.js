@@ -12,6 +12,8 @@ window.addEventListener('DOMContentLoaded', () => {
     const timelineCanvas = document.getElementById('timeline-canvas');
     const trajectoryCardEl = document.getElementById('trajectory-card');
     const trajectoryCanvas = document.getElementById('trajectory-canvas');
+    const trajectoryLegendEl = document.getElementById('trajectory-legend');
+    const timelineLegendEl = document.getElementById('timeline-legend');
     const viewToggle = document.getElementById('view-toggle');
     const statusBadge = document.getElementById('status-badge');
     const lastUpdatedEl = document.getElementById('last-updated');
@@ -73,6 +75,79 @@ window.addEventListener('DOMContentLoaded', () => {
                 return `<span class="tag ${name}">${name} x${count}</span>`;
             })
             .join('');
+    }
+
+    function renderLegend(container, classCounts, options = {}) {
+        if (!container) return;
+        container.innerHTML = '';
+
+        if (!classCounts || classCounts.length === 0) {
+            const empty = document.createElement('span');
+            empty.className = 'legend-empty';
+            empty.textContent = 'データなし';
+            container.appendChild(empty);
+            return;
+        }
+
+        if (options.fillLabel) {
+            const fillItem = document.createElement('span');
+            fillItem.className = 'legend-item';
+            const swatch = document.createElement('span');
+            swatch.className = 'legend-swatch fill';
+            const label = document.createElement('span');
+            label.textContent = options.fillLabel;
+            fillItem.appendChild(swatch);
+            fillItem.appendChild(label);
+            container.appendChild(fillItem);
+        }
+
+        classCounts.forEach(([name]) => {
+            const item = document.createElement('span');
+            item.className = 'legend-item';
+            const swatch = document.createElement('span');
+            swatch.className = 'legend-swatch';
+            const color = trajectoryColors[name] || [110, 231, 255];
+            swatch.style.background = `rgba(${color[0]}, ${color[1]}, ${color[2]}, 0.9)`;
+            const label = document.createElement('span');
+            label.textContent = name;
+            item.appendChild(swatch);
+            item.appendChild(label);
+            container.appendChild(item);
+        });
+
+        if (options.moreCount && options.moreCount > 0) {
+            const moreItem = document.createElement('span');
+            moreItem.className = 'legend-item';
+            moreItem.textContent = `+${options.moreCount} more`;
+            container.appendChild(moreItem);
+        }
+    }
+
+    function updateLegends(history, points) {
+        const historyCounts = {};
+        (history || []).forEach((entry) => {
+            entry.detections.forEach((det) => {
+                historyCounts[det.class_name] = (historyCounts[det.class_name] || 0) + 1;
+            });
+        });
+        const historyEntries = Object.entries(historyCounts).sort((a, b) => b[1] - a[1]);
+        const historyTop = historyEntries.slice(0, 5);
+        renderLegend(timelineLegendEl, historyTop, {
+            fillLabel: '検出量',
+            moreCount: Math.max(historyEntries.length - historyTop.length, 0),
+        });
+
+        const trajectoryCounts = {};
+        (points || []).forEach((point) => {
+            if (!point.className) return;
+            trajectoryCounts[point.className] =
+                (trajectoryCounts[point.className] || 0) + 1;
+        });
+        const trajectoryEntries = Object.entries(trajectoryCounts).sort((a, b) => b[1] - a[1]);
+        const trajectoryTop = trajectoryEntries.slice(0, 5);
+        renderLegend(trajectoryLegendEl, trajectoryTop, {
+            moreCount: Math.max(trajectoryEntries.length - trajectoryTop.length, 0),
+        });
     }
 
     function renderHistory(history) {
@@ -398,6 +473,7 @@ window.addEventListener('DOMContentLoaded', () => {
         renderTimeline(filteredHistory);
         updateTrajectory(data.latest_detection);
         drawTrajectory(trajectoryPoints);
+        updateLegends(filteredHistory, trajectoryPoints);
         if (activeView === 'timeline') {
             drawTimelineChart(filteredHistory);
         }
