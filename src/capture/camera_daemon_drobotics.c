@@ -87,8 +87,12 @@ struct arguments {
 // Global state
 static volatile sig_atomic_t g_running = 1;
 static volatile uint32_t g_current_interval_ms = 0; // Current frame interval, updated by SIGUSR1
-static SharedFrameBuffer *g_shm = NULL;
-static const char *g_shm_name = NULL;  // Custom shared memory name (if set via SHM_NAME env)
+
+// Dual shared memory: NV12 frames (for brightness/detection) + H.264 stream (for recording)
+static SharedFrameBuffer *g_shm_nv12 = NULL;  // NV12 frames
+static SharedFrameBuffer *g_shm_h264 = NULL;  // H.264 stream
+static const char *g_shm_name_nv12 = NULL;    // Custom name for NV12 (env: SHM_NAME_NV12)
+static const char *g_shm_name_h264 = NULL;    // Custom name for H.264 (env: SHM_NAME_H264)
 
 // -----------------------------
 // Argument and context helpers
@@ -336,18 +340,47 @@ static void cleanup_pipeline(camera_context_t *ctx) {
 // Initialization helpers
 // -----------------------------
 static int create_shared_memory(void) {
-  // Check for custom shared memory name via environment variable
-  g_shm_name = getenv("SHM_NAME");
-  if (g_shm_name) {
-    g_shm = shm_frame_buffer_create_named(g_shm_name);
+  // Get custom shared memory names via environment variables
+  g_shm_name_nv12 = getenv("SHM_NAME_NV12");
+  g_shm_name_h264 = getenv("SHM_NAME_H264");
+
+  // Create NV12 shared memory
+  if (g_shm_name_nv12) {
+    g_shm_nv12 = shm_frame_buffer_create_named(g_shm_name_nv12);
+    if (!g_shm_nv12) {
+      fprintf(stderr, "[Error] Failed to create NV12 shared memory: %s\n", g_shm_name_nv12);
+      return -1;
+    }
+    printf("[Info] Created NV12 shared memory: %s\n", g_shm_name_nv12);
   } else {
-    g_shm = shm_frame_buffer_create();
+    // Default: create with standard name
+    g_shm_nv12 = shm_frame_buffer_create();
+    if (!g_shm_nv12) {
+      fprintf(stderr, "[Error] Failed to create default NV12 shared memory\n");
+      return -1;
+    }
+    printf("[Info] Created default NV12 shared memory\n");
   }
 
-  if (!g_shm) {
-    fprintf(stderr, "[Error] Failed to create shared memory\n");
-    return -1;
+  // Create H.264 shared memory
+  if (g_shm_name_h264) {
+    g_shm_h264 = shm_frame_buffer_create_named(g_shm_name_h264);
+    if (!g_shm_h264) {
+      fprintf(stderr, "[Error] Failed to create H.264 shared memory: %s\n", g_shm_name_h264);
+      // Cleanup NV12 memory before returning
+      if (g_shm_name_nv12) {
+        shm_frame_buffer_destroy_named(g_shm_nv12, g_shm_name_nv12);
+      } else {
+        shm_frame_buffer_destroy(g_shm_nv12);
+      }
+      return -1;
+    }
+    printf("[Info] Created H.264 shared memory: %s\n", g_shm_name_h264);
+  } else {
+    // H.264 shared memory is optional; if not specified, skip it
+    printf("[Info] H.264 shared memory not specified (NV12-only mode)\n");
   }
+
   return 0;
 }
 

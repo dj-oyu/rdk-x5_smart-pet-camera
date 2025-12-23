@@ -19,8 +19,19 @@
 #include <stdbool.h>
 
 // Configuration constants
-#define SHM_NAME_FRAMES "/pet_camera_frames"
+// Main shared memory (consumed by detection/monitoring)
+#define SHM_NAME_ACTIVE_FRAME "/pet_camera_active_frame"  // NV12 frame for detection
+#define SHM_NAME_STREAM "/pet_camera_stream"              // H.264 stream for recording/WebRTC
 #define SHM_NAME_DETECTIONS "/pet_camera_detections"
+
+// Camera-specific shared memory (produced by camera daemons)
+#define SHM_NAME_FRAMES_DAY "/pet_camera_frames_day"       // DAY camera NV12
+#define SHM_NAME_FRAMES_NIGHT "/pet_camera_frames_night"   // NIGHT camera NV12
+#define SHM_NAME_STREAM_DAY "/pet_camera_stream_day"       // DAY camera H.264
+#define SHM_NAME_STREAM_NIGHT "/pet_camera_stream_night"   // NIGHT camera H.264
+
+// Legacy name for backward compatibility
+#define SHM_NAME_FRAMES "/pet_camera_frames"  // Alias to SHM_NAME_ACTIVE_FRAME
 
 #define RING_BUFFER_SIZE 30  // 30 frames (1 second at 30fps)
 #define MAX_DETECTIONS 10    // Maximum detections per frame
