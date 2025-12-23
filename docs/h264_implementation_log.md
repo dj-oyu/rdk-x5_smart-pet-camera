@@ -695,8 +695,109 @@ $ ./scripts/test_h264_recording.sh --duration 5
 
 ---
 
+### Fluent Stream Switching設計調査 ✅
+
+**調査日**: 2025-12-23
+
+**目的**: カメラ切り替え時のスムーズなH.264ストリーム切り替え方式の調査
+
+**調査項目**:
+1. libspcdev APIのGOP/キーフレーム制御機能
+2. デフォルトGOP設定の実測値
+3. 最適な切り替え方式の選定
+
+**調査結果**:
+
+#### 1. libspcdev API制約
+- ❌ **GOP設定API なし**: `sp_start_encode()`はwidth, height, bitrateのみ
+- ❌ **動的キーフレーム要求API なし**: `sp_encoder_request_idr()`等は存在しない
+- ❌ **エンコーダー詳細設定構造体 なし**
+- ❌ **ストリームメタデータ取得API なし**
+
+**調査方法**:
+```bash
+# ヘッダーファイル解析
+cat /usr/include/sp_codec.h /usr/include/sp_vio.h
+
+# ライブラリシンボル確認
+nm -D /usr/lib/libspcdev.so | grep -i "encode\|gop\|keyframe"
+
+# サンプルコード解析
+cat /app/cdev_demo/vio2encoder/vio2encoder.c
+```
+
+#### 2. デフォルトGOP実測値
+
+**解析対象**: `recordings/recording_20251223_223031.h264`
+
+**方法**:
+```bash
+ffprobe -v error -select_streams v:0 -show_entries frame=pict_type \
+  -of csv=p=0 recording.h264 | head -50 | nl
+```
+
+**結果**:
+```
+Frame 1:  I (キーフレーム)
+Frame 2-14: P (予測フレーム)
+Frame 15: I (キーフレーム)
+Frame 16-28: P
+Frame 29: I (キーフレーム)
+```
+
+**GOP構造**:
+- **GOP Size: 14フレーム**
+- **キーフレーム間隔: 14フレーム = 約470ms @ 30fps**
+- **Pattern: I + 13 P-frames**
+
+#### 3. 設計案の評価
+
+**検討した4つの案**:
+
+| 案 | 概要 | libspcdev対応 | 実装難易度 | 切り替え遅延 | 採用 |
+|----|------|--------------|----------|------------|-----|
+| A. キーフレーム同期 | SIGUSR2でIDR要求 | ❌ API不在 | 高 | 50-500ms | ❌ |
+| B. タイムスタンプ同期 | NV12/H.264同期 | ✅ | 中 | 即座 | ❌ キーフレーム問題未解決 |
+| C. バッファオーバーラップ | クライアント切り替え | ✅ | 高 | クライアント依存 | ❌ 複雑 |
+| **D. ウォームアップ延長** | warmup=15フレーム | ✅ | **低** | **500ms** | **✅** |
+
+**採用: 案D（ウォームアップ延長型）**
+
+**根拠**:
+1. デフォルトGOP（470ms）が既に十分短い
+2. warmup_frames = 15（500ms）で、ほぼ確実にキーフレームから開始
+3. 既存コードへの変更最小（1行変更）
+4. API制約を回避
+
+**実装**:
+```c
+// camera_switcher_daemon.c
+cfg.warmup_frames = 15;  // 3 → 15 に変更
+
+// 確率計算:
+// - GOP間隔: 470ms
+// - Warmup期間: 500ms
+// - キーフレーム遭遇確率: ~100%
+```
+
+#### 4. 設計ドキュメント
+
+詳細設計: [fluent_stream_switching_design.md](./fluent_stream_switching_design.md)
+- 4つの設計案の詳細比較
+- シグナルベースの制御フロー
+- 共有メモリベースの状態同期
+- libspcdev API調査結果
+
+**次のアクション**:
+1. camera_switcher_daemon.c の warmup_frames 変更
+2. 統合テスト（カメラ切り替えストリーム連続性）
+3. VLC再生でキーフレーム開始確認
+
+---
+
 **Last Updated**: 2025-12-23
 **Author**: Claude Sonnet 4.5
 **Related Documents**:
 - [h264_encoding_integration_guide.md](./h264_encoding_integration_guide.md)
-- [camera_switcher_h264_migration.md](./camera_switcher_h264_migration.md) - NEW
+- [camera_switcher_h264_migration.md](./camera_switcher_h264_migration.md)
+- [fluent_stream_switching_design.md](./fluent_stream_switching_design.md) - NEW

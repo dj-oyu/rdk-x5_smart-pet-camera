@@ -295,10 +295,52 @@ SHM_PATH = os.getenv("H264_SHM_PATH", "/dev/shm/pet_camera_stream")
 
 ---
 
+## Fluent Stream Switching調査結果 ✅
+
+**調査日**: 2025-12-23
+**調査目的**: カメラ切り替え時のH.264ストリーム連続性確保方式の決定
+
+### 調査結果サマリー
+
+**libspcdev API制約**:
+- ❌ GOP設定API なし
+- ❌ 動的キーフレーム要求API なし
+- ✅ デフォルトGOP: 14フレーム（約470ms @ 30fps）
+
+**採用方式**: **案D（ウォームアップ延長型）**
+
+**実装内容**:
+```c
+// camera_switcher_daemon.c
+cfg.warmup_frames = 15;  // 3 → 15 に変更（約500ms）
+```
+
+**根拠**:
+1. デフォルトGOPが既に短い（470ms）
+2. warmup 500msで、ほぼ確実にキーフレームから開始可能
+3. 実装が最もシンプル（1行変更）
+4. API制約を回避
+
+**詳細設計**: [fluent_stream_switching_design.md](./fluent_stream_switching_design.md)
+
+### 実装への影響
+
+**Phase 2（統合実装）への追加タスク**:
+- [ ] camera_switcher_daemon.c の warmup_frames を 15 に変更
+- [ ] カメラ切り替え統合テスト
+- [ ] VLC再生でキーフレーム開始確認
+
+**変更不要**:
+- ~~SIGUSR2ハンドラー追加~~ - 動的キーフレーム要求APIなし
+- ~~GOP設定変更~~ - API制約により不可能
+
+---
+
 ## 参考資料
 
 - [H.264 Encoding Integration Guide](./h264_encoding_integration_guide.md)
 - [H.264 Implementation Log](./h264_implementation_log.md)
+- [Fluent Stream Switching Design](./fluent_stream_switching_design.md) - NEW
 - [HW Encoding FAQ](./hw_encoding_faq.md)
 - libspcdev sample: `/app/cdev_demo/vio_capture/capture.c`
 
@@ -306,3 +348,4 @@ SHM_PATH = os.getenv("H264_SHM_PATH", "/dev/shm/pet_camera_stream")
 
 **Last Updated**: 2025-12-23
 **Next Review**: camera_daemon_drobotics.c 完成時
+**Status**: ✅ Fluent switching調査完了 - 案D採用確定
