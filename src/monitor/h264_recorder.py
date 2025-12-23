@@ -125,14 +125,29 @@ class H264Recorder:
     def _record_loop(self) -> None:
         """録画ループ（スレッドで実行）"""
         print("[H264Recorder] Recording loop started")
+        print(f"[H264Recorder] Expecting format: {FrameFormat.H264.value} (H264)")
 
         while self._recording:
             # フレーム取得
-            frame = self.shm.read_latest_frame()
+            try:
+                frame = self.shm.read_latest_frame()
+            except Exception as e:
+                print(f"[H264Recorder] Error reading frame from shared memory: {e}")
+                import traceback
+                traceback.print_exc()
+                time.sleep(0.1)
+                continue
 
             if frame is None:
                 time.sleep(0.01)  # 10ms待機
                 continue
+
+            # 初回フレーム情報をログ
+            if self._frame_count == 0:
+                print(f"[H264Recorder] First frame: format={frame.format}, "
+                      f"frame_number={frame.frame_number}, "
+                      f"data_size={len(frame.data)} bytes, "
+                      f"resolution={frame.width}x{frame.height}")
 
             # 同じフレームをスキップ
             if frame.frame_number == self._last_frame_number:
@@ -145,26 +160,46 @@ class H264Recorder:
             if frame.format != FrameFormat.H264.value:
                 # H.264以外のフォーマットは警告を出してスキップ
                 if self._frame_count == 0:  # 初回のみ警告
-                    print(f"[H264Recorder] Warning: Frame format is {frame.format}, expected H.264 (3)")
+                    print(f"[H264Recorder] ERROR: Frame format is {frame.format}, "
+                          f"expected H.264 ({FrameFormat.H264.value})")
+                    print(f"[H264Recorder] Available formats: {list(FrameFormat)}")
                 time.sleep(0.01)
                 continue
 
             # NAL unitsをファイルに書き込み
             try:
-                data_to_write = bytes(frame.data[:frame.size])
+                # frame.dataは既に正しいサイズにスライスされている
+                data_to_write = bytes(frame.data)
+
+                if len(data_to_write) == 0:
+                    print(f"[H264Recorder] Warning: Frame {frame.frame_number} has 0 bytes data")
+                    continue
+
                 self._file_handle.write(data_to_write)
+                self._file_handle.flush()  # 即座にディスクに書き込み
                 self._frame_count += 1
                 self._bytes_written += len(data_to_write)
 
-                # 30フレームごとにログ
-                if self._frame_count % 30 == 0:
+                # 初回と30フレームごとにログ
+                if self._frame_count == 1:
+                    print(f"[H264Recorder] ✅ First frame written: {len(data_to_write)} bytes")
+                elif self._frame_count % 30 == 0:
                     fps = 30.0  # 仮定
                     duration = self._frame_count / fps
                     print(f"[H264Recorder] Progress: {self._frame_count} frames "
                           f"({duration:.1f}s, {self._bytes_written:,} bytes)")
 
+            except AttributeError as e:
+                print(f"[H264Recorder] AttributeError accessing frame data: {e}")
+                print(f"[H264Recorder] Frame object attributes: {dir(frame)}")
+                import traceback
+                traceback.print_exc()
+                break
             except Exception as e:
-                print(f"[H264Recorder] Error writing frame: {e}")
+                print(f"[H264Recorder] Error writing frame {frame.frame_number}: {e}")
+                import traceback
+                traceback.print_exc()
                 break
 
-        print("[H264Recorder] Recording loop stopped")
+        print(f"[H264Recorder] Recording loop stopped (wrote {self._frame_count} frames, "
+              f"{self._bytes_written} bytes total)")
