@@ -22,7 +22,9 @@ from common.types import Frame, DetectionResult, Detection, BoundingBox, Detecti
 
 # MockSharedMemoryをインポート（型ヒント用）
 sys.path.insert(0, str(Path(__file__).parent.parent / "mock"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "capture"))
 from shared_memory import MockSharedMemory
+from real_shared_memory import RealSharedMemory, SHM_NAME_STREAM
 from camera_switcher import SwitchMode
 from common.types import CameraType
 
@@ -267,29 +269,28 @@ class WebMonitor:
             # NV12: Y plane + UV plane (interleaved)
             y_size = frame.width * frame.height
             uv_size = y_size // 2
+            expected_size = y_size + uv_size
 
-            if len(frame.data) < y_size + uv_size:
+            if len(frame.data) < expected_size:
                 print(
-                    f"[WARN] NV12 frame too small: {len(frame.data)} < {y_size + uv_size}"
+                    f"[WARN] NV12 frame too small: {len(frame.data)} < {expected_size}"
                 )
                 img = np.zeros((frame.height, frame.width, 3), dtype=np.uint8)
             else:
                 try:
-                    # NV12を1次元配列として準備
-                    yuv_data = np.frombuffer(
-                        frame.data[: y_size + uv_size], dtype=np.uint8
-                    )
+                    # NV12データを読み取り（sp_vio_get_frame()から取得）
+                    yuv_data = np.frombuffer(frame.data[:expected_size], dtype=np.uint8)
 
                     # NV12形式: [Y: height x width] [UV: height/2 x width (interleaved)]
                     # reshapeして (height * 3/2, width) にする
                     yuv_img = yuv_data.reshape((frame.height * 3 // 2, frame.width))
 
-                    # NV12 → BGR変換（OpenCVネイティブ）
+                    # NV12 → BGR変換
                     img = cv2.cvtColor(yuv_img, cv2.COLOR_YUV2BGR_NV12)
+
                 except Exception as e:
                     print(f"[ERROR] NV12 conversion failed: {e}")
                     import traceback
-
                     traceback.print_exc()
                     img = np.zeros((frame.height, frame.width, 3), dtype=np.uint8)
         elif frame.format == 3:  # H.264
@@ -617,7 +618,12 @@ def create_app(
         """H.264録画開始"""
         if not hasattr(monitor, 'recorder'):
             from h264_recorder import H264Recorder
-            monitor.recorder = H264Recorder(shm, Path("./recordings"))
+            if isinstance(shm, RealSharedMemory):
+                h264_shm = RealSharedMemory(frame_shm_name=SHM_NAME_STREAM)
+                h264_shm.open()
+                monitor.recorder = H264Recorder(h264_shm, Path("./recordings"))
+            else:
+                monitor.recorder = H264Recorder(shm, Path("./recordings"))
 
         data = request.get_json() or {}
         filename = data.get("filename")

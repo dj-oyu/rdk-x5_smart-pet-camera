@@ -21,6 +21,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,10 +90,13 @@ static volatile sig_atomic_t g_running = 1;
 static volatile uint32_t g_current_interval_ms = 0; // Current frame interval, updated by SIGUSR1
 
 // Dual shared memory: NV12 frames (for brightness/detection) + H.264 stream (for recording)
-static SharedFrameBuffer *g_shm_nv12 = NULL;  // NV12 frames
-static SharedFrameBuffer *g_shm_h264 = NULL;  // H.264 stream
-static const char *g_shm_name_nv12 = NULL;    // Custom name for NV12 (env: SHM_NAME_NV12)
-static const char *g_shm_name_h264 = NULL;    // Custom name for H.264 (env: SHM_NAME_H264)
+static SharedFrameBuffer *g_shm_nv12 = NULL;      // NV12 frames
+static SharedFrameBuffer *g_shm_h264 = NULL;      // H.264 stream
+static SharedFrameBuffer *g_shm_interval = NULL;  // Frame interval source
+static const char *g_shm_name_nv12 = NULL;        // Custom name for NV12 (env: SHM_NAME_NV12)
+static const char *g_shm_name_h264 = NULL;        // Custom name for H.264 (env: SHM_NAME_H264)
+static const char *g_shm_name_legacy = NULL;      // Legacy single-shm name (env: SHM_NAME)
+static bool g_legacy_h264_only = false;
 
 // -----------------------------
 // Argument and context helpers
@@ -138,9 +142,10 @@ static void populate_context_from_args(camera_context_t *ctx,
 static void signal_handler(int signum) {
   if (signum == SIGUSR1) {
     // Reload frame interval from shared memory (push notification)
-    if (g_shm) {
+    if (g_shm_interval) {
       uint32_t old_interval = g_current_interval_ms;
-      g_current_interval_ms = __atomic_load_n(&g_shm->frame_interval_ms, __ATOMIC_ACQUIRE);
+      g_current_interval_ms =
+          __atomic_load_n(&g_shm_interval->frame_interval_ms, __ATOMIC_ACQUIRE);
       // Note: printf in signal handler is technically unsafe, but useful for debugging
       printf("[Signal] SIGUSR1 received: interval %u -> %u ms\n", old_interval, g_current_interval_ms);
     }
@@ -313,21 +318,27 @@ error_cleanup:
 static void cleanup_pipeline(camera_context_t *ctx) {
   printf("[Info] Cleaning up H.264 pipeline...\n");
 
-  if (ctx->encoder_object && ctx->vio_object) {
-    sp_module_unbind(ctx->vio_object, SP_MTYPE_VIO,
-                     ctx->encoder_object, SP_MTYPE_ENCODER);
-    printf("[Info] VIO → Encoder unbound\n");
+  // Step 1: Close VIO (stops worker thread)
+  // Note: Unbind is already done in main() before calling this function
+  if (ctx->vio_object) {
+    sp_vio_close(ctx->vio_object);
+    printf("[Info] VIO closed\n");
   }
 
+  // Step 2: Stop encoder
   if (ctx->encoder_object) {
     sp_stop_encode(ctx->encoder_object);
+    printf("[Info] Encoder stopped\n");
+  }
+
+  // Step 3: Release resources
+  if (ctx->encoder_object) {
     sp_release_encoder_module(ctx->encoder_object);
     ctx->encoder_object = NULL;
     printf("[Info] Encoder released\n");
   }
 
   if (ctx->vio_object) {
-    sp_vio_close(ctx->vio_object);
     sp_release_vio_module(ctx->vio_object);
     ctx->vio_object = NULL;
     printf("[Info] VIO released\n");
@@ -343,24 +354,35 @@ static int create_shared_memory(void) {
   // Get custom shared memory names via environment variables
   g_shm_name_nv12 = getenv("SHM_NAME_NV12");
   g_shm_name_h264 = getenv("SHM_NAME_H264");
+  g_shm_name_legacy = getenv("SHM_NAME");
+  g_legacy_h264_only = (g_shm_name_legacy && !g_shm_name_nv12 && !g_shm_name_h264);
+
+  if (g_legacy_h264_only) {
+    g_shm_h264 = shm_frame_buffer_create_named(g_shm_name_legacy);
+    if (!g_shm_h264) {
+      fprintf(stderr, "[Error] Failed to create legacy shared memory: %s\n",
+              g_shm_name_legacy);
+      return -1;
+    }
+    g_shm_interval = g_shm_h264;
+    printf("[Info] Legacy H.264-only shared memory: %s\n", g_shm_name_legacy);
+    return 0;
+  }
 
   // Create NV12 shared memory
-  if (g_shm_name_nv12) {
-    g_shm_nv12 = shm_frame_buffer_create_named(g_shm_name_nv12);
-    if (!g_shm_nv12) {
-      fprintf(stderr, "[Error] Failed to create NV12 shared memory: %s\n", g_shm_name_nv12);
-      return -1;
-    }
-    printf("[Info] Created NV12 shared memory: %s\n", g_shm_name_nv12);
+  const char *nv12_name = g_shm_name_nv12 ? g_shm_name_nv12 : g_shm_name_legacy;
+  if (nv12_name) {
+    g_shm_nv12 = shm_frame_buffer_create_named(nv12_name);
   } else {
-    // Default: create with standard name
     g_shm_nv12 = shm_frame_buffer_create();
-    if (!g_shm_nv12) {
-      fprintf(stderr, "[Error] Failed to create default NV12 shared memory\n");
-      return -1;
-    }
-    printf("[Info] Created default NV12 shared memory\n");
   }
+  if (!g_shm_nv12) {
+    fprintf(stderr, "[Error] Failed to create NV12 shared memory\n");
+    return -1;
+  }
+  g_shm_interval = g_shm_nv12;
+  printf("[Info] Created NV12 shared memory: %s\n",
+         nv12_name ? nv12_name : SHM_NAME_FRAMES);
 
   // Create H.264 shared memory
   if (g_shm_name_h264) {
@@ -368,8 +390,8 @@ static int create_shared_memory(void) {
     if (!g_shm_h264) {
       fprintf(stderr, "[Error] Failed to create H.264 shared memory: %s\n", g_shm_name_h264);
       // Cleanup NV12 memory before returning
-      if (g_shm_name_nv12) {
-        shm_frame_buffer_destroy_named(g_shm_nv12, g_shm_name_nv12);
+      if (nv12_name) {
+        shm_frame_buffer_destroy_named(g_shm_nv12, nv12_name);
       } else {
         shm_frame_buffer_destroy(g_shm_nv12);
       }
@@ -384,23 +406,6 @@ static int create_shared_memory(void) {
   return 0;
 }
 
-static int open_or_create_shared_memory(void) {
-  // Check for custom shared memory name via environment variable
-  g_shm_name = getenv("SHM_NAME");
-  if (g_shm_name) {
-    g_shm = shm_frame_buffer_open_named(g_shm_name);
-  } else {
-    g_shm = shm_frame_buffer_open();
-  }
-
-  if (g_shm) {
-    return 0;
-  }
-
-  // Fall back to creation when the segment does not yet exist
-  return create_shared_memory();
-}
-
 // Note: open_memory_manager() removed - not needed with libspcdev
 // Note: initialize_camera() removed - configuration now in create_and_start_pipeline()
 // Note: start_pipeline() is now just create_and_start_pipeline()
@@ -412,15 +417,36 @@ static uint64_t run_capture_loop(camera_context_t *ctx, const struct arguments *
   int frame_limit = args->count;
   uint64_t frame_counter = 0;
   int stream_size = 0;
+  int nv12_ret = 0;
+  size_t nv12_size = (size_t)ctx->out_width * (size_t)ctx->out_height * 3 / 2;
+  uint8_t *nv12_buffer = NULL;
 
   // Allocate buffer for H.264 NAL units
-  char *h264_buffer = malloc(H264_STREAM_BUFFER_SIZE);
-  if (!h264_buffer) {
-    fprintf(stderr, "[Error] Failed to allocate H.264 buffer\n");
-    return 0;
+  char *h264_buffer = NULL;
+  if (g_shm_h264) {
+    h264_buffer = malloc(H264_STREAM_BUFFER_SIZE);
+    if (!h264_buffer) {
+      fprintf(stderr, "[Error] Failed to allocate H.264 buffer\n");
+      return 0;
+    }
+  }
+  if (g_shm_nv12) {
+    if (nv12_size > MAX_FRAME_SIZE) {
+      fprintf(stderr, "[Error] NV12 frame too large: %zu > %d bytes\n",
+              nv12_size, MAX_FRAME_SIZE);
+      free(h264_buffer);
+      return 0;
+    }
+    nv12_buffer = malloc(MAX_FRAME_SIZE);
+    if (!nv12_buffer) {
+      fprintf(stderr, "[Error] Failed to allocate NV12 buffer\n");
+      free(h264_buffer);
+      return 0;
+    }
   }
 
-  printf("[Info] Starting H.264 capture loop...\n");
+  printf("[Info] Starting capture loop (NV12=%s, H.264=%s)...\n",
+         g_shm_nv12 ? "on" : "off", g_shm_h264 ? "on" : "off");
 
   // Initialize frame interval from environment variable
   const char *interval_env = getenv("FRAME_INTERVAL_MS");
@@ -432,59 +458,84 @@ static uint64_t run_capture_loop(camera_context_t *ctx, const struct arguments *
   }
 
   // Set initial interval in shared memory for dynamic control
-  if (g_shm) {
-    __atomic_store_n(&g_shm->frame_interval_ms, g_current_interval_ms, __ATOMIC_RELEASE);
+  if (g_shm_interval) {
+    __atomic_store_n(&g_shm_interval->frame_interval_ms, g_current_interval_ms,
+                     __ATOMIC_RELEASE);
   }
 
   while (g_running &&
          ((frame_limit == 0) || (frame_counter < (uint64_t)frame_limit))) {
+    bool wrote_any = false;
+    struct timespec capture_ts;
+    clock_gettime(CLOCK_MONOTONIC, &capture_ts);
 
-    // Get H.264 encoded stream from hardware encoder
-    memset(h264_buffer, 0, H264_STREAM_BUFFER_SIZE);
-    stream_size = sp_encoder_get_stream(ctx->encoder_object, h264_buffer);
-
-    if (stream_size == -1) {
-      fprintf(stderr, "[Error] sp_encoder_get_stream failed\n");
-      usleep(10000);  // 10ms wait before retry
-      continue;
+    if (g_shm_nv12) {
+      // Try sp_vio_get_frame instead of sp_vio_get_yuv
+      // sp_vio_get_yuv may return data in an unexpected format
+      nv12_ret = sp_vio_get_frame(ctx->vio_object, (char *)nv12_buffer,
+                                  ctx->out_width, ctx->out_height, 2000);
+      if (nv12_ret == 0) {
+        Frame nv12_frame = {0};
+        nv12_frame.frame_number = frame_counter;
+        nv12_frame.timestamp = capture_ts;
+        nv12_frame.camera_id = ctx->camera_index;
+        nv12_frame.width = ctx->out_width;
+        nv12_frame.height = ctx->out_height;
+        nv12_frame.format = 1;  // NV12
+        nv12_frame.data_size = nv12_size;
+        memcpy(nv12_frame.data, nv12_buffer, nv12_size);
+        if (shm_frame_buffer_write(g_shm_nv12, &nv12_frame) < 0) {
+          fprintf(stderr, "[Error] Failed to write NV12 frame to shared memory\n");
+        } else {
+          wrote_any = true;
+        }
+      } else {
+        fprintf(stderr, "[Warn] sp_vio_get_yuv failed: %d\n", nv12_ret);
+      }
     }
 
-    if (stream_size == 0) {
-      // No data available yet
-      usleep(1000);  // 1ms wait
-      continue;
+    if (g_shm_h264) {
+      memset(h264_buffer, 0, H264_STREAM_BUFFER_SIZE);
+      stream_size = sp_encoder_get_stream(ctx->encoder_object, h264_buffer);
+
+      if (stream_size == -1) {
+        fprintf(stderr, "[Error] sp_encoder_get_stream failed\n");
+      } else if (stream_size == 0) {
+        // No data available yet
+      } else if (stream_size > MAX_FRAME_SIZE) {
+        fprintf(stderr, "[Error] H.264 frame too large: %d > %d bytes\n",
+                stream_size, MAX_FRAME_SIZE);
+      } else {
+        Frame h264_frame = {0};
+        h264_frame.frame_number = frame_counter;
+        h264_frame.timestamp = capture_ts;
+        h264_frame.camera_id = ctx->camera_index;
+        h264_frame.width = ctx->out_width;
+        h264_frame.height = ctx->out_height;
+        h264_frame.format = 3;  // H.264
+        h264_frame.data_size = stream_size;
+        memcpy(h264_frame.data, h264_buffer, stream_size);
+        if (shm_frame_buffer_write(g_shm_h264, &h264_frame) < 0) {
+          fprintf(stderr, "[Error] Failed to write H.264 frame to shared memory\n");
+        } else {
+          wrote_any = true;
+        }
+      }
     }
 
-    // Prepare frame for shared memory
-    Frame shm_frame = {0};
-    shm_frame.frame_number = frame_counter;
-    clock_gettime(CLOCK_MONOTONIC, &shm_frame.timestamp);
-    shm_frame.camera_id = ctx->camera_index;
-    shm_frame.width = ctx->out_width;
-    shm_frame.height = ctx->out_height;
-    shm_frame.format = 3;  // H.264
-    shm_frame.data_size = stream_size;
-
-    // Validate stream size
-    if (stream_size > MAX_FRAME_SIZE) {
-      fprintf(stderr, "[Error] H.264 frame too large: %d > %d bytes\n",
-              stream_size, MAX_FRAME_SIZE);
+    if (!wrote_any) {
+      usleep(1000);
       continue;
-    }
-
-    // Copy H.264 NAL units to shared memory
-    memcpy(shm_frame.data, h264_buffer, stream_size);
-
-    // Write to shared memory
-    if (shm_frame_buffer_write(g_shm, &shm_frame) < 0) {
-      fprintf(stderr, "[Error] Failed to write frame to shared memory\n");
     }
 
     frame_counter++;
 
     // Print status every 30 frames
     if (frame_counter % 30 == 0) {
-      printf("[Info] Frame %lu captured (%d bytes H.264)\n", frame_counter, stream_size);
+      printf("[Info] Frame %lu captured (nv12=%s, h264=%s)\n",
+             frame_counter,
+             g_shm_nv12 ? "yes" : "no",
+             (g_shm_h264 && stream_size > 0) ? "yes" : "no");
     }
 
     // Frame interval control
@@ -494,8 +545,10 @@ static uint64_t run_capture_loop(camera_context_t *ctx, const struct arguments *
     }
   }
 
-  free(h264_buffer);
   printf("[Info] Capture loop completed: %lu frames\n", frame_counter);
+
+  free(h264_buffer);
+  free(nv12_buffer);
   return frame_counter;
 }
 
@@ -515,17 +568,26 @@ int main(int argc, char **argv) {
   populate_context_from_args(&ctx, &args);
 
   // Create shared memory
-  if (open_or_create_shared_memory() != 0) {
+  if (create_shared_memory() != 0) {
     return 1;
   }
 
   // Create and start H.264 pipeline
   if (create_and_start_pipeline(&ctx) != 0) {
     cleanup_pipeline(&ctx);
-    if (g_shm_name) {
-      shm_frame_buffer_destroy_named(g_shm, g_shm_name);
-    } else {
-      shm_frame_buffer_destroy(g_shm);
+    if (g_shm_nv12) {
+      if (g_shm_name_nv12 || g_shm_name_legacy) {
+        shm_frame_buffer_close(g_shm_nv12);
+      } else {
+        shm_frame_buffer_destroy(g_shm_nv12);
+      }
+    }
+    if (g_shm_h264) {
+      if (g_shm_name_h264 || g_legacy_h264_only) {
+        shm_frame_buffer_close(g_shm_h264);
+      } else {
+        shm_frame_buffer_destroy(g_shm_h264);
+      }
     }
     return 1;
   }
@@ -539,17 +601,33 @@ int main(int argc, char **argv) {
 
   frame_counter = run_capture_loop(&ctx, &args);
 
+  // Immediately unbind to stop VIO worker from pushing more frames
+  if (ctx.encoder_object && ctx.vio_object) {
+    sp_module_unbind(ctx.vio_object, SP_MTYPE_VIO,
+                     ctx.encoder_object, SP_MTYPE_ENCODER);
+    printf("[Info] VIO → Encoder unbound\n");
+
+    // Wait for VIO worker thread to recognize the unbind and stop
+    printf("[Info] Waiting for VIO worker to stop...\n");
+    sleep(1);  // 1 second for worker thread to complete
+  }
+
   // Cleanup
   cleanup_pipeline(&ctx);
-  if (g_shm) {
-    if (g_shm_name) {
-      // Custom-named shared memory is managed by the orchestrator;
-      // we only close (not destroy)
-      printf("[Info] Preserving custom-named shared memory: %s\n", g_shm_name);
-      shm_frame_buffer_close(g_shm);
+  if (g_shm_nv12) {
+    if (g_shm_name_nv12 || g_shm_name_legacy) {
+      printf("[Info] Preserving custom NV12 shared memory\n");
+      shm_frame_buffer_close(g_shm_nv12);
     } else {
-      // Default shared memory - we created it, so we destroy it
-      shm_frame_buffer_destroy(g_shm);
+      shm_frame_buffer_destroy(g_shm_nv12);
+    }
+  }
+  if (g_shm_h264) {
+    if (g_shm_name_h264 || g_legacy_h264_only) {
+      printf("[Info] Preserving custom H.264 shared memory\n");
+      shm_frame_buffer_close(g_shm_h264);
+    } else {
+      shm_frame_buffer_destroy(g_shm_h264);
     }
   }
 
