@@ -6,6 +6,7 @@ import argparse
 import os
 import signal
 import sys
+import threading
 from pathlib import Path
 
 # 共通型定義/モック環境をimportできるようにパスを追加
@@ -20,6 +21,14 @@ for path in (COMMON_SRC, MOCK_SRC, CAPTURE_SRC):
 from monitor.web_monitor import WebMonitor, create_app
 from shared_memory import MockSharedMemory
 from real_shared_memory import RealSharedMemory
+
+# WebRTC server (optional)
+try:
+    from monitor.webrtc_server import WebRTCServer
+    WEBRTC_AVAILABLE = True
+except ImportError:
+    WEBRTC_AVAILABLE = False
+    WebRTCServer = None  # type: ignore
 
 
 def _env_int(key: str, default: int) -> int:
@@ -75,6 +84,17 @@ def _build_parser() -> argparse.ArgumentParser:
         default=_env_int("MONITOR_FPS", 30),
         help="モニター処理の目標FPS (デフォルト: 30)",
     )
+    parser.add_argument(
+        "--webrtc-port",
+        type=int,
+        default=_env_int("WEBRTC_PORT", 8081),
+        help="WebRTCサーバーのポート番号 (デフォルト: 8081)",
+    )
+    parser.add_argument(
+        "--no-webrtc",
+        action="store_true",
+        help="WebRTCサーバーを起動しない（MJPEGのみ）",
+    )
 
     return parser
 
@@ -115,17 +135,53 @@ def main(argv: list[str] | None = None) -> None:
 
     app = create_app(shm, monitor)
 
+    # WebRTC server setup
+    webrtc_server = None
+    webrtc_thread = None
+
+    if not args.no_webrtc and WEBRTC_AVAILABLE and args.shm_type == "real":
+        try:
+            # Create H.264 shared memory for WebRTC
+            h264_shm = RealSharedMemory(frame_shm_name="/pet_camera_stream")
+            h264_shm.open()
+
+            # Create WebRTC server
+            webrtc_server = WebRTCServer(h264_shm, host=args.host, port=args.webrtc_port)
+
+            # Run WebRTC server in background thread
+            def run_webrtc():
+                try:
+                    webrtc_server.run()
+                except Exception as e:
+                    print(f"[ERROR] WebRTC server error: {e}")
+
+            webrtc_thread = threading.Thread(target=run_webrtc, daemon=True)
+            webrtc_thread.start()
+
+            print(f"WebRTC server: http://{args.host}:{args.webrtc_port}")
+        except Exception as e:
+            print(f"[WARN] WebRTC server startup failed: {e}")
+            print(f"[WARN] Continuing with MJPEG only")
+    elif args.no_webrtc:
+        print("WebRTC: Disabled (--no-webrtc)")
+    elif not WEBRTC_AVAILABLE:
+        print("WebRTC: Not available (dependencies not installed)")
+        print("        Install: cd src/monitor && uv sync")
+    elif args.shm_type != "real":
+        print("WebRTC: Disabled (requires --shm-type real)")
+
     print("=" * 60)
     print("Smart Pet Camera WebMonitor")
     print("=" * 60)
     print(f"Shared memory: {args.shm_type}")
     print(f"MJPEG quality: {args.jpeg_quality}")
     print(f"Target FPS: {args.fps}")
-    print(f"Web server: http://{args.host}:{args.port}")
+    print(f"Web UI: http://{args.host}:{args.port}")
     print("Press Ctrl+C to stop")
     print("=" * 60)
 
     def _shutdown_handler(signum, frame):  # type: ignore[arg-type]
+        print("\n[INFO] Shutting down...")
         monitor.stop()
         sys.exit(0)
 
