@@ -24,11 +24,11 @@ from real_shared_memory import RealSharedMemory
 
 # WebRTC server (optional)
 try:
-    from monitor.webrtc_server import WebRTCServer
+    import aiortc
+    import av
     WEBRTC_AVAILABLE = True
 except ImportError:
     WEBRTC_AVAILABLE = False
-    WebRTCServer = None  # type: ignore
 
 
 def _env_int(key: str, default: int) -> int:
@@ -135,38 +135,16 @@ def main(argv: list[str] | None = None) -> None:
 
     app = create_app(shm, monitor)
 
-    # WebRTC server setup
-    webrtc_server = None
-    webrtc_thread = None
-
+    # WebRTC endpoint is integrated into Flask app
+    # No separate server needed
     if not args.no_webrtc and WEBRTC_AVAILABLE and args.shm_type == "real":
-        try:
-            # Create H.264 shared memory for WebRTC
-            h264_shm = RealSharedMemory(frame_shm_name="/pet_camera_stream")
-            h264_shm.open()
-
-            # Create WebRTC server
-            webrtc_server = WebRTCServer(h264_shm, host=args.host, port=args.webrtc_port)
-
-            # Run WebRTC server in background thread
-            def run_webrtc():
-                try:
-                    webrtc_server.run()
-                except Exception as e:
-                    print(f"[ERROR] WebRTC server error: {e}")
-
-            webrtc_thread = threading.Thread(target=run_webrtc, daemon=True)
-            webrtc_thread.start()
-
-            print(f"WebRTC server: http://{args.host}:{args.webrtc_port}")
-        except Exception as e:
-            print(f"[WARN] WebRTC server startup failed: {e}")
-            print(f"[WARN] Continuing with MJPEG only")
+        print(f"WebRTC: Enabled (endpoint: /api/webrtc/offer)")
+        print(f"        Stream source: /pet_camera_stream")
     elif args.no_webrtc:
         print("WebRTC: Disabled (--no-webrtc)")
     elif not WEBRTC_AVAILABLE:
         print("WebRTC: Not available (dependencies not installed)")
-        print("        Install: cd src/monitor && uv sync")
+        print("        Install: uv sync")
     elif args.shm_type != "real":
         print("WebRTC: Disabled (requires --shm-type real)")
 

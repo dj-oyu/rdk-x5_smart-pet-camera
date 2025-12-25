@@ -3,6 +3,7 @@ CFLAGS := -Wall -Wextra -O2 -std=c11
 CPPFLAGS := -D_GNU_SOURCE -I/usr/include
 
 BUILD_DIR := ../../build
+BUILD_DIR_ABS := $(abspath $(BUILD_DIR))
 
 LDFLAGS := -L/usr/hobot/lib
 
@@ -26,14 +27,14 @@ SWITCHER_DAEMON_BINARY := $(BUILD_DIR)/camera_switcher_daemon
 
 LDLIBS_COMMON := -lrt
 LDLIBS_DROBOTICS := $(LDLIBS_COMMON) -lpthread -lspcdev
-LDLIBS_SWITCHER_DEMO := $(LDLIBS_COMMON)
-LDLIBS_SWITCHER_DAEMON := $(LDLIBS_COMMON) -lpthread
+LDLIBS_SWITCHER_DEMO := $(LDLIBS_COMMON) -ljpeg
+LDLIBS_SWITCHER_DAEMON := $(LDLIBS_COMMON) -lpthread -ljpeg
 
 DAEMON_ARGS ?= -C 0 -P 1
 
 .PHONY: all clean test switcher-demo switcher-runtime-lib switcher-daemon switcher-daemon-build run run-daemon cleanup kill-processes help
 
-all: $(DAEMON_BINARY) $(SHM_TEST_BINARY)
+all: $(DAEMON_BINARY) $(SHM_TEST_BINARY) $(SWITCHER_DAEMON_BINARY)
 
 $(BUILD_DIR):
 	@mkdir -p $@
@@ -52,6 +53,10 @@ $(SWITCHER_RUNTIME_LIBRARY): $(SWITCHER_RUNTIME_OBJECTS) | $(BUILD_DIR)
 
 $(SWITCHER_DAEMON_BINARY): $(SWITCHER_DAEMON_OBJECTS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_SWITCHER_DAEMON)
+
+# Compile camera_switcher_daemon.c with absolute path to camera_daemon_drobotics
+camera_switcher_daemon.o: camera_switcher_daemon.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) -DCAPTURE_BIN_PATH=\"$(BUILD_DIR_ABS)/camera_daemon_drobotics\" -c -o $@ $<
 
 %.o: %.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
@@ -91,8 +96,12 @@ run-daemon: cleanup $(DAEMON_BINARY)
 cleanup: kill-processes clean
 	@echo "[Cleanup] Removing shared memory segments..."
 	@-rm -f /dev/shm/pet_camera_frames 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_frames" || true
+	@-rm -f /dev/shm/pet_camera_active_frame 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_active_frame" || true
+	@-rm -f /dev/shm/pet_camera_stream 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_stream" || true
 	@-rm -f /dev/shm/pet_camera_frames_day 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_frames_day" || true
 	@-rm -f /dev/shm/pet_camera_frames_night 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_frames_night" || true
+	@-rm -f /dev/shm/pet_camera_stream_day 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_stream_day" || true
+	@-rm -f /dev/shm/pet_camera_stream_night 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_stream_night" || true
 	@-rm -f /dev/shm/pet_camera_frames_probe 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_frames_probe" || true
 	@-rm -f /dev/shm/pet_camera_detections 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_detections" || true
 	@echo "[Cleanup] Shared memory cleanup complete"

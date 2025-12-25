@@ -5,6 +5,7 @@ Flask + MJPEGストリーミングでBBox合成映像をブラウザに表示
 """
 
 from flask import Flask, Response, jsonify, render_template_string, request, send_from_directory
+import asyncio
 import cv2
 import numpy as np
 import json
@@ -606,8 +607,8 @@ def create_app(
                         statusDiv.textContent = '● Connecting...';
                         statusDiv.style.color = '#ff0';
 
-                        // Create WebRTC client
-                        webrtcClient = new WebRTCVideoClient(video, 'http://localhost:8081');
+                        // Create WebRTC client (use same origin as current page)
+                        webrtcClient = new WebRTCVideoClient(video);
 
                         // Connection state callback
                         webrtcClient.onConnectionStateChange = (state) => {
@@ -816,6 +817,39 @@ def create_app(
 
         stats = monitor.recorder.get_stats()
         return jsonify(stats)
+
+    # pyright: ignore[reportUnusedFunction]
+    @app.route("/api/webrtc/offer", methods=["POST"])
+    def webrtc_offer():
+        """WebRTC offer/answer exchange"""
+        try:
+            print("[WebRTC] Received offer request")
+            # Import webrtc_server module
+            from webrtc_server import handle_offer
+
+            data = request.get_json()
+            if not data or "sdp" not in data or "type" not in data:
+                print("[WebRTC] Invalid offer data")
+                return jsonify({"error": "Invalid offer data"}), 400
+
+            print(f"[WebRTC] Processing offer: type={data['type']}, sdp_length={len(data['sdp'])}")
+
+            # Handle offer asynchronously in event loop
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                answer = loop.run_until_complete(handle_offer(data))
+                print(f"[WebRTC] Answer created successfully")
+            finally:
+                loop.close()
+
+            return jsonify(answer)
+
+        except Exception as e:
+            import traceback
+            print("[WebRTC] Error processing offer:")
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
 
     # pyright: ignore[reportUnusedFunction]
     @app.route("/api/detections/stream")

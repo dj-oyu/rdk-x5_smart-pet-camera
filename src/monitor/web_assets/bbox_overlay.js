@@ -131,7 +131,11 @@ export class BBoxOverlay {
                 const data = JSON.parse(event.data);
 
                 // Update detections
-                if (data.latest_detection && data.latest_detection.detections) {
+                // Support both formats: direct detections array and wrapped in latest_detection
+                if (data.detections) {
+                    this.detections = data.detections;
+                    this.latestDetection = data;
+                } else if (data.latest_detection && data.latest_detection.detections) {
                     this.detections = data.latest_detection.detections;
                     this.latestDetection = data.latest_detection;
                 } else {

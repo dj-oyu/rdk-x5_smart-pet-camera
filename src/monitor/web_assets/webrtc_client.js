@@ -10,9 +10,10 @@ export class WebRTCVideoClient {
      * @param {HTMLVideoElement} videoElement - Video element for playback
      * @param {string} signalingUrl - WebRTC signaling server URL
      */
-    constructor(videoElement, signalingUrl = 'http://localhost:8081') {
+    constructor(videoElement, signalingUrl = null) {
         this.videoElement = videoElement;
-        this.signalingUrl = signalingUrl;
+        // Use same origin by default (Flask app is on same port)
+        this.signalingUrl = signalingUrl || window.location.origin;
         this.pc = null;
         this.connectionState = 'disconnected';
 

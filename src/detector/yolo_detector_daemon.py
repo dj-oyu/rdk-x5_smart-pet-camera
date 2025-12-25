@@ -24,7 +24,7 @@ COMMON_SRC = PROJECT_ROOT / "src" / "common" / "src"
 sys.path.insert(0, str(CAPTURE_DIR))
 sys.path.insert(0, str(COMMON_SRC))
 
-from real_shared_memory import RealSharedMemory
+from real_shared_memory import RealSharedMemory, SHM_NAME_ACTIVE_FRAME
 from detection.yolo_detector import YoloDetector
 
 # ロガー設定
@@ -86,7 +86,7 @@ class YoloDetectorDaemon:
 
         # 共有メモリを開く
         try:
-            self.shm = RealSharedMemory()
+            self.shm = RealSharedMemory(frame_shm_name=SHM_NAME_ACTIVE_FRAME)
             self.shm.open()
             self.shm.open_detection_write()
             logger.info("Connected to shared memory")

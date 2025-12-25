@@ -148,6 +148,21 @@ YOLO_MODEL_PATH="${YOLO_MODELS_DIR}/${MODEL_FILE}"
 
 PIDS=()
 
+wait_for_shm() {
+  local name="$1"
+  local timeout="${2:-10}"
+  local elapsed=0
+
+  while [[ "${elapsed}" -lt "${timeout}" ]]; do
+    if [[ -e "/dev/shm/${name}" ]]; then
+      return 0
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  return 1
+}
+
 cleanup() {
   echo "[cleanup] stopping background processes..."
   for pid in "${PIDS[@]:-}"; do
@@ -182,6 +197,13 @@ echo "[start] launching camera_switcher_daemon..."
   ../../build/camera_switcher_daemon
 ) &
 PIDS+=("$!")
+
+echo "[wait] waiting for shared memory to appear..."
+if ! wait_for_shm "pet_camera_active_frame" 10; then
+  echo "[error] shared memory /dev/shm/pet_camera_active_frame not found after 10s" >&2
+  echo "        camera_daemon_drobotics may have failed to start." >&2
+  exit 1
+fi
 
 if [[ "${RUN_DETECTOR}" -eq 1 ]]; then
   echo "[start] launching YOLO detector (model=${YOLO_MODEL}, score_thres=${YOLO_SCORE_THRESHOLD})..."

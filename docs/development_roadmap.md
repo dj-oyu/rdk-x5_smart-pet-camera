@@ -365,10 +365,12 @@ class RealDetector:
 | Phase | 目標 | 完了日 | ステータス |
 |-------|------|---------|-----------|
 | Phase 0 | モック環境構築 | 2025-12-19 | ✅ 完了 |
-| Phase 1 | 実機Capture + BBox合成 | 2025-12-20 | ✅ 完了 |
-| Phase 2 | 実機統合 | TBD | 📋 次のステップ |
-| Phase 3 | 検出モデル | TBD | 📋 計画中 |
-| Phase 4 | 行動推定 | TBD | 📋 計画中 |
+| Phase 1 (旧) | 実機Capture + BBox合成 | 2025-12-20 | ✅ 完了 |
+| **Phase 1 (H.264)** | **H.264 HW Encoding** | 2025-12-23 | ✅ 完了 |
+| **Phase 2 (H.264)** | **カメラスイッチャーH.264対応** | 2025-12-24 | ✅ 完了 |
+| **Phase 3 (H.264)** | **WebRTC H.264配信** | 2025-12-26 | 🔧 実装完了・デバッグ中 |
+| Phase 4 | 本物の検出モデル統合 | TBD | 📋 計画中 |
+| Phase 5 | 行動推定 | TBD | 📋 計画中 |
 
 ### Phase 1 達成内容（100%完了）
 - ✅ 共有メモリ実装・テスト完了（POSIX shm、atomic操作）
@@ -407,7 +409,33 @@ class RealDetector:
 
 ## 変更履歴
 
-- 2025-12-20: **Phase 1 完了** 🎉
+- 2025-12-26: **Phase 3 (H.264) 実装完了・デバッグ中** 🔧
+  - aiortc/av依存関係追加（WebRTC対応）
+  - H264StreamTrack実装（共有メモリ → WebRTC）
+  - WebRTCシグナリングサーバー実装（SDP offer/answer）
+  - Flask統合（/api/webrtc/offer エンドポイント）
+  - ブラウザWebRTCクライアント実装
+  - Canvas BBoxオーバーレイ（SSE統合）
+  - HTML UI更新（WebRTC/MJPEG切り替え）
+  - **課題**: WebRTC接続確立のデバッグ中
+  - **詳細**: [webrtc_phase3_implementation_log.md](./webrtc_phase3_implementation_log.md)
+
+- 2025-12-24: **Phase 2 (H.264) 完了** ✅
+  - カメラスイッチャーH.264対応完了
+  - NV12+H.264デュアルフォーマット生成
+  - 6箇所の共有メモリ構成
+  - ブラックアウトなしのカメラ切り替え
+  - NV12色変換問題解決（`sp_vio_get_frame()`使用）
+  - **詳細**: [camera_switcher_h264_migration.md](./camera_switcher_h264_migration.md)
+
+- 2025-12-23: **Phase 1 (H.264) 完了** ✅
+  - H.264ハードウェアエンコーディング実装
+  - libspcdev統合（VIO→Encoder直結）
+  - CPU使用率57%削減、ビットレート47%削減
+  - H264Recorder実装（0バイト問題解決）
+  - **詳細**: [h264_implementation_log.md](./h264_implementation_log.md)
+
+- 2025-12-20: **Phase 1 (旧) 完了** 🎉
   - カメラデーモン初期化ハング問題を解決
   - カメラデーモンが正常に動作（D-Robotics MIPI）
   - ダミー検出デーモン実装完了（10-15fps、ランダム変化）

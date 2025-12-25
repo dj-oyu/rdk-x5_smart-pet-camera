@@ -24,8 +24,10 @@ from typing import Optional
 import numpy as np
 
 # Constants (must match C definitions)
-SHM_NAME_FRAMES = "/pet_camera_frames"
-SHM_NAME_DETECTIONS = "/pet_camera_detections"
+SHM_NAME_ACTIVE_FRAME = "/pet_camera_active_frame"
+SHM_NAME_STREAM = "/pet_camera_stream"
+SHM_NAME_FRAMES = os.getenv("SHM_NAME_FRAMES", SHM_NAME_ACTIVE_FRAME)
+SHM_NAME_DETECTIONS = os.getenv("SHM_NAME_DETECTIONS", "/pet_camera_detections")
 RING_BUFFER_SIZE = 30
 MAX_DETECTIONS = 10
 MAX_FRAME_SIZE = 1920 * 1080 * 3 // 2  # Max NV12 frame size (1080p)
@@ -72,7 +74,7 @@ class CFrame(Structure):
 class CSharedFrameBuffer(Structure):
     _fields_ = [
         ("write_index", c_uint32),
-        ("_padding", c_uint32),  # Alignment padding (4 bytes)
+        ("frame_interval_ms", c_uint32),  # Matches C SharedFrameBuffer
         ("frames", CFrame * RING_BUFFER_SIZE),
     ]
 
@@ -121,7 +123,11 @@ class RealSharedMemory:
     Provides the same interface as MockSharedMemory for compatibility.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        frame_shm_name: Optional[str] = None,
+        detection_shm_name: Optional[str] = None,
+    ):
         self.frame_fd: Optional[int] = None
         self.frame_mmap: Optional[mmap.mmap] = None
         self.detection_fd: Optional[int] = None
@@ -130,6 +136,8 @@ class RealSharedMemory:
         self.last_detection_version = 0
         self.total_frames_read = 0
         self.detection_write_mode = False
+        self.frame_shm_name = frame_shm_name or SHM_NAME_FRAMES
+        self.detection_shm_name = detection_shm_name or SHM_NAME_DETECTIONS
 
     def open(self):
         """Open existing shared memory segments."""
@@ -137,7 +145,7 @@ class RealSharedMemory:
         try:
             # Use os.open with O_RDONLY for read-only access
             # shm_open is available via /dev/shm on Linux
-            shm_path_frames = f"/dev/shm{SHM_NAME_FRAMES}"
+            shm_path_frames = f"/dev/shm{self.frame_shm_name}"
             self.frame_fd = os.open(shm_path_frames, os.O_RDONLY)
             self.frame_mmap = mmap.mmap(
                 self.frame_fd, sizeof(CSharedFrameBuffer), mmap.MAP_SHARED, mmap.PROT_READ
@@ -145,13 +153,13 @@ class RealSharedMemory:
             print(f"[Info] Opened shared memory: {shm_path_frames}")
         except FileNotFoundError:
             raise RuntimeError(
-                f"Shared memory {SHM_NAME_FRAMES} not found. "
+                f"Shared memory {self.frame_shm_name} not found. "
                 "Is the camera daemon running?"
             )
 
         # Open detection shared memory
         try:
-            shm_path_detections = f"/dev/shm{SHM_NAME_DETECTIONS}"
+            shm_path_detections = f"/dev/shm{self.detection_shm_name}"
             self.detection_fd = os.open(shm_path_detections, os.O_RDONLY)
             self.detection_mmap = mmap.mmap(
                 self.detection_fd,
@@ -163,7 +171,7 @@ class RealSharedMemory:
         except FileNotFoundError:
             # Detection shared memory might not exist yet
             print(
-                f"[Warn] Detection shared memory {SHM_NAME_DETECTIONS} not found "
+                f"[Warn] Detection shared memory {self.detection_shm_name} not found "
                 "(will be created by detection process)"
             )
 
@@ -171,7 +179,7 @@ class RealSharedMemory:
         """Open detection shared memory in write mode (creates if not exists)."""
         import ctypes.util
 
-        shm_path_detections = f"/dev/shm{SHM_NAME_DETECTIONS}"
+        shm_path_detections = f"/dev/shm{self.detection_shm_name}"
 
         try:
             # Try to open existing
@@ -223,7 +231,7 @@ class RealSharedMemory:
         latest_idx = (write_index - 1) % RING_BUFFER_SIZE
 
         # Calculate offset to the frame
-        # Offset = sizeof(write_index) + sizeof(padding) + sizeof(Frame) * latest_idx
+        # Offset = sizeof(write_index) + sizeof(frame_interval_ms) + sizeof(Frame) * latest_idx
         frame_offset = sizeof(c_uint32) * 2 + sizeof(CFrame) * latest_idx
 
         # Read the frame
@@ -374,7 +382,7 @@ class RealSharedMemory:
             return  # Already opened
 
         try:
-            shm_path_detections = f"/dev/shm{SHM_NAME_DETECTIONS}"
+            shm_path_detections = f"/dev/shm{self.detection_shm_name}"
             self.detection_fd = os.open(shm_path_detections, os.O_RDONLY)
             self.detection_mmap = mmap.mmap(
                 self.detection_fd,

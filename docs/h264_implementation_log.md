@@ -795,6 +795,40 @@ cfg.warmup_frames = 15;  // 3 → 15 に変更
 
 ---
 
+## 2025-12-23 更新: 二重フォーマット対応と接続更新
+
+### 実装済み ✅
+
+1. **camera_daemon_drobotics のNV12+H.264二重生成**
+   - NV12共有メモリとH.264共有メモリを同時生成して書き込み
+   - legacyの単一共有メモリ（H.264-only）も維持
+   - フレーム間隔制御の参照先を整理
+
+2. **camera_switcher_daemon の二重共有メモリ対応**
+   - `/pet_camera_active_frame` と `/pet_camera_stream` を作成
+   - day/night の NV12/H.264 両方を読み、アクティブ側を publish
+   - warmup_frames を 15 に変更（設計案D）
+
+3. **消費者側の接続更新**
+   - YOLO検出デーモン: `/pet_camera_active_frame` 参照
+   - WebMonitor録画API: `/pet_camera_stream` を読む RealSharedMemory を生成
+   - RealSharedMemory: shm名を注入できるよう拡張
+
+### 影響ファイル
+- `src/capture/camera_daemon_drobotics.c`
+- `src/capture/camera_switcher_daemon.c`
+- `src/capture/shared_memory.h`
+- `src/capture/real_shared_memory.py`
+- `src/detector/yolo_detector_daemon.py`
+- `src/monitor/web_monitor.py`
+
+### 次のアクション（更新）
+1. 統合テスト（NV12+H.264の両方が更新されること、切替時の連続性）
+2. README/運用ドキュメントの共有メモリ名更新
+3. scripts/test_h264_recording.sh の対象 shm 名更新（/pet_camera_stream）
+
+---
+
 **Last Updated**: 2025-12-23
 **Author**: Claude Sonnet 4.5
 **Related Documents**:

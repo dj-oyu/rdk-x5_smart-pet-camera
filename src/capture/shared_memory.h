@@ -30,8 +30,8 @@
 #define SHM_NAME_STREAM_DAY "/pet_camera_stream_day"       // DAY camera H.264
 #define SHM_NAME_STREAM_NIGHT "/pet_camera_stream_night"   // NIGHT camera H.264
 
-// Legacy name for backward compatibility
-#define SHM_NAME_FRAMES "/pet_camera_frames"  // Alias to SHM_NAME_ACTIVE_FRAME
+// Legacy name for backward compatibility (keep API names stable)
+#define SHM_NAME_FRAMES SHM_NAME_ACTIVE_FRAME
 
 #define RING_BUFFER_SIZE 30  // 30 frames (1 second at 30fps)
 #define MAX_DETECTIONS 10    // Maximum detections per frame

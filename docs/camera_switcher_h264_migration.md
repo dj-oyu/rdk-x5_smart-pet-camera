@@ -460,5 +460,28 @@ sp_vio_get_frame(ctx->vio_object, (char *)nv12_buffer, ...);
 
 ---
 
-**Last Updated**: 2025-12-24
-**Status**: ✅ **Phase 2 完了** → 🚀 **Phase 3 開始準備中**
+## Phase 3 進捗更新 (2025-12-26)
+
+### 実装状況: 🔧 デバッグ中
+
+**完了タスク**:
+- ✅ aiortc/av依存関係追加
+- ✅ H264StreamTrack実装（共有メモリ → WebRTC）
+- ✅ WebRTCシグナリングサーバー実装
+- ✅ Flask統合（/api/webrtc/offer エンドポイント）
+- ✅ ブラウザWebRTCクライアント実装
+- ✅ Canvas BBoxオーバーレイ（SSE統合）
+- ✅ HTML UI更新（WebRTC/MJPEG切り替え）
+
+**現在の課題**:
+- ⚠️ WebRTC接続が確立しない
+  - `POST /api/webrtc/offer` は200 OKを返す
+  - ブラウザで "Connecting..." のまま停止
+  - デバッグログ追加済み、原因調査中
+
+**詳細**: [webrtc_phase3_implementation_log.md](./webrtc_phase3_implementation_log.md)
+
+---
+
+**Last Updated**: 2025-12-26
+**Status**: ✅ **Phase 2 完了** → 🔧 **Phase 3 実装完了・接続デバッグ中**
