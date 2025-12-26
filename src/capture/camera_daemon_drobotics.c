@@ -115,9 +115,9 @@ static void init_default_arguments(struct arguments *args) {
 
 static void apply_sensor_defaults(struct arguments *args) {
   if (args->sensor_width <= 0)
-    args->sensor_width = SENSOR_WIDTH_DEFAULT;
+    args->sensor_width = args->out_width;
   if (args->sensor_height <= 0)
-    args->sensor_height = SENSOR_HEIGHT_DEFAULT;
+    args->sensor_height = args->out_height;
 }
 
 static void populate_context_from_args(camera_context_t *ctx,
@@ -252,8 +252,8 @@ static int create_and_start_pipeline(camera_context_t *ctx) {
 
   // Prepare sensor parameters
   parms.fps = ctx->fps;
-  parms.raw_height = ctx->sensor_height;
-  parms.raw_width = ctx->sensor_width;
+  parms.raw_height = ctx->out_height;
+  parms.raw_width = ctx->out_width;
 
   // 1. Initialize VIO module
   ctx->vio_object = sp_init_vio_module();
@@ -264,6 +264,7 @@ static int create_and_start_pipeline(camera_context_t *ctx) {
   printf("[Info] VIO module initialized\n");
 
   // 2. Open camera
+  // Use the same width/height for both sensor input and VIO output
   ret = sp_open_camera_v2(ctx->vio_object, ctx->camera_index, -1, 1,
                           &parms, &ctx->out_width, &ctx->out_height);
   if (ret != 0) {
