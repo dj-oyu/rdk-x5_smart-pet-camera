@@ -12,29 +12,44 @@ SHM_TEST_SOURCES := test_shm.c shared_memory.c
 SWITCHER_DEMO_SOURCES := camera_switcher_demo.c camera_switcher.c shared_memory.c
 SWITCHER_RUNTIME_SOURCES := camera_switcher_runtime.c camera_switcher.c shared_memory.c
 SWITCHER_DAEMON_SOURCES := camera_switcher_daemon.c camera_switcher_runtime.c camera_switcher.c shared_memory.c
+POC_LOWLEVEL_SOURCES := camera_poc_lowlevel.c shared_memory.c logger.c
+HAL_SOURCES := vio_lowlevel.c encoder_lowlevel.c logger.c
+DAEMON_NEW_SOURCES := camera_daemon_main.c camera_pipeline.c vio_lowlevel.c encoder_lowlevel.c shared_memory.c logger.c
 
 DAEMON_OBJECTS := $(DAEMON_SOURCES:.c=.o)
 SHM_TEST_OBJECTS := $(SHM_TEST_SOURCES:.c=.o)
 SWITCHER_DEMO_OBJECTS := $(SWITCHER_DEMO_SOURCES:.c=.o)
 SWITCHER_RUNTIME_OBJECTS := $(SWITCHER_RUNTIME_SOURCES:.c=.o)
 SWITCHER_DAEMON_OBJECTS := $(SWITCHER_DAEMON_SOURCES:.c=.o)
+POC_LOWLEVEL_OBJECTS := $(POC_LOWLEVEL_SOURCES:.c=.o)
+DAEMON_NEW_OBJECTS := $(DAEMON_NEW_SOURCES:.c=.o)
 
 DAEMON_BINARY := $(BUILD_DIR)/camera_daemon_drobotics
 SHM_TEST_BINARY := $(BUILD_DIR)/test_shm
 SWITCHER_DEMO_BINARY := $(BUILD_DIR)/camera_switcher_demo
 SWITCHER_RUNTIME_LIBRARY := $(BUILD_DIR)/libcamera_switcher_runtime.a
 SWITCHER_DAEMON_BINARY := $(BUILD_DIR)/camera_switcher_daemon
+POC_LOWLEVEL_BINARY := $(BUILD_DIR)/camera_poc_lowlevel
+DAEMON_NEW_BINARY := $(BUILD_DIR)/camera_daemon_new
 
 LDLIBS_COMMON := -lrt
-LDLIBS_DROBOTICS := $(LDLIBS_COMMON) -lpthread -lspcdev
+LDLIBS_DROBOTICS := $(LDLIBS_COMMON) -lpthread -lspcdev -lcam -lvpf -lhbmem
+LDLIBS_POC_LOWLEVEL := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lmultimedia
+LDLIBS_DAEMON_NEW := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lmultimedia
 LDLIBS_SWITCHER_DEMO := $(LDLIBS_COMMON) -ljpeg
 LDLIBS_SWITCHER_DAEMON := $(LDLIBS_COMMON) -lpthread -ljpeg
 
 DAEMON_ARGS ?= -C 0 -P 1
 
-.PHONY: all clean test switcher-demo switcher-runtime-lib switcher-daemon switcher-daemon-build run run-daemon cleanup kill-processes help
+.PHONY: all clean test switcher-demo switcher-runtime-lib switcher-daemon switcher-daemon-build run run-daemon cleanup kill-processes help poc-lowlevel daemon-new
 
 all: $(DAEMON_BINARY) $(SHM_TEST_BINARY) $(SWITCHER_DAEMON_BINARY)
+
+poc-lowlevel: $(POC_LOWLEVEL_BINARY)
+	@echo "[PoC] Low-level API PoC ready at $(POC_LOWLEVEL_BINARY)"
+
+daemon-new: $(DAEMON_NEW_BINARY)
+	@echo "[Build] New camera daemon ready at $(DAEMON_NEW_BINARY)"
 
 $(BUILD_DIR):
 	@mkdir -p $@
@@ -53,6 +68,12 @@ $(SWITCHER_RUNTIME_LIBRARY): $(SWITCHER_RUNTIME_OBJECTS) | $(BUILD_DIR)
 
 $(SWITCHER_DAEMON_BINARY): $(SWITCHER_DAEMON_OBJECTS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_SWITCHER_DAEMON)
+
+$(POC_LOWLEVEL_BINARY): $(POC_LOWLEVEL_OBJECTS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_POC_LOWLEVEL)
+
+$(DAEMON_NEW_BINARY): $(DAEMON_NEW_OBJECTS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_DAEMON_NEW)
 
 # Compile camera_switcher_daemon.c with absolute path to camera_daemon_drobotics
 camera_switcher_daemon.o: camera_switcher_daemon.c
@@ -110,14 +131,15 @@ kill-processes:
 	@echo "[Cleanup] Checking for existing camera processes..."
 	@-pkill -9 -f camera_switcher_daemon 2>/dev/null && echo "[Cleanup] Killed camera_switcher_daemon" || true
 	@-pkill -9 -f camera_daemon_drobotics 2>/dev/null && echo "[Cleanup] Killed camera_daemon_drobotics" || true
+	@-pkill -9 -f camera_poc_lowlevel 2>/dev/null && echo "[Cleanup] Killed camera_poc_lowlevel" || true
 	@-pkill -9 -f cam-service 2>/dev/null && echo "[Cleanup] Killed cam-service" || true
 	@sleep 1
 	@echo "[Cleanup] Process cleanup complete"
 
 clean:
 	@echo "[Clean] Removing built binaries and objects"
-	@rm -f $(DAEMON_OBJECTS) $(SHM_TEST_OBJECTS) $(SWITCHER_DEMO_OBJECTS) $(SWITCHER_RUNTIME_OBJECTS) $(SWITCHER_DAEMON_OBJECTS)
-	@rm -f $(DAEMON_BINARY) $(SHM_TEST_BINARY) $(SWITCHER_DEMO_BINARY) $(SWITCHER_RUNTIME_LIBRARY) $(SWITCHER_DAEMON_BINARY)
+	@rm -f $(DAEMON_OBJECTS) $(SHM_TEST_OBJECTS) $(SWITCHER_DEMO_OBJECTS) $(SWITCHER_RUNTIME_OBJECTS) $(SWITCHER_DAEMON_OBJECTS) $(POC_LOWLEVEL_OBJECTS)
+	@rm -f $(DAEMON_BINARY) $(SHM_TEST_BINARY) $(SWITCHER_DEMO_BINARY) $(SWITCHER_RUNTIME_LIBRARY) $(SWITCHER_DAEMON_BINARY) $(POC_LOWLEVEL_BINARY)
 
 help:
 	@echo "Camera daemon build targets"
