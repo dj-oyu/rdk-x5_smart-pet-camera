@@ -251,6 +251,15 @@ if [[ "${SKIP_BUILD}" -ne 1 ]]; then
     )
     echo "[build] Go streaming server built: ${BUILD_DIR}/streaming-server"
   fi
+
+  if [[ "${RUN_MONITOR}" -eq 1 ]]; then
+    echo "[build] building Go web monitor..."
+    (
+      cd "${STREAMING_DIR}"
+      go build -o "${BUILD_DIR}/web_monitor" ./cmd/web_monitor
+    )
+    echo "[build] Go web monitor built: ${BUILD_DIR}/web_monitor"
+  fi
 else
   echo "[info] skipping build (using existing build artifacts)"
 fi
@@ -297,10 +306,15 @@ if [[ "${RUN_DETECTOR}" -eq 1 ]]; then
 fi
 
 if [[ "${RUN_MONITOR}" -eq 1 ]]; then
-  echo "[start] launching web monitor on ${MONITOR_HOST}:${MONITOR_PORT}..."
+  echo "[start] launching Go web monitor on ${MONITOR_HOST}:${MONITOR_PORT}..."
   (
     cd "${REPO_ROOT}"
-    "${UV_BIN}" run src/monitor/main.py --shm-type real --host "${MONITOR_HOST}" --port "${MONITOR_PORT}"
+    "${BUILD_DIR}/web_monitor" \
+      -http "${MONITOR_HOST}:${MONITOR_PORT}" \
+      -frame-shm "/pet_camera_active_frame" \
+      -detection-shm "/pet_camera_detections" \
+      -webrtc-base "http://localhost:${STREAMING_PORT}" \
+      -fps 30
   ) &
   PIDS+=("$!")
 fi
