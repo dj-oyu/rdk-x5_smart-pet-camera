@@ -311,6 +311,8 @@ if [[ "${RUN_MONITOR}" -eq 1 ]]; then
     cd "${REPO_ROOT}"
     "${BUILD_DIR}/web_monitor" \
       -http "${MONITOR_HOST}:${MONITOR_PORT}" \
+      -assets "${REPO_ROOT}/src/monitor/web_assets" \
+      -assets-build "${BUILD_DIR}/web" \
       -frame-shm "/pet_camera_active_frame" \
       -detection-shm "/pet_camera_detections" \
       -webrtc-base "http://localhost:${STREAMING_PORT}" \
