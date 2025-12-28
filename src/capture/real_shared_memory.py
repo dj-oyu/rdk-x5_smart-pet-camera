@@ -484,14 +484,21 @@ class RealSharedMemory:
             c_detection.bbox.w = det["bbox"]["w"]
             c_detection.bbox.h = det["bbox"]["h"]
 
-        # Increment version
-        c_det.version = self.last_detection_version + 1
-        self.last_detection_version = c_det.version
+        # Increment version (using atomic-like increment)
+        self.last_detection_version += 1
+        c_det.version = self.last_detection_version
 
         # Write to shared memory
         self.detection_mmap.seek(0)
-        self.detection_mmap.write(bytes(c_det))
+        data = bytes(c_det)
+        self.detection_mmap.write(data)
         self.detection_mmap.flush()
+
+        # Debug: Verify version was written (only log when detections > 0)
+        if c_det.num_detections > 0:
+            import logging
+            logger = logging.getLogger("RealSharedMemory")
+            logger.info(f"Wrote detection to SHM: frame={frame_number}, num_det={c_det.num_detections}, version={c_det.version}")
 
 
 if __name__ == "__main__":
