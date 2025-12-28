@@ -6,6 +6,7 @@
  */
 
 #include "shared_memory.h"
+#include "logger.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,14 +26,14 @@ static void* shm_create_or_open(const char* name, size_t size, bool create) {
         // Create new shared memory segment
         shm_fd = shm_open(name, O_CREAT | O_RDWR, 0666);
         if (shm_fd == -1) {
-            fprintf(stderr, "[Error] shm_open create failed for %s: %s\n",
-                    name, strerror(errno));
+            LOG_ERROR("SharedMemory", "shm_open create failed for %s: %s",
+                      name, strerror(errno));
             return NULL;
         }
 
         // Set size
         if (ftruncate(shm_fd, size) == -1) {
-            fprintf(stderr, "[Error] ftruncate failed: %s\n", strerror(errno));
+            LOG_ERROR("SharedMemory", "ftruncate failed: %s", strerror(errno));
             close(shm_fd);
             shm_unlink(name);
             return NULL;
@@ -41,8 +42,8 @@ static void* shm_create_or_open(const char* name, size_t size, bool create) {
         // Open existing shared memory segment
         shm_fd = shm_open(name, O_RDWR, 0666);
         if (shm_fd == -1) {
-            fprintf(stderr, "[Error] shm_open failed for %s: %s\n",
-                    name, strerror(errno));
+            LOG_ERROR("SharedMemory", "shm_open failed for %s: %s",
+                      name, strerror(errno));
             return NULL;
         }
     }
@@ -50,7 +51,7 @@ static void* shm_create_or_open(const char* name, size_t size, bool create) {
     // Map to memory
     ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
     if (ptr == MAP_FAILED) {
-        fprintf(stderr, "[Error] mmap failed: %s\n", strerror(errno));
+        LOG_ERROR("SharedMemory", "mmap failed: %s", strerror(errno));
         close(shm_fd);
         if (create) {
             shm_unlink(name);
@@ -78,8 +79,8 @@ SharedFrameBuffer* shm_frame_buffer_create(void) {
     );
 
     if (shm) {
-        printf("[Info] Shared memory created: %s (size=%zu bytes)\n",
-               SHM_NAME_FRAMES, sizeof(SharedFrameBuffer));
+        LOG_INFO("SharedMemory", "Shared memory created: %s (size=%zu bytes)",
+                 SHM_NAME_FRAMES, sizeof(SharedFrameBuffer));
     }
 
     return shm;
@@ -93,7 +94,7 @@ SharedFrameBuffer* shm_frame_buffer_open(void) {
     );
 
     if (shm) {
-        printf("[Info] Shared memory opened: %s\n", SHM_NAME_FRAMES);
+        LOG_INFO("SharedMemory", "Shared memory opened: %s", SHM_NAME_FRAMES);
     }
 
     return shm;
@@ -109,7 +110,7 @@ void shm_frame_buffer_destroy(SharedFrameBuffer* shm) {
     if (shm) {
         munmap(shm, sizeof(SharedFrameBuffer));
         shm_unlink(SHM_NAME_FRAMES);
-        printf("[Info] Shared memory destroyed: %s\n", SHM_NAME_FRAMES);
+        LOG_INFO("SharedMemory", "Shared memory destroyed: %s", SHM_NAME_FRAMES);
     }
 }
 
@@ -121,8 +122,8 @@ SharedFrameBuffer* shm_frame_buffer_create_named(const char* name) {
     );
 
     if (shm) {
-        printf("[Info] Shared memory created: %s (size=%zu bytes)\n",
-               name, sizeof(SharedFrameBuffer));
+        LOG_INFO("SharedMemory", "Shared memory created: %s (size=%zu bytes)",
+                 name, sizeof(SharedFrameBuffer));
     }
 
     return shm;
@@ -136,7 +137,7 @@ SharedFrameBuffer* shm_frame_buffer_open_named(const char* name) {
     );
 
     if (shm) {
-        printf("[Info] Shared memory opened: %s\n", name);
+        LOG_INFO("SharedMemory", "Shared memory opened: %s", name);
     }
 
     return shm;
@@ -146,7 +147,7 @@ void shm_frame_buffer_destroy_named(SharedFrameBuffer* shm, const char* name) {
     if (shm) {
         munmap(shm, sizeof(SharedFrameBuffer));
         shm_unlink(name);
-        printf("[Info] Shared memory destroyed: %s\n", name);
+        LOG_INFO("SharedMemory", "Shared memory destroyed: %s", name);
     }
 }
 
@@ -204,8 +205,8 @@ LatestDetectionResult* shm_detection_create(void) {
     );
 
     if (shm) {
-        printf("[Info] Detection shared memory created: %s (size=%zu bytes)\n",
-               SHM_NAME_DETECTIONS, sizeof(LatestDetectionResult));
+        LOG_INFO("SharedMemory", "Detection shared memory created: %s (size=%zu bytes)",
+                 SHM_NAME_DETECTIONS, sizeof(LatestDetectionResult));
     }
 
     return shm;
@@ -219,7 +220,7 @@ LatestDetectionResult* shm_detection_open(void) {
     );
 
     if (shm) {
-        printf("[Info] Detection shared memory opened: %s\n", SHM_NAME_DETECTIONS);
+        LOG_INFO("SharedMemory", "Detection shared memory opened: %s", SHM_NAME_DETECTIONS);
     }
 
     return shm;
@@ -235,7 +236,7 @@ void shm_detection_destroy(LatestDetectionResult* shm) {
     if (shm) {
         munmap(shm, sizeof(LatestDetectionResult));
         shm_unlink(SHM_NAME_DETECTIONS);
-        printf("[Info] Detection shared memory destroyed: %s\n", SHM_NAME_DETECTIONS);
+        LOG_INFO("SharedMemory", "Detection shared memory destroyed: %s", SHM_NAME_DETECTIONS);
     }
 }
 

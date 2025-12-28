@@ -8,6 +8,7 @@
  */
 
 #include "camera_switcher_runtime.h"
+#include "logger.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -37,20 +38,53 @@ static int do_switch(CameraSwitchRuntime *rt, CameraMode target,
 
 static void *active_thread_main(void *arg) {
   CameraSwitchRuntime *rt = (CameraSwitchRuntime *)arg;
-  uint_fast8_t check_frame = 0;
+  uint_fast32_t frame_count = 0;
+  uint64_t last_frame_number = 0;
+  uint64_t processed_count = 0;
+  uint64_t skipped_count = 0;
 
   while (!rt->stop_flag) {
     Frame frame = {0};
     frame.camera_id = rt->active_camera;
 
-    if (!rt->ops.capture_frame ||
-        rt->ops.capture_frame(rt->active_camera, &frame, rt->ops.user_data) !=
+    if (!rt->ops.capture_active_frame ||
+        rt->ops.capture_active_frame(rt->active_camera, &frame, rt->ops.user_data) !=
             0) {
+      usleep(1000); // 1ms sleep on error
       continue;
     }
 
-    // Check brightness every 64 frames (once per ~2s at 30fps, same as probe)
-    if (!(++check_frame & 0x3F)) {
+    // Skip if this is the same frame as last time
+    // Sleep briefly to avoid busy loop (active_frame is non-blocking)
+    if (frame.frame_number == last_frame_number) {
+      skipped_count++;
+      usleep(100); // 100us = 0.1ms (allows up to 10000 checks/sec)
+      continue;
+    }
+    last_frame_number = frame.frame_number;
+    processed_count++;
+
+    if (processed_count % 100 == 0) {
+      LOG_INFO("ActiveThread", "Processed %lu frames, skipped %lu (frame#%lu)",
+               processed_count, skipped_count, frame.frame_number);
+    }
+
+    // Use different check intervals based on active camera
+    // Day camera: faster checks (default 3 frames = 10fps) for quick dark detection
+    // Night camera: slower checks (default 30 frames = 1fps) as brightness changes slowly
+    int check_interval;
+    if (rt->active_camera == CAMERA_MODE_DAY) {
+      check_interval = rt->cfg.brightness_check_interval_frames_day > 0
+                           ? rt->cfg.brightness_check_interval_frames_day
+                           : 3;
+    } else {
+      check_interval = rt->cfg.brightness_check_interval_frames_night > 0
+                           ? rt->cfg.brightness_check_interval_frames_night
+                           : 30;
+    }
+
+    // Check brightness every N frames
+    if (frame_count % check_interval == 0) {
       CameraSwitchDecision decision = camera_switcher_handle_frame(
           &rt->controller, &frame, rt->active_camera, true,
           rt->ops.publish_frame, rt->ops.user_data);
@@ -64,6 +98,8 @@ static void *active_thread_main(void *arg) {
       camera_switcher_publish_frame(&rt->controller, &frame,
                                     rt->ops.publish_frame, rt->ops.user_data);
     }
+
+    frame_count++;
   }
 
   return NULL;
@@ -81,9 +117,9 @@ static void *probe_thread_main(void *arg) {
       probe_frame.camera_id = CAMERA_MODE_DAY;
 
       int capture_result =
-          rt->ops.capture_frame
-              ? rt->ops.capture_frame(CAMERA_MODE_DAY, &probe_frame,
-                                      rt->ops.user_data)
+          rt->ops.capture_probe_frame
+              ? rt->ops.capture_probe_frame(CAMERA_MODE_DAY, &probe_frame,
+                                            rt->ops.user_data)
               : -1;
 
       // printf("[probe] capture_frame result=%d, data_size=%u, format=%d\n",
@@ -106,11 +142,10 @@ static void *probe_thread_main(void *arg) {
             do_switch(rt, CAMERA_MODE_NIGHT, "auto-night");
           }
         } else {
-          printf("[probe] ERROR: inactive slot buffer is NULL\n");
+          LOG_ERROR("ProbeThread", "Inactive slot buffer is NULL");
         }
       } else {
-        printf("[probe] ERROR: capture_frame failed with result=%d\n",
-               capture_result);
+        LOG_ERROR("ProbeThread", "capture_frame failed with result=%d", capture_result);
       }
     }
 

@@ -19,16 +19,11 @@
 #include <stdbool.h>
 
 // Configuration constants
-// Main shared memory (consumed by detection/monitoring)
-#define SHM_NAME_ACTIVE_FRAME "/pet_camera_active_frame"  // NV12 frame for detection
-#define SHM_NAME_STREAM "/pet_camera_stream"              // H.264 stream for recording/WebRTC
-#define SHM_NAME_DETECTIONS "/pet_camera_detections"
-
-// Camera-specific shared memory (produced by camera daemons)
-#define SHM_NAME_FRAMES_DAY "/pet_camera_frames_day"       // DAY camera NV12
-#define SHM_NAME_FRAMES_NIGHT "/pet_camera_frames_night"   // NIGHT camera NV12
-#define SHM_NAME_STREAM_DAY "/pet_camera_stream_day"       // DAY camera H.264
-#define SHM_NAME_STREAM_NIGHT "/pet_camera_stream_night"   // NIGHT camera H.264
+// Main shared memory (consumed by detection/monitoring/streaming)
+#define SHM_NAME_ACTIVE_FRAME "/pet_camera_active_frame"  // NV12 frame from active camera (30fps)
+#define SHM_NAME_STREAM "/pet_camera_stream"              // H.264 stream from active camera (30fps)
+#define SHM_NAME_PROBE_FRAME "/pet_camera_probe_frame"    // NV12 frame for brightness probing (on-demand)
+#define SHM_NAME_DETECTIONS "/pet_camera_detections"      // YOLO detection results
 
 // Legacy name for backward compatibility (keep API names stable)
 #define SHM_NAME_FRAMES SHM_NAME_ACTIVE_FRAME

@@ -226,7 +226,7 @@ cleanup() {
       wait "${pid}" >/dev/null 2>&1 || true
     fi
   done
-  make -C "${CAPTURE_DIR}" cleanup >/dev/null 2>&1 || true
+  make -C "${CAPTURE_DIR}" kill-processes >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
@@ -263,8 +263,8 @@ fi
 
 echo "[start] launching camera_switcher_daemon..."
 (
-  cd "${CAPTURE_DIR}"
-  ../../build/camera_switcher_daemon
+  cd "${REPO_ROOT}"
+  "${BUILD_DIR}/camera_switcher_daemon"
 ) &
 PIDS+=("$!")
 

@@ -262,4 +262,3 @@ func assertStatusPayload(t *testing.T, payload map[string]any) {
 		assertDetectionHistoryEntry(t, item, fmt.Sprintf("detection_history[%d]", i))
 	}
 }
-

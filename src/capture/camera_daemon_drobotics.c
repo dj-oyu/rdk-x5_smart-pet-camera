@@ -98,21 +98,13 @@ struct arguments {
 
 // Global state
 static volatile sig_atomic_t g_running = 1;
-static volatile uint32_t g_current_interval_ms =
-    0; // Current frame interval, updated by SIGUSR1
+static volatile sig_atomic_t g_is_active = 0;        // Active camera flag (SIGUSR1=1, SIGUSR2=0)
+static volatile sig_atomic_t g_probe_requested = 0;  // Probe request flag (SIGRTMIN=1)
 
-// Dual shared memory: NV12 frames (for brightness/detection) + H.264 stream
-// (for recording)
-static SharedFrameBuffer *g_shm_nv12 = NULL;     // NV12 frames
-static SharedFrameBuffer *g_shm_h264 = NULL;     // H.264 stream
-static SharedFrameBuffer *g_shm_interval = NULL; // Frame interval source
-static const char *g_shm_name_nv12 =
-    NULL; // Custom name for NV12 (env: SHM_NAME_NV12)
-static const char *g_shm_name_h264 =
-    NULL; // Custom name for H.264 (env: SHM_NAME_H264)
-static const char *g_shm_name_legacy =
-    NULL; // Legacy single-shm name (env: SHM_NAME)
-static bool g_legacy_h264_only = false;
+// Shared memory pointers
+static SharedFrameBuffer *g_shm_active_nv12 = NULL; // Active camera NV12 (only when active)
+static SharedFrameBuffer *g_shm_active_h264 = NULL; // Active camera H.264 (only when active)
+static SharedFrameBuffer *g_shm_probe_nv12 = NULL;  // Probe NV12 (only on probe request)
 
 // -----------------------------
 // Argument and context helpers
@@ -169,17 +161,19 @@ static void populate_context_from_args(camera_context_t *ctx,
 // Signal handler
 static void signal_handler(int signum) {
   if (signum == SIGUSR1) {
-    // Reload frame interval from shared memory (push notification)
-    if (g_shm_interval) {
-      uint32_t old_interval = g_current_interval_ms;
-      g_current_interval_ms =
-          __atomic_load_n(&g_shm_interval->frame_interval_ms, __ATOMIC_ACQUIRE);
-      // Note: printf in signal handler is technically unsafe, but useful for
-      // debugging
-      printf("[Signal] SIGUSR1 received: interval %u -> %u ms\n", old_interval,
-             g_current_interval_ms);
-    }
+    // Activate camera: start writing to active_frame and stream
+    g_is_active = 1;
+    fprintf(stderr, "[Signal] SIGUSR1: Camera activated\n");
+  } else if (signum == SIGUSR2) {
+    // Deactivate camera: stop writing to active_frame and stream
+    g_is_active = 0;
+    fprintf(stderr, "[Signal] SIGUSR2: Camera deactivated\n");
+  } else if (signum == SIGRTMIN) {
+    // Probe request: write one frame to probe_frame
+    g_probe_requested = 1;
+    fprintf(stderr, "[Signal] SIGRTMIN: Probe requested\n");
   } else {
+    // SIGINT or SIGTERM
     g_running = 0;
   }
 }
@@ -191,7 +185,9 @@ static void setup_signals(void) {
   sa.sa_handler = signal_handler;
   sigaction(SIGINT, &sa, NULL);
   sigaction(SIGTERM, &sa, NULL);
-  sigaction(SIGUSR1, &sa, NULL); // For dynamic frame interval control
+  sigaction(SIGUSR1, &sa, NULL);  // Activate camera
+  sigaction(SIGUSR2, &sa, NULL);  // Deactivate camera
+  sigaction(SIGRTMIN, &sa, NULL); // Probe request
 }
 
 // Note: JPEG encoding removed - using hardware H.264 encoding instead

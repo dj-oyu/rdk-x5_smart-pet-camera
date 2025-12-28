@@ -3,6 +3,7 @@
  */
 
 #include "camera_switcher.h"
+#include "logger.h"
 
 #include <setjmp.h>
 #include <stdio.h>
@@ -135,17 +136,18 @@ camera_switcher_record_brightness(CameraSwitchController *ctrl,
     if (camera != CAMERA_MODE_DAY) {
       return CAMERA_SWITCH_DECISION_NONE; // Ignore probe from night camera
     }
-    printf("[DEBUG] active=DAY, camera=%d, brightness=%.1f,threshold=%.1f\n",
-           (int)camera, brightness, ctrl->cfg.day_to_night_threshold);
+    LOG_DEBUG("Switcher",
+              "active=DAY, camera=%d, brightness=%.1f, threshold=%.1f",
+              (int)camera, brightness, ctrl->cfg.day_to_night_threshold);
     if (brightness < ctrl->cfg.day_to_night_threshold) {
       if (ctrl->below_threshold_since < 0) {
         ctrl->below_threshold_since = now;
-        printf("[DEBUG] started timer for DAY->NIGHT\n");
+        LOG_DEBUG("Switcher", "Started timer for DAY->NIGHT");
       }
       double elapsed = now - ctrl->below_threshold_since;
       if (elapsed >= ctrl->cfg.day_to_night_hold_seconds) {
         decision = CAMERA_SWITCH_DECISION_TO_NIGHT;
-        printf("[DEBUG] DECISION: switch to NIGHT (elapsed=%.1fs)\n", elapsed);
+        LOG_INFO("Switcher", "Switch to NIGHT (elapsed=%.1fs)", elapsed);
       }
     } else {
       ctrl->below_threshold_since = -1.0;
@@ -156,17 +158,19 @@ camera_switcher_record_brightness(CameraSwitchController *ctrl,
     if (camera != CAMERA_MODE_DAY) {
       return CAMERA_SWITCH_DECISION_NONE; // Ignore night camera brightness
     }
-    printf("[DEBUG] active=NIGHT, probing DAY camera=%d, brightness=%.1f, threshold=%.1f\n",
-           (int)camera, brightness, ctrl->cfg.night_to_day_threshold);
+    LOG_DEBUG(
+        "Switcher",
+        "active=NIGHT, probing DAY camera=%d, brightness=%.1f, threshold=%.1f",
+        (int)camera, brightness, ctrl->cfg.night_to_day_threshold);
     if (brightness > ctrl->cfg.night_to_day_threshold) {
       if (ctrl->above_threshold_since < 0) {
         ctrl->above_threshold_since = now;
-        printf("[DEBUG] started timer for NIGHT->DAY\n");
+        LOG_DEBUG("Switcher", "Started timer for NIGHT->DAY");
       }
       double elapsed = now - ctrl->above_threshold_since;
       if (elapsed >= ctrl->cfg.night_to_day_hold_seconds) {
         decision = CAMERA_SWITCH_DECISION_TO_DAY;
-        printf("[DEBUG] DECISION: switch to DAY (elapsed=%.1fs)\n", elapsed);
+        LOG_INFO("Switcher", "Switch to DAY (elapsed=%.1fs)", elapsed);
       }
     } else {
       ctrl->above_threshold_since = -1.0;
@@ -291,16 +295,12 @@ camera_switcher_handle_frame(CameraSwitchController *ctrl, Frame const *frame,
   }
 
   double brightness = frame_calculate_mean_luma(frame);
-  // printf("[camera_switcher] frame_calculate_mean_luma returned: %.1f
-  // (camera=%d, format=%d, data_size=%u)\n", brightness, (int)camera,
-  // frame->format, frame->data_size);
 
   CameraSwitchDecision decision = CAMERA_SWITCH_DECISION_NONE;
   if (brightness >= 0) {
     decision = camera_switcher_record_brightness(ctrl, camera, brightness);
   } else {
-    printf("[camera_switcher] WARNING: brightness calculation failed (returned "
-           "-1)\n");
+    LOG_WARN("Switcher", "Brightness calculation failed (returned -1)");
   }
 
   if (is_active_camera && publish_cb) {

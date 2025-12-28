@@ -7,58 +7,67 @@ BUILD_DIR_ABS := $(abspath $(BUILD_DIR))
 
 LDFLAGS := -L/usr/hobot/lib
 
-DAEMON_SOURCES := camera_daemon_drobotics.c shared_memory.c
-SHM_TEST_SOURCES := test_shm.c shared_memory.c
-SWITCHER_DEMO_SOURCES := camera_switcher_demo.c camera_switcher.c shared_memory.c
-SWITCHER_RUNTIME_SOURCES := camera_switcher_runtime.c camera_switcher.c shared_memory.c
-SWITCHER_DAEMON_SOURCES := camera_switcher_daemon.c camera_switcher_runtime.c camera_switcher.c shared_memory.c
+DAEMON_SOURCES := camera_daemon_main.c camera_pipeline.c vio_lowlevel.c encoder_lowlevel.c encoder_thread.c shared_memory.c logger.c
+DAEMON_OLD_SOURCES := camera_daemon_drobotics.c shared_memory.c
+SHM_TEST_SOURCES := test_shm.c shared_memory.c logger.c
+FPS_READER_SOURCES := test_fps_reader.c shared_memory.c logger.c
+SWITCHER_DEMO_SOURCES := camera_switcher_demo.c camera_switcher.c shared_memory.c logger.c
+SWITCHER_RUNTIME_SOURCES := camera_switcher_runtime.c camera_switcher.c shared_memory.c logger.c
+SWITCHER_DAEMON_SOURCES := camera_switcher_daemon.c camera_switcher_runtime.c camera_switcher.c shared_memory.c logger.c
 POC_LOWLEVEL_SOURCES := camera_poc_lowlevel.c shared_memory.c logger.c
 HAL_SOURCES := vio_lowlevel.c encoder_lowlevel.c logger.c
-DAEMON_NEW_SOURCES := camera_daemon_main.c camera_pipeline.c vio_lowlevel.c encoder_lowlevel.c shared_memory.c logger.c
 
 DAEMON_OBJECTS := $(DAEMON_SOURCES:.c=.o)
+DAEMON_OLD_OBJECTS := $(DAEMON_OLD_SOURCES:.c=.o)
 SHM_TEST_OBJECTS := $(SHM_TEST_SOURCES:.c=.o)
+FPS_READER_OBJECTS := $(FPS_READER_SOURCES:.c=.o)
 SWITCHER_DEMO_OBJECTS := $(SWITCHER_DEMO_SOURCES:.c=.o)
 SWITCHER_RUNTIME_OBJECTS := $(SWITCHER_RUNTIME_SOURCES:.c=.o)
 SWITCHER_DAEMON_OBJECTS := $(SWITCHER_DAEMON_SOURCES:.c=.o)
 POC_LOWLEVEL_OBJECTS := $(POC_LOWLEVEL_SOURCES:.c=.o)
-DAEMON_NEW_OBJECTS := $(DAEMON_NEW_SOURCES:.c=.o)
 
 DAEMON_BINARY := $(BUILD_DIR)/camera_daemon_drobotics
+DAEMON_OLD_BINARY := $(BUILD_DIR)/camera_daemon_old
 SHM_TEST_BINARY := $(BUILD_DIR)/test_shm
+FPS_READER_BINARY := $(BUILD_DIR)/test_fps_reader
 SWITCHER_DEMO_BINARY := $(BUILD_DIR)/camera_switcher_demo
 SWITCHER_RUNTIME_LIBRARY := $(BUILD_DIR)/libcamera_switcher_runtime.a
 SWITCHER_DAEMON_BINARY := $(BUILD_DIR)/camera_switcher_daemon
 POC_LOWLEVEL_BINARY := $(BUILD_DIR)/camera_poc_lowlevel
-DAEMON_NEW_BINARY := $(BUILD_DIR)/camera_daemon_new
 
 LDLIBS_COMMON := -lrt
-LDLIBS_DROBOTICS := $(LDLIBS_COMMON) -lpthread -lspcdev -lcam -lvpf -lhbmem
+LDLIBS_DAEMON := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lmultimedia
+LDLIBS_DAEMON_OLD := $(LDLIBS_COMMON) -lpthread -lspcdev -lcam -lvpf -lhbmem
 LDLIBS_POC_LOWLEVEL := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lmultimedia
-LDLIBS_DAEMON_NEW := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lmultimedia
 LDLIBS_SWITCHER_DEMO := $(LDLIBS_COMMON) -ljpeg
 LDLIBS_SWITCHER_DAEMON := $(LDLIBS_COMMON) -lpthread -ljpeg
 
 DAEMON_ARGS ?= -C 0 -P 1
 
-.PHONY: all clean test switcher-demo switcher-runtime-lib switcher-daemon switcher-daemon-build run run-daemon cleanup kill-processes help poc-lowlevel daemon-new
+.PHONY: all clean test switcher-demo switcher-runtime-lib switcher-daemon switcher-daemon-build run run-daemon cleanup kill-processes help poc-lowlevel daemon-old
 
 all: $(DAEMON_BINARY) $(SHM_TEST_BINARY) $(SWITCHER_DAEMON_BINARY)
 
 poc-lowlevel: $(POC_LOWLEVEL_BINARY)
 	@echo "[PoC] Low-level API PoC ready at $(POC_LOWLEVEL_BINARY)"
 
-daemon-new: $(DAEMON_NEW_BINARY)
-	@echo "[Build] New camera daemon ready at $(DAEMON_NEW_BINARY)"
+daemon-old: $(DAEMON_OLD_BINARY)
+	@echo "[Build] Old camera daemon ready at $(DAEMON_OLD_BINARY)"
 
 $(BUILD_DIR):
 	@mkdir -p $@
 
 $(DAEMON_BINARY): $(DAEMON_OBJECTS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_DROBOTICS)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_DAEMON)
+
+$(DAEMON_OLD_BINARY): $(DAEMON_OLD_OBJECTS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_DAEMON_OLD)
 
 $(SHM_TEST_BINARY): $(SHM_TEST_OBJECTS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_DROBOTICS)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_DAEMON_OLD)
+
+$(FPS_READER_BINARY): $(FPS_READER_OBJECTS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_COMMON)
 
 $(SWITCHER_DEMO_BINARY): $(SWITCHER_DEMO_OBJECTS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_SWITCHER_DEMO)
@@ -72,10 +81,7 @@ $(SWITCHER_DAEMON_BINARY): $(SWITCHER_DAEMON_OBJECTS) | $(BUILD_DIR)
 $(POC_LOWLEVEL_BINARY): $(POC_LOWLEVEL_OBJECTS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_POC_LOWLEVEL)
 
-$(DAEMON_NEW_BINARY): $(DAEMON_NEW_OBJECTS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_DAEMON_NEW)
-
-# Compile camera_switcher_daemon.c with absolute path to camera_daemon_drobotics
+# Compile camera_switcher_daemon.c with absolute path to camera_daemon
 camera_switcher_daemon.o: camera_switcher_daemon.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) -DCAPTURE_BIN_PATH=\"$(BUILD_DIR_ABS)/camera_daemon_drobotics\" -c -o $@ $<
 
@@ -116,14 +122,9 @@ run-daemon: cleanup $(DAEMON_BINARY)
 
 cleanup: kill-processes clean
 	@echo "[Cleanup] Removing shared memory segments..."
-	@-rm -f /dev/shm/pet_camera_frames 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_frames" || true
 	@-rm -f /dev/shm/pet_camera_active_frame 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_active_frame" || true
 	@-rm -f /dev/shm/pet_camera_stream 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_stream" || true
-	@-rm -f /dev/shm/pet_camera_frames_day 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_frames_day" || true
-	@-rm -f /dev/shm/pet_camera_frames_night 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_frames_night" || true
-	@-rm -f /dev/shm/pet_camera_stream_day 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_stream_day" || true
-	@-rm -f /dev/shm/pet_camera_stream_night 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_stream_night" || true
-	@-rm -f /dev/shm/pet_camera_frames_probe 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_frames_probe" || true
+	@-rm -f /dev/shm/pet_camera_probe_frame 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_probe_frame" || true
 	@-rm -f /dev/shm/pet_camera_detections 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_detections" || true
 	@echo "[Cleanup] Shared memory cleanup complete"
 

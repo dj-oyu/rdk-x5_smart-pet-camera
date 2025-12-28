@@ -4,7 +4,7 @@
  * Reference daemon wiring CameraSwitchRuntime to the existing capture daemon
  * binary.
  * - Starts both cameras (day/night) with dedicated shared memory
- * - Inactive camera runs at low FPS to minimize resource usage
+ * - Both cameras run at constant 30fps for optimal performance
  * - Reads frames from camera-specific shared memory and feeds brightness to the
  * switcher
  * - Republishes frames back to main shared memory with warmup + double
@@ -22,6 +22,7 @@
 
 #include "camera_switcher.h"
 #include "camera_switcher_runtime.h"
+#include "logger.h"
 #include "shared_memory.h"
 
 // CAPTURE_BIN_PATH is defined at compile time via -DCAPTURE_BIN_PATH="..."
@@ -36,72 +37,31 @@ typedef struct {
   pid_t day_pid;            // PID of day camera daemon (always running)
   pid_t night_pid;          // PID of night camera daemon (always running)
   CameraMode active_camera; // Currently active camera
-  SharedFrameBuffer *main_shm_nv12;  // Active NV12 shared memory
-  SharedFrameBuffer *main_shm_h264;  // Active H.264 shared memory
-  SharedFrameBuffer *day_shm_nv12;   // Day camera NV12 shared memory
-  SharedFrameBuffer *night_shm_nv12; // Night camera NV12 shared memory
-  SharedFrameBuffer *day_shm_h264;   // Day camera H.264 shared memory
-  SharedFrameBuffer *night_shm_h264; // Night camera H.264 shared memory
+  SharedFrameBuffer
+      *probe_shm_nv12; // Probe frame shared memory (for brightness reading)
+  SharedFrameBuffer *
+      active_shm_nv12; // Active frame shared memory (for active thread reading)
 } DaemonContext;
 
-static int spawn_daemon_with_shm(CameraMode camera, const char *nv12_name,
-                                 const char *h264_name, int frame_interval_ms) {
+static int spawn_daemon(CameraMode camera) {
   pid_t pid = fork();
   if (pid < 0) {
     perror("fork");
     return -1;
   }
   if (pid == 0) {
-    char *envp[5];
-    char env_vals[4][64];
-    size_t env_cnt = 0;
-
-    // Set custom shared memory names
-    if (nv12_name) {
-      // setenv("SHM_NAME_NV12", nv12_name, 1);
-      snprintf(env_vals[env_cnt], sizeof(env_vals[0]), "SHM_NAME_NV12=%s",
-               nv12_name);
-      envp[env_cnt] = env_vals[env_cnt];
-      env_cnt++;
-    }
-    if (h264_name) {
-      // setenv("SHM_NAME_H264", h264_name, 1);
-      snprintf(env_vals[env_cnt], sizeof(env_vals[0]), "SHM_NAME_H264=%s",
-               h264_name);
-      envp[env_cnt] = env_vals[env_cnt];
-      env_cnt++;
-    }
-
-    // Set frame interval for low-rate capture (inactive camera)
-    if (frame_interval_ms > 0) {
-      snprintf(env_vals[env_cnt], sizeof(env_vals[0]), "FRAME_INTERVAL_MS=%d",
-               frame_interval_ms);
-      // setenv("FRAME_INTERVAL_MS", interval_str, 1);
-      envp[env_cnt] = env_vals[env_cnt];
-      env_cnt++;
-    }
-
     char camera_arg[16];
     snprintf(camera_arg, sizeof(camera_arg), "%d", (int)camera);
 
-    envp[env_cnt] = NULL;
-    printf("[ENVIRONMENT]");
-    for (int env_i = 0; envp[env_i] != NULL; env_i++) {
-      printf("env[%d]: %s ", env_i, envp[env_i]);
-    }
-    printf("\n");
-
-    execle(CAPTURE_BIN, CAPTURE_BIN, "-C", camera_arg, "-P", "1", "--daemon",
-           NULL, envp);
-    perror("execle");
+    // No environment variables needed - camera_daemon uses fixed shm names
+    // Enable verbose logging to see debug messages
+    execl(CAPTURE_BIN, CAPTURE_BIN, "-C", camera_arg, "-W", "640", "-H", "480",
+          "-v", NULL);
+    perror("execl");
     _exit(1);
   }
-  printf(
-      "[switcher-daemon] spawned %s (PID=%d) camera=%d nv12=%s h264=%s "
-      "interval=%dms\n",
-      CAPTURE_BIN, pid, (int)camera,
-      nv12_name ? nv12_name : "(default)", h264_name ? h264_name : "(none)",
-      frame_interval_ms);
+  LOG_INFO("SwitcherDaemon", "Spawned %s (PID=%d) camera=%d (30fps constant)",
+           CAPTURE_BIN, pid, (int)camera);
   return pid;
 }
 
@@ -122,7 +82,7 @@ static SharedFrameBuffer *wait_for_shm(const char *name, int max_retries) {
     shm = shm_frame_buffer_open_named(name);
     if (!shm) {
       if (retries == 0) {
-        printf("[switcher-daemon] waiting for %s to be created...\n", name);
+        LOG_INFO("SwitcherDaemon", "Waiting for %s to be created...", name);
       }
       usleep(100000); // 100ms
       retries++;
@@ -130,9 +90,9 @@ static SharedFrameBuffer *wait_for_shm(const char *name, int max_retries) {
   }
 
   if (shm) {
-    printf("[switcher-daemon] opened %s\n", name);
+    LOG_INFO("SwitcherDaemon", "Opened %s", name);
   } else {
-    fprintf(stderr, "[switcher-daemon] timeout waiting for %s\n", name);
+    LOG_ERROR("SwitcherDaemon", "Timeout waiting for %s", name);
   }
 
   return shm;
@@ -141,123 +101,110 @@ static SharedFrameBuffer *wait_for_shm(const char *name, int max_retries) {
 static int switch_camera_cb(CameraMode camera, void *user_data) {
   DaemonContext *ctx = (DaemonContext *)user_data;
 
-  printf("[switcher-daemon] switching to camera=%d\n", (int)camera);
-
-  // Open shared memory segments if not already opened (with retry)
-  if (!ctx->day_shm_nv12) {
-    ctx->day_shm_nv12 = wait_for_shm(SHM_NAME_FRAMES_DAY, 10); // 1 second max
-  }
-  if (!ctx->night_shm_nv12) {
-    ctx->night_shm_nv12 = wait_for_shm(SHM_NAME_FRAMES_NIGHT, 10);
-  }
-  if (!ctx->day_shm_h264) {
-    ctx->day_shm_h264 = wait_for_shm(SHM_NAME_STREAM_DAY, 10);
-  }
-  if (!ctx->night_shm_h264) {
-    ctx->night_shm_h264 = wait_for_shm(SHM_NAME_STREAM_NIGHT, 10);
+  if (ctx->active_camera == camera) {
+    return 0; // Already active
   }
 
-  // Update frame intervals dynamically via shared memory + signal notification
-  // Active camera: 30fps (interval=0), Inactive camera: ~2fps (interval=500ms)
+  LOG_INFO("SwitcherDaemon", "Switching to %s camera",
+           camera == CAMERA_MODE_DAY ? "DAY" : "NIGHT");
 
-  if (camera == CAMERA_MODE_DAY) {
-    // DAY becomes active (30fps), NIGHT becomes inactive (2fps)
-    if (ctx->day_shm_nv12) {
-      __atomic_store_n(&ctx->day_shm_nv12->frame_interval_ms, 0,
-                       __ATOMIC_RELEASE);
-      kill(ctx->day_pid, SIGUSR1); // Push notification
-      printf("[switcher-daemon] DAY camera -> 30fps\n");
-    }
-    if (ctx->night_shm_nv12) {
-      __atomic_store_n(&ctx->night_shm_nv12->frame_interval_ms, 500,
-                       __ATOMIC_RELEASE);
-      kill(ctx->night_pid, SIGUSR1); // Push notification
-      printf("[switcher-daemon] NIGHT camera -> 2fps\n");
-    }
-  } else {
-    // NIGHT becomes active (30fps), DAY becomes inactive (2fps)
-    if (ctx->night_shm_nv12) {
-      __atomic_store_n(&ctx->night_shm_nv12->frame_interval_ms, 0,
-                       __ATOMIC_RELEASE);
-      kill(ctx->night_pid, SIGUSR1); // Push notification
-      printf("[switcher-daemon] NIGHT camera -> 30fps\n");
-    }
-    if (ctx->day_shm_nv12) {
-      __atomic_store_n(&ctx->day_shm_nv12->frame_interval_ms, 500,
-                       __ATOMIC_RELEASE);
-      kill(ctx->day_pid, SIGUSR1); // Push notification
-      printf("[switcher-daemon] DAY camera -> 2fps\n");
-    }
+  // Deactivate old camera (SIGUSR2)
+  pid_t old_pid =
+      (ctx->active_camera == CAMERA_MODE_DAY) ? ctx->day_pid : ctx->night_pid;
+  if (old_pid > 0) {
+    kill(old_pid, SIGUSR2);
+    LOG_DEBUG("SwitcherDaemon", "Sent SIGUSR2 to PID %d (deactivate)", old_pid);
+  }
+
+  // Activate new camera (SIGUSR1)
+  pid_t new_pid = (camera == CAMERA_MODE_DAY) ? ctx->day_pid : ctx->night_pid;
+  if (new_pid > 0) {
+    kill(new_pid, SIGUSR1);
+    LOG_DEBUG("SwitcherDaemon", "Sent SIGUSR1 to PID %d (activate)", new_pid);
   }
 
   ctx->active_camera = camera;
   return 0;
 }
 
-static int capture_frame_cb(CameraMode camera, Frame *out_frame,
-                            void *user_data) {
+// Capture frame for ActiveThread - reads directly from active shared memory (no
+// signal)
+static int capture_active_frame_cb(CameraMode camera, Frame *out_frame,
+                                   void *user_data) {
   DaemonContext *ctx = (DaemonContext *)user_data;
+  (void)camera; // Unused - we always read from active_frame
 
-  // Initialize shared memory pointers on first use (with retry)
-  if (camera == CAMERA_MODE_DAY && !ctx->day_shm_nv12) {
-    ctx->day_shm_nv12 = wait_for_shm(SHM_NAME_FRAMES_DAY, 10);
-    if (!ctx->day_shm_nv12) {
-      return -1; // Timeout
-    }
-  } else if (camera == CAMERA_MODE_NIGHT && !ctx->night_shm_nv12) {
-    ctx->night_shm_nv12 = wait_for_shm(SHM_NAME_FRAMES_NIGHT, 10);
-    if (!ctx->night_shm_nv12) {
-      return -1; // Timeout
+  // Open active shared memory on first use
+  if (!ctx->active_shm_nv12) {
+    ctx->active_shm_nv12 = wait_for_shm(SHM_NAME_ACTIVE_FRAME, 10);
+    if (!ctx->active_shm_nv12) {
+      LOG_ERROR("SwitcherDaemon", "Failed to open active frame shared memory");
+      return -1;
     }
   }
 
-  // Read from the requested camera's shared memory
-  SharedFrameBuffer *target_shm =
-      (camera == CAMERA_MODE_DAY) ? ctx->day_shm_nv12 : ctx->night_shm_nv12;
-  int ret = shm_frame_buffer_read_latest(target_shm, out_frame);
-
+  // Read directly from active shared memory (written by active camera daemon)
+  int ret = shm_frame_buffer_read_latest(ctx->active_shm_nv12, out_frame);
   return (ret >= 0) ? 0 : -1;
 }
 
-static int publish_frame_cb(const Frame *frame, void *user_data) {
+// Capture frame for ProbeThread - sends signal and reads from probe shared
+// memory
+static int capture_probe_frame_cb(CameraMode camera, Frame *out_frame,
+                                  void *user_data) {
   DaemonContext *ctx = (DaemonContext *)user_data;
-  if (!ctx->main_shm_nv12) {
-    ctx->main_shm_nv12 = wait_for_shm(SHM_NAME_ACTIVE_FRAME, 10);
-    if (!ctx->main_shm_nv12) {
-      return -1; // Timeout
-    }
-  }
-  if (shm_frame_buffer_write(ctx->main_shm_nv12, frame) < 0) {
-    return -1;
-  }
 
-  if (!ctx->main_shm_h264) {
-    ctx->main_shm_h264 = wait_for_shm(SHM_NAME_STREAM, 10);
-  }
-  if (ctx->main_shm_h264) {
-    SharedFrameBuffer *source_h264 = (ctx->active_camera == CAMERA_MODE_DAY)
-                                         ? ctx->day_shm_h264
-                                         : ctx->night_shm_h264;
-    if (source_h264) {
-      Frame h264_frame = {0};
-      if (shm_frame_buffer_read_latest(source_h264, &h264_frame) >= 0) {
-        shm_frame_buffer_write(ctx->main_shm_h264, &h264_frame);
-      }
+  // Open probe shared memory on first use
+  if (!ctx->probe_shm_nv12) {
+    ctx->probe_shm_nv12 = wait_for_shm(SHM_NAME_PROBE_FRAME, 10);
+    if (!ctx->probe_shm_nv12) {
+      LOG_ERROR("SwitcherDaemon", "Failed to open probe shared memory");
+      return -1;
     }
   }
 
-  return 0;
+  // Send probe request signal to the target camera (non-active camera)
+  pid_t target_pid =
+      (camera == CAMERA_MODE_DAY) ? ctx->day_pid : ctx->night_pid;
+  if (target_pid > 0) {
+    kill(target_pid, SIGRTMIN);
+    LOG_DEBUG("SwitcherDaemon", "Sent SIGRTMIN to PID %d (probe request)",
+              target_pid);
+  }
+
+  // Read from probe shared memory
+  int ret = shm_frame_buffer_read_latest(ctx->probe_shm_nv12, out_frame);
+  return (ret >= 0) ? 0 : -1;
 }
 
+// publish_frame_cb removed - camera_daemon writes directly to
+// active_frame/stream
+
 static volatile sig_atomic_t g_stop = 0;
+static volatile sig_atomic_t g_force_day = 0; // SIGUSR1: Force switch to DAY
+static volatile sig_atomic_t g_force_night =
+    0; // SIGUSR2: Force switch to NIGHT
+
 static void handle_signal(int sig) {
-  (void)sig;
-  g_stop = 1;
+  if (sig == SIGUSR1) {
+    g_force_day = 1;
+    LOG_INFO("SwitcherDaemon", "SIGUSR1: Force switch to DAY requested");
+  } else if (sig == SIGUSR2) {
+    g_force_night = 1;
+    LOG_INFO("SwitcherDaemon", "SIGUSR2: Force switch to NIGHT requested");
+  } else {
+    g_stop = 1;
+  }
 }
 
 int main(void) {
+  // Initialize logger
+  log_init(LOG_LEVEL_INFO, stdout, 0);
+
   signal(SIGINT, handle_signal);
   signal(SIGTERM, handle_signal);
+  signal(SIGUSR1, handle_signal); // Force switch to DAY
+  signal(SIGUSR2, handle_signal); // Force switch to NIGHT
 
   CameraSwitchConfig cfg = {
       .day_to_night_threshold = 40.0,
@@ -270,164 +217,125 @@ int main(void) {
 
   CameraSwitchRuntimeConfig rt_cfg = {
       .probe_interval_sec = 2.0,
-      .active_interval_sec =
-          0.5, // Check brightness every 500ms for quick response
+      .active_interval_sec = 0.5, // Unused
+      .brightness_check_interval_frames_day =
+          3, // Day: every 3 frames = 10fps (fast dark detection)
+      .brightness_check_interval_frames_night =
+          30, // Night: every 30 frames = 1fps (slow bright detection)
   };
 
-  DaemonContext ctx = {.day_pid = -1,
-                       .night_pid = -1,
-                       .active_camera = CAMERA_MODE_DAY,
-                       .main_shm_nv12 = NULL,
-                       .main_shm_h264 = NULL,
-                       .day_shm_nv12 = NULL,
-                       .night_shm_nv12 = NULL,
-                       .day_shm_h264 = NULL,
-                       .night_shm_h264 = NULL};
+  DaemonContext ctx = {
+      .day_pid = -1,
+      .night_pid = -1,
+      .active_camera =
+          -1, // No active camera initially (will be set by first switch)
+      .probe_shm_nv12 = NULL,
+      .active_shm_nv12 = NULL,
+  };
 
   CameraCaptureOps ops = {
       .switch_camera = switch_camera_cb,
-      .capture_frame = capture_frame_cb,
-      .publish_frame = publish_frame_cb,
+      .capture_active_frame =
+          capture_active_frame_cb, // Read from active_frame (no signal)
+      .capture_probe_frame =
+          capture_probe_frame_cb, // Read from probe_frame (send signal)
+      .publish_frame = NULL, // No frame copying - camera_daemon writes directly
       .user_data = &ctx,
   };
 
-  // Create main shared memory for publishing to web/detection/stream
-  ctx.main_shm_nv12 = shm_frame_buffer_create_named(SHM_NAME_ACTIVE_FRAME);
-  if (!ctx.main_shm_nv12) {
-    fprintf(stderr, "[switcher-daemon] failed to create NV12 shared memory\n");
-    return 1;
-  }
-  ctx.main_shm_h264 = shm_frame_buffer_create_named(SHM_NAME_STREAM);
-  if (!ctx.main_shm_h264) {
-    fprintf(stderr, "[switcher-daemon] failed to create H.264 shared memory\n");
-    return 1;
-  }
-  printf("[switcher-daemon] created main shared memory: %s, %s\n",
-         SHM_NAME_ACTIVE_FRAME, SHM_NAME_STREAM);
-
   // Start camera daemons
-  // Active camera: 30fps, Inactive camera: ~2fps
-  // Frame interval is dynamically controlled via shared memory
+  // Both cameras run at constant 30fps for optimal performance
 
   // Check if SINGLE_CAMERA_MODE is enabled (for testing with one camera)
   const char *single_camera_mode = getenv("SINGLE_CAMERA_MODE");
   int use_single_camera = (single_camera_mode && atoi(single_camera_mode) == 1);
 
   if (use_single_camera) {
-    printf("[switcher-daemon] SINGLE_CAMERA_MODE: using camera 0 for both "
-           "DAY/NIGHT\n");
-
-    // Use camera 0 for both DAY and NIGHT (shared camera, different shared
-    // memory)
-    ctx.day_pid =
-        spawn_daemon_with_shm(0, SHM_NAME_FRAMES_DAY, SHM_NAME_STREAM_DAY, 0);
+    LOG_INFO("SwitcherDaemon",
+             "SINGLE_CAMERA_MODE: using camera 0 for both DAY/NIGHT");
+    ctx.day_pid = spawn_daemon(0);
     if (ctx.day_pid <= 0) {
-      fprintf(stderr, "[switcher-daemon] failed to start day camera daemon\n");
+      LOG_ERROR("SwitcherDaemon", "Failed to start day camera daemon");
       return 1;
     }
-
-    // For single camera mode, don't start a second daemon
-    // The runtime will just read from the same camera's shared memory
     ctx.night_pid = -1; // No night camera daemon in single camera mode
-    printf("[switcher-daemon] Single camera started (DAY mode only)\n");
+    LOG_INFO("SwitcherDaemon", "Single camera started (DAY mode only)");
   } else {
-    // Dual camera mode (original behavior)
-    printf("[switcher-daemon] DUAL_CAMERA_MODE: starting both cameras\n");
+    // Dual camera mode: both cameras run at 30fps
+    LOG_INFO("SwitcherDaemon",
+             "DUAL_CAMERA_MODE: starting both cameras at 30fps");
 
-    // Day camera: 30fps (active initially)
-    ctx.day_pid = spawn_daemon_with_shm(CAMERA_MODE_DAY, SHM_NAME_FRAMES_DAY,
-                                        SHM_NAME_STREAM_DAY, 0);
+    ctx.day_pid = spawn_daemon(CAMERA_MODE_DAY);
     if (ctx.day_pid <= 0) {
-      fprintf(stderr, "[switcher-daemon] failed to start day camera daemon\n");
+      LOG_ERROR("SwitcherDaemon", "Failed to start day camera daemon");
       return 1;
     }
 
-    // Night camera: ~2fps (inactive initially)
-    ctx.night_pid = spawn_daemon_with_shm(
-        CAMERA_MODE_NIGHT, SHM_NAME_FRAMES_NIGHT, SHM_NAME_STREAM_NIGHT, 500);
+    ctx.night_pid = spawn_daemon(CAMERA_MODE_NIGHT);
     if (ctx.night_pid <= 0) {
-      fprintf(stderr,
-              "[switcher-daemon] failed to start night camera daemon\n");
+      LOG_ERROR("SwitcherDaemon", "Failed to start night camera daemon");
       kill_daemon(ctx.day_pid);
       return 1;
     }
 
-    printf("[switcher-daemon] both cameras started\n");
+    LOG_INFO("SwitcherDaemon", "Both cameras started at 30fps");
   }
 
-  // Wait for camera daemons to create their shared memory (max 5 seconds)
-  printf("[switcher-daemon] waiting for camera daemons to initialize...\n");
-  ctx.day_shm_nv12 = wait_for_shm(SHM_NAME_FRAMES_DAY, 50); // 50 * 100ms = 5s
-  ctx.day_shm_h264 = wait_for_shm(SHM_NAME_STREAM_DAY, 50);
+  // Wait for camera daemons to initialize (simple sleep)
+  LOG_INFO("SwitcherDaemon", "Waiting for camera daemons to initialize...");
+  sleep(2);
 
-  if (!use_single_camera) {
-    ctx.night_shm_nv12 = wait_for_shm(SHM_NAME_FRAMES_NIGHT, 50);
-    ctx.night_shm_h264 = wait_for_shm(SHM_NAME_STREAM_NIGHT, 50);
-  } else {
-    // In single camera mode, use DAY camera's shared memory for both
-    ctx.night_shm_nv12 = ctx.day_shm_nv12;
-    ctx.night_shm_h264 = ctx.day_shm_h264;
-    printf("[switcher-daemon] Single camera mode: using DAY camera for both "
-           "modes\n");
-  }
-
-  uint32_t day_index =
-      ctx.day_shm_nv12 ? shm_frame_buffer_get_write_index(ctx.day_shm_nv12) : 0;
-  uint32_t night_index =
-      ctx.night_shm_nv12 ? shm_frame_buffer_get_write_index(ctx.night_shm_nv12)
-                         : 0;
-
+  // Activate initial camera (DAY by default)
   CameraMode initial_camera = CAMERA_MODE_DAY;
-  if (day_index == 0 && night_index > 0) {
-    initial_camera = CAMERA_MODE_NIGHT;
-  }
-
   if (switch_camera_cb(initial_camera, &ctx) != 0) {
-    fprintf(stderr, "[switcher-daemon] failed to apply initial camera\n");
+    LOG_ERROR("SwitcherDaemon", "Failed to activate initial camera");
   }
 
   CameraSwitchRuntime rt;
   camera_switch_runtime_init(&rt, &cfg, &rt_cfg, &ops, initial_camera);
 
   if (camera_switch_runtime_start(&rt) != 0) {
-    fprintf(stderr, "[switcher-daemon] failed to start runtime threads\n");
+    LOG_ERROR("SwitcherDaemon", "Failed to start runtime threads");
     kill_daemon(ctx.day_pid);
     kill_daemon(ctx.night_pid);
     return 1;
   }
 
-  printf("[switcher-daemon] running. Press Ctrl+C to stop.\n");
+  LOG_INFO("SwitcherDaemon", "Running. Press Ctrl+C to stop.");
+  LOG_INFO("SwitcherDaemon",
+           "Send SIGUSR1 to force DAY, SIGUSR2 to force NIGHT");
   while (!g_stop) {
+    // Check for force switch signals
+    if (g_force_day) {
+      g_force_day = 0;
+      LOG_INFO("SwitcherDaemon", "Force switching to DAY camera");
+      switch_camera_cb(CAMERA_MODE_DAY, &ctx);
+      camera_switcher_notify_active_camera(&rt.controller, CAMERA_MODE_DAY,
+                                           "forced");
+    }
+    if (g_force_night) {
+      g_force_night = 0;
+      LOG_INFO("SwitcherDaemon", "Force switching to NIGHT camera");
+      switch_camera_cb(CAMERA_MODE_NIGHT, &ctx);
+      camera_switcher_notify_active_camera(&rt.controller, CAMERA_MODE_NIGHT,
+                                           "forced");
+    }
     sleep(1);
   }
 
-  printf("[switcher-daemon] stopping...\n");
+  LOG_INFO("SwitcherDaemon", "Stopping...");
   camera_switch_runtime_stop(&rt);
 
   // Stop both daemons (they will destroy their own shared memory)
   kill_daemon(ctx.day_pid);
   kill_daemon(ctx.night_pid);
 
-  // Close camera-specific shared memory
-  if (ctx.day_shm_nv12) {
-    shm_frame_buffer_close(ctx.day_shm_nv12);
+  // Close shared memory
+  if (ctx.probe_shm_nv12) {
+    shm_frame_buffer_close(ctx.probe_shm_nv12);
   }
-  if (ctx.night_shm_nv12) {
-    shm_frame_buffer_close(ctx.night_shm_nv12);
-  }
-  if (ctx.day_shm_h264) {
-    shm_frame_buffer_close(ctx.day_shm_h264);
-  }
-  if (ctx.night_shm_h264) {
-    shm_frame_buffer_close(ctx.night_shm_h264);
-  }
-
-  // Destroy main shared memory (we created it)
-  if (ctx.main_shm_nv12) {
-    shm_frame_buffer_destroy(ctx.main_shm_nv12);
-  }
-  if (ctx.main_shm_h264) {
-    shm_frame_buffer_destroy(ctx.main_shm_h264);
+  if (ctx.active_shm_nv12) {
+    shm_frame_buffer_close(ctx.active_shm_nv12);
   }
 
   return 0;
