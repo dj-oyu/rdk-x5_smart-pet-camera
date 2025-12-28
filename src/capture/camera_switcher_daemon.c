@@ -56,7 +56,7 @@ static int spawn_daemon(CameraMode camera) {
     // No environment variables needed - camera_daemon uses fixed shm names
     // Enable verbose logging to see debug messages
     execl(CAPTURE_BIN, CAPTURE_BIN, "-C", camera_arg, "-W", "640", "-H", "480",
-          "-v", NULL);
+          NULL);
     perror("execl");
     _exit(1);
   }
@@ -199,7 +199,7 @@ static void handle_signal(int sig) {
 
 int main(void) {
   // Initialize logger
-  log_init(LOG_LEVEL_INFO, stdout, 0);
+  log_init(LOG_LEVEL_DEBUG, stdout, 0);
 
   signal(SIGINT, handle_signal);
   signal(SIGTERM, handle_signal);

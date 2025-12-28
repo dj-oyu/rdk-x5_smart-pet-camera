@@ -274,7 +274,7 @@ echo "[start] launching camera_switcher_daemon..."
 echo "[log] camera_switcher_daemon log: /tmp/camera_switcher_daemon.log"
 (
   cd "${REPO_ROOT}"
-  "${BUILD_DIR}/camera_switcher_daemon" 2>&1 | tee /tmp/camera_switcher_daemon.log
+  "${BUILD_DIR}/camera_switcher_daemon" 2>&1
 ) &
 PIDS+=("$!")
 

@@ -156,12 +156,16 @@ import "C"
 import (
 	"bytes"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"time"
 	"unsafe"
 )
 
 const (
 	formatJPEG   = 0
+	formatNV12   = 1
 	maxFrameSize = 1920 * 1080 * 3 / 2
 )
 
@@ -325,8 +329,103 @@ func (r *shmReader) LatestJPEG() ([]byte, bool) {
 	if !ok {
 		return nil, false
 	}
-	if frame.Format != formatJPEG || len(frame.Data) == 0 {
-		return nil, false
+
+	// If already JPEG, return as-is
+	if frame.Format == formatJPEG && len(frame.Data) > 0 {
+		return frame.Data, true
 	}
-	return frame.Data, true
+
+	// If NV12, convert to JPEG
+	if frame.Format == formatNV12 && len(frame.Data) > 0 {
+		jpegData, err := nv12ToJPEG(frame.Data, frame.Width, frame.Height)
+		if err != nil {
+			return nil, false
+		}
+		return jpegData, true
+	}
+
+	return nil, false
+}
+
+// nv12ToJPEG converts NV12 format to JPEG
+func nv12ToJPEG(nv12Data []byte, width, height int) ([]byte, error) {
+	// Convert NV12 to RGB
+	rgbImg := nv12ToRGB(nv12Data, width, height)
+
+	// Encode to JPEG
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, rgbImg, &jpeg.Options{Quality: 85}); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
+// nv12ToRGB converts NV12 YUV format to RGB image
+func nv12ToRGB(nv12Data []byte, width, height int) *image.RGBA {
+	ySize := width * height
+	uvSize := width * height / 2
+
+	if len(nv12Data) < ySize+uvSize {
+		return nil
+	}
+
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+
+	// Y plane
+	yPlane := nv12Data[:ySize]
+	// UV plane (interleaved)
+	uvPlane := nv12Data[ySize : ySize+uvSize]
+
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			// Get Y value
+			yVal := int(yPlane[y*width+x])
+
+			// Get UV values (half resolution)
+			uvX := (x / 2) * 2
+			uvY := y / 2
+			uvIndex := uvY*width + uvX
+
+			uVal := int(uvPlane[uvIndex])
+			vVal := int(uvPlane[uvIndex+1])
+
+			// YUV to RGB conversion (BT.601, optimized integer math)
+			// C = Y - 16, D = U - 128, E = V - 128
+			c := yVal - 16
+			d := uVal - 128
+			e := vVal - 128
+
+			// R = clip(( 298 * C + 409 * E + 128) >> 8)
+			// G = clip(( 298 * C - 100 * D - 208 * E + 128) >> 8)
+			// B = clip(( 298 * C + 516 * D + 128) >> 8)
+			r := (298*c + 409*e + 128) >> 8
+			g := (298*c - 100*d - 208*e + 128) >> 8
+			b := (298*c + 516*d + 128) >> 8
+
+			// Clamp to [0, 255]
+			img.Set(x, y, clampInt(r, g, b))
+		}
+	}
+
+	return img
+}
+
+func clampInt(r, g, b int) color.RGBA {
+	return color.RGBA{
+		R: uint8(clamp(r)),
+		G: uint8(clamp(g)),
+		B: uint8(clamp(b)),
+		A: 255,
+	}
+}
+
+func clamp(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return v
 }

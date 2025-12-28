@@ -150,11 +150,18 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to create answer: %w", err)
 	}
 
+	// Create a channel to signal when ICE gathering is complete
+	gatherComplete := webrtc.GatheringCompletePromise(peerConn)
+
 	// Set local description (answer)
 	if err := peerConn.SetLocalDescription(answer); err != nil {
 		peerConn.Close()
 		return nil, fmt.Errorf("failed to set local description: %w", err)
 	}
+
+	// Wait for ICE gathering to complete
+	<-gatherComplete
+	log.Printf("[WebRTC] ICE gathering complete for client %s", client.id)
 
 	// Add client to server
 	s.clientsMu.Lock()
@@ -166,8 +173,14 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 
 	log.Printf("[WebRTC] Client %s connected", client.id)
 
-	// Return answer as JSON
-	answerJSON, err := json.Marshal(answer)
+	// Get the complete local description (with ICE candidates)
+	localDesc := peerConn.LocalDescription()
+	if localDesc == nil {
+		return nil, fmt.Errorf("no local description available")
+	}
+
+	// Return answer as JSON (now includes ICE candidates)
+	answerJSON, err := json.Marshal(localDesc)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal answer: %w", err)
 	}
