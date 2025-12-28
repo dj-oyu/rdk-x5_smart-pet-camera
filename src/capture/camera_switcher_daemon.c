@@ -199,7 +199,7 @@ static void handle_signal(int sig) {
 
 int main(void) {
   // Initialize logger
-  log_init(LOG_LEVEL_DEBUG, stdout, 0);
+  log_init(LOG_LEVEL_INFO, stdout, 0);
 
   signal(SIGINT, handle_signal);
   signal(SIGTERM, handle_signal);
@@ -207,7 +207,7 @@ int main(void) {
   signal(SIGUSR2, handle_signal); // Force switch to NIGHT
 
   CameraSwitchConfig cfg = {
-      .day_to_night_threshold = 40.0,
+      .day_to_night_threshold = 50.0,
       .night_to_day_threshold =
           60.0, // Lowered from 70.0 to match typical indoor brightness
       .day_to_night_hold_seconds = 0.5, // Back to original for testing

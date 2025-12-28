@@ -29,15 +29,15 @@ from detection.yolo_detector import YoloDetector
 
 # ロガー設定
 logging.basicConfig(
-    level=logging.FATAL,
+    level=logging.INFO,
     format="[%(asctime)s.%(msecs)03d] [%(levelname)s] [%(name)s] %(message)s",
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("YOLODetectorDaemon")
 
-# YOLODetectorのロガーもDEBUGに設定
+# YOLODetectorのロガーもINFOに設定
 yolo_logger = logging.getLogger("detection.yolo_detector")
-yolo_logger.setLevel(logging.FATAL)
+yolo_logger.setLevel(logging.INFO)
 
 
 class YoloDetectorDaemon:

@@ -124,6 +124,11 @@ export class WebRTCVideoClient {
 
         } catch (error) {
             console.error('[WebRTC] Error starting connection:', error);
+            console.error('[WebRTC] Error details:', {
+                name: error.name,
+                message: error.message,
+                stack: error.stack
+            });
             if (this.onError) {
                 this.onError(error);
             }
