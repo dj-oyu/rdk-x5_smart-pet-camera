@@ -271,9 +271,10 @@ if [[ "${RUN_STREAMING}" -eq 1 ]]; then
 fi
 
 echo "[start] launching camera_switcher_daemon..."
+echo "[log] camera_switcher_daemon log: /tmp/camera_switcher_daemon.log"
 (
   cd "${REPO_ROOT}"
-  "${BUILD_DIR}/camera_switcher_daemon"
+  "${BUILD_DIR}/camera_switcher_daemon" 2>&1 | tee /tmp/camera_switcher_daemon.log
 ) &
 PIDS+=("$!")
 
@@ -295,18 +296,20 @@ fi
 if [[ "${RUN_DETECTOR}" -eq 1 ]]; then
   echo "[start] launching YOLO detector (model=${YOLO_MODEL}, score_thres=${YOLO_SCORE_THRESHOLD})..."
   echo "        model_path: ${YOLO_MODEL_PATH}"
+  echo "[log] YOLO detector log: /tmp/yolo_detector.log"
   (
     cd "${REPO_ROOT}"
     "${UV_BIN}" run src/detector/yolo_detector_daemon.py \
       --model-path "${YOLO_MODEL_PATH}" \
       --score-threshold "${YOLO_SCORE_THRESHOLD}" \
-      --nms-threshold "${YOLO_NMS_THRESHOLD}"
+      --nms-threshold "${YOLO_NMS_THRESHOLD}" 2>&1 | tee /tmp/yolo_detector.log
   ) &
   PIDS+=("$!")
 fi
 
 if [[ "${RUN_MONITOR}" -eq 1 ]]; then
   echo "[start] launching Go web monitor on ${MONITOR_HOST}:${MONITOR_PORT}..."
+  echo "[log] web_monitor log: /tmp/web_monitor.log"
   (
     cd "${REPO_ROOT}"
     "${BUILD_DIR}/web_monitor" \
@@ -316,13 +319,14 @@ if [[ "${RUN_MONITOR}" -eq 1 ]]; then
       -frame-shm "/pet_camera_active_frame" \
       -detection-shm "/pet_camera_detections" \
       -webrtc-base "http://localhost:${STREAMING_PORT}" \
-      -fps 30
+      -fps 30 2>&1 | tee /tmp/web_monitor.log
   ) &
   PIDS+=("$!")
 fi
 
 if [[ "${RUN_STREAMING}" -eq 1 ]]; then
   echo "[start] launching Go streaming server on ${STREAMING_HOST}:${STREAMING_PORT}..."
+  echo "[log] streaming-server log: /tmp/streaming_server.log"
   (
     cd "${REPO_ROOT}"
     "${BUILD_DIR}/streaming-server" \
@@ -331,7 +335,7 @@ if [[ "${RUN_STREAMING}" -eq 1 ]]; then
       -metrics ":${METRICS_PORT}" \
       -pprof ":${PPROF_PORT}" \
       -record-path "${RECORDING_PATH}" \
-      -max-clients "${STREAMING_MAX_CLIENTS}"
+      -max-clients "${STREAMING_MAX_CLIENTS}" 2>&1 | tee /tmp/streaming_server.log
   ) &
   PIDS+=("$!")
 fi
@@ -354,6 +358,18 @@ if [[ "${RUN_STREAMING}" -eq 1 ]]; then
   echo "pprof:            http://localhost:${PPROF_PORT}/debug/pprof/"
   echo "Recording Path:   ${RECORDING_PATH}"
   echo "Max Clients:      ${STREAMING_MAX_CLIENTS}"
+fi
+echo ""
+echo "Log Files:"
+echo "  - Camera Switcher: /tmp/camera_switcher_daemon.log"
+if [[ "${RUN_DETECTOR}" -eq 1 ]]; then
+  echo "  - YOLO Detector:   /tmp/yolo_detector.log"
+fi
+if [[ "${RUN_MONITOR}" -eq 1 ]]; then
+  echo "  - Web Monitor:     /tmp/web_monitor.log"
+fi
+if [[ "${RUN_STREAMING}" -eq 1 ]]; then
+  echo "  - Streaming:       /tmp/streaming_server.log"
 fi
 echo ""
 echo "Press Ctrl+C to stop (all processes will be cleaned up)."
