@@ -33,6 +33,11 @@ AI物体検出技術を活用し、ペット（猫）の日常行動を自動的
   - 開発計画（Phase 1-4）
 - **[development_roadmap.md](docs/development_roadmap.md)** - 開発ロードマップとタスク管理
 
+### プライバシー・セキュリティ
+- **[PRIVACY_AUDIT.md](docs/PRIVACY_AUDIT.md)** - プライバシー監査レポート（最終実施: 2025-12-28）
+- **[PRIVACY_CHECKLIST.md](docs/PRIVACY_CHECKLIST.md)** - プライバシーレビューチェックリスト
+- **プライバシースキャン**: `python3 scripts/privacy_scan.py` でドキュメント内の機密情報をチェック
+
 ## クイックスタート（Phase 0: モック環境）
 
 実機なしでローカルPC上で動作確認できます。

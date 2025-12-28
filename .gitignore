@@ -47,12 +47,25 @@ coverage.xml
 
 # Environments
 .env
+.env.*
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Secrets and credentials
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+secrets.yaml
+credentials.json
+.secrets/
+**/secrets/
+*.secret
 
 # IDEs
 .vscode/
