@@ -4,7 +4,8 @@ Webモニター実装
 Flask + MJPEGストリーミングでBBox合成映像をブラウザに表示
 """
 
-from flask import Flask, Response, jsonify, render_template_string, request
+from flask import Flask, Response, jsonify, render_template_string, request, send_from_directory
+import asyncio
 import cv2
 import numpy as np
 import json
@@ -14,6 +15,7 @@ import threading
 import time
 from pathlib import Path
 import sys
+from collections import deque
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "common" / "src"))
 # 共通型定義をインポート
@@ -21,7 +23,9 @@ from common.types import Frame, DetectionResult, Detection, BoundingBox, Detecti
 
 # MockSharedMemoryをインポート（型ヒント用）
 sys.path.insert(0, str(Path(__file__).parent.parent / "mock"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "capture"))
 from shared_memory import MockSharedMemory
+from real_shared_memory import RealSharedMemory, SHM_NAME_STREAM
 from camera_switcher import SwitchMode
 from common.types import CameraType
 
@@ -31,10 +35,24 @@ if TYPE_CHECKING:
 
 # 色定義（BGR）
 COLORS = {
-    "cat": (0, 255, 0),          # 緑
+    "cat": (0, 255, 0),        # 緑
+    "dog": (0, 200, 255),      # オレンジ寄り
+    "bird": (255, 150, 0),     # 青寄り
     "food_bowl": (0, 165, 255),  # オレンジ
-    "water_bowl": (255, 0, 0),   # 青
+    "water_bowl": (0, 120, 255), # 青
+    "dish": (255, 0, 0),         # 青
+    "person": (255, 255, 0),     # シアン
+    "book": (0, 255, 255),       # 黄色
+    "cell_phone": (255, 0, 255), # マゼンタ
+    "chair": (140, 180, 255),
+    "couch": (180, 140, 255),
+    "tv": (200, 255, 120),
+    "laptop": (200, 200, 255),
+    "remote": (255, 200, 120),
 }
+
+ASSET_SRC_DIR = Path(__file__).parent / "web_assets"
+ASSET_BUILD_DIR = Path(__file__).resolve().parents[2] / "build" / "web"
 
 
 class WebMonitor:
@@ -85,6 +103,8 @@ class WebMonitor:
         self._overlay_thread: Optional[threading.Thread] = None
         self._latest_detection: Optional[DetectionResult] = None
         self._latest_detection_lock = threading.Lock()
+        self._latest_detection_key: Optional[tuple[int, int]] = None
+        self._detection_history: deque[DetectionResult] = deque(maxlen=8)
 
     def start(self) -> None:
         """Overlayスレッドを開始"""
@@ -133,9 +153,7 @@ class WebMonitor:
 
             # JPEGエンコード
             _, encoded = cv2.imencode(
-                '.jpg',
-                overlay_frame,
-                [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
+                ".jpg", overlay_frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
             )
             jpeg_data = encoded.tobytes()
 
@@ -182,7 +200,9 @@ class WebMonitor:
             elif isinstance(detection_result_raw, dict):
                 detection_dict = detection_result_raw
             else:
-                print(f"[WARN] Unsupported detection result type: {type(detection_result_raw)}")
+                print(
+                    f"[WARN] Unsupported detection result type: {type(detection_result_raw)}"
+                )
                 return None
 
             detections = []
@@ -213,9 +233,12 @@ class WebMonitor:
                     )
                 )
 
+            timestamp_raw = float(detection_dict.get("timestamp", 0.0))
+            if timestamp_raw < 1_000_000_000:
+                timestamp_raw = time.time()
             return DetectionResult(
                 frame_number=int(detection_dict.get("frame_number", 0)),
-                timestamp=float(detection_dict.get("timestamp", time.time())),
+                timestamp=timestamp_raw,
                 detections=detections,
                 version=int(detection_dict.get("version", 0)),
             )
@@ -224,9 +247,7 @@ class WebMonitor:
             return None
 
     def _draw_overlay(
-        self,
-        frame: Frame,
-        detection_result: Optional[DetectionResult]
+        self, frame: Frame, detection_result: Optional[DetectionResult]
     ) -> np.ndarray:
         """
         BBoxを合成
@@ -238,12 +259,55 @@ class WebMonitor:
         Returns:
             BBox合成済みのフレーム（BGR）
         """
-        # JPEG デコード
-        np_arr = np.frombuffer(frame.data, np.uint8)
-        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        if img is None:
-            # 共有メモリ側のJPEGが壊れている場合でもUIが止まらないようにする
-            print("[WARN] Failed to decode frame; using blank fallback")
+        # フォーマットに応じてデコード
+        if frame.format == 0:  # JPEG
+            np_arr = np.frombuffer(frame.data, np.uint8)
+            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if img is None:
+                print("[WARN] Failed to decode JPEG frame; using blank fallback")
+                img = np.zeros((frame.height, frame.width, 3), dtype=np.uint8)
+        elif frame.format == 1:  # NV12
+            # NV12: Y plane + UV plane (interleaved)
+            y_size = frame.width * frame.height
+            uv_size = y_size // 2
+            expected_size = y_size + uv_size
+
+            if len(frame.data) < expected_size:
+                print(
+                    f"[WARN] NV12 frame too small: {len(frame.data)} < {expected_size}"
+                )
+                img = np.zeros((frame.height, frame.width, 3), dtype=np.uint8)
+            else:
+                try:
+                    # NV12データを読み取り（sp_vio_get_frame()から取得）
+                    yuv_data = np.frombuffer(frame.data[:expected_size], dtype=np.uint8)
+
+                    # NV12形式: [Y: height x width] [UV: height/2 x width (interleaved)]
+                    # reshapeして (height * 3/2, width) にする
+                    yuv_img = yuv_data.reshape((frame.height * 3 // 2, frame.width))
+
+                    # NV12 → BGR変換
+                    img = cv2.cvtColor(yuv_img, cv2.COLOR_YUV2BGR_NV12)
+
+                except Exception as e:
+                    print(f"[ERROR] NV12 conversion failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    img = np.zeros((frame.height, frame.width, 3), dtype=np.uint8)
+        elif frame.format == 3:  # H.264
+            # H.264 フレームはMJPEGストリーミングではサポートされません
+            # WebRTCストリーミングを使用してください
+            # （H.264デコード → オーバーレイ → JPEG再エンコードは非効率的なため）
+            print("[INFO] H.264 frame detected. Use WebRTC streaming for H.264.")
+            img = np.zeros((frame.height, frame.width, 3), dtype=np.uint8)
+            # 代わりに "H.264 Mode - Use WebRTC" というメッセージを表示
+            cv2.putText(img, "H.264 Mode - Use WebRTC Streaming",
+                       (frame.width//4, frame.height//2),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
+        else:
+            print(
+                f"[WARN] Unsupported frame format: {frame.format}; using blank fallback"
+            )
             img = np.zeros((frame.height, frame.width, 3), dtype=np.uint8)
 
         if detection_result is None or not detection_result.detections:
@@ -274,21 +338,12 @@ class WebMonitor:
 
         # バウンディングボックスを描画
         cv2.rectangle(
-            img,
-            (bbox.x, bbox.y),
-            (bbox.x + bbox.w, bbox.y + bbox.h),
-            color,
-            2
+            img, (bbox.x, bbox.y), (bbox.x + bbox.w, bbox.y + bbox.h), color, 2
         )
 
         # ラベルを描画
         label = f"{class_name}: {confidence:.2f}"
-        label_size, baseline = cv2.getTextSize(
-            label,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            1
-        )
+        label_size, baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         label_y = max(bbox.y - 10, label_size[1] + 10)
 
         # ラベル背景
@@ -297,25 +352,16 @@ class WebMonitor:
             (bbox.x, label_y - label_size[1] - baseline),
             (bbox.x + label_size[0], label_y + baseline),
             color,
-            -1
+            -1,
         )
 
         # ラベルテキスト
         cv2.putText(
-            img,
-            label,
-            (bbox.x, label_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 0, 0),
-            1
+            img, label, (bbox.x, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1
         )
 
     def _draw_info_text(
-        self,
-        img: np.ndarray,
-        frame: Frame,
-        detection_result: Optional[DetectionResult]
+        self, img: np.ndarray, frame: Frame, detection_result: Optional[DetectionResult]
     ) -> None:
         """情報テキストを描画"""
         info_lines = [
@@ -336,7 +382,7 @@ class WebMonitor:
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
                 (0, 255, 255),
-                2
+                2,
             )
             y_offset += 25
 
@@ -345,8 +391,7 @@ class WebMonitor:
         while True:
             try:
                 frame = self.frame_queue.get(timeout=1.0)
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
             except queue.Empty:
                 continue
 
@@ -354,11 +399,21 @@ class WebMonitor:
         """最新検出結果を保存（API用）"""
         with self._latest_detection_lock:
             self._latest_detection = detection_result
+            detection_key = (detection_result.frame_number, detection_result.version)
+            if detection_key != self._latest_detection_key:
+                self._latest_detection_key = detection_key
+                if detection_result.num_detections > 0:
+                    self._detection_history.appendleft(detection_result)
 
     def get_latest_detection(self) -> Optional[DetectionResult]:
         """最新検出結果を取得"""
         with self._latest_detection_lock:
             return self._latest_detection
+
+    def get_detection_history(self) -> list[DetectionResult]:
+        """検出履歴を取得"""
+        with self._latest_detection_lock:
+            return list(self._detection_history)
 
     def get_stats_snapshot(self) -> dict[str, float | int]:
         """統計情報のスナップショットを返す"""
@@ -403,7 +458,7 @@ def create_app(
     app = Flask(__name__)
 
     # pyright: ignore[reportUnusedFunction]
-    @app.route('/')
+    @app.route("/")
     def index():
         """メインページ"""
         html = """
@@ -412,207 +467,12 @@ def create_app(
         <head>
             <title>Smart Pet Camera Monitor</title>
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <style>
-                body {
-                    font-family: 'Inter', 'Noto Sans JP', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-                    background: radial-gradient(circle at 20% 20%, #1f2a44, #0f1628 35%, #0b0f1d 65%, #070a12 100%);
-                    color: #e8ecf5;
-                    margin: 0;
-                    padding: 32px 18px 48px;
-                    min-height: 100vh;
-                }
-                * { box-sizing: border-box; }
-                a { color: inherit; }
-                .app {
-                    max-width: 1400px;
-                    margin: 0 auto;
-                    display: flex;
-                    flex-direction: column;
-                    gap: 18px;
-                }
-                .header {
-                    display: flex;
-                    align-items: center;
-                    gap: 16px;
-                    flex-wrap: wrap;
-                }
-                .title {
-                    font-size: 26px;
-                    font-weight: 700;
-                    letter-spacing: 0.2px;
-                }
-                .badge {
-                    display: inline-flex;
-                    align-items: center;
-                    gap: 6px;
-                    background: linear-gradient(135deg, #2a8fff, #7bd0ff);
-                    color: #061326;
-                    padding: 6px 10px;
-                    border-radius: 12px;
-                    font-weight: 700;
-                    font-size: 12px;
-                    box-shadow: 0 8px 24px rgba(45, 140, 255, 0.4);
-                }
-                .badge-secondary {
-                    background: rgba(255,255,255,0.05);
-                    color: #b8c4d9;
-                    box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
-                }
-                .grid {
-                    display: grid;
-                    grid-template-columns: 2fr 1fr;
-                    gap: 18px;
-                }
-                .panel {
-                    background: rgba(255,255,255,0.04);
-                    border: 1px solid rgba(255,255,255,0.06);
-                    border-radius: 16px;
-                    padding: 16px;
-                    box-shadow: 0 12px 50px rgba(0,0,0,0.28);
-                    backdrop-filter: blur(4px);
-                }
-                .panel h2 {
-                    margin: 0 0 12px;
-                    font-size: 16px;
-                    font-weight: 700;
-                    color: #f4f7ff;
-                    letter-spacing: 0.2px;
-                }
-                .panel-subtitle {
-                    color: #9aaccc;
-                    font-size: 13px;
-                    margin: 0 0 14px;
-                }
-                #video-panel {
-                    position: relative;
-                    background: linear-gradient(145deg, rgba(35,47,76,0.9), rgba(11,16,30,0.9));
-                    border-radius: 14px;
-                    overflow: hidden;
-                    min-height: 380px;
-                    border: 1px solid rgba(255,255,255,0.06);
-                }
-                #stream {
-                    width: 100%;
-                    display: block;
-                    background: #05070d;
-                    object-fit: contain;
-                }
-                .stat-grid {
-                    display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-                    gap: 12px;
-                    margin: 12px 0 6px;
-                }
-                .stat {
-                    background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02));
-                    padding: 12px;
-                    border-radius: 12px;
-                    border: 1px solid rgba(255,255,255,0.08);
-                    display: flex;
-                    flex-direction: column;
-                    gap: 6px;
-                }
-                .stat-label {
-                    color: #95a5c7;
-                    font-size: 12px;
-                    letter-spacing: 0.1px;
-                }
-                .stat-value {
-                    font-size: 22px;
-                    font-weight: 700;
-                    color: #7cd8ff;
-                }
-                .stat-sub {
-                    color: #7ad97f;
-                    font-weight: 700;
-                    font-size: 13px;
-                }
-                .list {
-                    display: flex;
-                    flex-direction: column;
-                    gap: 10px;
-                    margin-top: 12px;
-                }
-                .list-item {
-                    background: rgba(255,255,255,0.04);
-                    border: 1px solid rgba(255,255,255,0.05);
-                    border-radius: 12px;
-                    padding: 12px;
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                    gap: 12px;
-                }
-                .list-label {
-                    color: #b9c6dd;
-                    font-size: 13px;
-                }
-                .list-value {
-                    font-weight: 700;
-                    color: #f6f8ff;
-                }
-                .detections {
-                    display: flex;
-                    flex-direction: column;
-                    gap: 8px;
-                }
-                .det-card {
-                    background: rgba(0, 0, 0, 0.25);
-                    border: 1px solid rgba(255,255,255,0.08);
-                    border-radius: 12px;
-                    padding: 12px;
-                    display: grid;
-                    grid-template-columns: 1fr auto;
-                    gap: 6px;
-                }
-                .det-title {
-                    font-weight: 700;
-                    color: #f7fbff;
-                }
-                .det-meta {
-                    color: #9fb0d1;
-                    font-size: 12px;
-                    text-align: right;
-                }
-                .tag-row {
-                    display: flex;
-                    gap: 8px;
-                    flex-wrap: wrap;
-                }
-                .tag {
-                    padding: 4px 10px;
-                    border-radius: 10px;
-                    font-size: 12px;
-                    font-weight: 700;
-                    background: rgba(255,255,255,0.08);
-                    border: 1px solid rgba(255,255,255,0.08);
-                    color: #dfe8ff;
-                }
-                .tag.cat { background: rgba(0, 255, 0, 0.08); border-color: rgba(0,255,0,0.14); color: #9df9a5; }
-                .tag.food_bowl { background: rgba(0, 165, 255, 0.1); border-color: rgba(0,165,255,0.18); color: #9ad7ff; }
-                .tag.water_bowl { background: rgba(255, 0, 0, 0.1); border-color: rgba(255,0,0,0.2); color: #ff9c9c; }
-                .muted {
-                    color: #8c9bbb;
-                    font-size: 13px;
-                    margin: 0;
-                }
-                .footer-note {
-                    color: #6d7a9b;
-                    font-size: 12px;
-                    margin-top: 6px;
-                }
-                @media (max-width: 960px) {
-                    .grid {
-                        grid-template-columns: 1fr;
-                    }
-                }
-            </style>
+            <link rel="stylesheet" href="/assets/monitor.css">
         </head>
         <body>
             <div class="app">
                 <div class="header">
                     <div class="title">🐱 Smart Pet Camera Monitor</div>
-                    <span class="badge">Live stream</span>
                     <span class="badge badge-secondary" id="status-badge">Waiting for data...</span>
                 </div>
 
@@ -621,18 +481,45 @@ def create_app(
                         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
                             <div>
                                 <h2>Live Feed</h2>
-                                <p class="panel-subtitle">BBox合成済みの映像をリアルタイムで確認できます。</p>
+                                <p class="panel-subtitle" id="stream-subtitle">WebRTC H.264ストリーム（30fps、低遅延）</p>
                             </div>
-                            <div class="tag-row">
-                                <span class="tag cat">cat</span>
-                                <span class="tag food_bowl">food_bowl</span>
-                                <span class="tag water_bowl">water_bowl</span>
+                            <div style="display:flex;gap:12px;align-items:center;">
+                                <div class="view-toggle">
+                                    <button type="button" id="btn-webrtc" class="active">WebRTC</button>
+                                    <button type="button" id="btn-mjpeg">MJPEG</button>
+                                </div>
+                                <div class="tag-row">
+                                    <span class="tag cat">cat</span>
+                                    <span class="tag food_bowl">food_bowl</span>
+                                    <span class="tag water_bowl">water_bowl</span>
+                                </div>
                             </div>
                         </div>
-                        <div id="video-panel">
-                            <img id="stream" src="/stream" alt="Live stream from Smart Pet Camera">
+                        <div id="video-panel" style="position:relative;">
+                            <!-- WebRTC View (default) -->
+                            <div id="webrtc-view" style="position:relative;width:100%;display:block;">
+                                <video id="webrtc-video" autoplay playsinline muted
+                                       style="width:100%;height:auto;display:block;background:#000;"></video>
+                                <canvas id="bbox-canvas"
+                                        style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
+                                <div id="webrtc-status"
+                                     style="position:absolute;top:10px;right:10px;padding:4px 8px;background:rgba(0,0,0,0.7);color:#0f0;font-size:12px;border-radius:4px;">
+                                    ● Connecting...
+                                </div>
+                            </div>
+                            <!-- MJPEG View (fallback) -->
+                            <div id="mjpeg-view" style="display:none;">
+                                <img id="stream" alt="Live stream from Smart Pet Camera" style="width:100%;height:auto;">
+                            </div>
                         </div>
-                        <p class="footer-note">共有メモリの最新フレームにバウンディングボックスを合成したMJPEGストリームを配信しています。</p>
+                        <div class="trajectory-card" id="trajectory-card">
+                            <div class="trajectory-title">Trajectory</div>
+                            <canvas class="trajectory-canvas" id="trajectory-canvas"></canvas>
+                            <div class="legend" id="trajectory-legend"></div>
+                        </div>
+                        <p class="footer-note" id="stream-footer">
+                            WebRTC経由でH.264ストリームを直接配信。ブラウザ上で検出結果をリアルタイムオーバーレイ。
+                        </p>
                     </div>
 
                     <div class="panel">
@@ -643,11 +530,6 @@ def create_app(
                                 <span class="stat-label">Camera FPS</span>
                                 <span class="stat-value" id="fps">--</span>
                                 <span class="stat-sub" id="target-fps">目標: -- fps</span>
-                            </div>
-                            <div class="stat">
-                                <span class="stat-label">Frames processed</span>
-                                <span class="stat-value" id="frames">--</span>
-                                <span class="stat-sub" id="frames-total">---</span>
                             </div>
                             <div class="stat">
                                 <span class="stat-label">Detections</span>
@@ -665,102 +547,192 @@ def create_app(
                                 <div class="list-label">Latest update</div>
                                 <div class="list-value" id="last-updated">--</div>
                             </div>
+                            <div class="list-item">
+                                <div class="list-label">Frames buffered</div>
+                                <div class="list-value" id="frames-total">--</div>
+                            </div>
                         </div>
                     </div>
 
                     <div class="panel">
-                        <h2>最新の検出結果</h2>
-                        <p class="panel-subtitle">直近のフレームで検出されたオブジェクト一覧</p>
-                        <div class="detections" id="detection-list">
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+                            <div>
+                                <h2>検出インサイト</h2>
+                                <p class="panel-subtitle">履歴・ランキング・タイムラインを切り替えて把握</p>
+                            </div>
+                            <div class="view-toggle" id="view-toggle">
+                                <button type="button" data-view="history" class="active">履歴</button>
+                                <button type="button" data-view="ranking">ランキング</button>
+                                <button type="button" data-view="timeline">タイムライン</button>
+                            </div>
+                        </div>
+                        <div class="detections" id="history-list">
                             <p class="muted">まだ検出結果はありません。カメラ入力を待機しています。</p>
+                        </div>
+                        <div class="rank-list" id="ranking-list" style="display:none;"></div>
+                        <div class="timeline" id="timeline-list" style="display:none;"></div>
+                        <div class="timeline-chart" id="timeline-chart" style="display:none;">
+                            <canvas class="timeline-canvas" id="timeline-canvas"></canvas>
+                            <div class="legend" id="timeline-legend"></div>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <script>
-                const fpsEl = document.getElementById('fps');
-                const framesEl = document.getElementById('frames');
-                const detectionsEl = document.getElementById('detections');
-                const shmBufferEl = document.getElementById('shm-buffer');
-                const framesTotalEl = document.getElementById('frames-total');
-                const detectionVersionEl = document.getElementById('detection-version');
-                const detectionListEl = document.getElementById('detection-list');
-                const statusBadge = document.getElementById('status-badge');
-                const lastUpdatedEl = document.getElementById('last-updated');
-                const targetFpsEl = document.getElementById('target-fps');
+            <script src="/assets/monitor.js" defer></script>
+            <script type="module">
+                import { WebRTCVideoClient } from '/assets/webrtc_client.js';
+                import { BBoxOverlay } from '/assets/bbox_overlay.js';
 
-                function formatNumber(value) {
-                    return value.toLocaleString(undefined, { maximumFractionDigits: 1 });
-                }
+                // Elements
+                const video = document.getElementById('webrtc-video');
+                const canvas = document.getElementById('bbox-canvas');
+                const webrtcView = document.getElementById('webrtc-view');
+                const mjpegView = document.getElementById('mjpeg-view');
+                const statusDiv = document.getElementById('webrtc-status');
+                const subtitle = document.getElementById('stream-subtitle');
+                const footer = document.getElementById('stream-footer');
+                const btnWebrtc = document.getElementById('btn-webrtc');
+                const btnMjpeg = document.getElementById('btn-mjpeg');
 
-                function renderDetections(latestDetection) {
-                    if (!latestDetection) {
-                        detectionListEl.innerHTML = '<p class="muted">まだ検出結果はありません。カメラ入力を待機しています。</p>';
-                        return;
-                    }
+                // WebRTC client and overlay
+                let webrtcClient = null;
+                let bboxOverlay = null;
+                let currentMode = 'webrtc';  // 'webrtc' or 'mjpeg'
 
-                    const ts = new Date(latestDetection.timestamp * 1000);
-                    const header = `Frame #${latestDetection.frame_number} / ${latestDetection.num_detections} detections`;
-                    const meta = `${ts.toLocaleString()} / v${latestDetection.version}`;
-
-                    const detections = latestDetection.detections.map(det => {
-                        const bbox = det.bbox;
-                        return `
-                            <div class="det-card">
-                                <div>
-                                    <div class="det-title">${det.class_name}</div>
-                                    <div class="tag-row" style="margin-top:4px;">
-                                        <span class="tag ${det.class_name}">${(det.confidence * 100).toFixed(1)}%</span>
-                                        <span class="tag badge-secondary">x:${bbox.x} y:${bbox.y} w:${bbox.w} h:${bbox.h}</span>
-                                    </div>
-                                </div>
-                                <div class="det-meta">${meta}</div>
-                            </div>
-                        `;
-                    }).join("");
-
-                    detectionListEl.innerHTML = `
-                        <div class="det-card">
-                            <div class="det-title">${header}</div>
-                            <div class="det-meta">${meta}</div>
-                        </div>
-                        ${detections}
-                    `;
-                }
-
-                async function fetchStatus() {
+                // Initialize WebRTC
+                async function initWebRTC() {
                     try {
-                        const res = await fetch('/api/status');
-                        if (!res.ok) return;
-                        const data = await res.json();
+                        console.log('[App] Initializing WebRTC...');
+                        statusDiv.textContent = '● Connecting...';
+                        statusDiv.style.color = '#ff0';
 
-                        fpsEl.textContent = `${formatNumber(data.monitor.current_fps)} fps`;
-                        framesEl.textContent = formatNumber(data.monitor.frames_processed);
-                        detectionsEl.textContent = formatNumber(data.monitor.detection_count);
-                        targetFpsEl.textContent = `目標: ${data.monitor.target_fps} fps`;
+                        // Create WebRTC client (use same origin as current page)
+                        webrtcClient = new WebRTCVideoClient(video);
 
-                        framesTotalEl.textContent = `buffer: ${data.shared_memory.frame_count} / total: ${formatNumber(data.shared_memory.total_frames_written)}`;
-                        detectionVersionEl.textContent = `version: ${data.shared_memory.detection_version}`;
-                        shmBufferEl.textContent = data.shared_memory.has_detection ? '🟢 receiving detections' : '🟡 waiting for detections';
-                        statusBadge.textContent = data.shared_memory.has_detection ? 'Receiving data' : 'Live stream active';
+                        // Connection state callback
+                        webrtcClient.onConnectionStateChange = (state) => {
+                            console.log('[App] WebRTC state:', state);
+                            if (state === 'connected') {
+                                statusDiv.textContent = '● Connected (30fps)';
+                                statusDiv.style.color = '#0f0';
+                            } else if (state === 'connecting') {
+                                statusDiv.textContent = '● Connecting...';
+                                statusDiv.style.color = '#ff0';
+                            } else if (state === 'failed' || state === 'closed') {
+                                statusDiv.textContent = '● Disconnected';
+                                statusDiv.style.color = '#f00';
+                            }
+                        };
 
-                        const updatedAt = new Date(data.timestamp * 1000);
-                        lastUpdatedEl.textContent = updatedAt.toLocaleTimeString();
+                        // Error callback
+                        webrtcClient.onError = (error) => {
+                            console.error('[App] WebRTC error:', error);
+                            statusDiv.textContent = '● Error - Switch to MJPEG';
+                            statusDiv.style.color = '#f00';
+                            // Auto-fallback to MJPEG on error
+                            setTimeout(() => switchToMJPEG(), 2000);
+                        };
 
-                        renderDetections(data.latest_detection);
+                        // Start connection
+                        await webrtcClient.start();
+                        console.log('[App] WebRTC connection initiated');
+
+                        // Initialize BBox overlay
+                        bboxOverlay = new BBoxOverlay(video, canvas, '/api/detections/stream');
+                        bboxOverlay.start();
+                        console.log('[App] BBox overlay started');
+
                     } catch (error) {
-                        statusBadge.textContent = 'Waiting for data...';
+                        console.error('[App] WebRTC initialization failed:', error);
+                        statusDiv.textContent = '● Failed - Using MJPEG';
+                        statusDiv.style.color = '#f00';
+                        // Fallback to MJPEG
+                        setTimeout(() => switchToMJPEG(), 2000);
                     }
                 }
 
-                fetchStatus();
-                setInterval(fetchStatus, 1500);
+                // Switch to MJPEG
+                function switchToMJPEG() {
+                    console.log('[App] Switching to MJPEG...');
+                    currentMode = 'mjpeg';
+
+                    // Stop WebRTC
+                    if (webrtcClient) {
+                        webrtcClient.stop();
+                    }
+                    if (bboxOverlay) {
+                        bboxOverlay.stop();
+                    }
+
+                    // Show MJPEG, hide WebRTC
+                    webrtcView.style.display = 'none';
+                    mjpegView.style.display = 'block';
+
+                    // Start MJPEG stream (set src triggers browser HTTP connection → Go Subscribe)
+                    const streamImg = document.getElementById('stream');
+                    if (!streamImg.src || !streamImg.src.includes('/stream')) {
+                        streamImg.src = '/stream?t=' + Date.now(); // Cache buster
+                        console.log('[MJPEG] Started stream (browser HTTP connection)');
+                    }
+
+                    // Update UI
+                    btnWebrtc.classList.remove('active');
+                    btnMjpeg.classList.add('active');
+                    subtitle.textContent = 'MJPEG ストリーム（サーバー側BBox合成）';
+                    footer.textContent = '共有メモリの最新フレームにバウンディングボックスを合成したMJPEGストリームを配信しています。';
+                }
+
+                // Switch to WebRTC
+                async function switchToWebRTC() {
+                    console.log('[App] Switching to WebRTC...');
+                    currentMode = 'webrtc';
+
+                    // Stop MJPEG stream (clear src closes browser HTTP connection → Go Unsubscribe)
+                    const streamImg = document.getElementById('stream');
+                    if (streamImg.src) {
+                        streamImg.src = '';
+                        console.log('[MJPEG] Stopped stream (browser closed HTTP connection)');
+                    }
+
+                    // Show WebRTC, hide MJPEG
+                    webrtcView.style.display = 'block';
+                    mjpegView.style.display = 'none';
+
+                    // Update UI
+                    btnWebrtc.classList.add('active');
+                    btnMjpeg.classList.remove('active');
+                    subtitle.textContent = 'WebRTC H.264ストリーム（30fps、低遅延）';
+                    footer.textContent = 'WebRTC経由でH.264ストリームを直接配信。ブラウザ上で検出結果をリアルタイムオーバーレイ。';
+
+                    // Initialize WebRTC if not already running
+                    if (!webrtcClient || !webrtcClient.isConnected()) {
+                        await initWebRTC();
+                    }
+                }
+
+                // Button handlers
+                btnWebrtc.addEventListener('click', switchToWebRTC);
+                btnMjpeg.addEventListener('click', switchToMJPEG);
+
+                // Start with WebRTC
+                window.addEventListener('load', () => {
+                    console.log('[App] Page loaded, starting WebRTC...');
+                    initWebRTC();
+                });
             </script>
         </body>
         </html>
         """
         return render_template_string(html)
+
+    @app.route("/assets/<path:filename>")
+    def assets(filename: str):
+        """Web UIアセットを返す"""
+        build_path = ASSET_BUILD_DIR / filename
+        if build_path.exists():
+            return send_from_directory(ASSET_BUILD_DIR, filename)
+        return send_from_directory(ASSET_SRC_DIR, filename)
 
     @app.route("/api/camera_status", methods=["GET"])
     def camera_status() -> Response:
@@ -787,31 +759,171 @@ def create_app(
         mode = str(data.get("mode", "manual")).lower()
         if mode == SwitchMode.AUTO.value:
             switch_controller.resume_auto()
-            return jsonify({"ok": True, "mode": "auto", "status": switch_controller.get_status()})
+            return jsonify(
+                {"ok": True, "mode": "auto", "status": switch_controller.get_status()}
+            )
 
         camera_raw = str(data.get("camera", "")).lower()
         if camera_raw not in (CameraType.DAY.value, CameraType.NIGHT.value):
             return jsonify({"error": "camera must be 'day' or 'night'"}), 400
 
-        camera = CameraType.DAY if camera_raw == CameraType.DAY.value else CameraType.NIGHT
+        camera = (
+            CameraType.DAY if camera_raw == CameraType.DAY.value else CameraType.NIGHT
+        )
         reason = str(data.get("reason", "debug"))
         switch_controller.force_camera(camera, reason=reason)
-        return jsonify({"ok": True, "mode": "manual", "status": switch_controller.get_status()})
+        return jsonify(
+            {"ok": True, "mode": "manual", "status": switch_controller.get_status()}
+        )
 
     # pyright: ignore[reportUnusedFunction]
-    @app.route('/stream')
+    @app.route("/api/recording/start", methods=["POST"])
+    def start_recording():
+        """H.264録画開始"""
+        if not hasattr(monitor, 'recorder'):
+            from h264_recorder import H264Recorder
+            if isinstance(shm, RealSharedMemory):
+                h264_shm = RealSharedMemory(frame_shm_name=SHM_NAME_STREAM)
+                h264_shm.open()
+                monitor.recorder = H264Recorder(h264_shm, Path("./recordings"))
+            else:
+                monitor.recorder = H264Recorder(shm, Path("./recordings"))
+
+        data = request.get_json() or {}
+        filename = data.get("filename")
+
+        if monitor.recorder.is_recording():
+            return jsonify({"error": "Already recording"}), 400
+
+        filepath = monitor.recorder.start_recording(filename)
+        return jsonify({
+            "status": "recording",
+            "file": str(filepath),
+            "started_at": time.time()
+        })
+
+    # pyright: ignore[reportUnusedFunction]
+    @app.route("/api/recording/stop", methods=["POST"])
+    def stop_recording():
+        """H.264録画停止"""
+        if not hasattr(monitor, 'recorder'):
+            return jsonify({"error": "Recorder not initialized"}), 400
+
+        if not monitor.recorder.is_recording():
+            return jsonify({"error": "Not recording"}), 400
+
+        filepath = monitor.recorder.stop_recording()
+        stats = monitor.recorder.get_stats()
+
+        return jsonify({
+            "status": "stopped",
+            "file": str(filepath),
+            "stats": stats,
+            "stopped_at": time.time()
+        })
+
+    # pyright: ignore[reportUnusedFunction]
+    @app.route("/api/recording/status", methods=["GET"])
+    def recording_status():
+        """録画状態取得"""
+        if not hasattr(monitor, 'recorder'):
+            return jsonify({"recording": False})
+
+        stats = monitor.recorder.get_stats()
+        return jsonify(stats)
+
+    # pyright: ignore[reportUnusedFunction]
+    @app.route("/api/webrtc/offer", methods=["POST"])
+    def webrtc_offer():
+        """WebRTC offer/answer exchange"""
+        try:
+            print("[WebRTC] Received offer request")
+            # Import webrtc_server module
+            from webrtc_server import handle_offer
+
+            data = request.get_json()
+            if not data or "sdp" not in data or "type" not in data:
+                print("[WebRTC] Invalid offer data")
+                return jsonify({"error": "Invalid offer data"}), 400
+
+            print(f"[WebRTC] Processing offer: type={data['type']}, sdp_length={len(data['sdp'])}")
+
+            # Handle offer asynchronously in event loop
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                answer = loop.run_until_complete(handle_offer(data))
+                print(f"[WebRTC] Answer created successfully")
+            finally:
+                loop.close()
+
+            return jsonify(answer)
+
+        except Exception as e:
+            import traceback
+            print("[WebRTC] Error processing offer:")
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
+
+    # pyright: ignore[reportUnusedFunction]
+    @app.route("/api/detections/stream")
+    def detections_stream():
+        """
+        Server-Sent Events で検出結果をリアルタイム配信
+        ブラウザ側でオーバーレイ描画するために使用
+        """
+        def generate():
+            last_version = -1
+            while True:
+                current_version = shm.get_detection_version()
+                if current_version != last_version:
+                    detection_result, last_version = shm.read_detection()
+                    parsed = monitor._parse_detection_result(detection_result)
+
+                    if parsed:
+                        # JSON形式で検出結果を送信
+                        data = {
+                            'frame_number': parsed.frame_number,
+                            'timestamp': parsed.timestamp,
+                            'detections': [
+                                {
+                                    'class_name': d.class_name.value,
+                                    'confidence': d.confidence,
+                                    'bbox': {
+                                        'x': d.bbox.x,
+                                        'y': d.bbox.y,
+                                        'w': d.bbox.w,
+                                        'h': d.bbox.h
+                                    }
+                                }
+                                for d in parsed.detections
+                            ]
+                        }
+                        yield f"data: {json.dumps(data)}\n\n"
+
+                time.sleep(0.033)  # 30fps
+
+        return Response(
+            generate(),
+            mimetype='text/event-stream',
+            headers={'Cache-Control': 'no-cache', 'Connection': 'keep-alive'}
+        )
+
+    # pyright: ignore[reportUnusedFunction]
+    @app.route("/stream")
     def video_stream():
         """MJPEGストリーム"""
         return Response(
             monitor.generate_mjpeg(),
-            mimetype='multipart/x-mixed-replace; boundary=frame'
+            mimetype="multipart/x-mixed-replace; boundary=frame",
         )
 
     # pyright: ignore[reportUnusedFunction]
-    @app.route('/api/status')
+    @app.route("/api/status")
     def api_status():
         """統計情報と最新検出結果を返すシンプルなAPI"""
         latest_detection = monitor.get_latest_detection()
+        detection_history = monitor.get_detection_history()
         return jsonify(
             {
                 "monitor": monitor.get_stats_snapshot(),
@@ -819,8 +931,60 @@ def create_app(
                 "latest_detection": (
                     _detection_to_dict(latest_detection) if latest_detection else None
                 ),
+                "detection_history": [
+                    _detection_to_dict(item) for item in detection_history
+                ],
                 "timestamp": time.time(),
             }
+        )
+
+    # pyright: ignore[reportUnusedFunction]
+    @app.route("/api/status/stream")
+    def api_status_stream():
+        """SSEで統計情報と最新検出結果を配信"""
+        def generate():
+            last_frame_count = -1
+            last_detection_version = -1
+            last_monitor_frames = -1
+            last_sent = 0.0
+            while True:
+                monitor_stats = monitor.get_stats_snapshot()
+                shm_stats = shm.get_stats()
+                now = time.time()
+
+                changed = (
+                    shm_stats["frame_count"] != last_frame_count
+                    or shm_stats["detection_version"] != last_detection_version
+                    or monitor_stats["frames_processed"] != last_monitor_frames
+                )
+                if changed or now - last_sent > 2.0:
+                    latest_detection = monitor.get_latest_detection()
+                    detection_history = monitor.get_detection_history()
+                    payload = {
+                        "monitor": monitor_stats,
+                        "shared_memory": shm_stats,
+                        "latest_detection": (
+                            _detection_to_dict(latest_detection)
+                            if latest_detection
+                            else None
+                        ),
+                        "detection_history": [
+                            _detection_to_dict(item) for item in detection_history
+                        ],
+                        "timestamp": now,
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    last_frame_count = shm_stats["frame_count"]
+                    last_detection_version = shm_stats["detection_version"]
+                    last_monitor_frames = monitor_stats["frames_processed"]
+                    last_sent = now
+
+                time.sleep(0.02)
+
+        return Response(
+            generate(),
+            mimetype="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
 
     return app

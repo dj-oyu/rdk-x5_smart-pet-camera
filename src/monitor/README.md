@@ -19,7 +19,7 @@ uv run python -m monitor --shm-type mock --host 127.0.0.1 --port 8080
 
 | オプション | デフォルト | 説明 |
 | --- | --- | --- |
-| `--shm-type` | `mock` | 共有メモリ実装の種別。現在は `mock` のみ対応。 |
+| `--shm-type` | `mock` | 共有メモリ実装の種別。`mock` または `real` を指定可能。 |
 | `--host` | `0.0.0.0` | Flaskサーバーのバインド先ホスト。 |
 | `--port` | `8080` | Flaskサーバーのポート番号。 |
 | `--jpeg-quality` | `80` | MJPEGエンコード品質（1-100）。 |
@@ -44,7 +44,12 @@ CLI引数は以下の環境変数でも指定できます（引数が優先さ�
   # モニター単体起動（MockSharedMemoryを内部で生成）
   uv run src/monitor/main.py --shm-type mock --host 0.0.0.0 --port 8080
   ```
-- **実機共有メモリ（captureデーモンと統合）**: 共有メモリ名は `/dev/shm/pet_camera_frames` と `/dev/shm/pet_camera_detections` を使用し、`src/capture/real_shared_memory.py` の `RealSharedMemory` が読み取りに対応します。CLIの `--shm-type real` は未実装ですが、アプリ組み込みで `RealSharedMemory` を渡せば capture デーモンが配信するフレームをそのままストリーミングできます（例: `shm = RealSharedMemory(); shm.open(); monitor = WebMonitor(shm); create_app(shm, monitor)`）。
+- **実機共有メモリ（captureデーモンと統合）**: 共有メモリ名は `/dev/shm/pet_camera_frames` と `/dev/shm/pet_camera_detections` を使用し、`src/capture/real_shared_memory.py` の `RealSharedMemory` が読み取りに対応します。CLIから `--shm-type real` を指定すると共有メモリを開いてそのままストリーミングできます。
+  ```bash
+  # capture デーモンが共有メモリを書いている状態で閲覧
+  uv run src/monitor/main.py --shm-type real --host 0.0.0.0 --port 8080
+  ```
+  capture デーモンのビルド・起動、モック検出デーモン、モニターをまとめて立ち上げたい場合は `./scripts/run_camera_switcher_dev.sh` も利用できます。
 
 ## Web UI概要
 
@@ -55,7 +60,7 @@ CLI引数は以下の環境変数でも指定できます（引数が優先さ�
 
 ## 運用メモ
 
-- 共有メモリは `MockSharedMemory` のみ対応です。実機用共有メモリが実装された場合は `--shm-type` で切り替えられるよう拡張してください（`RealSharedMemory` を直接渡すプログラム的な統合は利用可能）。
+- 共有メモリは `MockSharedMemory` と `RealSharedMemory` の両方に対応しています。`--shm-type` で切り替えて利用してください。
 - 停止は `Ctrl+C` で行えます。内部スレッドはシグナルで安全に停止します。
 
 ## 実機統合テスト（RealSharedMemory + captureデーモン）

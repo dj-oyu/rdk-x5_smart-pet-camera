@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package petcamera;
+
+option go_package = "github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/pkg/proto";
+
+message BBox {
+    int32 x = 1;
+    int32 y = 2;
+    int32 w = 3;
+    int32 h = 4;
+}
+
+message Detection {
+    BBox bbox = 1;
+    float confidence = 2;
+    int32 class_id = 3;
+    string label = 4;
+}
+
+message DetectionEvent {
+    uint64 frame_number = 1;
+    double timestamp = 2;
+    repeated Detection detections = 3;
+}
