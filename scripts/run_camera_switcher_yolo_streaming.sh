@@ -50,6 +50,9 @@ LOG_LEVEL="${LOG_LEVEL:-info}"
 TLS_CERT="${TLS_CERT:-}"
 TLS_KEY="${TLS_KEY:-}"
 
+# HTTP専用ポート (MJPEG用、M5Stack等のマイコン向け)
+HTTP_ONLY_PORT="${HTTP_ONLY_PORT:-8082}"
+
 # Streaming設定
 STREAMING_MAX_CLIENTS="${STREAMING_MAX_CLIENTS:-10}"
 STREAMING_SHM="${STREAMING_SHM:-/pet_camera_stream}"
@@ -361,7 +364,14 @@ if [[ "${RUN_MONITOR}" -eq 1 ]]; then
     TLS_ARGS="-tls-cert ${TLS_CERT} -tls-key ${TLS_KEY}"
     PROTOCOL="https"
   fi
+  HTTP_ONLY_ARGS=""
+  if [[ -n "${HTTP_ONLY_PORT}" ]]; then
+    HTTP_ONLY_ARGS="-http-only ${MONITOR_HOST}:${HTTP_ONLY_PORT}"
+  fi
   echo "[start] launching Go web monitor on ${PROTOCOL}://${MONITOR_HOST}:${MONITOR_PORT}..."
+  if [[ -n "${HTTP_ONLY_PORT}" ]]; then
+    echo "[start] HTTP-only MJPEG endpoint on http://${MONITOR_HOST}:${HTTP_ONLY_PORT}/stream"
+  fi
   echo "[log] web_monitor log: /tmp/web_monitor.log"
   (
     cd "${REPO_ROOT}"
@@ -375,7 +385,7 @@ if [[ "${RUN_MONITOR}" -eq 1 ]]; then
       -webrtc-base "http://localhost:${STREAMING_PORT}" \
       -fps 30 \
       -log-level "${LOG_LEVEL}" \
-      ${TLS_ARGS} 2>&1 | tee /tmp/web_monitor.log
+      ${TLS_ARGS} ${HTTP_ONLY_ARGS} 2>&1 | tee /tmp/web_monitor.log
   ) &
   PIDS+=("$!")
 fi
