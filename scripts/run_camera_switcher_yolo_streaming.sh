@@ -19,6 +19,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# .envファイルを読み込み（存在する場合）
+if [[ -f "${REPO_ROOT}/.env" ]]; then
+  # shellcheck disable=SC1091
+  set -a
+  source "${REPO_ROOT}/.env"
+  set +a
+fi
 CAPTURE_DIR="${REPO_ROOT}/src/capture"
 STREAMING_DIR="${REPO_ROOT}/src/streaming_server"
 BUILD_DIR="${REPO_ROOT}/build"
@@ -37,6 +45,10 @@ YOLO_NMS_THRESHOLD="${YOLO_NMS_THRESHOLD:-0.7}"
 
 # ログ設定
 LOG_LEVEL="${LOG_LEVEL:-info}"
+
+# TLS設定 (HTTPS対応)
+TLS_CERT="${TLS_CERT:-}"
+TLS_KEY="${TLS_KEY:-}"
 
 # Streaming設定
 STREAMING_MAX_CLIENTS="${STREAMING_MAX_CLIENTS:-10}"
@@ -67,6 +79,8 @@ Options:
   --score-thres T   検出スコア閾値 (default: 0.6)
   --nms-thres T     NMS IoU閾値 (default: 0.7)
   --log-level L     ログレベル (debug/info/warn/error, default: info)
+  --tls-cert FILE   TLS証明書ファイル (HTTPSを有効化)
+  --tls-key FILE    TLS秘密鍵ファイル
   -h, --help        このヘルプを表示
 
 環境変数:
@@ -84,6 +98,8 @@ Options:
   YOLO_SCORE_THRESHOLD   検出スコア閾値
   YOLO_NMS_THRESHOLD     NMS IoU閾値
   LOG_LEVEL              ログレベル (debug/info/warn/error)
+  TLS_CERT               TLS証明書ファイルパス
+  TLS_KEY                TLS秘密鍵ファイルパス
 
 Examples:
   # デフォルト（YOLO + WebRTC Streaming）
@@ -97,6 +113,11 @@ Examples:
 
   # ビルドスキップ
   ./scripts/run_camera_switcher_yolo_streaming.sh --skip-build
+
+  # HTTPS有効 (Tailscale証明書)
+  ./scripts/run_camera_switcher_yolo_streaming.sh \
+    --tls-cert ~/your-hostname.ts.net.crt \
+    --tls-key ~/your-hostname.ts.net.key
 
 Endpoints:
   Web Monitor:     http://localhost:${MONITOR_PORT}/
@@ -159,6 +180,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --log-level)
       LOG_LEVEL="${2:?--log-level requires value}"
+      shift
+      ;;
+    --tls-cert)
+      TLS_CERT="${2:?--tls-cert requires value}"
+      shift
+      ;;
+    --tls-key)
+      TLS_KEY="${2:?--tls-key requires value}"
       shift
       ;;
     -h|--help)
@@ -326,10 +355,17 @@ if [[ "${RUN_DETECTOR}" -eq 1 ]]; then
 fi
 
 if [[ "${RUN_MONITOR}" -eq 1 ]]; then
-  echo "[start] launching Go web monitor on ${MONITOR_HOST}:${MONITOR_PORT}..."
+  TLS_ARGS=""
+  PROTOCOL="http"
+  if [[ -n "${TLS_CERT}" && -n "${TLS_KEY}" ]]; then
+    TLS_ARGS="-tls-cert ${TLS_CERT} -tls-key ${TLS_KEY}"
+    PROTOCOL="https"
+  fi
+  echo "[start] launching Go web monitor on ${PROTOCOL}://${MONITOR_HOST}:${MONITOR_PORT}..."
   echo "[log] web_monitor log: /tmp/web_monitor.log"
   (
     cd "${REPO_ROOT}"
+    # shellcheck disable=SC2086
     "${BUILD_DIR}/web_monitor" \
       -http "${MONITOR_HOST}:${MONITOR_PORT}" \
       -assets "${REPO_ROOT}/src/monitor/web_assets" \
@@ -338,7 +374,8 @@ if [[ "${RUN_MONITOR}" -eq 1 ]]; then
       -detection-shm "/pet_camera_detections" \
       -webrtc-base "http://localhost:${STREAMING_PORT}" \
       -fps 30 \
-      -log-level "${LOG_LEVEL}" 2>&1 | tee /tmp/web_monitor.log
+      -log-level "${LOG_LEVEL}" \
+      ${TLS_ARGS} 2>&1 | tee /tmp/web_monitor.log
   ) &
   PIDS+=("$!")
 fi

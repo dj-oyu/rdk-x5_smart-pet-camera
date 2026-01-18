@@ -18,6 +18,8 @@ type Config struct {
 	DetectionInterval   time.Duration
 	MJPEGInterval       time.Duration
 	RecordingOutputPath string
+	TLSCertFile         string
+	TLSKeyFile          string
 }
 
 // DefaultConfig returns a config aligned with the existing Flask monitor behavior.
