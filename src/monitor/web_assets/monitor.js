@@ -549,31 +549,207 @@ window.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Recording control (Coming Soon - shows notification only)
-    function showRecordingNotification() {
-        const recordInfo = document.getElementById('record-info');
+    // Recording functionality using MediaRecorder API
+    const RecordingManager = {
+        mediaRecorder: null,
+        recordedChunks: [],
+        isRecording: false,
+        startTime: null,
+        timerInterval: null,
 
-        // Show notification
-        alert('📹 録画機能は近日公開予定です\n\nH.264ストリームの録画機能を準備中です。\n今後のアップデートをお待ちください。');
+        // Find the best supported MIME type
+        getSupportedMimeType() {
+            const mimeTypes = [
+                'video/webm;codecs=h264',
+                'video/mp4;codecs=avc1',
+                'video/webm;codecs=vp9',
+                'video/webm;codecs=vp8',
+                'video/webm'
+            ];
+            for (const mimeType of mimeTypes) {
+                if (MediaRecorder.isTypeSupported(mimeType)) {
+                    console.log('[Recording] Using MIME type:', mimeType);
+                    return mimeType;
+                }
+            }
+            console.warn('[Recording] No supported MIME type found');
+            return null;
+        },
 
-        // Update info text
-        if (recordInfo) {
-            recordInfo.textContent = '録画機能は近日公開予定です';
-            recordInfo.style.color = '#bfe6ff';
+        // Get file extension based on MIME type
+        getFileExtension(mimeType) {
+            if (mimeType.includes('mp4')) return 'mp4';
+            return 'webm';
+        },
 
-            // Clear after 3 seconds
-            setTimeout(() => {
-                recordInfo.textContent = '';
-                recordInfo.style.color = '';
-            }, 3000);
+        // Update UI elements
+        updateUI() {
+            const recordBtn = document.getElementById('record-btn');
+            const recordStatus = document.getElementById('record-status');
+
+            if (this.isRecording) {
+                recordBtn?.classList.add('recording');
+                if (recordStatus) {
+                    recordStatus.classList.add('recording');
+                    this.updateTimer();
+                }
+            } else {
+                recordBtn?.classList.remove('recording');
+                if (recordStatus) {
+                    recordStatus.classList.remove('recording');
+                    recordStatus.textContent = '';
+                }
+            }
+        },
+
+        // Update recording timer display
+        updateTimer() {
+            const recordStatus = document.getElementById('record-status');
+            if (!recordStatus || !this.startTime) return;
+
+            const elapsed = Math.floor((Date.now() - this.startTime) / 1000);
+            const minutes = Math.floor(elapsed / 60).toString().padStart(2, '0');
+            const seconds = (elapsed % 60).toString().padStart(2, '0');
+            recordStatus.textContent = `REC ${minutes}:${seconds}`;
+        },
+
+        // Start recording
+        start() {
+            const video = document.getElementById('webrtc-video');
+            if (!video || !video.srcObject) {
+                alert('WebRTCストリームが接続されていません。\nWebRTCモードで接続してから録画してください。');
+                return false;
+            }
+
+            const mimeType = this.getSupportedMimeType();
+            if (!mimeType) {
+                alert('このブラウザは録画機能に対応していません。');
+                return false;
+            }
+
+            try {
+                // Use the video's MediaStream directly
+                const stream = video.srcObject;
+
+                this.mediaRecorder = new MediaRecorder(stream, {
+                    mimeType: mimeType,
+                    videoBitsPerSecond: 2000000
+                });
+
+                this.recordedChunks = [];
+
+                this.mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        this.recordedChunks.push(event.data);
+                    }
+                };
+
+                this.mediaRecorder.onstop = () => {
+                    this.download(mimeType);
+                };
+
+                this.mediaRecorder.onerror = (event) => {
+                    console.error('[Recording] Error:', event.error);
+                    alert('録画中にエラーが発生しました。');
+                    this.isRecording = false;
+                    this.updateUI();
+                };
+
+                // Start recording (collect data every second)
+                this.mediaRecorder.start(1000);
+                this.isRecording = true;
+                this.startTime = Date.now();
+
+                // Start timer update
+                this.timerInterval = setInterval(() => this.updateTimer(), 1000);
+
+                this.updateUI();
+                console.log('[Recording] Started');
+                return true;
+
+            } catch (error) {
+                console.error('[Recording] Failed to start:', error);
+                alert('録画の開始に失敗しました: ' + error.message);
+                return false;
+            }
+        },
+
+        // Stop recording
+        stop() {
+            if (!this.mediaRecorder || this.mediaRecorder.state === 'inactive') {
+                return;
+            }
+
+            try {
+                this.mediaRecorder.stop();
+                this.isRecording = false;
+
+                if (this.timerInterval) {
+                    clearInterval(this.timerInterval);
+                    this.timerInterval = null;
+                }
+
+                this.updateUI();
+                console.log('[Recording] Stopped');
+
+            } catch (error) {
+                console.error('[Recording] Failed to stop:', error);
+            }
+        },
+
+        // Download recorded video
+        download(mimeType) {
+            if (this.recordedChunks.length === 0) {
+                console.warn('[Recording] No data to download');
+                return;
+            }
+
+            const blob = new Blob(this.recordedChunks, { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            const extension = this.getFileExtension(mimeType);
+
+            // Generate filename with timestamp
+            const now = new Date();
+            const timestamp = now.getFullYear() +
+                String(now.getMonth() + 1).padStart(2, '0') +
+                String(now.getDate()).padStart(2, '0') + '_' +
+                String(now.getHours()).padStart(2, '0') +
+                String(now.getMinutes()).padStart(2, '0') +
+                String(now.getSeconds()).padStart(2, '0');
+            const filename = `pet_camera_${timestamp}.${extension}`;
+
+            // Trigger download
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+
+            // Cleanup
+            setTimeout(() => URL.revokeObjectURL(url), 100);
+
+            console.log('[Recording] Downloaded:', filename, 'Size:', (blob.size / 1024 / 1024).toFixed(2), 'MB');
+        },
+
+        // Toggle recording
+        toggle() {
+            if (this.isRecording) {
+                this.stop();
+            } else {
+                this.start();
+            }
         }
-    }
+    };
 
-    // Setup recording button (Coming Soon)
+    // Setup recording button
     const recordBtn = document.getElementById('record-btn');
     if (recordBtn) {
-        recordBtn.addEventListener('click', showRecordingNotification);
+        recordBtn.addEventListener('click', () => RecordingManager.toggle());
     }
+
+    // Expose for debugging
+    window.RecordingManager = RecordingManager;
 
     startStatusStream();
     applyView('history');
