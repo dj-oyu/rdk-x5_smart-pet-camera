@@ -232,7 +232,7 @@ func protobufToJSON(event *pb.DetectionEvent) ([]byte, error) {
 			},
 			"confidence": det.Confidence,
 			"class_id":   det.ClassId,
-			"label":      det.Label,
+			"class_name": det.Label,
 		}
 	}
 
