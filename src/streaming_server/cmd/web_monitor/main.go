@@ -25,6 +25,8 @@ func main() {
 	flag.IntVar(&cfg.TargetFPS, "fps", cfg.TargetFPS, "Target FPS for stats")
 	flag.StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error, silent)")
 	flag.BoolVar(&logColor, "log-color", true, "Enable colored log output")
+	flag.StringVar(&cfg.TLSCertFile, "tls-cert", "", "TLS certificate file (enables HTTPS)")
+	flag.StringVar(&cfg.TLSKeyFile, "tls-key", "", "TLS private key file")
 	flag.Parse()
 
 	// Initialize logger
@@ -36,16 +38,28 @@ func main() {
 
 	server := webmonitor.NewServer(cfg)
 
-	logger.Info("Main", "Go web monitor listening on %s", cfg.Addr)
-	logger.Info("Main", "Assets: %s (build: %s)", cfg.AssetsDir, cfg.BuildAssetsDir)
-	logger.Info("Main", "Log level: %s", level)
-
 	httpServer := &http.Server{
 		Addr:    cfg.Addr,
 		Handler: server.Handler(),
 	}
 
-	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("server error: %v", err)
+	// Use HTTPS if TLS certificate is provided
+	if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
+		logger.Info("Main", "Go web monitor listening on %s (HTTPS)", cfg.Addr)
+		logger.Info("Main", "TLS cert: %s", cfg.TLSCertFile)
+		logger.Info("Main", "Assets: %s (build: %s)", cfg.AssetsDir, cfg.BuildAssetsDir)
+		logger.Info("Main", "Log level: %s", level)
+
+		if err := httpServer.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	} else {
+		logger.Info("Main", "Go web monitor listening on %s (HTTP)", cfg.Addr)
+		logger.Info("Main", "Assets: %s (build: %s)", cfg.AssetsDir, cfg.BuildAssetsDir)
+		logger.Info("Main", "Log level: %s", level)
+
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
 	}
 }
