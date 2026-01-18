@@ -15,8 +15,10 @@ func main() {
 
 	var logLevel string
 	var logColor bool
+	var httpOnlyAddr string
 
 	flag.StringVar(&cfg.Addr, "http", cfg.Addr, "HTTP server address")
+	flag.StringVar(&httpOnlyAddr, "http-only", "", "HTTP-only server address for MJPEG stream (e.g., :8082)")
 	flag.StringVar(&cfg.AssetsDir, "assets", cfg.AssetsDir, "Web assets directory")
 	flag.StringVar(&cfg.BuildAssetsDir, "assets-build", cfg.BuildAssetsDir, "Build assets directory")
 	flag.StringVar(&cfg.FrameShmName, "frame-shm", cfg.FrameShmName, "Frame shared memory name")
@@ -37,6 +39,20 @@ func main() {
 	logger.Init(level, os.Stderr, logColor)
 
 	server := webmonitor.NewServer(cfg)
+
+	// Start HTTP-only server for MJPEG stream if configured
+	if httpOnlyAddr != "" {
+		go func() {
+			httpOnlyServer := &http.Server{
+				Addr:    httpOnlyAddr,
+				Handler: server.Handler(),
+			}
+			logger.Info("Main", "HTTP-only server listening on %s (MJPEG/API)", httpOnlyAddr)
+			if err := httpOnlyServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("HTTP-only server error: %v", err)
+			}
+		}()
+	}
 
 	httpServer := &http.Server{
 		Addr:    cfg.Addr,
