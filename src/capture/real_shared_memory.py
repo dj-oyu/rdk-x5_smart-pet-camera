@@ -18,14 +18,33 @@ from ctypes import (
     c_char,
     c_size_t,
     sizeof,
+    CDLL,
+    POINTER,
+    c_void_p,
+    addressof,
 )
 from dataclasses import dataclass
 from typing import Optional
 import numpy as np
 
+# Load librt for semaphore operations
+try:
+    librt = CDLL("librt.so.1")
+    # Define sem_post function signature
+    # int sem_post(sem_t *sem)
+    librt.sem_post.argtypes = [c_void_p]
+    librt.sem_post.restype = c_int
+except OSError as e:
+    import logging
+    logging.warning(f"Failed to load librt for semaphore support: {e}")
+    librt = None
+
 # Constants (must match C definitions)
-SHM_NAME_FRAMES = "/pet_camera_frames"
-SHM_NAME_DETECTIONS = "/pet_camera_detections"
+SHM_NAME_ACTIVE_FRAME = "/pet_camera_active_frame"
+SHM_NAME_STREAM = "/pet_camera_stream"
+SHM_NAME_YOLO_INPUT = "/pet_camera_yolo_input"
+SHM_NAME_FRAMES = os.getenv("SHM_NAME_FRAMES", SHM_NAME_ACTIVE_FRAME)
+SHM_NAME_DETECTIONS = os.getenv("SHM_NAME_DETECTIONS", "/pet_camera_detections")
 RING_BUFFER_SIZE = 30
 MAX_DETECTIONS = 10
 MAX_FRAME_SIZE = 1920 * 1080 * 3 // 2  # Max NV12 frame size (1080p)
@@ -72,7 +91,8 @@ class CFrame(Structure):
 class CSharedFrameBuffer(Structure):
     _fields_ = [
         ("write_index", c_uint32),
-        ("_padding", c_uint32),  # Alignment padding (4 bytes)
+        ("frame_interval_ms", c_uint32),  # Matches C SharedFrameBuffer
+        ("new_frame_sem", c_uint8 * 32),  # sem_t semaphore (32 bytes on Linux)
         ("frames", CFrame * RING_BUFFER_SIZE),
     ]
 
@@ -84,6 +104,7 @@ class CLatestDetectionResult(Structure):
         ("num_detections", c_int),
         ("detections", CDetection * MAX_DETECTIONS),
         ("version", c_uint32),
+        ("detection_update_sem", c_uint8 * 32),  # sem_t semaphore (32 bytes on Linux)
     ]
 
 
@@ -111,7 +132,7 @@ class Frame:
     width: int
     height: int
     format: int  # 0=JPEG, 1=NV12, 2=RGB
-    data: bytes
+    data: bytes | memoryview  # memoryview for zero-copy optimization
 
 
 class RealSharedMemory:
@@ -121,7 +142,11 @@ class RealSharedMemory:
     Provides the same interface as MockSharedMemory for compatibility.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        frame_shm_name: Optional[str] = None,
+        detection_shm_name: Optional[str] = None,
+    ):
         self.frame_fd: Optional[int] = None
         self.frame_mmap: Optional[mmap.mmap] = None
         self.detection_fd: Optional[int] = None
@@ -130,6 +155,8 @@ class RealSharedMemory:
         self.last_detection_version = 0
         self.total_frames_read = 0
         self.detection_write_mode = False
+        self.frame_shm_name = frame_shm_name or SHM_NAME_FRAMES
+        self.detection_shm_name = detection_shm_name or SHM_NAME_DETECTIONS
 
     def open(self):
         """Open existing shared memory segments."""
@@ -137,7 +164,7 @@ class RealSharedMemory:
         try:
             # Use os.open with O_RDONLY for read-only access
             # shm_open is available via /dev/shm on Linux
-            shm_path_frames = f"/dev/shm{SHM_NAME_FRAMES}"
+            shm_path_frames = f"/dev/shm{self.frame_shm_name}"
             self.frame_fd = os.open(shm_path_frames, os.O_RDONLY)
             self.frame_mmap = mmap.mmap(
                 self.frame_fd, sizeof(CSharedFrameBuffer), mmap.MAP_SHARED, mmap.PROT_READ
@@ -145,13 +172,13 @@ class RealSharedMemory:
             print(f"[Info] Opened shared memory: {shm_path_frames}")
         except FileNotFoundError:
             raise RuntimeError(
-                f"Shared memory {SHM_NAME_FRAMES} not found. "
+                f"Shared memory {self.frame_shm_name} not found. "
                 "Is the camera daemon running?"
             )
 
         # Open detection shared memory
         try:
-            shm_path_detections = f"/dev/shm{SHM_NAME_DETECTIONS}"
+            shm_path_detections = f"/dev/shm{self.detection_shm_name}"
             self.detection_fd = os.open(shm_path_detections, os.O_RDONLY)
             self.detection_mmap = mmap.mmap(
                 self.detection_fd,
@@ -163,7 +190,7 @@ class RealSharedMemory:
         except FileNotFoundError:
             # Detection shared memory might not exist yet
             print(
-                f"[Warn] Detection shared memory {SHM_NAME_DETECTIONS} not found "
+                f"[Warn] Detection shared memory {self.detection_shm_name} not found "
                 "(will be created by detection process)"
             )
 
@@ -171,7 +198,7 @@ class RealSharedMemory:
         """Open detection shared memory in write mode (creates if not exists)."""
         import ctypes.util
 
-        shm_path_detections = f"/dev/shm{SHM_NAME_DETECTIONS}"
+        shm_path_detections = f"/dev/shm{self.detection_shm_name}"
 
         try:
             # Try to open existing
@@ -223,8 +250,9 @@ class RealSharedMemory:
         latest_idx = (write_index - 1) % RING_BUFFER_SIZE
 
         # Calculate offset to the frame
-        # Offset = sizeof(write_index) + sizeof(padding) + sizeof(Frame) * latest_idx
-        frame_offset = sizeof(c_uint32) * 2 + sizeof(CFrame) * latest_idx
+        # Offset = sizeof(write_index) + sizeof(frame_interval_ms) + sizeof(new_frame_sem) + sizeof(Frame) * latest_idx
+        # new_frame_sem is 32 bytes (sem_t on Linux)
+        frame_offset = sizeof(c_uint32) * 2 + 32 + sizeof(CFrame) * latest_idx
 
         # Read the frame
         self.frame_mmap.seek(frame_offset)
@@ -241,6 +269,10 @@ class RealSharedMemory:
         # Convert to Python Frame
         timestamp_sec = c_frame.timestamp.tv_sec + c_frame.timestamp.tv_nsec / 1e9
 
+        # ゼロコピー最適化：memoryviewを使用（bytes()コピーを避ける）
+        # YOLODetectorはbytesもmemoryviewも受け取れる
+        data_view = memoryview(c_frame.data)[: c_frame.data_size]
+
         frame = Frame(
             frame_number=c_frame.frame_number,
             timestamp_sec=timestamp_sec,
@@ -248,7 +280,7 @@ class RealSharedMemory:
             width=c_frame.width,
             height=c_frame.height,
             format=c_frame.format,
-            data=bytes(c_frame.data[: c_frame.data_size]),
+            data=data_view,  # memoryview（ゼロコピー）
         )
 
         return frame
@@ -302,7 +334,10 @@ class RealSharedMemory:
     def get_detection_version(self) -> int:
         """Return the last observed detection version (polls shared memory if available)."""
         if not self.detection_mmap:
-            return self.last_detection_version
+            # Try to open detection shared memory if not already opened
+            self._try_open_detection_readonly()
+            if not self.detection_mmap:
+                return self.last_detection_version
 
         detection_struct = self._read_detection_struct(update_version_only=True)
         if detection_struct is None:
@@ -318,6 +353,10 @@ class RealSharedMemory:
         Returns:
             (detection_result_dict | None, version)
         """
+        # Try to open detection shared memory if not already opened
+        if not self.detection_mmap:
+            self._try_open_detection_readonly()
+
         detection_struct = self._read_detection_struct()
         if detection_struct is None:
             return (None, self.last_detection_version)
@@ -361,6 +400,25 @@ class RealSharedMemory:
             "has_detection": 1 if detection_version > 0 else 0,
         }
 
+    def _try_open_detection_readonly(self) -> None:
+        """Try to open detection shared memory in read-only mode (for lazy initialization)."""
+        if self.detection_mmap or self.detection_write_mode:
+            return  # Already opened
+
+        try:
+            shm_path_detections = f"/dev/shm{self.detection_shm_name}"
+            self.detection_fd = os.open(shm_path_detections, os.O_RDONLY)
+            self.detection_mmap = mmap.mmap(
+                self.detection_fd,
+                sizeof(CLatestDetectionResult),
+                mmap.MAP_SHARED,
+                mmap.PROT_READ,
+            )
+            print(f"[Info] Opened detection shared memory: {shm_path_detections}")
+        except FileNotFoundError:
+            # Detection shared memory still doesn't exist
+            pass
+
     def _read_detection_struct(
         self, update_version_only: bool = False
     ) -> Optional[tuple[CLatestDetectionResult, bool]]:
@@ -379,6 +437,9 @@ class RealSharedMemory:
 
         self.detection_mmap.seek(0)
         det_data = self.detection_mmap.read(sizeof(CLatestDetectionResult))
+        if len(det_data) < sizeof(CLatestDetectionResult):
+            # Shared memory not ready or truncated; treat as no data.
+            return None
         c_det = CLatestDetectionResult.from_buffer_copy(det_data)
 
         has_new_version = c_det.version != self.last_detection_version
@@ -447,14 +508,50 @@ class RealSharedMemory:
             c_detection.bbox.w = det["bbox"]["w"]
             c_detection.bbox.h = det["bbox"]["h"]
 
-        # Increment version
-        c_det.version = self.last_detection_version + 1
-        self.last_detection_version = c_det.version
+        # Increment version (using atomic-like increment)
+        self.last_detection_version += 1
+        c_det.version = self.last_detection_version
 
         # Write to shared memory
         self.detection_mmap.seek(0)
-        self.detection_mmap.write(bytes(c_det))
+        data = bytes(c_det)
+        self.detection_mmap.write(data)
         self.detection_mmap.flush()
+
+        # Post semaphore to signal event-driven consumers (Go streaming server)
+        import logging
+        logger = logging.getLogger("RealSharedMemory")
+
+        if librt is not None:
+            try:
+                # Get pointer to the semaphore field in shared memory
+                # We need to read the structure from mmap and get the semaphore address
+                self.detection_mmap.seek(0)
+                # Create a ctypes structure from the mmap buffer
+                shm_struct = CLatestDetectionResult.from_buffer(self.detection_mmap)
+                # Get address of the semaphore field
+                sem_addr = addressof(shm_struct.detection_update_sem)
+                # Post semaphore
+                ret = librt.sem_post(c_void_p(sem_addr))
+                if ret != 0:
+                    logger.warning(f"sem_post failed with return code: {ret}")
+                else:
+                    # DEBUG: セマフォpost成功を確認
+                    logger.debug(
+                        f"sem_post SUCCESS: frame={frame_number}, "
+                        f"num_det={c_det.num_detections}, version={c_det.version}"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to post detection semaphore: {e}")
+        else:
+            logger.debug("librt not available - semaphore signaling disabled")
+
+        # Debug: Verify version was written (only log when detections > 0)
+        if c_det.num_detections > 0:
+            logger.debug(
+                f"Wrote detection to SHM: frame={frame_number}, "
+                f"num_det={c_det.num_detections}, version={c_det.version}"
+            )
 
 
 if __name__ == "__main__":

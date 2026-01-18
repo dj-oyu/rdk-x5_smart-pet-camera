@@ -92,6 +92,24 @@ make clean
 - `../../build/libcamera_switcher_runtime.a` - 昼夜切り替えランタイム静的ライブラリ
 - `../../build/camera_switcher_daemon` - プロセス切り替え型リファレンスデーモン
 
+## 開発用ワンコマンド起動（カメラ切替 + モニター + モック検出）
+
+カメラ切替デーモンのビルドから、モック検出デーモン・Webモニターの起動までを一括で行う開発用スクリプトを用意しています。
+
+```bash
+# 依存: uv が利用可能であること（Python依存関係の解決に使用）
+./scripts/run_camera_switcher_dev.sh
+# ポートを変えたい場合
+MONITOR_PORT=9001 ./scripts/run_camera_switcher_dev.sh
+# すでにビルド済みの場合（再ビルドをスキップ）
+./scripts/run_camera_switcher_dev.sh --skip-build
+```
+
+- `camera_daemon_drobotics` と `camera_switcher_daemon` をビルドし、旧プロセス/共有メモリをクリーンアップしてから `camera_switcher_daemon` を起動します。
+- `src/capture/mock_detector_daemon.py` を `uv run` で起動し、RealSharedMemory にダミー検出結果を書き込みます（現状の detector はモック実装のみ）。
+- `src/monitor/main.py --shm-type real` を `uv run` で起動し、`http://<host>:<port>/` でフレームと検出結果を確認できます。
+- `Ctrl+C` で全プロセスを停止し、共有メモリも掃除されます。
+
 ## 使用方法
 
 ### 1. 共有メモリテストの実行

@@ -17,10 +17,19 @@
 #include <stdint.h>
 #include <time.h>
 #include <stdbool.h>
+#include <semaphore.h>
 
 // Configuration constants
-#define SHM_NAME_FRAMES "/pet_camera_frames"
-#define SHM_NAME_DETECTIONS "/pet_camera_detections"
+// Main shared memory (consumed by detection/monitoring/streaming)
+#define SHM_NAME_ACTIVE_FRAME "/pet_camera_active_frame"  // NV12 frame from active camera (30fps)
+#define SHM_NAME_STREAM "/pet_camera_stream"              // H.264 stream from active camera (30fps)
+#define SHM_NAME_PROBE_FRAME "/pet_camera_probe_frame"    // NV12 frame for brightness probing (on-demand)
+#define SHM_NAME_YOLO_INPUT "/pet_camera_yolo_input"      // 640x640 NV12 for YOLO (VSE Channel 1)
+#define SHM_NAME_MJPEG_FRAME "/pet_camera_mjpeg_frame"    // 640x480 NV12 for MJPEG/web_monitor (VSE Channel 2)
+#define SHM_NAME_DETECTIONS "/pet_camera_detections"      // YOLO detection results
+
+// Legacy name for backward compatibility (keep API names stable)
+#define SHM_NAME_FRAMES SHM_NAME_ACTIVE_FRAME
 
 #define RING_BUFFER_SIZE 30  // 30 frames (1 second at 30fps)
 #define MAX_DETECTIONS 10    // Maximum detections per frame
@@ -39,7 +48,7 @@ typedef struct {
     int camera_id;              // Camera index (0 or 1)
     int width;                  // Frame width in pixels
     int height;                 // Frame height in pixels
-    int format;                 // 0=JPEG, 1=NV12, 2=RGB
+    int format;                 // 0=JPEG, 1=NV12, 2=RGB, 3=H264
     size_t data_size;           // Actual data size in bytes
     uint8_t data[MAX_FRAME_SIZE]; // Frame data
 } Frame;
@@ -49,11 +58,14 @@ typedef struct {
  *
  * Thread-safety:
  * - Writer (camera daemon) atomically updates write_index
- * - Readers poll write_index to detect new frames
- * - No locks required (lock-free design)
+ * - Readers can use new_frame_sem for event-driven frame notification (sem_wait)
+ * - Polling is still supported via write_index for backward compatibility
+ * - frame_interval_ms can be updated by external process for dynamic FPS control
  */
 typedef struct {
     volatile uint32_t write_index; // Atomic write pointer (wraps at RING_BUFFER_SIZE)
+    volatile uint32_t frame_interval_ms; // Dynamic frame interval control (0 = 30fps, 500 = ~2fps)
+    sem_t new_frame_sem; // Semaphore for new frame notification (posted on each write)
     Frame frames[RING_BUFFER_SIZE]; // Ring buffer of frames
 } SharedFrameBuffer;
 
@@ -88,6 +100,7 @@ typedef struct {
     int num_detections;             // Number of valid detections (0 ~ MAX_DETECTIONS)
     Detection detections[MAX_DETECTIONS];
     volatile uint32_t version;      // Incremented on each update (atomic)
+    sem_t detection_update_sem;     // Semaphore for event-driven detection updates
 } LatestDetectionResult;
 
 /**
@@ -127,6 +140,34 @@ void shm_frame_buffer_close(SharedFrameBuffer* shm);
  * Should be called by the camera daemon at shutdown.
  */
 void shm_frame_buffer_destroy(SharedFrameBuffer* shm);
+
+/**
+ * Create shared memory with custom name (for probe)
+ *
+ * Creates a temporary shared memory segment with a custom name.
+ * Useful for probe captures to avoid ring buffer conflicts.
+ *
+ * Returns:
+ *   Pointer to mapped SharedFrameBuffer, or NULL on error
+ */
+SharedFrameBuffer* shm_frame_buffer_create_named(const char* name);
+
+/**
+ * Open shared memory with custom name (for probe)
+ *
+ * Opens an existing shared memory segment with a custom name.
+ *
+ * Returns:
+ *   Pointer to mapped SharedFrameBuffer, or NULL on error
+ */
+SharedFrameBuffer* shm_frame_buffer_open_named(const char* name);
+
+/**
+ * Destroy shared memory with custom name (for probe)
+ *
+ * Unmaps and deletes a custom-named shared memory segment.
+ */
+void shm_frame_buffer_destroy_named(SharedFrameBuffer* shm, const char* name);
 
 /**
  * Write a frame to the ring buffer (camera daemon only)

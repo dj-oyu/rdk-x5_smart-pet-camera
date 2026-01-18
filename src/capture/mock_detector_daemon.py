@@ -83,13 +83,21 @@ def main():
     print()
 
     # Open shared memory
-    try:
-        shm = RealSharedMemory()
-        shm.open()
-        shm.open_detection_write()
-        print("[Info] Connected to shared memory")
-    except Exception as e:
-        print(f"[Error] Failed to open shared memory: {e}")
+    shm = RealSharedMemory()
+    connected = False
+    for i in range(20):
+        try:
+            shm.open()
+            shm.open_detection_write()
+            print("[Info] Connected to shared memory")
+            connected = True
+            break
+        except Exception as e:
+            print(f"[Info] Waiting for shared memory... ({i+1}/20)")
+            time.sleep(1.0)
+    
+    if not connected:
+        print("[Error] Failed to open shared memory after retries")
         print("[Error] Make sure camera daemon is running")
         return 1
 

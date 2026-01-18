@@ -15,6 +15,7 @@
 #include <assert.h>
 
 #include "shared_memory.h"
+#include "logger.h"
 
 #define TEST_PASSED() printf("[PASS] %s\n", __func__)
 #define TEST_FAILED() do { printf("[FAIL] %s:%d\n", __func__, __LINE__); exit(1); } while(0)
@@ -181,6 +182,9 @@ void test_detection_version_increment(void) {
 }
 
 int main(void) {
+    // Initialize logger
+    log_init(LOG_LEVEL_INFO, stdout, 0);
+
     printf("=== Shared Memory Test Suite ===\n\n");
 
     test_shm_create_destroy();
