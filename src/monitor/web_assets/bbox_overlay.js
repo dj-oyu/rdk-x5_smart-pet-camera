@@ -51,7 +51,7 @@ export class BBoxOverlay {
         this.isRunning = false;
 
         // Persistence settings
-        this.PERSISTENCE_MS = 500; // Keep bbox for 500ms
+        this.PERSISTENCE_MS = 2000; // Keep bbox for 2000ms (SSE sends every ~1s)
 
         // Stats
         this.stats = {

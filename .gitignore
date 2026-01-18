@@ -153,3 +153,7 @@ core.*
 
 # recorded videos
 recordings/
+
+# Go build artifacts in source directory
+src/streaming_server/server
+src/streaming_server/web_monitor
