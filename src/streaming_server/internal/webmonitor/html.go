@@ -15,113 +15,62 @@ const indexHTML = `
             <span class="badge badge-secondary" id="status-badge">Waiting for data...</span>
         </div>
 
-        <div class="grid">
-            <div class="panel" style="grid-row: span 2;">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-                    <div>
-                        <h2>Live Feed</h2>
-                        <p class="panel-subtitle" id="stream-subtitle">WebRTC H.264ストリーム（30fps、低遅延）</p>
-                    </div>
-                    <div style="display:flex;gap:12px;align-items:center;">
-                        <div class="view-toggle">
-                            <button type="button" id="btn-webrtc" class="active">WebRTC</button>
-                            <button type="button" id="btn-mjpeg">MJPEG</button>
-                        </div>
-                        <div class="tag-row">
-                            <span class="tag cat">cat</span>
-                            <span class="tag food_bowl">food_bowl</span>
-                            <span class="tag water_bowl">water_bowl</span>
-                        </div>
-                    </div>
-                </div>
-                <div id="video-panel" style="position:relative;">
+        <div class="main-content">
+            <!-- Video Area -->
+            <div class="video-container">
+                <div id="video-panel">
                     <!-- WebRTC View (default) -->
                     <div id="webrtc-view" style="position:relative;width:100%;display:block;">
                         <video id="webrtc-video" autoplay playsinline muted
-                               style="width:100%;height:auto;display:block;background:#000;"></video>
+                               style="width:100%;height:auto;display:block;background:#000;border-radius:8px;"></video>
                         <canvas id="bbox-canvas"
                                 style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;"></canvas>
-                        <div id="webrtc-status"
-                             style="position:absolute;top:10px;right:10px;padding:4px 8px;background:rgba(0,0,0,0.7);color:#0f0;font-size:12px;border-radius:4px;">
-                            ● Connecting...
-                        </div>
                     </div>
                     <!-- MJPEG View (fallback) -->
                     <div id="mjpeg-view" style="display:none;">
-                        <img id="stream" alt="Live stream from Smart Pet Camera" style="width:100%;height:auto;">
+                        <img id="stream" alt="Camera stream" style="width:100%;height:auto;border-radius:8px;">
                     </div>
                 </div>
-                <div class="trajectory-card" id="trajectory-card">
-                    <div class="trajectory-title">Trajectory</div>
-                    <canvas class="trajectory-canvas" id="trajectory-canvas"></canvas>
-                    <div class="legend" id="trajectory-legend"></div>
-                </div>
-                <p class="footer-note" id="stream-footer">
-                    WebRTC経由でH.264ストリームを直接配信。ブラウザ上で検出結果をリアルタイムオーバーレイ。
-                </p>
-            </div>
-
-            <div class="panel">
-                <h2>システムステータス</h2>
-                <p class="panel-subtitle">モニター、共有メモリ、検出結果の最新サマリ</p>
-                <div class="stat-grid">
-                    <div class="stat">
-                        <span class="stat-label">Camera FPS</span>
-                        <span class="stat-value" id="fps">--</span>
-                        <span class="stat-sub" id="target-fps">目標: -- fps</span>
+                <!-- Video Controls -->
+                <div class="video-controls">
+                    <div class="view-toggle">
+                        <button type="button" id="btn-webrtc" class="active">WebRTC</button>
+                        <button type="button" id="btn-mjpeg">MJPEG</button>
                     </div>
-                    <div class="stat">
-                        <span class="stat-label">Detections</span>
-                        <span class="stat-value" id="detections">--</span>
-                        <span class="stat-sub" id="detection-version">---</span>
-                    </div>
-                </div>
-
-                <div class="list">
-                    <div class="list-item">
-                        <div class="list-label">Shared memory buffer</div>
-                        <div class="list-value" id="shm-buffer">--</div>
-                    </div>
-                    <div class="list-item">
-                        <div class="list-label">Latest update</div>
-                        <div class="list-value" id="last-updated">--</div>
-                    </div>
-                    <div class="list-item">
-                        <div class="list-label">Frames buffered</div>
-                        <div class="list-value" id="frames-total">--</div>
+                    <div class="record-controls">
+                        <button id="record-btn" class="record-btn" title="REC">
+                            <span class="record-icon"></span>
+                            <span class="dummy-tooltip">DUMMY</span>
+                        </button>
+                        <!-- TODO: 録画実装完了後に復活 <span id="record-status" class="record-status"></span> -->
                     </div>
                 </div>
             </div>
 
-            <div class="panel">
-                <h2>パフォーマンス</h2>
-                <p class="panel-subtitle">イベント駆動型SSEによる帯域幅削減</p>
-                <div class="stat-grid">
-                    <div class="stat">
-                        <span class="stat-label">Event Rate</span>
-                        <span class="stat-value" id="event-rate">-- events/sec</span>
-                        <span class="stat-sub">vs 30/sec polling</span>
-                    </div>
-                    <div class="stat">
-                        <span class="stat-label">Bandwidth</span>
-                        <span class="stat-value" id="bandwidth">-- KB/s</span>
-                        <span class="stat-sub">Real-time usage</span>
-                    </div>
-                </div>
-                <div style="margin-top:12px;text-align:center;">
-                    <span class="stat-badge info" id="bandwidth-reduction">計測中...</span>
-                </div>
+            <!-- Hidden elements for JS compatibility -->
+            <div style="display:none;">
+                <span id="stream-subtitle"></span>
+                <span id="stream-footer"></span>
+                <span id="fps"></span>
+                <span id="target-fps"></span>
+                <span id="detections"></span>
+                <span id="detection-version"></span>
+                <span id="shm-buffer"></span>
+                <span id="last-updated"></span>
+                <span id="frames-total"></span>
+                <span id="event-rate"></span>
+                <span id="bandwidth"></span>
+                <span id="bandwidth-reduction"></span>
+                <span id="record-info"></span>
             </div>
 
-            <div class="panel">
-                <h2>録画コントロール</h2>
-                <p class="panel-subtitle">H.264ストリームの録画制御（近日公開予定）</p>
-                <div style="margin-bottom:12px;">
-                    <button id="record-btn" class="btn btn-primary">⏺ 録画</button>
-                </div>
-                <div id="record-info" class="record-info"></div>
+            <!-- Trajectory visualization -->
+            <div class="trajectory-card" id="trajectory-card">
+                <canvas class="trajectory-canvas" id="trajectory-canvas"></canvas>
+                <div class="legend" id="trajectory-legend"></div>
             </div>
 
+            <!-- Detection Insights -->
             <div class="panel">
                 <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
                     <div>
@@ -157,9 +106,6 @@ const indexHTML = `
         const canvas = document.getElementById('bbox-canvas');
         const webrtcView = document.getElementById('webrtc-view');
         const mjpegView = document.getElementById('mjpeg-view');
-        const statusDiv = document.getElementById('webrtc-status');
-        const subtitle = document.getElementById('stream-subtitle');
-        const footer = document.getElementById('stream-footer');
         const btnWebrtc = document.getElementById('btn-webrtc');
         const btnMjpeg = document.getElementById('btn-mjpeg');
 
@@ -172,8 +118,6 @@ const indexHTML = `
         async function initWebRTC() {
             try {
                 console.log('[App] Initializing WebRTC...');
-                statusDiv.textContent = '● Connecting...';
-                statusDiv.style.color = '#ff0';
 
                 // Create WebRTC client (use same origin as current page)
                 webrtcClient = new WebRTCVideoClient(video);
@@ -181,23 +125,11 @@ const indexHTML = `
                 // Connection state callback
                 webrtcClient.onConnectionStateChange = (state) => {
                     console.log('[App] WebRTC state:', state);
-                    if (state === 'connected') {
-                        statusDiv.textContent = '● Connected (30fps)';
-                        statusDiv.style.color = '#0f0';
-                    } else if (state === 'connecting') {
-                        statusDiv.textContent = '● Connecting...';
-                        statusDiv.style.color = '#ff0';
-                    } else if (state === 'failed' || state === 'closed') {
-                        statusDiv.textContent = '● Disconnected';
-                        statusDiv.style.color = '#f00';
-                    }
                 };
 
                 // Error callback
                 webrtcClient.onError = (error) => {
                     console.error('[App] WebRTC error:', error);
-                    statusDiv.textContent = '● Error - Switch to MJPEG';
-                    statusDiv.style.color = '#f00';
                     // Auto-fallback to MJPEG on error
                     setTimeout(() => switchToMJPEG(), 2000);
                 };
@@ -220,8 +152,6 @@ const indexHTML = `
 
             } catch (error) {
                 console.error('[App] WebRTC initialization failed:', error);
-                statusDiv.textContent = '● Failed - Using MJPEG';
-                statusDiv.style.color = '#f00';
                 // Fallback to MJPEG
                 setTimeout(() => switchToMJPEG(), 2000);
             }
@@ -254,8 +184,6 @@ const indexHTML = `
             // Update UI
             btnWebrtc.classList.remove('active');
             btnMjpeg.classList.add('active');
-            subtitle.textContent = 'MJPEG ストリーム（サーバー側BBox合成）';
-            footer.textContent = '共有メモリの最新フレームにバウンディングボックスを合成したMJPEGストリームを配信しています。';
         }
 
         // Switch to WebRTC
@@ -277,8 +205,6 @@ const indexHTML = `
             // Update UI
             btnWebrtc.classList.add('active');
             btnMjpeg.classList.remove('active');
-            subtitle.textContent = 'WebRTC H.264ストリーム（30fps、低遅延）';
-            footer.textContent = 'WebRTC経由でH.264ストリームを直接配信。ブラウザ上で検出結果をリアルタイムオーバーレイ。';
 
             // Initialize WebRTC if not already running
             if (!webrtcClient || !webrtcClient.isConnected()) {

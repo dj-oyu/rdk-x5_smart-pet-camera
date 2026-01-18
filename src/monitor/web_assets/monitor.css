@@ -98,13 +98,12 @@ a { color: inherit; }
     margin: 0 0 14px;
 }
 #video-panel {
-    position: sticky;
-    top: 18px;
     background: linear-gradient(145deg, rgba(35,47,76,0.9), rgba(11,16,30,0.9));
-    border-radius: 14px;
+    border-radius: 14px 14px 0 0;
     overflow: hidden;
     min-height: 380px;
     border: 1px solid rgba(255,255,255,0.06);
+    border-bottom: none;
 }
 #stream {
     width: 100%;
@@ -250,7 +249,6 @@ a { color: inherit; }
     display: flex;
     flex-direction: column;
     gap: 8px;
-    margin-top: 12px;
 }
 .trajectory-title {
     font-size: 12px;
@@ -491,6 +489,174 @@ a { color: inherit; }
     min-height: 38px;
 }
 
+/* Main content layout */
+.main-content {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+}
+
+/* Video container */
+.video-container {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+}
+
+/* Video controls bar */
+.video-controls {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    background: var(--panel);
+    border: 1px solid var(--panel-edge);
+    border-top: none;
+    border-radius: 0 0 14px 14px;
+    gap: 16px;
+}
+
+/* Recording controls container */
+.record-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    position: relative;
+}
+
+/* Recording button - skeuomorphic design */
+.record-btn {
+    position: relative;
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    border: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    /* Outer bezel - metallic look */
+    background: linear-gradient(145deg, #4a4a4a, #2a2a2a);
+    box-shadow:
+        0 4px 8px rgba(0, 0, 0, 0.4),
+        0 2px 4px rgba(0, 0, 0, 0.3),
+        inset 0 1px 1px rgba(255, 255, 255, 0.1);
+    transition: all 0.15s ease;
+}
+
+.record-btn::before {
+    content: "";
+    position: absolute;
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    /* Inner ring - chrome bezel */
+    background: linear-gradient(145deg, #3a3a3a, #1a1a1a);
+    box-shadow:
+        inset 0 2px 4px rgba(0, 0, 0, 0.5),
+        inset 0 -1px 2px rgba(255, 255, 255, 0.05);
+}
+
+.record-btn:hover {
+    transform: scale(1.02);
+    box-shadow:
+        0 6px 12px rgba(0, 0, 0, 0.5),
+        0 3px 6px rgba(0, 0, 0, 0.4),
+        inset 0 1px 1px rgba(255, 255, 255, 0.1);
+}
+
+.record-btn:active {
+    transform: scale(0.98);
+    box-shadow:
+        0 2px 4px rgba(0, 0, 0, 0.4),
+        0 1px 2px rgba(0, 0, 0, 0.3),
+        inset 0 1px 1px rgba(255, 255, 255, 0.1);
+}
+
+/* Recording icon - glossy red circle */
+.record-icon {
+    position: relative;
+    z-index: 1;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: linear-gradient(145deg, #ff6b6b, #cc4444);
+    box-shadow:
+        0 2px 4px rgba(0, 0, 0, 0.4),
+        inset 0 2px 4px rgba(255, 150, 150, 0.4),
+        inset 0 -2px 4px rgba(100, 0, 0, 0.3);
+    transition: all 0.2s ease;
+}
+
+/* Glossy highlight on record icon */
+.record-icon::after {
+    content: "";
+    position: absolute;
+    top: 3px;
+    left: 4px;
+    width: 8px;
+    height: 6px;
+    border-radius: 50%;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.5), transparent);
+}
+
+/* Recording state - stop button (rounded square) */
+.record-btn.recording .record-icon {
+    border-radius: 4px;
+    width: 18px;
+    height: 18px;
+    background: linear-gradient(145deg, #ff4444, #aa2222);
+    box-shadow:
+        0 0 12px rgba(255, 60, 60, 0.6),
+        0 2px 4px rgba(0, 0, 0, 0.4),
+        inset 0 2px 4px rgba(255, 120, 120, 0.4);
+    animation: glow-pulse 1.5s ease-in-out infinite;
+}
+
+.record-btn.recording .record-icon::after {
+    top: 2px;
+    left: 3px;
+    width: 6px;
+    height: 5px;
+    border-radius: 2px;
+}
+
+@keyframes glow-pulse {
+    0%, 100% { box-shadow: 0 0 12px rgba(255, 60, 60, 0.6), 0 2px 4px rgba(0, 0, 0, 0.4), inset 0 2px 4px rgba(255, 120, 120, 0.4); }
+    50% { box-shadow: 0 0 20px rgba(255, 60, 60, 0.9), 0 2px 4px rgba(0, 0, 0, 0.4), inset 0 2px 4px rgba(255, 120, 120, 0.4); }
+}
+
+/* Dummy tooltip - uses wrapper element */
+.dummy-tooltip {
+    position: absolute;
+    top: -32px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 4px 10px;
+    background: linear-gradient(145deg, #ffdd66, #eebb22);
+    color: #333;
+    font-size: 11px;
+    font-weight: 700;
+    border-radius: 6px;
+    white-space: nowrap;
+    box-shadow:
+        0 2px 6px rgba(0, 0, 0, 0.3),
+        inset 0 1px 0 rgba(255, 255, 255, 0.5);
+    z-index: 10;
+    pointer-events: none;
+}
+
+.dummy-tooltip::after {
+    content: "";
+    position: absolute;
+    bottom: -6px;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-top-color: #eebb22;
+}
+
 @media (max-width: 960px) {
     .grid {
         grid-template-columns: 1fr;
@@ -502,5 +668,31 @@ a { color: inherit; }
     }
     body {
         padding: 24px 16px 32px;
+    }
+    .video-controls {
+        flex-wrap: wrap;
+        gap: 12px;
+        padding: 10px 12px;
+    }
+    .record-btn {
+        width: 46px;
+        height: 46px;
+    }
+    .record-btn::before {
+        width: 36px;
+        height: 36px;
+    }
+    .record-icon {
+        width: 18px;
+        height: 18px;
+    }
+    .record-btn.recording .record-icon {
+        width: 14px;
+        height: 14px;
+    }
+    .dummy-tooltip {
+        top: -30px;
+        font-size: 10px;
+        padding: 3px 8px;
     }
 }
