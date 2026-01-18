@@ -283,12 +283,12 @@ class YoloDetectorDaemon:
                                 f"@ ({det.bbox.x}, {det.bbox.y}, {det.bbox.w}, {det.bbox.h})"
                             )
 
-                elif self.stats["frames_processed"] % 30 == 0:
-                    # INFOレベル: 30フレームに1回検出結果のみ
+                elif detections:
+                    # INFOレベル: 検出があった場合のみログ出力
                     classes = [d["class_name"] for d in detection_dicts]
                     logger.info(
                         f"Frame #{self.stats['frames_processed']}: "
-                        f"{len(detections)} detections {classes if classes else '(none)'}"
+                        f"{len(detections)} detections {classes}"
                     )
 
         except KeyboardInterrupt:
