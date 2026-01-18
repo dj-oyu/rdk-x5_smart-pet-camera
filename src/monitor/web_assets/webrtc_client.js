@@ -79,11 +79,12 @@ export class WebRTCVideoClient {
                 }
             };
 
+            // Add video transceiver for receiving video (required for iOS Safari)
+            this.pc.addTransceiver('video', { direction: 'recvonly' });
+            console.log('[WebRTC] Added video transceiver');
+
             // Create offer
-            const offer = await this.pc.createOffer({
-                offerToReceiveVideo: true,
-                offerToReceiveAudio: false
-            });
+            const offer = await this.pc.createOffer();
 
             // Set local description
             await this.pc.setLocalDescription(offer);
