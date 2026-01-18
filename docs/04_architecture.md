@@ -577,6 +577,201 @@ echo "Dependencies installed successfully"
 
 ---
 
+## 共有メモリとセマフォの実装上の注意点
+
+### 背景
+
+複数プロセスが同一の共有メモリセグメントにアクセスする場合、POSIXセマフォの初期化タイミングに注意が必要。
+
+### 問題: セマフォの二重初期化
+
+**症状**:
+- 複数のカメラデーモンが同じ共有メモリに対して`sem_init()`を呼ぶと、既に初期化済みのセマフォが破壊される
+- 結果として`vio_get_frame()`が`-43 (EIDRM: Identifier removed)`エラーを返す
+- VIOバッファへのアクセスが不安定になり、カメラ切り替えが失敗する
+
+**POSIX仕様**:
+```c
+// POSIX標準：既に初期化されたセマフォにsem_init()を呼ぶのは未定義動作
+sem_t sem;
+sem_init(&sem, 1, 0);  // 初期化
+sem_init(&sem, 1, 0);  // ← UB: セマフォが破壊される
+```
+
+### 解決策: O_EXCL フラグによる判定
+
+`shm_open()`で`O_EXCL`フラグを使用し、新規作成と既存オープンを明確に区別する：
+
+```c
+// shared_memory.c: shm_create_or_open_ex()
+static void* shm_create_or_open_ex(const char* name, size_t size,
+                                   bool create, bool* created_new) {
+    int shm_fd;
+    bool is_new = false;
+
+    if (create) {
+        // O_EXCL: 既存の場合はEEXISTエラーを返す
+        shm_fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0666);
+        if (shm_fd == -1 && errno == EEXIST) {
+            // 既存の共有メモリを開く
+            shm_fd = shm_open(name, O_RDWR, 0666);
+            is_new = false;
+        } else if (shm_fd != -1) {
+            // 新規作成成功
+            is_new = true;
+            ftruncate(shm_fd, size);
+        }
+    }
+
+    // ... mmap処理
+
+    if (created_new) {
+        *created_new = is_new;
+    }
+    return ptr;
+}
+```
+
+**セマフォ初期化**:
+```c
+SharedFrameBuffer* shm_frame_buffer_create_named(const char* name) {
+    bool created_new = false;
+    SharedFrameBuffer* shm = shm_create_or_open_ex(name, sizeof(SharedFrameBuffer),
+                                                   true, &created_new);
+
+    if (shm && created_new) {
+        // 新規作成時のみセマフォを初期化
+        sem_init(&shm->new_frame_sem, 1, 0);
+    }
+    // 既存の場合はセマフォをそのまま使用（再初期化しない）
+
+    return shm;
+}
+```
+
+### 実装方針
+
+1. **最初のプロセスが共有メモリを作成**
+   - `O_EXCL`で新規作成を試行
+   - 成功したらセマフォを初期化
+
+2. **2番目以降のプロセスは開くだけ**
+   - `EEXIST`エラーを受け取る
+   - 既存の共有メモリを開く
+   - セマフォは再初期化しない
+
+3. **単体動作とマルチプロセス動作の両立**
+   - `camera_daemon`単体: 最初のカメラが作成、2番目が開く
+   - `camera_switcher_daemon`併用: switcherが事前作成、各カメラが開く
+   - いずれの場合も安全に動作
+
+### 効果
+
+- ✅ セマフォの二重初期化によるUndefined Behaviorを完全に回避
+- ✅ VIOエラー（-43 EIDRM）が解消
+- ✅ カメラ切り替えが安定動作
+- ✅ 柔軟な運用（単体/マルチプロセス両対応）
+
+### 関連ファイル
+
+- `src/capture/shared_memory.c`: `shm_create_or_open_ex()`, `shm_frame_buffer_create_named()`
+- `src/capture/camera_pipeline.c`: 共有メモリのopen/create処理
+- `src/capture/camera_switcher_daemon.c`: マルチカメラオーケストレーション
+
+---
+
+## ハードウェアアクセラレーション調査
+
+### GPU/暗号化ハードウェア
+
+#### ハードウェア構成
+
+**CPU**:
+- モデル: ARM Cortex-A55 (8コア)
+- アーキテクチャ: aarch64 (ARMv8.2-A)
+- Features: fp asimd evtstrm crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp
+
+**GPU**:
+- デバイス: Vivante GC8000L.6214.0000
+- ドライバ: galcore (Vivante Graphics Driver)
+- OpenCL対応: ✅ Vivante OpenCL Platform
+- デバイスファイル: `/dev/galcore`, `/dev/dri/card0`, `/dev/dri/renderD128`
+
+#### 暗号化ハードウェア対応状況
+
+**AESハードウェアアクセラレーション**: ❌ 非対応
+
+**検証方法**:
+1. CPU Featuresに暗号化拡張フラグ（`aes`, `sha`, `pmull`, `crypto`）が存在しない
+2. パフォーマンステスト結果:
+   ```
+   AES-GCM 10000 iterations: 875ms
+   Average per operation: 87.5µs
+   ```
+   - ハードウェア対応の場合: < 1µs/operation
+   - ソフトウェア実装: > 5µs/operation
+   - **結論**: ソフトウェア実装
+
+#### WebRTC SRTP暗号化のGPUオフロード可能性
+
+**結論**: ❌ 非現実的
+
+**理由**:
+
+1. **CPU-GPUデータ転送オーバーヘッド**
+   - 30fps × 複数パケット/フレーム = 毎秒数百回のCPU-GPU往復
+   - PCIe/メモリバス経由の転送コスト: 100-500µs/transfer
+   - AES-128処理時間: 87µs/operation
+   - **転送コストが暗号化コストを上回る**
+
+2. **pion/webrtcの制約**
+   - Go言語のWebRTCライブラリはGPU非対応
+   - カスタム実装には大規模な改修が必要（数週間規模）
+
+3. **小さいパケットサイズ**
+   - RTPパケット: 数百バイト～1KB程度
+   - GPUは大きなバッチ処理で効率的
+   - 小パケットでは転送オーバーヘッドが支配的
+
+**現在のCPU使用率**: 61.9% (streaming-server)
+- SRTP暗号化: 42.69%
+- その他WebRTC処理: 17%
+- ポーリング等: 残り
+
+#### 推奨される最適化アプローチ
+
+1. **軽量SRTP暗号プロファイルへの変更**
+   - `SRTP_AES128_CM_HMAC_SHA1_32` (認証タグ80bit→32bit)
+   - 約10-15%の負荷削減見込み
+   - ローカルネットワーク用途では許容可能なセキュリティレベル
+
+2. **フレームレート/解像度の調整**
+   - 30fps → 20fps: 暗号化回数が2/3に削減
+   - 640x480 → 320x240: データ量が1/4に削減
+
+3. **H.264ストリームのパススルー** ✅ 実装済み
+   - 再エンコード処理を削除
+   - カメラからの生H.264ストリームを直接送信
+   - CPU負荷: 81% → 61.9% (約19%削減)
+
+### GPU活用の可能性がある処理
+
+GPUオフロードが効果的な処理:
+
+1. **物体検出 (YOLO)**
+   - ✅ 既に実装済み（TensorFlow Lite GPU delegate使用）
+   - 大きな行列演算でGPU効率が高い
+
+2. **画像処理 (将来)**
+   - ノイズリダクション、画像安定化
+   - OpenCLで並列処理
+
+3. **ビデオエンコード (将来)**
+   - GC8000Lはビデオエンコード機能を持つ可能性
+   - ハードウェアH.264エンコーダ調査が必要
+
+---
+
 ## まとめ
 
 このアーキテクチャは以下の原則に基づいて設計されている：

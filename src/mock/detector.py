@@ -111,13 +111,37 @@ class MockDetector:
             y = random.randint(self.frame_height // 2, self.frame_height - h - 50)
             confidence = random.uniform(0.7, 0.95)
 
-        elif class_name == DetectionClass.WATER_BOWL:
-            # 水飲み場: 小さめ、画面下部
+        elif class_name == DetectionClass.DISH:
+            # 皿: 小さめ、画面下部
             w = random.randint(80, 150)
             h = random.randint(60, 100)
             x = random.randint(50, self.frame_width - w - 50)
             y = random.randint(self.frame_height // 2, self.frame_height - h - 50)
             confidence = random.uniform(0.7, 0.95)
+
+        elif class_name == DetectionClass.PERSON:
+            # 人物: 大きめ、画面全体
+            w = random.randint(200, 400)
+            h = random.randint(300, 600)
+            x = random.randint(50, self.frame_width - w - 50)
+            y = random.randint(50, self.frame_height - h - 50)
+            confidence = random.uniform(0.85, 0.99)
+
+        elif class_name == DetectionClass.BOOK:
+            # 本: 中サイズ、画面中央〜上部
+            w = random.randint(100, 200)
+            h = random.randint(120, 250)
+            x = random.randint(100, self.frame_width - w - 100)
+            y = random.randint(50, self.frame_height // 2)
+            confidence = random.uniform(0.75, 0.95)
+
+        elif class_name == DetectionClass.CELL_PHONE:
+            # 携帯電話: 小さめ、画面全体
+            w = random.randint(60, 120)
+            h = random.randint(100, 200)
+            x = random.randint(50, self.frame_width - w - 50)
+            y = random.randint(50, self.frame_height - h - 50)
+            confidence = random.uniform(0.8, 0.95)
 
         else:
             # デフォルト
