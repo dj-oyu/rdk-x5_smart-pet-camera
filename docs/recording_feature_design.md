@@ -198,11 +198,116 @@ recordings/
 | 優先コーデック | H.264 (WebM) → MP4 → VP9 → VP8 |
 | UIデザイン | 既存の録画ボタンを活用 |
 
+---
+
+## 3. マイコン端末からのコントロール（M5Stack Tab5等）
+
+### 背景
+
+- M5Stack Tab5等のマイコンでMJPEG再生専用端末を構築
+- TLS/HTTPSに対応していない（または制限がある）
+- シンプルなHTTP APIでコントロールしたい
+
+### 要件
+
+1. **MJPEGストリームはHTTPでも配信**
+   - マイコンはTLS非対応の場合が多い
+   - `/stream` エンドポイントはHTTPでアクセス可能に
+
+2. **コントロールAPI**
+   - 録画開始/停止
+   - カメラ切り替え（Day/Night）
+   - ステータス取得
+
+### アーキテクチャ
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  iPhone/PC      │     │  M5Stack Tab5   │     │  SBC (RDK-X5)   │
+│  (フル機能)      │     │  (MJPEG表示)    │     │                 │
+└────────┬────────┘     └────────┬────────┘     │  ┌───────────┐  │
+         │                       │              │  │ Go Server │  │
+         │ HTTPS:8080            │ HTTP:8081    │  │           │  │
+         │ - WebRTC              │ - /stream    │  │ :8080 TLS │  │
+         │ - WebUI               │ - /api/*     │  │ :8081 HTTP│  │
+         │ - API                 │              │  └───────────┘  │
+         └───────────────────────┴──────────────┴─────────────────┘
+```
+
+### HTTP API エンドポイント（ポート8081）
+
+| エンドポイント | メソッド | 説明 |
+|---------------|---------|------|
+| `/stream` | GET | MJPEGストリーム |
+| `/api/status` | GET | システムステータス |
+| `/api/recording/start` | POST | 録画開始 |
+| `/api/recording/stop` | POST | 録画停止 |
+| `/api/recording/status` | GET | 録画状態 |
+| `/api/camera/switch` | POST | カメラ切替 `{"camera": "day"\|"night"}` |
+| `/api/camera/status` | GET | 現在のカメラ |
+
+### 実装方針
+
+#### Option A: デュアルポート（推奨）
+
+```
+:8080 - HTTPS (WebRTC + WebUI + API)
+:8081 - HTTP  (MJPEG + API のみ)
+```
+
+**メリット:**
+- セキュリティとアクセシビリティの両立
+- iOS SafariはHTTPSでWebRTC、マイコンはHTTPでMJPEG
+
+#### Option B: HTTP/HTTPS両対応（単一ポート）
+
+同じポートでHTTPとHTTPSの両方を受け付ける。
+
+**デメリット:**
+- 実装が複雑
+- 多くのクライアントがHTTPにダウングレード可能になる
+
+### M5Stack Tab5 実装例
+
+```cpp
+// MJPEG表示
+HTTPClient http;
+http.begin("http://rdk-x5.local:8081/stream");
+
+// 録画開始
+http.begin("http://rdk-x5.local:8081/api/recording/start");
+http.POST("");
+
+// ステータス取得
+http.begin("http://rdk-x5.local:8081/api/status");
+String status = http.getString();
+```
+
+### 実装タスク
+
+- [ ] HTTP専用ポート（8081）の追加
+- [ ] MJPEGストリームをHTTPポートで配信
+- [ ] APIエンドポイントをHTTPポートでも公開
+- [ ] カメラ切替APIの実装
+
+---
+
+## 決定事項
+
+| 項目 | 決定 |
+|------|------|
+| Phase 1実装対象 | ブラウザ側録画のみ |
+| 優先コーデック | H.264 (WebM) → MP4 → VP9 → VP8 |
+| UIデザイン | 既存の録画ボタンを活用 |
+| HTTP/HTTPS | デュアルポート方式（:8080 HTTPS, :8081 HTTP） |
+| マイコン対応 | HTTP APIで録画コントロール可能に |
+
 ## 次のステップ
 
-1. ブラウザ側録画の実装
-2. iOS Safariでのテスト
-3. （将来）サーバー側録画の検討
+1. **即時対応**: HTTP専用ポートでMJPEG配信（M5Stack対応）
+2. ブラウザ側録画の実装
+3. iOS Safariでのテスト
+4. （将来）サーバー側録画の検討
 
 ---
 
