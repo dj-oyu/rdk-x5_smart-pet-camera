@@ -255,7 +255,28 @@ python main.py
 
 ---
 
-## Phase 2: 実機統合 📋 計画中
+### Phase 1.5: GPU Acceleration (OpenCL) 📋 計画中
+
+**目的**: Vivante GC8000L GPUを使用して画像処理（NV12→RGB変換）をオフロードし、CPU負荷を低減する。
+
+**調査結果**: [docs/gpu_capability_report.md](./gpu_capability_report.md)
+
+**タスク**:
+
+1.  **OpenCL Wrapper実装 (C)**
+    - Zero-Copy (Mapped Memory) パターンを使用
+    - `cl_mem_alloc_host_ptr` フラグによるバッファ確保
+    - NV12 → RGB/BGR 変換カーネル実装
+
+2.  **Pythonバインディング (ctypes/CFFI)**
+    - `src/common/src/gpu/` モジュール作成
+    - `convert_nv12_to_rgb(input_ptr, output_ptr)` インターフェース
+
+3.  **統合**
+    - `web_monitor.py` の `cv2.cvtColor` を置換
+    - `yolo_detector_daemon.py` の `cv2.cvtColor` を置換
+
+### Phase 2: 実機統合 📋 計画中
 
 **目的**: モックから実機共有メモリへの切り替え
 
@@ -365,10 +386,13 @@ class RealDetector:
 | Phase | 目標 | 完了日 | ステータス |
 |-------|------|---------|-----------|
 | Phase 0 | モック環境構築 | 2025-12-19 | ✅ 完了 |
-| Phase 1 | 実機Capture + BBox合成 | 2025-12-20 | ✅ 完了 |
-| Phase 2 | 実機統合 | TBD | 📋 次のステップ |
-| Phase 3 | 検出モデル | TBD | 📋 計画中 |
-| Phase 4 | 行動推定 | TBD | 📋 計画中 |
+| Phase 1 (old) | Real Device Capture + BBox Overlay | 2025-12-20 | ✅ Done |
+| **Phase 1 (H.264)** | **H.264 HW Encoding** | 2025-12-23 | ✅ Done |
+| **Phase 1.5 (GPU)** | **OpenCL NV12 Acceleration** | TBD | 📋 Planned |
+| **Phase 2 (H.264)** | **Camera Switcher H.264 Support** | 2025-12-24 | ✅ Done |
+| **Phase 3 (H.264)** | **WebRTC H.264 Streaming** | 2025-12-26 | 🔧 In Progress |
+| Phase 4 | Real Detection Model Integration | TBD | 📋 Planned |
+| Phase 5 | Behavior Estimation | TBD | 📋 Planned |
 
 ### Phase 1 達成内容（100%完了）
 - ✅ 共有メモリ実装・テスト完了（POSIX shm、atomic操作）
@@ -407,7 +431,33 @@ class RealDetector:
 
 ## 変更履歴
 
-- 2025-12-20: **Phase 1 完了** 🎉
+- 2025-12-26: **Phase 3 (H.264) 実装完了・デバッグ中** 🔧
+  - aiortc/av依存関係追加（WebRTC対応）
+  - H264StreamTrack実装（共有メモリ → WebRTC）
+  - WebRTCシグナリングサーバー実装（SDP offer/answer）
+  - Flask統合（/api/webrtc/offer エンドポイント）
+  - ブラウザWebRTCクライアント実装
+  - Canvas BBoxオーバーレイ（SSE統合）
+  - HTML UI更新（WebRTC/MJPEG切り替え）
+  - **課題**: WebRTC接続確立のデバッグ中
+  - **詳細**: [webrtc_phase3_implementation_log.md](./webrtc_phase3_implementation_log.md)
+
+- 2025-12-24: **Phase 2 (H.264) 完了** ✅
+  - カメラスイッチャーH.264対応完了
+  - NV12+H.264デュアルフォーマット生成
+  - 6箇所の共有メモリ構成
+  - ブラックアウトなしのカメラ切り替え
+  - NV12色変換問題解決（`sp_vio_get_frame()`使用）
+  - **詳細**: [camera_switcher_h264_migration.md](./camera_switcher_h264_migration.md)
+
+- 2025-12-23: **Phase 1 (H.264) 完了** ✅
+  - H.264ハードウェアエンコーディング実装
+  - libspcdev統合（VIO→Encoder直結）
+  - CPU使用率57%削減、ビットレート47%削減
+  - H264Recorder実装（0バイト問題解決）
+  - **詳細**: [h264_implementation_log.md](./h264_implementation_log.md)
+
+- 2025-12-20: **Phase 1 (旧) 完了** 🎉
   - カメラデーモン初期化ハング問題を解決
   - カメラデーモンが正常に動作（D-Robotics MIPI）
   - ダミー検出デーモン実装完了（10-15fps、ランダム変化）

@@ -6,6 +6,7 @@
  */
 
 #include "shared_memory.h"
+#include "logger.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,42 +18,52 @@
 #include <unistd.h>
 
 // Helper function to create or open shared memory
-static void* shm_create_or_open(const char* name, size_t size, bool create) {
+// Returns pointer to shared memory, and sets *created_new to true if newly created
+static void* shm_create_or_open_ex(const char* name, size_t size, bool create, bool* created_new) {
     int shm_fd;
     void* ptr;
+    bool is_new = false;
 
     if (create) {
-        // Create new shared memory segment
-        shm_fd = shm_open(name, O_CREAT | O_RDWR, 0666);
-        if (shm_fd == -1) {
-            fprintf(stderr, "[Error] shm_open create failed for %s: %s\n",
-                    name, strerror(errno));
-            return NULL;
-        }
+        // Try to create exclusively first to detect if already exists
+        shm_fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0666);
+        if (shm_fd == -1 && errno == EEXIST) {
+            // Already exists, open it instead
+            shm_fd = shm_open(name, O_RDWR, 0666);
+            is_new = false;
+        } else if (shm_fd != -1) {
+            // Successfully created new shared memory
+            is_new = true;
 
-        // Set size
-        if (ftruncate(shm_fd, size) == -1) {
-            fprintf(stderr, "[Error] ftruncate failed: %s\n", strerror(errno));
-            close(shm_fd);
-            shm_unlink(name);
+            // Set size for new shared memory
+            if (ftruncate(shm_fd, size) == -1) {
+                LOG_ERROR("SharedMemory", "ftruncate failed: %s", strerror(errno));
+                close(shm_fd);
+                shm_unlink(name);
+                return NULL;
+            }
+        } else {
+            LOG_ERROR("SharedMemory", "shm_open create failed for %s: %s",
+                      name, strerror(errno));
             return NULL;
         }
     } else {
         // Open existing shared memory segment
         shm_fd = shm_open(name, O_RDWR, 0666);
         if (shm_fd == -1) {
-            fprintf(stderr, "[Error] shm_open failed for %s: %s\n",
-                    name, strerror(errno));
+            LOG_ERROR("SharedMemory", "shm_open failed for %s: %s",
+                      name, strerror(errno));
             return NULL;
         }
+        is_new = false;
     }
 
     // Map to memory
     ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
     if (ptr == MAP_FAILED) {
-        fprintf(stderr, "[Error] mmap failed: %s\n", strerror(errno));
+        LOG_ERROR("SharedMemory", "mmap failed: %s", strerror(errno));
         close(shm_fd);
-        if (create) {
+        if (is_new) {
             shm_unlink(name);
         }
         return NULL;
@@ -61,11 +72,20 @@ static void* shm_create_or_open(const char* name, size_t size, bool create) {
     close(shm_fd);  // Can close fd after mmap
 
     // Initialize to zero on creation
-    if (create) {
+    if (is_new) {
         memset(ptr, 0, size);
     }
 
+    if (created_new) {
+        *created_new = is_new;
+    }
+
     return ptr;
+}
+
+// Legacy wrapper for backwards compatibility
+static void* shm_create_or_open(const char* name, size_t size, bool create) {
+    return shm_create_or_open_ex(name, size, create, NULL);
 }
 
 // Frame buffer functions
@@ -78,8 +98,17 @@ SharedFrameBuffer* shm_frame_buffer_create(void) {
     );
 
     if (shm) {
-        printf("[Info] Shared memory created: %s (size=%zu bytes)\n",
-               SHM_NAME_FRAMES, sizeof(SharedFrameBuffer));
+        // Initialize semaphore for inter-process notification
+        // pshared=1 allows use across processes
+        if (sem_init(&shm->new_frame_sem, 1, 0) != 0) {
+            LOG_ERROR("SharedMemory", "sem_init failed: %s", strerror(errno));
+            munmap(shm, sizeof(SharedFrameBuffer));
+            shm_unlink(SHM_NAME_FRAMES);
+            return NULL;
+        }
+
+        LOG_INFO("SharedMemory", "Shared memory created: %s (size=%zu bytes)",
+                 SHM_NAME_FRAMES, sizeof(SharedFrameBuffer));
     }
 
     return shm;
@@ -93,7 +122,7 @@ SharedFrameBuffer* shm_frame_buffer_open(void) {
     );
 
     if (shm) {
-        printf("[Info] Shared memory opened: %s\n", SHM_NAME_FRAMES);
+        LOG_INFO("SharedMemory", "Shared memory opened: %s", SHM_NAME_FRAMES);
     }
 
     return shm;
@@ -107,9 +136,67 @@ void shm_frame_buffer_close(SharedFrameBuffer* shm) {
 
 void shm_frame_buffer_destroy(SharedFrameBuffer* shm) {
     if (shm) {
+        // Destroy semaphore before unmapping
+        sem_destroy(&shm->new_frame_sem);
+
         munmap(shm, sizeof(SharedFrameBuffer));
         shm_unlink(SHM_NAME_FRAMES);
-        printf("[Info] Shared memory destroyed: %s\n", SHM_NAME_FRAMES);
+        LOG_INFO("SharedMemory", "Shared memory destroyed: %s", SHM_NAME_FRAMES);
+    }
+}
+
+SharedFrameBuffer* shm_frame_buffer_create_named(const char* name) {
+    bool created_new = false;
+    SharedFrameBuffer* shm = (SharedFrameBuffer*)shm_create_or_open_ex(
+        name,
+        sizeof(SharedFrameBuffer),
+        true,  // create (or open if exists)
+        &created_new
+    );
+
+    if (shm) {
+        if (created_new) {
+            // Initialize semaphore only for newly created shared memory
+            if (sem_init(&shm->new_frame_sem, 1, 0) != 0) {
+                LOG_ERROR("SharedMemory", "sem_init failed for %s: %s",
+                          name, strerror(errno));
+                munmap(shm, sizeof(SharedFrameBuffer));
+                shm_unlink(name);
+                return NULL;
+            }
+            LOG_INFO("SharedMemory", "Shared memory created: %s (size=%zu bytes)",
+                     name, sizeof(SharedFrameBuffer));
+        } else {
+            LOG_INFO("SharedMemory", "Shared memory opened (already exists): %s",
+                     name);
+        }
+    }
+
+    return shm;
+}
+
+SharedFrameBuffer* shm_frame_buffer_open_named(const char* name) {
+    SharedFrameBuffer* shm = (SharedFrameBuffer*)shm_create_or_open(
+        name,
+        sizeof(SharedFrameBuffer),
+        false  // open existing
+    );
+
+    if (shm) {
+        LOG_INFO("SharedMemory", "Shared memory opened: %s", name);
+    }
+
+    return shm;
+}
+
+void shm_frame_buffer_destroy_named(SharedFrameBuffer* shm, const char* name) {
+    if (shm) {
+        // Destroy semaphore before unmapping
+        sem_destroy(&shm->new_frame_sem);
+
+        munmap(shm, sizeof(SharedFrameBuffer));
+        shm_unlink(name);
+        LOG_INFO("SharedMemory", "Shared memory destroyed: %s", name);
     }
 }
 
@@ -124,6 +211,12 @@ int shm_frame_buffer_write(SharedFrameBuffer* shm, const Frame* frame) {
 
     // Copy frame data to the slot
     memcpy(&shm->frames[idx], frame, sizeof(Frame));
+
+    // Memory barrier to ensure frame data is visible before semaphore post
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+
+    // Notify waiting readers that a new frame is available
+    sem_post(&shm->new_frame_sem);
 
     return 0;
 }
@@ -167,8 +260,17 @@ LatestDetectionResult* shm_detection_create(void) {
     );
 
     if (shm) {
-        printf("[Info] Detection shared memory created: %s (size=%zu bytes)\n",
-               SHM_NAME_DETECTIONS, sizeof(LatestDetectionResult));
+        // Initialize semaphore for event-driven detection updates
+        // pshared=1 (inter-process), initial value=0 (starts empty)
+        if (sem_init(&shm->detection_update_sem, 1, 0) != 0) {
+            LOG_ERROR("SharedMemory", "Failed to initialize detection semaphore: %s", strerror(errno));
+            munmap(shm, sizeof(LatestDetectionResult));
+            shm_unlink(SHM_NAME_DETECTIONS);
+            return NULL;
+        }
+
+        LOG_INFO("SharedMemory", "Detection shared memory created: %s (size=%zu bytes)",
+                 SHM_NAME_DETECTIONS, sizeof(LatestDetectionResult));
     }
 
     return shm;
@@ -182,7 +284,7 @@ LatestDetectionResult* shm_detection_open(void) {
     );
 
     if (shm) {
-        printf("[Info] Detection shared memory opened: %s\n", SHM_NAME_DETECTIONS);
+        LOG_INFO("SharedMemory", "Detection shared memory opened: %s", SHM_NAME_DETECTIONS);
     }
 
     return shm;
@@ -196,9 +298,12 @@ void shm_detection_close(LatestDetectionResult* shm) {
 
 void shm_detection_destroy(LatestDetectionResult* shm) {
     if (shm) {
+        // Destroy semaphore before unmapping
+        sem_destroy(&shm->detection_update_sem);
+
         munmap(shm, sizeof(LatestDetectionResult));
         shm_unlink(SHM_NAME_DETECTIONS);
-        printf("[Info] Detection shared memory destroyed: %s\n", SHM_NAME_DETECTIONS);
+        LOG_INFO("SharedMemory", "Detection shared memory destroyed: %s", SHM_NAME_DETECTIONS);
     }
 }
 
@@ -218,6 +323,9 @@ int shm_detection_write(LatestDetectionResult* shm,
 
     // Atomically increment version
     __atomic_fetch_add(&shm->version, 1, __ATOMIC_SEQ_CST);
+
+    // Signal semaphore to notify event-driven consumers
+    sem_post(&shm->detection_update_sem);
 
     return 0;
 }

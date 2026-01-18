@@ -150,3 +150,6 @@ dmypy.json
 # Core dumps
 core
 core.*
+
+# recorded videos
+recordings/

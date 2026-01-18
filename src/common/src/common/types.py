@@ -20,8 +20,55 @@ class CameraType(Enum):
 class DetectionClass(Enum):
     """検出対象クラス"""
     CAT = "cat"
+    DOG = "dog"
+    BIRD = "bird"
     FOOD_BOWL = "food_bowl"
     WATER_BOWL = "water_bowl"
+    DISH = "dish"
+    PERSON = "person"
+    BACKPACK = "backpack"
+    UMBRELLA = "umbrella"
+    HANDBAG = "handbag"
+    SUITCASE = "suitcase"
+    BOTTLE = "bottle"
+    WINE_GLASS = "wine_glass"
+    CUP = "cup"
+    FORK = "fork"
+    KNIFE = "knife"
+    SPOON = "spoon"
+    BANANA = "banana"
+    APPLE = "apple"
+    SANDWICH = "sandwich"
+    ORANGE = "orange"
+    BROCCOLI = "broccoli"
+    CARROT = "carrot"
+    HOT_DOG = "hot_dog"
+    PIZZA = "pizza"
+    DONUT = "donut"
+    CAKE = "cake"
+    CHAIR = "chair"
+    COUCH = "couch"
+    POTTED_PLANT = "potted_plant"
+    BED = "bed"
+    DINING_TABLE = "dining_table"
+    TOILET = "toilet"
+    TV = "tv"
+    LAPTOP = "laptop"
+    MOUSE = "mouse"
+    REMOTE = "remote"
+    KEYBOARD = "keyboard"
+    BOOK = "book"
+    CLOCK = "clock"
+    VASE = "vase"
+    TEDDY_BEAR = "teddy_bear"
+    HAIR_DRIER = "hair_drier"
+    TOOTHBRUSH = "toothbrush"
+    CELL_PHONE = "cell_phone"
+    MICROWAVE = "microwave"
+    OVEN = "oven"
+    TOASTER = "toaster"
+    SINK = "sink"
+    REFRIGERATOR = "refrigerator"
 
 
 class BehaviorType(Enum):
@@ -92,6 +139,14 @@ class Detection:
     bbox: BoundingBox
 
 
+class FrameFormat(Enum):
+    """フレームフォーマット"""
+    JPEG = 0  # JPEG圧縮
+    NV12 = 1  # NV12 YUV (raw)
+    RGB = 2   # RGB (raw)
+    H264 = 3  # H.264 encoded (NAL units)
+
+
 @dataclass
 class Frame:
     """
@@ -106,14 +161,16 @@ class Frame:
         int camera_id;
         int width;
         int height;
+        int format;  // 0=JPEG, 1=NV12, 2=RGB, 3=H264
     } Frame;
     """
-    data: bytes  # JPEG エンコード済みデータ
+    data: bytes  # フレームデータ（フォーマットに応じて可変）
     frame_number: int
     timestamp: float  # UNIXタイムスタンプ
     camera_id: int
     width: int
     height: int
+    format: int = 0  # デフォルトはJPEG（FrameFormat.JPEG）
 
     @property
     def size(self) -> int:
