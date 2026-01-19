@@ -64,4 +64,52 @@ BrightnessZone isp_classify_brightness_zone(float brightness_avg, uint32_t cur_l
  */
 void isp_fill_frame_brightness(Frame *frame, const isp_brightness_result_t *result);
 
+/**
+ * Low-light correction state (for hysteresis tracking)
+ */
+typedef struct {
+    bool correction_active;         // True if low-light correction is currently applied
+    BrightnessZone current_zone;    // Last applied zone
+    double below_threshold_since;   // Timestamp when brightness dropped below threshold (-1 if not)
+    double above_threshold_since;   // Timestamp when brightness rose above threshold (-1 if not)
+} isp_lowlight_state_t;
+
+/**
+ * Initialize low-light correction state
+ */
+void isp_lowlight_state_init(isp_lowlight_state_t *state);
+
+/**
+ * Apply low-light correction profile based on brightness zone
+ *
+ * Sets ISP color processing (brightness, contrast, saturation) and gamma
+ * correction parameters for the given zone.
+ *
+ * Args:
+ *   isp_handle: ISP vnode handle
+ *   zone: Target brightness zone
+ *
+ * Returns:
+ *   0 on success, -1 on error
+ */
+int isp_apply_lowlight_profile(hbn_vnode_handle_t isp_handle, BrightnessZone zone);
+
+/**
+ * Update low-light correction with hysteresis
+ *
+ * Checks if correction should be enabled/disabled based on current brightness
+ * and hysteresis thresholds. Applies profile if state changes.
+ *
+ * Args:
+ *   isp_handle: ISP vnode handle
+ *   state: Low-light state to track hysteresis
+ *   brightness_result: Current brightness measurement
+ *
+ * Returns:
+ *   true if correction is active after update, false otherwise
+ */
+bool isp_update_lowlight_correction(hbn_vnode_handle_t isp_handle,
+                                    isp_lowlight_state_t *state,
+                                    const isp_brightness_result_t *brightness_result);
+
 #endif // ISP_BRIGHTNESS_H

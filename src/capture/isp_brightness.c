@@ -1,15 +1,18 @@
 /**
  * isp_brightness.c - ISP brightness statistics implementation
  *
- * Uses D-Robotics ISP API to get hardware-calculated brightness statistics.
+ * Uses D-Robotics ISP API to get hardware-calculated brightness statistics
+ * and applies low-light correction profiles.
  */
 
 #include "isp_brightness.h"
+#include "isp_lowlight_profile.h"
 #include "logger.h"
 
 #include <hbn_api.h>
 #include <hbn_isp_api.h>
 #include <string.h>
+#include <time.h>
 
 // ISP AE statistics grid: 32x32 = 1024 zones, 4 channels each
 #define AE_GRID_SIZE 32
@@ -120,4 +123,143 @@ void isp_fill_frame_brightness(Frame *frame, const isp_brightness_result_t *resu
         frame->brightness_lux = 0;
         frame->brightness_zone = BRIGHTNESS_ZONE_NORMAL;  // Default to normal
     }
+}
+
+// ============================================================================
+// Low-light correction implementation
+// ============================================================================
+
+static double get_time_seconds(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+void isp_lowlight_state_init(isp_lowlight_state_t *state) {
+    if (!state) return;
+    state->correction_active = false;
+    state->current_zone = BRIGHTNESS_ZONE_NORMAL;
+    state->below_threshold_since = -1.0;
+    state->above_threshold_since = -1.0;
+}
+
+int isp_apply_lowlight_profile(hbn_vnode_handle_t isp_handle, BrightnessZone zone) {
+    if (isp_handle <= 0) {
+        LOG_ERROR("ISP_Lowlight", "Invalid ISP handle");
+        return -1;
+    }
+
+    isp_lowlight_profile_t profile = isp_get_profile_for_zone(zone);
+    int ret;
+
+    // 1. Apply color processing (brightness, contrast, saturation)
+    hbn_isp_color_process_attr_t cproc_attr = {0};
+    ret = hbn_isp_get_color_process_attr(isp_handle, &cproc_attr);
+    if (ret != 0) {
+        LOG_WARN("ISP_Lowlight", "Failed to get color process attr: %d", ret);
+        // Continue anyway - we'll set the values
+    }
+
+    cproc_attr.mode = HBN_ISP_MODE_MANUAL;
+    cproc_attr.manual_attr.bright = profile.brightness;
+    cproc_attr.manual_attr.contrast = profile.contrast;
+    cproc_attr.manual_attr.saturation = profile.saturation;
+    // Keep hue unchanged (0.0)
+
+    ret = hbn_isp_set_color_process_attr(isp_handle, &cproc_attr);
+    if (ret != 0) {
+        LOG_ERROR("ISP_Lowlight", "Failed to set color process attr: %d", ret);
+        return -1;
+    }
+
+    // 2. Apply gamma correction
+    hbn_isp_gc_attr_t gc_attr = {0};
+    ret = hbn_isp_get_gc_attr(isp_handle, &gc_attr);
+    if (ret != 0) {
+        LOG_WARN("ISP_Lowlight", "Failed to get gamma attr: %d", ret);
+    }
+
+    gc_attr.mode = HBN_ISP_MODE_MANUAL;
+    gc_attr.manual_attr.standard = true;  // Use standard gamma formula
+    gc_attr.manual_attr.standard_val = profile.gamma;
+
+    ret = hbn_isp_set_gc_attr(isp_handle, &gc_attr);
+    if (ret != 0) {
+        LOG_ERROR("ISP_Lowlight", "Failed to set gamma attr: %d", ret);
+        return -1;
+    }
+
+    LOG_INFO("ISP_Lowlight", "Applied profile for zone %d: bright=%.1f, contrast=%.2f, sat=%.2f, gamma=%.2f",
+             zone, profile.brightness, profile.contrast, profile.saturation, profile.gamma);
+
+    return 0;
+}
+
+bool isp_update_lowlight_correction(hbn_vnode_handle_t isp_handle,
+                                    isp_lowlight_state_t *state,
+                                    const isp_brightness_result_t *brightness_result) {
+    if (!state || !brightness_result || !brightness_result->valid) {
+        return state ? state->correction_active : false;
+    }
+
+    isp_lowlight_hysteresis_t hyst = DEFAULT_HYSTERESIS;
+    double now = get_time_seconds();
+    float brightness = brightness_result->brightness_avg;
+    BrightnessZone zone = brightness_result->zone;
+
+    if (!state->correction_active) {
+        // Currently OFF - check if we should turn ON
+        if (brightness < hyst.correction_on_threshold) {
+            if (state->below_threshold_since < 0) {
+                state->below_threshold_since = now;
+                LOG_DEBUG("ISP_Lowlight", "Brightness %.1f below threshold, starting hold timer", brightness);
+            }
+            double elapsed = now - state->below_threshold_since;
+            if (elapsed >= hyst.hold_time_on_sec) {
+                // Enable correction
+                LOG_INFO("ISP_Lowlight", "Enabling low-light correction (brightness=%.1f, held for %.1fs)",
+                         brightness, elapsed);
+                if (isp_apply_lowlight_profile(isp_handle, zone) == 0) {
+                    state->correction_active = true;
+                    state->current_zone = zone;
+                }
+                state->below_threshold_since = -1.0;
+            }
+        } else {
+            state->below_threshold_since = -1.0;  // Reset timer
+        }
+        state->above_threshold_since = -1.0;  // Clear other timer
+    } else {
+        // Currently ON - check if we should turn OFF
+        if (brightness > hyst.correction_off_threshold) {
+            if (state->above_threshold_since < 0) {
+                state->above_threshold_since = now;
+                LOG_DEBUG("ISP_Lowlight", "Brightness %.1f above threshold, starting hold timer", brightness);
+            }
+            double elapsed = now - state->above_threshold_since;
+            if (elapsed >= hyst.hold_time_off_sec) {
+                // Disable correction (apply NORMAL profile)
+                LOG_INFO("ISP_Lowlight", "Disabling low-light correction (brightness=%.1f, held for %.1fs)",
+                         brightness, elapsed);
+                if (isp_apply_lowlight_profile(isp_handle, BRIGHTNESS_ZONE_NORMAL) == 0) {
+                    state->correction_active = false;
+                    state->current_zone = BRIGHTNESS_ZONE_NORMAL;
+                }
+                state->above_threshold_since = -1.0;
+            }
+        } else {
+            state->above_threshold_since = -1.0;  // Reset timer
+
+            // While correction is active, update zone if it changes significantly
+            if (zone != state->current_zone && zone != BRIGHTNESS_ZONE_NORMAL && zone != BRIGHTNESS_ZONE_BRIGHT) {
+                LOG_DEBUG("ISP_Lowlight", "Zone changed from %d to %d, updating profile", state->current_zone, zone);
+                if (isp_apply_lowlight_profile(isp_handle, zone) == 0) {
+                    state->current_zone = zone;
+                }
+            }
+        }
+        state->below_threshold_since = -1.0;  // Clear other timer
+    }
+
+    return state->correction_active;
 }

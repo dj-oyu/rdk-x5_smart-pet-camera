@@ -131,6 +131,9 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
     goto error_cleanup;
   }
 
+  // Initialize low-light correction state (Phase 2)
+  isp_lowlight_state_init(&pipeline->lowlight_state);
+
   LOG_INFO(Pipeline_log_header, "Pipeline created successfully");
   return 0;
 
@@ -204,14 +207,22 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     isp_brightness_result_t brightness_result = {0};
     isp_get_brightness(pipeline->vio.isp_handle, &brightness_result);
 
+    // Update low-light correction based on brightness (Phase 2)
+    // Only active camera should control ISP parameters to avoid conflicts
+    bool correction_active = false;
+    if (write_active) {
+      correction_active = isp_update_lowlight_correction(
+          pipeline->vio.isp_handle, &pipeline->lowlight_state, &brightness_result);
+    }
+
     // Debug: log flags every 30 frames
     if (frame_count % 30 == 0) {
       LOG_DEBUG(
           Pipeline_log_header,
-          "Flags: is_active=%d, probe=%d, write_active=%d, write_probe=%d, brightness=%.1f lux=%u zone=%d",
+          "Flags: is_active=%d, probe=%d, brightness=%.1f lux=%u zone=%d correction=%d",
           *pipeline->is_active_flag, *pipeline->probe_requested_flag,
-          write_active, write_probe, brightness_result.brightness_avg,
-          brightness_result.brightness_lux, brightness_result.zone);
+          brightness_result.brightness_avg, brightness_result.brightness_lux,
+          brightness_result.zone, correction_active);
     }
 
     if (write_active || write_probe) {
@@ -228,6 +239,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
 
       // Apply brightness data from ISP
       isp_fill_frame_brightness(&nv12_frame, &brightness_result);
+      nv12_frame.correction_applied = correction_active ? 1 : 0;
 
       // Calculate NV12 size from buffer metadata
       size_t nv12_size = 0;
@@ -312,6 +324,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
 
         // Apply brightness data from ISP (same for all channels)
         isp_fill_frame_brightness(&yolo_nv12_frame, &brightness_result);
+        yolo_nv12_frame.correction_applied = correction_active ? 1 : 0;
 
         // Calculate NV12 size for 640x640
         size_t yolo_size = 0;
@@ -370,6 +383,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
 
         // Apply brightness data from ISP (same for all channels)
         isp_fill_frame_brightness(&mjpeg_nv12_frame, &brightness_result);
+        mjpeg_nv12_frame.correction_applied = correction_active ? 1 : 0;
 
         // Calculate NV12 size for 640x480
         size_t mjpeg_size = 0;
