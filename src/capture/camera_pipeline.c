@@ -203,14 +203,22 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     bool write_active = *pipeline->is_active_flag == 1;
     bool write_probe = *pipeline->probe_requested_flag == 1;
 
-    // Get ISP brightness statistics once per capture cycle (shared by all frames)
-    isp_brightness_result_t brightness_result = {0};
-    isp_get_brightness(pipeline->vio.isp_handle, &brightness_result);
+    // Get ISP brightness statistics with throttling (every 8 frames = ~3.75Hz)
+    // This reduces ISP API overhead and prevents video stuttering
+    // Use bitmask for efficient modulo: (frame_count & 7) == 0
+    #define ISP_BRIGHTNESS_MASK 7  // 8 frames interval (2^3 - 1)
+    static isp_brightness_result_t cached_brightness = {0};
+    bool is_brightness_frame = (frame_count & ISP_BRIGHTNESS_MASK) == 0;
+    if (is_brightness_frame) {
+      isp_get_brightness(pipeline->vio.isp_handle, &cached_brightness);
+    }
+    isp_brightness_result_t brightness_result = cached_brightness;
 
     // Update low-light correction based on brightness (Phase 2)
     // Only active camera should control ISP parameters to avoid conflicts
-    bool correction_active = false;
-    if (write_active) {
+    // Also throttled to match brightness measurement interval
+    bool correction_active = pipeline->lowlight_state.correction_active;
+    if (write_active && is_brightness_frame) {
       correction_active = isp_update_lowlight_correction(
           pipeline->vio.isp_handle, &pipeline->lowlight_state, &brightness_result);
     }
