@@ -183,13 +183,15 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     // Get NV12 frame from VIO
     ret = vio_get_frame(&pipeline->vio, &vio_frame, 2000);
     if (ret != 0) {
-      // Non-active cameras may fail to get frames during probe (expected)
-      // Only log as WARN if camera is active, otherwise DEBUG to reduce noise
-      if (*pipeline->is_active_flag == 1) {
+      // Error -43 (HBN_STATUS_NODE_DEQUE_ERROR) is transient during camera
+      // switches - the VIO buffer isn't ready yet. Use DEBUG level to avoid log
+      // spam. Non-active cameras may also fail to get frames during probe
+      // (expected).
+      if (*pipeline->is_active_flag == 1 && ret != -43) {
         LOG_WARN(Pipeline_log_header, "vio_get_frame failed: %d", ret);
       } else {
-        LOG_DEBUG(Pipeline_log_header, "vio_get_frame failed (inactive): %d",
-                  ret);
+        LOG_DEBUG(Pipeline_log_header, "vio_get_frame failed: %d (active=%d)",
+                  ret, *pipeline->is_active_flag);
       }
       continue;
     }
