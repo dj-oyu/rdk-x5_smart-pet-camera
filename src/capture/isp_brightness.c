@@ -226,47 +226,44 @@ int isp_apply_lowlight_profile(hbn_vnode_handle_t isp_handle, BrightnessZone zon
     isp_lowlight_profile_t profile = isp_get_profile_for_zone(zone);
     int ret;
 
-    // 1. Apply color processing (brightness, contrast, saturation)
-    hbn_isp_color_process_attr_t cproc_attr = {0};
-    ret = hbn_isp_get_color_process_attr(isp_handle, &cproc_attr);
+    // Apply 3DNR (Temporal Noise Reduction)
+    hbn_isp_3dnr_attr_t tnr_attr = {0};
+    ret = hbn_isp_get_3dnr_attr(isp_handle, &tnr_attr);
     if (ret != 0) {
-        LOG_WARN("ISP_Lowlight", "Failed to get color process attr: %d", ret);
-        // Continue anyway - we'll set the values
+        LOG_WARN("ISP_Lowlight", "Failed to get 3DNR attr: %d", ret);
+    } else {
+        int old_3dnr = tnr_attr.manual_attr.tnr_strength;
+        tnr_attr.mode = HBN_ISP_MODE_MANUAL;
+        tnr_attr.manual_attr.tnr_strength = (uint8_t)profile.denoise_3d;
+
+        ret = hbn_isp_set_3dnr_attr(isp_handle, &tnr_attr);
+        if (ret != 0) {
+            LOG_WARN("ISP_Lowlight", "Failed to set 3DNR attr: %d", ret);
+        } else {
+            LOWLIGHT_LOG_INFO("3DNR: %d -> %d", old_3dnr, profile.denoise_3d);
+        }
     }
 
-    cproc_attr.mode = HBN_ISP_MODE_MANUAL;
-    cproc_attr.manual_attr.bright = profile.brightness;
-    cproc_attr.manual_attr.contrast = profile.contrast;
-    cproc_attr.manual_attr.saturation = profile.saturation;
-    // Keep hue unchanged (0.0)
-
-    ret = hbn_isp_set_color_process_attr(isp_handle, &cproc_attr);
+    // Apply 2DNR (Spatial Noise Reduction)
+    hbn_isp_2dnr_attr_t snr_attr = {0};
+    ret = hbn_isp_get_2dnr_attr(isp_handle, &snr_attr);
     if (ret != 0) {
-        LOG_ERROR("ISP_Lowlight", "Failed to set color process attr: %d", ret);
-        return -1;
+        LOG_WARN("ISP_Lowlight", "Failed to get 2DNR attr: %d", ret);
+    } else {
+        float old_2dnr = snr_attr.manual_attr.blend_static;
+        snr_attr.mode = HBN_ISP_MODE_MANUAL;
+        snr_attr.manual_attr.blend_static = profile.denoise_2d;
+
+        ret = hbn_isp_set_2dnr_attr(isp_handle, &snr_attr);
+        if (ret != 0) {
+            LOG_WARN("ISP_Lowlight", "Failed to set 2DNR attr: %d", ret);
+        } else {
+            LOWLIGHT_LOG_INFO("2DNR: %.1f -> %.1f", old_2dnr, profile.denoise_2d);
+        }
     }
 
-    // 2. Apply gamma correction
-    hbn_isp_gc_attr_t gc_attr = {0};
-    ret = hbn_isp_get_gc_attr(isp_handle, &gc_attr);
-    if (ret != 0) {
-        LOG_WARN("ISP_Lowlight", "Failed to get gamma attr: %d", ret);
-    }
-
-    gc_attr.mode = HBN_ISP_MODE_MANUAL;
-    gc_attr.manual_attr.standard = true;  // Use standard gamma formula
-    gc_attr.manual_attr.standard_val = profile.gamma;
-
-    ret = hbn_isp_set_gc_attr(isp_handle, &gc_attr);
-    if (ret != 0) {
-        LOG_ERROR("ISP_Lowlight", "Failed to set gamma attr: %d", ret);
-        return -1;
-    }
-
-    LOG_INFO("ISP_Lowlight", "Applied profile for zone %d: bright=%.1f, contrast=%.2f, sat=%.2f, gamma=%.2f",
-             zone, profile.brightness, profile.contrast, profile.saturation, profile.gamma);
-    LOWLIGHT_LOG_INFO("Applied profile for zone %d: bright=%.1f, contrast=%.2f, sat=%.2f, gamma=%.2f",
-             zone, profile.brightness, profile.contrast, profile.saturation, profile.gamma);
+    LOG_INFO("ISP_Lowlight", "Applied zone %d: 3DNR=%d, 2DNR=%.1f",
+             zone, profile.denoise_3d, profile.denoise_2d);
 
     return 0;
 }
