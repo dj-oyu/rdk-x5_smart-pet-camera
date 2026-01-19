@@ -294,7 +294,14 @@ camera_switcher_handle_frame(CameraSwitchController *ctrl, Frame const *frame,
     return CAMERA_SWITCH_DECISION_NONE;
   }
 
-  double brightness = frame_calculate_mean_luma(frame);
+  // Use ISP-computed brightness if available (Phase 1.4: CPU offload)
+  // Fallback to CPU calculation if ISP value is not populated (0.0)
+  double brightness;
+  if (frame->brightness_avg > 0.0f) {
+    brightness = (double)frame->brightness_avg;
+  } else {
+    brightness = frame_calculate_mean_luma(frame);
+  }
 
   CameraSwitchDecision decision = CAMERA_SWITCH_DECISION_NONE;
   if (brightness >= 0) {
