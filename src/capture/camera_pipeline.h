@@ -15,6 +15,7 @@
 #include "encoder_lowlevel.h"
 #include "encoder_thread.h"
 #include "shared_memory.h"
+#include "isp_brightness.h"  // For isp_lowlight_state_t
 
 /**
  * NV12 sampling configuration
@@ -47,6 +48,9 @@ typedef struct {
 
     // NV12 sampling configuration (deprecated in new design)
     nv12_sampling_config_t nv12_sampling;
+
+    // Low-light correction state (Phase 2: ISP auto-correction)
+    isp_lowlight_state_t lowlight_state;
 
     // Configuration
     int camera_index;
