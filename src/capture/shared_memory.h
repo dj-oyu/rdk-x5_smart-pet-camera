@@ -36,10 +36,21 @@
 #define MAX_FRAME_SIZE (1920 * 1080 * 3 / 2)  // Max NV12 frame size (1080p)
 
 /**
+ * Brightness zone classification for low-light detection
+ */
+typedef enum {
+    BRIGHTNESS_ZONE_DARK = 0,    // brightness_avg < 50 (needs correction)
+    BRIGHTNESS_ZONE_DIM = 1,     // 50 <= brightness_avg < 70 (mild correction)
+    BRIGHTNESS_ZONE_NORMAL = 2,  // 70 <= brightness_avg < 180
+    BRIGHTNESS_ZONE_BRIGHT = 3,  // brightness_avg >= 180
+} BrightnessZone;
+
+/**
  * Frame structure - represents a single camera frame
  *
  * Layout:
  * - Metadata (frame_number, timestamp, camera_id)
+ * - Brightness metrics (ISP statistics)
  * - Frame data (JPEG or raw YUV)
  */
 typedef struct {
@@ -50,6 +61,15 @@ typedef struct {
     int height;                 // Frame height in pixels
     int format;                 // 0=JPEG, 1=NV12, 2=RGB, 3=H264
     size_t data_size;           // Actual data size in bytes
+
+    // Brightness metrics (Phase 0: ISP low-light enhancement)
+    // Updated by camera daemon from ISP AE statistics
+    float brightness_avg;       // Y-plane average brightness (0-255), from ISP AE stats
+    uint32_t brightness_lux;    // Environment illuminance from ISP cur_lux
+    uint8_t brightness_zone;    // BrightnessZone enum value
+    uint8_t correction_applied; // 1 if ISP low-light correction is active
+    uint8_t _reserved[2];       // Padding for alignment
+
     uint8_t data[MAX_FRAME_SIZE]; // Frame data
 } Frame;
 
