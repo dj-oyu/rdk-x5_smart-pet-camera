@@ -94,15 +94,30 @@ Sensor → VIN → ISP → VSE ─┬─ Ch0 (1920x1080) → H.264 Encoder
 
 CPUでY平面をスキャンする代わりに、ISPのHW統計を利用してCPU負荷を削減。
 
-### 現状の輝度計算頻度（参考）
+### 設計方針: 毎フレーム書き込み、読み取り側で頻度制御
+
+**採用案（方法4）:**
+- camera_daemon は毎フレーム ISP stats を取得して Frame に書き込む
+- camera_switcher 等の読み取り側が必要なタイミングで参照
+- ISP API 呼び出しは軽量なので毎フレームでも許容できる想定
+
+**代替案（方法1）: frame_number ベースの間引き**
+```c
+// camera_pipeline.c の capture コールバック内
+if (frame->frame_number % stats_interval == 0) {
+    isp_get_brightness_stats(&frame->brightness_avg, ...);
+}
+```
+- 方法4で性能問題が発生した場合のフォールバック
+- stats_interval は SharedFrameBuffer.frame_interval_ms 同様に動的制御可能
+
+### 現状の輝度計算頻度（参考: camera_switcher）
 
 | 状態 | 頻度 | 理由 |
 |------|------|------|
 | Day | 3フレームごと（約10Hz） | 暗くなった時の素早い検出 |
 | Night | 30フレームごと（約1Hz） | 明るくなった時はゆっくり検出 |
 | Probe | 2秒ごと | 非アクティブカメラ |
-
-→ ISP統計取得も同程度の頻度で十分（毎フレーム不要）
 
 ### タスク
 
@@ -112,25 +127,23 @@ CPUでY平面をスキャンする代わりに、ISPのHW統計を利用してCP
   - `hbn_isp_get_ae_statistics()` ラッパー
   - 32x32グリッドから平均輝度計算
 
-- [ ] **1.2** カメラデーモンにISP統計スレッド追加
-  - `src/capture/camera_daemon_main.c`
-  - 設定可能な取得間隔（デフォルト: 3フレーム）
-  - 輝度値をFrameHeaderに書き込み
+- [ ] **1.2** カメラパイプラインに統合
+  - `src/capture/camera_pipeline.c`
+  - フレームキャプチャ時に毎回 ISP stats 取得
+  - 輝度値を Frame 構造体に書き込み
 
 - [ ] **1.3** cur_lux（環境照度）の取得
   - `hbn_isp_get_exposure_attr()`からcur_luxを取得
   - 輝度ゾーン判定ロジック:
     - dark: brightness_avg < 50 or cur_lux < 100
-    - normal: 50 <= brightness_avg < 180
+    - dim: 50 <= brightness_avg < 70
+    - normal: 70 <= brightness_avg < 180
     - bright: brightness_avg >= 180
 
-- [ ] **1.4** キャッシュ機構
-  - 直近5回の輝度値を保持
-  - 移動平均で安定化（ノイズ除去）
-
-- [ ] **1.5** camera_switcher統合
+- [ ] **1.4** camera_switcher統合
   - `frame_calculate_mean_luma()`をISP統計で置換
-  - フォールバック: ISP失敗時は従来のCPU計算
+  - Frame.brightness_avg を直接参照するように変更
+  - フォールバック: ISP値が0の場合は従来のCPU計算
 
 ### マイルストーン 1
 

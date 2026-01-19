@@ -10,7 +10,8 @@ import argparse
 import os
 import struct
 import time
-from ctypes import sizeof
+from ctypes import sizeof, memmove as ctypes_memmove
+import ctypes
 
 import numpy as np
 
@@ -96,14 +97,23 @@ def main():
             c_frame.height = args.height
             c_frame.format = args.format
             c_frame.data_size = len(data)
+
+            # Brightness metrics (Phase 0: ISP low-light enhancement)
+            if args.format == 1:  # NV12: Calculate Y-plane average
+                c_frame.brightness_avg = float(np.mean(y_plane))
+            else:
+                c_frame.brightness_avg = 128.0  # Default for non-NV12
+            c_frame.brightness_lux = 500  # Mock lux value (indoor lighting)
+            c_frame.brightness_zone = 2   # BRIGHTNESS_ZONE_NORMAL
+            c_frame.correction_applied = 0
             
             # Copy data
-            import ctypes
             ctypes.memmove(c_frame.data, data, len(data))
             
             # Write frame to ring buffer
             idx = write_index % RING_BUFFER_SIZE
-            frame_offset = sizeof(ctypes.c_uint32) * 2 + sizeof(CFrame) * idx
+            # Offset: write_index(4) + frame_interval_ms(4) + sem_t(32) + frames[idx]
+            frame_offset = sizeof(ctypes.c_uint32) * 2 + 32 + sizeof(CFrame) * idx
             
             shm_mmap.seek(frame_offset)
             shm_mmap.write(bytes(c_frame))

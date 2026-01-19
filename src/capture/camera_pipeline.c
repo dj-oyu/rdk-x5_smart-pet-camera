@@ -6,6 +6,7 @@
 
 #include "camera_pipeline.h"
 #include "hb_mem_mgr.h"
+#include "isp_brightness.h"
 #include "logger.h"
 #include <stdio.h>
 #include <string.h>
@@ -197,13 +198,18 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     bool write_active = *pipeline->is_active_flag == 1;
     bool write_probe = *pipeline->probe_requested_flag == 1;
 
+    // Get ISP brightness statistics once per capture cycle (shared by all frames)
+    isp_brightness_result_t brightness_result = {0};
+    isp_get_brightness(pipeline->vio.isp_handle, &brightness_result);
+
     // Debug: log flags every 30 frames
     if (frame_count % 30 == 0) {
       LOG_DEBUG(
           Pipeline_log_header,
-          "Flags: is_active=%d, probe=%d, write_active=%d, write_probe=%d",
+          "Flags: is_active=%d, probe=%d, write_active=%d, write_probe=%d, brightness=%.1f lux=%u zone=%d",
           *pipeline->is_active_flag, *pipeline->probe_requested_flag,
-          write_active, write_probe);
+          write_active, write_probe, brightness_result.brightness_avg,
+          brightness_result.brightness_lux, brightness_result.zone);
     }
 
     if (write_active || write_probe) {
@@ -217,6 +223,9 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       nv12_frame.frame_number = frame_count;
       nv12_frame.camera_id = pipeline->camera_index;
       nv12_frame.timestamp = frame_timestamp;
+
+      // Apply brightness data from ISP
+      isp_fill_frame_brightness(&nv12_frame, &brightness_result);
 
       // Calculate NV12 size from buffer metadata
       size_t nv12_size = 0;
@@ -299,6 +308,9 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
         yolo_nv12_frame.camera_id = pipeline->camera_index;
         yolo_nv12_frame.timestamp = frame_timestamp;
 
+        // Apply brightness data from ISP (same for all channels)
+        isp_fill_frame_brightness(&yolo_nv12_frame, &brightness_result);
+
         // Calculate NV12 size for 640x640
         size_t yolo_size = 0;
         for (int i = 0; i < yolo_frame.buffer.plane_cnt; i++) {
@@ -353,6 +365,9 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
         mjpeg_nv12_frame.frame_number = frame_count;
         mjpeg_nv12_frame.camera_id = pipeline->camera_index;
         mjpeg_nv12_frame.timestamp = frame_timestamp;
+
+        // Apply brightness data from ISP (same for all channels)
+        isp_fill_frame_brightness(&mjpeg_nv12_frame, &brightness_result);
 
         // Calculate NV12 size for 640x480
         size_t mjpeg_size = 0;

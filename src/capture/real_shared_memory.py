@@ -84,6 +84,12 @@ class CFrame(Structure):
         ("height", c_int),
         ("format", c_int),
         ("data_size", c_size_t),
+        # Brightness metrics (Phase 0: ISP low-light enhancement)
+        ("brightness_avg", c_float),  # Y-plane average brightness (0-255)
+        ("brightness_lux", c_uint32),  # Environment illuminance from ISP cur_lux
+        ("brightness_zone", c_uint8),  # 0=dark, 1=dim, 2=normal, 3=bright
+        ("correction_applied", c_uint8),  # 1 if ISP low-light correction is active
+        ("_reserved", c_uint8 * 2),  # Padding for alignment
         ("data", c_uint8 * MAX_FRAME_SIZE),
     ]
 
@@ -133,6 +139,11 @@ class Frame:
     height: int
     format: int  # 0=JPEG, 1=NV12, 2=RGB
     data: bytes | memoryview  # memoryview for zero-copy optimization
+    # Brightness metrics (Phase 0: ISP low-light enhancement)
+    brightness_avg: float = 0.0  # Y-plane average brightness (0-255)
+    brightness_lux: int = 0  # Environment illuminance from ISP cur_lux
+    brightness_zone: int = 2  # 0=dark, 1=dim, 2=normal, 3=bright
+    correction_applied: bool = False  # True if ISP low-light correction is active
 
 
 class RealSharedMemory:
@@ -281,6 +292,10 @@ class RealSharedMemory:
             height=c_frame.height,
             format=c_frame.format,
             data=data_view,  # memoryview（ゼロコピー）
+            brightness_avg=c_frame.brightness_avg,
+            brightness_lux=c_frame.brightness_lux,
+            brightness_zone=c_frame.brightness_zone,
+            correction_applied=bool(c_frame.correction_applied),
         )
 
         return frame

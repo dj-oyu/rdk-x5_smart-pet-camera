@@ -7,7 +7,7 @@ BUILD_DIR_ABS := $(abspath $(BUILD_DIR))
 
 LDFLAGS := -L/usr/hobot/lib
 
-DAEMON_SOURCES := camera_daemon_main.c camera_pipeline.c vio_lowlevel.c encoder_lowlevel.c encoder_thread.c shared_memory.c logger.c
+DAEMON_SOURCES := camera_daemon_main.c camera_pipeline.c vio_lowlevel.c encoder_lowlevel.c encoder_thread.c shared_memory.c isp_brightness.c logger.c
 SHM_TEST_SOURCES := test_shm.c shared_memory.c logger.c
 FPS_READER_SOURCES := test_fps_reader.c shared_memory.c logger.c
 SWITCHER_DEMO_SOURCES := camera_switcher_demo.c camera_switcher.c shared_memory.c logger.c
@@ -132,10 +132,7 @@ run-daemon: cleanup $(DAEMON_BINARY)
 
 cleanup: kill-processes clean
 	@echo "[Cleanup] Removing shared memory segments..."
-	@-rm -f /dev/shm/pet_camera_active_frame 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_active_frame" || true
-	@-rm -f /dev/shm/pet_camera_stream 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_stream" || true
-	@-rm -f /dev/shm/pet_camera_probe_frame 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_probe_frame" || true
-	@-rm -f /dev/shm/pet_camera_detections 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_detections" || true
+	@-rm -f /dev/shm/pet_camera_* 2>/dev/null && echo "[Cleanup] Removed /dev/shm/pet_camera_*" || true
 	@echo "[Cleanup] Shared memory cleanup complete"
 
 kill-processes:
