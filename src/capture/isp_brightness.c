@@ -11,8 +11,59 @@
 
 #include <hbn_api.h>
 #include <hbn_isp_api.h>
+#include <stdarg.h>
 #include <string.h>
 #include <time.h>
+
+// ============================================================================
+// ISP Lowlight dedicated file logging
+// ============================================================================
+
+#define ISP_LOWLIGHT_LOG_PATH "/tmp/isp_lowlight.log"
+
+static FILE *g_lowlight_log_file = NULL;
+
+static void lowlight_log_init(void) {
+    if (g_lowlight_log_file == NULL) {
+        g_lowlight_log_file = fopen(ISP_LOWLIGHT_LOG_PATH, "a");
+        if (g_lowlight_log_file) {
+            setvbuf(g_lowlight_log_file, NULL, _IOLBF, 0);  // Line buffered
+        }
+    }
+}
+
+static void lowlight_log(const char *level, const char *fmt, ...) {
+    lowlight_log_init();
+
+    // Get timestamp
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    localtime_r(&ts.tv_sec, &tm);
+
+    // Format: YYYY/MM/DD HH:MM:SS.mmm [LEVEL] message
+    char timestamp[64];
+    snprintf(timestamp, sizeof(timestamp), "%04d/%02d/%02d %02d:%02d:%02d.%03ld",
+             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000);
+
+    va_list args;
+    va_start(args, fmt);
+
+    // Write to file
+    if (g_lowlight_log_file) {
+        fprintf(g_lowlight_log_file, "%s [%s] ", timestamp, level);
+        vfprintf(g_lowlight_log_file, fmt, args);
+        fprintf(g_lowlight_log_file, "\n");
+    }
+
+    va_end(args);
+}
+
+#define LOWLIGHT_LOG_DEBUG(fmt, ...) lowlight_log("DEBUG", fmt, ##__VA_ARGS__)
+#define LOWLIGHT_LOG_INFO(fmt, ...)  lowlight_log("INFO", fmt, ##__VA_ARGS__)
+#define LOWLIGHT_LOG_WARN(fmt, ...)  lowlight_log("WARN", fmt, ##__VA_ARGS__)
+#define LOWLIGHT_LOG_ERROR(fmt, ...) lowlight_log("ERROR", fmt, ##__VA_ARGS__)
 
 // ISP AE statistics grid: 32x32 = 1024 zones, 4 channels each
 #define AE_GRID_SIZE 32
@@ -141,6 +192,7 @@ void isp_lowlight_state_init(isp_lowlight_state_t *state) {
     state->current_zone = BRIGHTNESS_ZONE_NORMAL;
     state->below_threshold_since = -1.0;
     state->above_threshold_since = -1.0;
+    LOWLIGHT_LOG_INFO("Low-light state initialized");
 }
 
 int isp_apply_lowlight_profile(hbn_vnode_handle_t isp_handle, BrightnessZone zone) {
@@ -191,6 +243,8 @@ int isp_apply_lowlight_profile(hbn_vnode_handle_t isp_handle, BrightnessZone zon
 
     LOG_INFO("ISP_Lowlight", "Applied profile for zone %d: bright=%.1f, contrast=%.2f, sat=%.2f, gamma=%.2f",
              zone, profile.brightness, profile.contrast, profile.saturation, profile.gamma);
+    LOWLIGHT_LOG_INFO("Applied profile for zone %d: bright=%.1f, contrast=%.2f, sat=%.2f, gamma=%.2f",
+             zone, profile.brightness, profile.contrast, profile.saturation, profile.gamma);
 
     return 0;
 }
@@ -207,18 +261,31 @@ bool isp_update_lowlight_correction(hbn_vnode_handle_t isp_handle,
     float brightness = brightness_result->brightness_avg;
     BrightnessZone zone = brightness_result->zone;
 
+    // Log brightness periodically for debugging (every ~1 second based on frame rate)
+    static int log_counter = 0;
+    if (++log_counter >= 30) {
+        LOWLIGHT_LOG_DEBUG("brightness=%.1f lux=%u zone=%d correction=%d threshold_on=%.1f threshold_off=%.1f",
+                          brightness, brightness_result->brightness_lux, zone,
+                          state->correction_active, hyst.correction_on_threshold, hyst.correction_off_threshold);
+        log_counter = 0;
+    }
+
     if (!state->correction_active) {
         // Currently OFF - check if we should turn ON
         if (brightness < hyst.correction_on_threshold) {
             if (state->below_threshold_since < 0) {
                 state->below_threshold_since = now;
                 LOG_DEBUG("ISP_Lowlight", "Brightness %.1f below threshold, starting hold timer", brightness);
+                LOWLIGHT_LOG_INFO("Brightness %.1f below threshold %.1f, starting hold timer",
+                                  brightness, hyst.correction_on_threshold);
             }
             double elapsed = now - state->below_threshold_since;
             if (elapsed >= hyst.hold_time_on_sec) {
                 // Enable correction
                 LOG_INFO("ISP_Lowlight", "Enabling low-light correction (brightness=%.1f, held for %.1fs)",
                          brightness, elapsed);
+                LOWLIGHT_LOG_INFO(">>> ENABLING low-light correction (brightness=%.1f, zone=%d, held for %.1fs)",
+                         brightness, zone, elapsed);
                 if (isp_apply_lowlight_profile(isp_handle, zone) == 0) {
                     state->correction_active = true;
                     state->current_zone = zone;
@@ -235,11 +302,15 @@ bool isp_update_lowlight_correction(hbn_vnode_handle_t isp_handle,
             if (state->above_threshold_since < 0) {
                 state->above_threshold_since = now;
                 LOG_DEBUG("ISP_Lowlight", "Brightness %.1f above threshold, starting hold timer", brightness);
+                LOWLIGHT_LOG_INFO("Brightness %.1f above threshold %.1f, starting hold timer",
+                                  brightness, hyst.correction_off_threshold);
             }
             double elapsed = now - state->above_threshold_since;
             if (elapsed >= hyst.hold_time_off_sec) {
                 // Disable correction (apply NORMAL profile)
                 LOG_INFO("ISP_Lowlight", "Disabling low-light correction (brightness=%.1f, held for %.1fs)",
+                         brightness, elapsed);
+                LOWLIGHT_LOG_INFO("<<< DISABLING low-light correction (brightness=%.1f, held for %.1fs)",
                          brightness, elapsed);
                 if (isp_apply_lowlight_profile(isp_handle, BRIGHTNESS_ZONE_NORMAL) == 0) {
                     state->correction_active = false;
@@ -253,6 +324,7 @@ bool isp_update_lowlight_correction(hbn_vnode_handle_t isp_handle,
             // While correction is active, update zone if it changes significantly
             if (zone != state->current_zone && zone != BRIGHTNESS_ZONE_NORMAL && zone != BRIGHTNESS_ZONE_BRIGHT) {
                 LOG_DEBUG("ISP_Lowlight", "Zone changed from %d to %d, updating profile", state->current_zone, zone);
+                LOWLIGHT_LOG_INFO("Zone changed from %d to %d, updating profile", state->current_zone, zone);
                 if (isp_apply_lowlight_profile(isp_handle, zone) == 0) {
                     state->current_zone = zone;
                 }
