@@ -39,7 +39,7 @@ POC_VSE_DUAL_BINARY := $(BUILD_DIR)/camera_poc_vse_dual
 ISP_LOWLIGHT_BINARY := $(BUILD_DIR)/test_isp_lowlight
 
 LDLIBS_COMMON := -lrt
-LDLIBS_DAEMON := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lmultimedia
+LDLIBS_DAEMON := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lmultimedia -lm
 LDLIBS_DAEMON_OLD := $(LDLIBS_COMMON) -lpthread -lspcdev -lcam -lvpf -lhbmem
 LDLIBS_POC_LOWLEVEL := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lmultimedia
 LDLIBS_ISP_LOWLIGHT := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lm

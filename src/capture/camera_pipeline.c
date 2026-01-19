@@ -8,11 +8,86 @@
 #include "hb_mem_mgr.h"
 #include "isp_brightness.h"
 #include "logger.h"
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 
 char Pipeline_log_header[16];
+
+// ============================================================================
+// Adaptive Gamma LUT for low-light Y-channel correction
+// ============================================================================
+
+// Brightness thresholds and corresponding gamma values
+// Lower gamma = stronger brightening (lifts dark areas more)
+typedef struct {
+    float brightness_max;  // Apply if brightness_avg < this
+    float gamma;
+} gamma_level_t;
+
+static const gamma_level_t GAMMA_LEVELS[] = {
+    { 20.0f, 0.40f },  // Very dark: aggressive correction
+    { 35.0f, 0.50f },  // Dark
+    { 50.0f, 0.60f },  // Moderately dark
+    { 65.0f, 0.75f },  // Dim
+    { 80.0f, 0.85f },  // Slightly dim
+    { 0.0f,  1.00f },  // Normal (sentinel, no correction)
+};
+#define NUM_GAMMA_LEVELS (sizeof(GAMMA_LEVELS) / sizeof(GAMMA_LEVELS[0]))
+
+static uint8_t g_gamma_luts[NUM_GAMMA_LEVELS][256];
+static bool g_gamma_lut_initialized = false;
+
+static void init_gamma_lut(uint8_t *lut, float gamma) {
+    for (int i = 0; i < 256; i++) {
+        float normalized = i / 255.0f;
+        float corrected = powf(normalized, gamma);
+        int value = (int)(corrected * 255.0f + 0.5f);
+        lut[i] = (uint8_t)(value > 255 ? 255 : value);
+    }
+}
+
+static void ensure_gamma_lut_initialized(void) {
+    if (!g_gamma_lut_initialized) {
+        for (size_t i = 0; i < NUM_GAMMA_LEVELS; i++) {
+            init_gamma_lut(g_gamma_luts[i], GAMMA_LEVELS[i].gamma);
+        }
+        g_gamma_lut_initialized = true;
+        LOG_INFO("Pipeline", "Adaptive gamma LUTs initialized (%zu levels)",
+                 NUM_GAMMA_LEVELS);
+    }
+}
+
+// Select appropriate gamma LUT based on brightness
+static const uint8_t* select_gamma_lut(float brightness_avg, float *gamma_out) {
+    for (size_t i = 0; i < NUM_GAMMA_LEVELS - 1; i++) {
+        if (brightness_avg < GAMMA_LEVELS[i].brightness_max) {
+            if (gamma_out) *gamma_out = GAMMA_LEVELS[i].gamma;
+            return g_gamma_luts[i];
+        }
+    }
+    if (gamma_out) *gamma_out = 1.0f;
+    return NULL;  // No correction needed
+}
+
+// Apply adaptive gamma correction to Y channel in-place
+// Returns the gamma value used (1.0 if no correction)
+static float apply_adaptive_gamma(uint8_t *y_data, size_t y_size, float brightness_avg) {
+    float gamma_used = 1.0f;
+    const uint8_t *lut = select_gamma_lut(brightness_avg, &gamma_used);
+
+    if (lut == NULL) {
+        return 1.0f;  // No correction
+    }
+
+    // Apply LUT to each Y pixel
+    for (size_t i = 0; i < y_size; i++) {
+        y_data[i] = lut[y_data[i]];
+    }
+
+    return gamma_used;
+}
 
 int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
                     int sensor_width, int sensor_height, int output_width,
@@ -26,6 +101,9 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
 
   if (!pipeline || !is_active_flag || !probe_requested_flag)
     return -1;
+
+  // Initialize gamma LUTs for low-light correction (once)
+  ensure_gamma_lut_initialized();
 
   memset(pipeline, 0, sizeof(camera_pipeline_t));
 
@@ -206,34 +284,33 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     // Get ISP brightness statistics with throttling (every 8 frames = ~3.75Hz)
     // This reduces ISP API overhead and prevents video stuttering
     // Use bitmask for efficient modulo: (frame_count & 7) == 0
-    #define ISP_BRIGHTNESS_MASK 7  // 8 frames interval (2^3 - 1)
+    #define ISP_BRIGHTNESS_MASK 7   // 8 frames interval for brightness measurement
+    #define ISP_CORRECTION_MASK 31  // 32 frames interval for correction update (~1Hz)
     static isp_brightness_result_t cached_brightness = {0};
     bool is_brightness_frame = (frame_count & ISP_BRIGHTNESS_MASK) == 0;
+    bool is_correction_frame = (frame_count & ISP_CORRECTION_MASK) == 0;
     if (is_brightness_frame) {
       isp_get_brightness(pipeline->vio.isp_handle, &cached_brightness);
     }
     isp_brightness_result_t brightness_result = cached_brightness;
 
-    // Update low-light correction based on brightness (Phase 2)
-    // Only active camera should control ISP parameters to avoid conflicts
-    // Also throttled to match brightness measurement interval
-    // NOTE: ISP parameter setting disabled to avoid H.264 stutter
-    bool correction_active = pipeline->lowlight_state.correction_active;
-    // Log brightness for monitoring
-    if (write_active && is_brightness_frame && (frame_count & 31) == 0) {
-      LOG_INFO(Pipeline_log_header, "brightness=%.1f lux=%u zone=%d",
-               brightness_result.brightness_avg, brightness_result.brightness_lux,
-               brightness_result.zone);
+    // Apply ISP noise reduction based on brightness zone
+    // Only active camera controls ISP, throttled to ~1Hz
+    if (write_active && is_correction_frame) {
+      isp_update_lowlight_correction(
+          pipeline->vio.isp_handle,
+          &pipeline->lowlight_state,
+          &brightness_result);
     }
 
     // Debug: log flags every 30 frames
     if (frame_count % 30 == 0) {
       LOG_DEBUG(
           Pipeline_log_header,
-          "Flags: is_active=%d, probe=%d, brightness=%.1f lux=%u zone=%d correction=%d",
+          "Flags: is_active=%d, probe=%d, brightness=%.1f lux=%u zone=%d",
           *pipeline->is_active_flag, *pipeline->probe_requested_flag,
           brightness_result.brightness_avg, brightness_result.brightness_lux,
-          brightness_result.zone, correction_active);
+          brightness_result.zone);
     }
 
     if (write_active || write_probe) {
@@ -250,7 +327,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
 
       // Apply brightness data from ISP
       isp_fill_frame_brightness(&nv12_frame, &brightness_result);
-      nv12_frame.correction_applied = correction_active ? 1 : 0;
+      nv12_frame.correction_applied = 0;
 
       // Calculate NV12 size from buffer metadata
       size_t nv12_size = 0;
@@ -335,7 +412,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
 
         // Apply brightness data from ISP (same for all channels)
         isp_fill_frame_brightness(&yolo_nv12_frame, &brightness_result);
-        yolo_nv12_frame.correction_applied = correction_active ? 1 : 0;
+        yolo_nv12_frame.correction_applied = 0;
 
         // Calculate NV12 size for 640x640
         size_t yolo_size = 0;
@@ -353,6 +430,15 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
             offset += yolo_frame.buffer.size[i];
           }
 
+          // Apply adaptive gamma correction to Y channel for low-light enhancement
+          // Y plane is the first plane (size[0] bytes)
+          size_t y_plane_size = yolo_frame.buffer.size[0];
+          float gamma_used = apply_adaptive_gamma(
+              yolo_nv12_frame.data, y_plane_size, brightness_result.brightness_avg);
+          if (gamma_used < 1.0f) {
+            yolo_nv12_frame.correction_applied = 1;
+          }
+
           int write_ret = shm_frame_buffer_write(pipeline->shm_yolo_input, &yolo_nv12_frame);
           if (write_ret < 0) {
             LOG_WARN(Pipeline_log_header, "Failed to write YOLO input to shm");
@@ -364,8 +450,8 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
                        yolo_nv12_frame.width, yolo_nv12_frame.height, yolo_size);
             } else {
               LOG_DEBUG(Pipeline_log_header,
-                        "Wrote YOLO %dx%d frame#%d to shm (idx=%d)",
-                        yolo_nv12_frame.width, yolo_nv12_frame.height, frame_count, write_ret);
+                        "YOLO frame#%d gamma=%.2f brightness=%.1f",
+                        frame_count, gamma_used, brightness_result.brightness_avg);
             }
           }
         }
@@ -394,7 +480,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
 
         // Apply brightness data from ISP (same for all channels)
         isp_fill_frame_brightness(&mjpeg_nv12_frame, &brightness_result);
-        mjpeg_nv12_frame.correction_applied = correction_active ? 1 : 0;
+        mjpeg_nv12_frame.correction_applied = 0;
 
         // Calculate NV12 size for 640x480
         size_t mjpeg_size = 0;

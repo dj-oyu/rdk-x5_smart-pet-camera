@@ -3,6 +3,10 @@
  *
  * Defines ISP parameter profiles for different brightness zones.
  * Used by isp_brightness.c to apply automatic low-light correction.
+ *
+ * NOTE: Color Processing (brightness/contrast/saturation) and Gamma APIs
+ * return success but don't actually change values on this hardware.
+ * Only Exposure settings (AE target, gain ranges) are effective.
  */
 
 #ifndef ISP_LOWLIGHT_PROFILE_H
@@ -12,12 +16,11 @@
 
 /**
  * ISP correction profile for a brightness zone
+ * Uses Noise Reduction settings which are effective on this hardware
  */
 typedef struct {
-    float brightness;    // Color process brightness offset (-128 to 127)
-    float contrast;      // Color process contrast (0.0 to 4.0, 1.0 = no change)
-    float saturation;    // Color process saturation (0.0 to 4.0, 1.0 = no change)
-    float gamma;         // Gamma value (< 1.0 brightens, > 1.0 darkens, 2.2 = sRGB)
+    int denoise_3d;       // 3DNR strength [0-128], higher = more temporal NR
+    float denoise_2d;     // 2DNR blend_static [0-1.0], higher = more spatial NR
 } isp_lowlight_profile_t;
 
 /**
@@ -38,36 +41,32 @@ typedef struct {
  *   DIM:    50 <= brightness_avg < 70
  *   NORMAL: 70 <= brightness_avg < 180
  *   BRIGHT: brightness_avg >= 180
+ *
+ * Default AE target from tuning file is ~38
+ * Default ISP dgain max is ~255
  */
 
-// DARK zone: Aggressive brightening for very low light
-// brightness=+40, contrast=1.2, saturation=0.9 (reduce noise color), gamma=0.7
+// DARK zone: Strong noise reduction for high-gain low-light
+// Default 3DNR=113 from tuning, boost to 120 for aggressive NR
 #define PROFILE_DARK { \
-    .brightness = 40.0f, \
-    .contrast = 1.2f, \
-    .saturation = 0.9f, \
-    .gamma = 0.7f \
+    .denoise_3d = 120, \
+    .denoise_2d = 0.7f \
 }
 
-// DIM zone: Moderate brightening for dim conditions
-// brightness=+20, contrast=1.1, saturation=1.0, gamma=0.85
+// DIM zone: Moderate noise reduction
 #define PROFILE_DIM { \
-    .brightness = 20.0f, \
-    .contrast = 1.1f, \
-    .saturation = 1.0f, \
-    .gamma = 0.85f \
+    .denoise_3d = 115, \
+    .denoise_2d = 0.5f \
 }
 
-// NORMAL zone: No correction needed
-// brightness=0, contrast=1.0, saturation=1.0, gamma=1.0 (passthrough)
+// NORMAL zone: Default settings (restore tuning file values)
+// Default 3DNR=113, 2DNR blend_static=5.0 (from tuning)
 #define PROFILE_NORMAL { \
-    .brightness = 0.0f, \
-    .contrast = 1.0f, \
-    .saturation = 1.0f, \
-    .gamma = 1.0f \
+    .denoise_3d = 113, \
+    .denoise_2d = 5.0f \
 }
 
-// BRIGHT zone: Same as normal (no correction)
+// BRIGHT zone: Same as normal
 #define PROFILE_BRIGHT PROFILE_NORMAL
 
 /**
