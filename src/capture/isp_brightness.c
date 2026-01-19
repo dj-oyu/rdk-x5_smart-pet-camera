@@ -142,11 +142,20 @@ int isp_get_brightness(hbn_vnode_handle_t isp_handle, isp_brightness_result_t *r
             debug_counter = 0;
         }
 
-        // Normalize to 0-255 range
-        // The raw values may need scaling depending on ISP configuration
-        // Assuming 10-bit or 12-bit values, scale down to 8-bit
-        // Scale from potential 12-bit (0-4095) to 8-bit (0-255)
-        result->brightness_avg = (float)(raw_avg >> 4);
+        // Normalize to 0-255 range based on detected bit depth
+        // Different sensors/cameras may use different formats:
+        // - 8-bit:  max ~255    -> no shift
+        // - 12-bit: max ~4095   -> shift 4
+        // - 16-bit: max ~65535  -> shift 8
+        int shift_bits = 0;
+        if (max_val > 4095) {
+            shift_bits = 8;  // 16-bit to 8-bit
+        } else if (max_val > 255) {
+            shift_bits = 4;  // 12-bit to 8-bit
+        }
+        // else: already 8-bit range, no shift needed
+
+        result->brightness_avg = (float)(raw_avg >> shift_bits);
         if (result->brightness_avg > 255.0f) {
             result->brightness_avg = 255.0f;
         }
