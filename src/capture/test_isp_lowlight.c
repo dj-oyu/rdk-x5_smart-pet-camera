@@ -58,7 +58,7 @@
 #define DEFAULT_DGAIN_MAX 16.0f  // Allow higher digital gain
 
 // Noise reduction defaults (higher = more NR, but may lose detail)
-#define DEFAULT_3DNR_STRENGTH 128  // 3DNR strength [0-255]
+#define DEFAULT_3DNR_STRENGTH 113  // 3DNR strength [0-128]
 #define DEFAULT_2DNR_STRENGTH 0.5f // 2DNR blend [0-1.0]
 #define DEFAULT_SHARPNESS 64       // Sharpness [0-255]
 
@@ -71,9 +71,13 @@ typedef struct {
   float ae_target;
   float dgain_max;
   // Noise reduction and sharpness
-  int denoise_3d;   // 3DNR strength [0-255], -1 = don't change
+  int denoise_3d;   // 3DNR strength [0-128], -1 = don't change
   float denoise_2d; // 2DNR blend strength [0-1.0], -1 = don't change
   int sharpness;    // Sharpness/EE strength [0-255], -1 = don't change
+  // WDR (Wide Dynamic Range) for highlight protection
+  int wdr;            // WDR strength [0-255], -1 = don't change
+  float shadow_boost; // Shadow boost amount [0-2.0], 0 = disabled
+  int hlc;            // Highlight compression [0-255], -1 = don't change
   int reset;
   int dump_only;
   int save_frames; // Save before/after frames to files
@@ -89,6 +93,9 @@ typedef struct {
   bool denoise_3d_set;
   bool denoise_2d_set;
   bool sharpness_set;
+  bool wdr_set;
+  bool shadow_boost_set;
+  bool hlc_set;
 } config_t;
 
 typedef struct {
@@ -320,9 +327,15 @@ static void print_usage(const char *prog) {
          DEFAULT_DGAIN_MAX);
   printf("\n[Noise Reduction & Sharpness]\n");
   printf(
-      "  --3dnr <val>       3D Noise Reduction strength [0-255] (temporal)\n");
+      "  --3dnr <val>       3D Noise Reduction strength [0-128] (temporal)\n");
   printf("  --2dnr <val>       2D Noise Reduction blend [0-1.0] (spatial)\n");
   printf("  --sharpness <val>  Edge Enhancement strength [0-255]\n");
+  printf("\n[Dynamic Range (Anti-Clipping)]\n");
+  printf("  --wdr <val>        WDR strength [0-255] (overall dynamic range "
+         "compression)\n");
+  printf("  --shadow <val>     Shadow boost [0-2.0] (lifts dark areas)\n");
+  printf("  --hlc <val>        Highlight compression [0-255] (prevents "
+         "clipping)\n");
   printf("\n[Control]\n");
   printf("  --reset            Reset to default ISP values\n");
   printf("  --dump             Dump current ISP settings only\n");
@@ -331,9 +344,15 @@ static void print_usage(const char *prog) {
          "params)\n");
   printf("  --help             Show this help\n\n");
   printf("Example (low-light with noise reduction):\n");
-  printf("  %s --camera 1 --brightness 30 --gamma 0.7 --3dnr 180 --2dnr 0.6 "
+  printf("  %s --camera 1 --brightness 30 --gamma 0.7 --3dnr 110 --2dnr 0.6 "
          "--save\n",
          prog);
+  printf("\nExample (prevent highlight clipping with aggressive WDR):\n");
+  printf("  %s --camera 1 --wdr 200 --hlc 200 --shadow 2.0 --brightness 10 "
+         "--save\n",
+         prog);
+  printf("\nExample (moderate WDR with shadow boost):\n");
+  printf("  %s --camera 1 --wdr 150 --shadow 1.5 --hlc 150 --save\n", prog);
   printf("\nExample (test 5 random patterns with fixed brightness):\n");
   printf("  %s --camera 1 --brightness 30 --patterns 5 --save\n", prog);
 }
@@ -350,6 +369,9 @@ static int parse_args(int argc, char **argv, config_t *cfg) {
       {"3dnr", required_argument, 0, '3'},
       {"2dnr", required_argument, 0, '2'},
       {"sharpness", required_argument, 0, 'e'},
+      {"wdr", required_argument, 0, 'w'},
+      {"shadow", required_argument, 0, 'W'},
+      {"hlc", required_argument, 0, 'H'},
       {"reset", no_argument, 0, 'r'},
       {"dump", no_argument, 0, 'D'},
       {"save", no_argument, 0, 'S'},
@@ -368,6 +390,9 @@ static int parse_args(int argc, char **argv, config_t *cfg) {
   cfg->denoise_3d = -1; // -1 = don't change
   cfg->denoise_2d = -1.0f;
   cfg->sharpness = -1;
+  cfg->wdr = -1;
+  cfg->shadow_boost = 0.0f;
+  cfg->hlc = -1;
   cfg->reset = 0;
   cfg->dump_only = 0;
   cfg->save_frames = 0;
@@ -382,9 +407,12 @@ static int parse_args(int argc, char **argv, config_t *cfg) {
   cfg->denoise_3d_set = false;
   cfg->denoise_2d_set = false;
   cfg->sharpness_set = false;
+  cfg->wdr_set = false;
+  cfg->shadow_boost_set = false;
+  cfg->hlc_set = false;
 
   int opt;
-  while ((opt = getopt_long(argc, argv, "c:b:n:s:g:t:d:3:2:e:rDSP:h",
+  while ((opt = getopt_long(argc, argv, "c:b:n:s:g:t:d:3:2:e:w:W:H:rDSP:h",
                             long_options, NULL)) != -1) {
     switch (opt) {
     case 'c':
@@ -419,8 +447,8 @@ static int parse_args(int argc, char **argv, config_t *cfg) {
       cfg->denoise_3d_set = true;
       if (cfg->denoise_3d < 0)
         cfg->denoise_3d = 0;
-      if (cfg->denoise_3d > 255)
-        cfg->denoise_3d = 255;
+      if (cfg->denoise_3d > 128)
+        cfg->denoise_3d = 128;
       break;
     case '2':
       cfg->denoise_2d = atof(optarg);
@@ -437,6 +465,30 @@ static int parse_args(int argc, char **argv, config_t *cfg) {
         cfg->sharpness = 0;
       if (cfg->sharpness > 255)
         cfg->sharpness = 255;
+      break;
+    case 'w':
+      cfg->wdr = atoi(optarg);
+      cfg->wdr_set = true;
+      if (cfg->wdr < 0)
+        cfg->wdr = 0;
+      if (cfg->wdr > 255)
+        cfg->wdr = 255;
+      break;
+    case 'W':
+      cfg->shadow_boost = atof(optarg);
+      cfg->shadow_boost_set = true;
+      if (cfg->shadow_boost < 0)
+        cfg->shadow_boost = 0;
+      if (cfg->shadow_boost > 2.0f)
+        cfg->shadow_boost = 2.0f;
+      break;
+    case 'H':
+      cfg->hlc = atoi(optarg);
+      cfg->hlc_set = true;
+      if (cfg->hlc < 0)
+        cfg->hlc = 0;
+      if (cfg->hlc > 255)
+        cfg->hlc = 255;
       break;
     case 'r':
       cfg->reset = 1;
@@ -739,7 +791,8 @@ static void dump_exposure_attr(hbn_vnode_handle_t isp_handle) {
   hbn_isp_exposure_attr_t exp_attr = {0};
   int ret = hbn_isp_get_exposure_attr(isp_handle, &exp_attr);
   if (ret != 0) {
-    fprintf(stderr, "[ISP] Failed to get exposure attr: %s\n", hbn_strerror(ret));
+    fprintf(stderr, "[ISP] Failed to get exposure attr: %s\n",
+            hbn_strerror(ret));
     return;
   }
 
@@ -773,7 +826,8 @@ static void dump_color_process_attr(hbn_vnode_handle_t isp_handle) {
   hbn_isp_color_process_attr_t cproc_attr = {0};
   int ret = hbn_isp_get_color_process_attr(isp_handle, &cproc_attr);
   if (ret != 0) {
-    fprintf(stderr, "[ISP] Failed to get color process attr: %s\n", hbn_strerror(ret));
+    fprintf(stderr, "[ISP] Failed to get color process attr: %s\n",
+            hbn_strerror(ret));
     return;
   }
 
@@ -886,6 +940,55 @@ static void dump_ee_attr(hbn_vnode_handle_t isp_handle) {
          ee_attr.manual_attr.edge_detail_attr.detail_lvl);
 }
 
+static void dump_wdr_attr(hbn_vnode_handle_t isp_handle) {
+  hbn_isp_wdr_attr_t wdr_attr = {0};
+  int ret = hbn_isp_get_wdr_attr(isp_handle, &wdr_attr);
+  if (ret != 0) {
+    fprintf(stderr, "[ISP] Failed to get WDR attr: %s\n", hbn_strerror(ret));
+    return;
+  }
+
+  printf("\n=== WDR (Wide Dynamic Range) Settings ===\n");
+  printf("Mode: %s\n", wdr_attr.mode == HBN_ISP_MODE_AUTO ? "AUTO" : "MANUAL");
+
+  printf("\nManual Attr (Strength):\n");
+  printf("  Strength: %u\n", wdr_attr.manual_attr.strength_attr.strength);
+  printf("  High Strength: %u\n",
+         wdr_attr.manual_attr.strength_attr.high_strength);
+  printf("  Low Strength: %u\n",
+         wdr_attr.manual_attr.strength_attr.low_strength);
+
+  printf("\nManual Attr (GTM - Global Tone Mapping):\n");
+  printf("  Curve Select: %u\n",
+         wdr_attr.manual_attr.gtm_attr.wdr_curve_select);
+  printf("  Log Weight: %u\n", wdr_attr.manual_attr.gtm_attr.log_weight);
+  printf("  Flat Level Global: %u\n",
+         wdr_attr.manual_attr.gtm_attr.flat_level_global);
+  printf("  Curve2 Lo Factor: %.3f\n",
+         wdr_attr.manual_attr.gtm_attr.curve2_lofactor);
+  printf("  Curve2 Hi Factor: %.3f\n",
+         wdr_attr.manual_attr.gtm_attr.curve2_hifactor);
+
+  printf("\nManual Attr (Highlight Control):\n");
+  printf("  HLC Base Log: %.3f\n",
+         wdr_attr.manual_attr.high_light_attr.hlc_base_log);
+  printf("  HLC Slope: %u\n", wdr_attr.manual_attr.high_light_attr.hlc_slope);
+
+  printf("\nManual Attr (Gain Limitation):\n");
+  printf("  Max Gain: %u\n",
+         wdr_attr.manual_attr.gain_limitation_attr.max_gain);
+  printf("  Min Gain: %u\n",
+         wdr_attr.manual_attr.gain_limitation_attr.min_gain);
+
+  printf("\nManual Attr (LTM - Local Tone Mapping):\n");
+  printf("  Contrast: %d\n", wdr_attr.manual_attr.ltm_weight_attr.contrast);
+  printf("  Dark Attention Level: %u\n",
+         wdr_attr.manual_attr.ltm_attr.dark_attention_level);
+  printf("  Flat Mode: %s\n",
+         wdr_attr.manual_attr.ltm_attr.flat_mode ? "ON" : "OFF");
+  printf("  Flat Level: %u\n", wdr_attr.manual_attr.ltm_attr.flat_evel);
+}
+
 static int apply_lowlight_enhancement(vio_handles_t *h, config_t *cfg) {
   int ret;
 
@@ -939,13 +1042,15 @@ static int apply_lowlight_enhancement(vio_handles_t *h, config_t *cfg) {
 
   ret = hbn_isp_set_gc_attr(h->isp_handle, &gc_attr);
   if (ret != 0) {
-    printf("  Approach 1 failed (%s), trying manual mode...\n", hbn_strerror(ret));
+    printf("  Approach 1 failed (%s), trying manual mode...\n",
+           hbn_strerror(ret));
 
     // Try approach 2: Switch to manual mode
     gc_attr.mode = HBN_ISP_MODE_MANUAL;
     ret = hbn_isp_set_gc_attr(h->isp_handle, &gc_attr);
     if (ret != 0) {
-      printf("  Approach 2 failed (%s), trying custom curve...\n", hbn_strerror(ret));
+      printf("  Approach 2 failed (%s), trying custom curve...\n",
+             hbn_strerror(ret));
 
       // Try approach 3: Use custom curve instead of standard formula
       gc_attr.manual_attr.standard = 0;
@@ -1005,11 +1110,12 @@ static int apply_lowlight_enhancement(vio_handles_t *h, config_t *cfg) {
     } else {
       tnr_attr.mode = HBN_ISP_MODE_MANUAL;
       tnr_attr.manual_attr.tnr_strength = (uint8_t)cfg->denoise_3d;
-      tnr_attr.manual_attr.tnr_strength2 = (uint8_t)(cfg->denoise_3d / 2);
+      tnr_attr.manual_attr.tnr_strength2 =
+          (uint8_t)(cfg->denoise_3d + 2.5) * 2 / 5;
       // Longer filter for stronger NR (but may cause ghosting)
-      tnr_attr.manual_attr.filter_len = (cfg->denoise_3d > 128) ? 4 : 2;
-      tnr_attr.manual_attr.filter_len2 = (cfg->denoise_3d > 128) ? 4 : 2;
-      tnr_attr.manual_attr.motion_smooth_factor = 0.5;
+      tnr_attr.manual_attr.filter_len = (cfg->denoise_3d > 95) ? 20 : 6;
+      tnr_attr.manual_attr.filter_len2 = (cfg->denoise_3d > 95) ? 4 : 2;
+      tnr_attr.manual_attr.motion_smooth_factor = 3.0;
 
       ret = hbn_isp_set_3dnr_attr(h->isp_handle, &tnr_attr);
       if (ret != 0) {
@@ -1082,12 +1188,151 @@ static int apply_lowlight_enhancement(vio_handles_t *h, config_t *cfg) {
 
         ee_ret = hbn_isp_set_ee_attr(h->isp_handle, &ee_attr);
         if (ee_ret != 0) {
-          fprintf(stderr,
-                  "  Warning: Failed to set EE attr: %s (continuing)\n",
+          fprintf(stderr, "  Warning: Failed to set EE attr: %s (continuing)\n",
                   hbn_strerror(ee_ret));
-          printf("  Note: Edge Enhancement may not be adjustable at runtime.\n");
+          printf(
+              "  Note: Edge Enhancement may not be adjustable at runtime.\n");
         } else {
           printf("  Edge Enhancement applied (MANUAL mode)\n");
+        }
+      }
+    }
+  }
+
+  // 7. Apply WDR (Wide Dynamic Range) for highlight protection
+  if (cfg->wdr >= 0 || cfg->shadow_boost > 0 || cfg->hlc >= 0) {
+    printf("\n[7] Setting WDR (Wide Dynamic Range)...\n");
+    printf("  WDR Strength: %d, Shadow Boost: %.2f, HLC: %d\n", cfg->wdr,
+           cfg->shadow_boost, cfg->hlc);
+
+    hbn_isp_wdr_attr_t wdr_attr = {0};
+    ret = hbn_isp_get_wdr_attr(h->isp_handle, &wdr_attr);
+    if (ret != 0) {
+      fprintf(stderr, "  Failed to get WDR attr: %s\n", hbn_strerror(ret));
+    } else {
+      printf("  Current mode: %s\n",
+             wdr_attr.mode == HBN_ISP_MODE_AUTO ? "AUTO" : "MANUAL");
+
+      // Print current values for debugging
+      printf("  Current high_strength: %u, low_strength: %u\n",
+             wdr_attr.manual_attr.strength_attr.high_strength,
+             wdr_attr.manual_attr.strength_attr.low_strength);
+      printf("  Current dark_attention: %u, contrast: %d\n",
+             wdr_attr.manual_attr.ltm_attr.dark_attention_level,
+             wdr_attr.manual_attr.ltm_weight_attr.contrast);
+      printf("  Current hlc_base_log: %.3f, hlc_slope: %u\n",
+             wdr_attr.manual_attr.high_light_attr.hlc_base_log,
+             wdr_attr.manual_attr.high_light_attr.hlc_slope);
+      printf("  Current max_gain: %u, min_gain: %u\n",
+             wdr_attr.manual_attr.gain_limitation_attr.max_gain,
+             wdr_attr.manual_attr.gain_limitation_attr.min_gain);
+
+      int wdr_ret = -1;
+
+      // Try approach 1: Keep AUTO mode, adjust auto_level
+      if (wdr_attr.mode == HBN_ISP_MODE_AUTO) {
+        uint8_t wdr_level = cfg->wdr >= 0 ? (uint8_t)(cfg->wdr * 10 / 255) : 5;
+        wdr_attr.auto_attr.auto_level = wdr_level;
+        printf("  Trying AUTO mode with level %u...\n", wdr_level);
+
+        wdr_ret = hbn_isp_set_wdr_attr(h->isp_handle, &wdr_attr);
+        if (wdr_ret == 0) {
+          printf("  WDR applied (AUTO mode)\n");
+        }
+      }
+
+      if (wdr_ret != 0) {
+        // Try approach 2: Manual mode with aggressive settings
+        printf(
+            "  Trying MANUAL mode with aggressive highlight compression...\n");
+        wdr_attr.mode = HBN_ISP_MODE_MANUAL;
+
+        if (cfg->wdr >= 0) {
+          // WDR strength controls overall dynamic range compression
+          wdr_attr.manual_attr.strength_attr.strength = (uint8_t)cfg->wdr;
+          // high_strength: CRUCIAL for highlight compression
+          // Higher value = more aggressive highlight compression
+          wdr_attr.manual_attr.strength_attr.high_strength =
+              (uint8_t)(cfg->wdr > 128 ? 255 : cfg->wdr * 2);
+          // low_strength: for shadow region boost
+          wdr_attr.manual_attr.strength_attr.low_strength =
+              (uint16_t)(cfg->wdr * 4);
+          printf("  Set strength=%u, high_strength=%u, low_strength=%u\n",
+                 wdr_attr.manual_attr.strength_attr.strength,
+                 wdr_attr.manual_attr.strength_attr.high_strength,
+                 wdr_attr.manual_attr.strength_attr.low_strength);
+        }
+
+        if (cfg->shadow_boost > 0) {
+          // Maximize dark attention for shadow lifting (max 255)
+          uint8_t dark_level = (uint8_t)(cfg->shadow_boost * 127);
+          if (dark_level < 64)
+            dark_level = 64; // Minimum effective value
+          wdr_attr.manual_attr.ltm_attr.dark_attention_level = dark_level;
+          // Lower contrast for smoother tone mapping (prevents clipping)
+          int16_t new_contrast = (int16_t)(30 - cfg->shadow_boost * 20);
+          if (new_contrast < 0)
+            new_contrast = 0;
+          wdr_attr.manual_attr.ltm_weight_attr.contrast = new_contrast;
+          // Enable flat mode for more uniform processing
+          wdr_attr.manual_attr.ltm_attr.flat_mode = 1;
+          wdr_attr.manual_attr.ltm_attr.flat_evel = 128;
+          printf("  Set dark_attention=%u, contrast=%d, flat_mode=1\n",
+                 dark_level, new_contrast);
+        }
+
+        // HLC (Highlight Control) - Key for preventing white clipping
+        if (cfg->hlc >= 0) {
+          // hlc_slope: Higher = more aggressive highlight compression (0-255)
+          wdr_attr.manual_attr.high_light_attr.hlc_slope = (uint8_t)cfg->hlc;
+          // hlc_base_log: Threshold for highlight compression
+          // Lower value = compress more of the bright range
+          // Typical range: 0.0 to 3.0, lower is more aggressive
+          float hlc_threshold = 2.0f - (cfg->hlc / 255.0f) * 1.5f;
+          if (hlc_threshold < 0.5f)
+            hlc_threshold = 0.5f;
+          wdr_attr.manual_attr.high_light_attr.hlc_base_log = hlc_threshold;
+          printf("  Set hlc_slope=%u, hlc_base_log=%.2f\n", cfg->hlc,
+                 hlc_threshold);
+        } else if (cfg->wdr >= 0) {
+          // Auto-set HLC based on WDR strength if not explicitly set
+          wdr_attr.manual_attr.high_light_attr.hlc_slope =
+              (uint8_t)(cfg->wdr > 128 ? 200 : cfg->wdr + 50);
+          wdr_attr.manual_attr.high_light_attr.hlc_base_log = 1.5f;
+          printf("  Auto-set hlc_slope=%u, hlc_base_log=1.5\n",
+                 wdr_attr.manual_attr.high_light_attr.hlc_slope);
+        }
+
+        // GTM (Global Tone Mapping) for better tonal distribution
+        // log_weight: Higher = more compression in highlights
+        wdr_attr.manual_attr.gtm_attr.log_weight = 200;
+        // flat_level_global: Higher = more uniform output
+        wdr_attr.manual_attr.gtm_attr.flat_level_global = 128;
+        // curve settings for highlight protection
+        wdr_attr.manual_attr.gtm_attr.curve2_hifactor = 0.5f; // Compress highs
+        wdr_attr.manual_attr.gtm_attr.curve2_lofactor = 1.5f; // Boost lows
+        printf("  Set GTM log_weight=200, flat_level=128, hi_factor=0.5, "
+               "lo_factor=1.5\n");
+
+        // Gain limitation - CRITICAL to prevent over-exposure
+        // Lower max_gain prevents excessive amplification that causes clipping
+        uint16_t max_gain = 512; // Reduced from 1024
+        if (cfg->wdr >= 0 && cfg->wdr > 128) {
+          max_gain = 256; // Even more conservative for high WDR
+        }
+        wdr_attr.manual_attr.gain_limitation_attr.max_gain = max_gain;
+        wdr_attr.manual_attr.gain_limitation_attr.min_gain = 64;
+        printf("  Set max_gain=%u, min_gain=64\n", max_gain);
+
+        wdr_ret = hbn_isp_set_wdr_attr(h->isp_handle, &wdr_attr);
+        if (wdr_ret != 0) {
+          fprintf(stderr,
+                  "  Warning: Failed to set WDR attr: %s (continuing)\n",
+                  hbn_strerror(wdr_ret));
+          printf("  Note: WDR may not be adjustable at runtime.\n");
+          printf("  Alternative: Reduce brightness and use CPROC contrast.\n");
+        } else {
+          printf("  WDR applied (MANUAL mode)\n");
         }
       }
     }
@@ -1197,7 +1442,7 @@ static int capture_and_analyze(vio_handles_t *h, const char *label,
       int height = 480;
 
       // Create descriptive filename:
-      // cam{N}_{before|after}_b{B}_c{C}_g{G}_3d{D}_2d{D}_sh{S}_{timestamp}.nv12
+      // {timestamp}_cam{N}_{label}_b{B}_c{C}_g{G}_[nr_info]_[wdr_info].nv12
       char nr_info[64] = "";
       if (g_cfg_ptr->denoise_3d >= 0 || g_cfg_ptr->denoise_2d >= 0 ||
           g_cfg_ptr->sharpness >= 0) {
@@ -1207,10 +1452,20 @@ static int capture_and_analyze(vio_handles_t *h, const char *label,
                  g_cfg_ptr->sharpness >= 0 ? g_cfg_ptr->sharpness : 0);
       }
 
+      // WDR/HLC/Shadow info for filename
+      char wdr_info[64] = "";
+      if (g_cfg_ptr->wdr >= 0 || g_cfg_ptr->hlc >= 0 ||
+          g_cfg_ptr->shadow_boost > 0) {
+        snprintf(wdr_info, sizeof(wdr_info), "_wdr%d_hlc%d_sdw%.0f",
+                 g_cfg_ptr->wdr >= 0 ? g_cfg_ptr->wdr : 0,
+                 g_cfg_ptr->hlc >= 0 ? g_cfg_ptr->hlc : 0,
+                 g_cfg_ptr->shadow_boost * 10);
+      }
+
       snprintf(filename, sizeof(filename),
-               "%s/%s_cam%d_%s_b%.0f_c%.1f_g%.1f%s.nv12", g_output_dir,
+               "%s/%s_cam%d_%s_b%.0f_c%.1f_g%.1f%s%s.nv12", g_output_dir,
                timestamp, g_cfg_ptr->camera_index, label, g_cfg_ptr->brightness,
-               g_cfg_ptr->contrast, g_cfg_ptr->gamma, nr_info);
+               g_cfg_ptr->contrast, g_cfg_ptr->gamma, nr_info, wdr_info);
 
       save_nv12_frame(filename, y_data, uv_data, y_size, uv_size, width,
                       height);
@@ -1380,7 +1635,8 @@ int main(int argc, char **argv) {
   // Initialize VIO pipeline
   ret = init_vio_pipeline(&handles, cfg.camera_index);
   if (ret != 0) {
-    fprintf(stderr, "Failed to initialize VIO pipeline: %s\n", hbn_strerror(ret));
+    fprintf(stderr, "Failed to initialize VIO pipeline: %s\n",
+            hbn_strerror(ret));
     return 1;
   }
 
@@ -1404,6 +1660,7 @@ int main(int argc, char **argv) {
   dump_3dnr_attr(handles.isp_handle);
   dump_2dnr_attr(handles.isp_handle);
   dump_ee_attr(handles.isp_handle);
+  dump_wdr_attr(handles.isp_handle);
 
   // Capture and analyze BEFORE frame
   if (g_running && !cfg.dump_only) {
@@ -1479,6 +1736,7 @@ int main(int argc, char **argv) {
     dump_3dnr_attr(handles.isp_handle);
     dump_2dnr_attr(handles.isp_handle);
     dump_ee_attr(handles.isp_handle);
+    dump_wdr_attr(handles.isp_handle);
 
     // Capture and analyze AFTER frame
     if (g_running) {
