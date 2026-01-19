@@ -119,21 +119,34 @@ int isp_get_brightness(hbn_vnode_handle_t isp_handle, isp_brightness_result_t *r
     // We use channel 0 (typically Y/luminance or R) for brightness estimation
     uint64_t sum = 0;
     int valid_zones = 0;
+    uint32_t min_val = UINT32_MAX, max_val = 0;
 
     for (int i = 0; i < AE_GRID_ITEMS; i++) {
         // Each zone has AE_CHANNELS values, use first channel (index * 4)
         uint32_t zone_value = ae_stats.expStat[i * AE_CHANNELS];
         sum += zone_value;
         valid_zones++;
+        if (zone_value < min_val) min_val = zone_value;
+        if (zone_value > max_val) max_val = zone_value;
     }
 
+    uint64_t raw_avg = 0;
     if (valid_zones > 0) {
+        raw_avg = sum / valid_zones;
+
+        // Debug: log raw values periodically
+        static int debug_counter = 0;
+        if (++debug_counter >= 30) {
+            LOWLIGHT_LOG_DEBUG("AE raw: avg=%lu min=%u max=%u zones=%d",
+                              (unsigned long)raw_avg, min_val, max_val, valid_zones);
+            debug_counter = 0;
+        }
+
         // Normalize to 0-255 range
         // The raw values may need scaling depending on ISP configuration
         // Assuming 10-bit or 12-bit values, scale down to 8-bit
-        uint64_t avg = sum / valid_zones;
         // Scale from potential 12-bit (0-4095) to 8-bit (0-255)
-        result->brightness_avg = (float)(avg >> 4);
+        result->brightness_avg = (float)(raw_avg >> 4);
         if (result->brightness_avg > 255.0f) {
             result->brightness_avg = 255.0f;
         }
