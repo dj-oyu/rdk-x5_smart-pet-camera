@@ -217,11 +217,14 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     // Update low-light correction based on brightness (Phase 2)
     // Only active camera should control ISP parameters to avoid conflicts
     // Also throttled to match brightness measurement interval
+    // NOTE: Temporarily disabled - ISP parameter changes may cause H.264 stutter
     bool correction_active = pipeline->lowlight_state.correction_active;
+#if 0  // Disabled for debugging H.264 stutter
     if (write_active && is_brightness_frame) {
       correction_active = isp_update_lowlight_correction(
           pipeline->vio.isp_handle, &pipeline->lowlight_state, &brightness_result);
     }
+#endif
 
     // Debug: log flags every 30 frames
     if (frame_count % 30 == 0) {
