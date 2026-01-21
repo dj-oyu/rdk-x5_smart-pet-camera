@@ -1,3 +1,10 @@
+/**
+ * Monitor UI Module
+ * Handles status display, detection history, timeline, and recording
+ */
+
+import { decodeStatusEvent, base64ToBytes } from './protobuf_decoder.js';
+
 window.addEventListener('DOMContentLoaded', () => {
     const fpsEl = document.getElementById('fps');
     const detectionsEl = document.getElementById('detections');
@@ -491,18 +498,23 @@ window.addEventListener('DOMContentLoaded', () => {
     }
 
     function startStatusStream() {
-        const stream = new EventSource('/api/status/stream');
+        // Use protobuf format for efficiency
+        const stream = new EventSource('/api/status/stream?format=protobuf');
         stream.addEventListener('message', (event) => {
             if (!event.data) return;
             try {
-                const data = JSON.parse(event.data);
+                // Decode protobuf (base64 -> bytes -> struct)
+                const bytes = base64ToBytes(event.data);
+                const data = decodeStatusEvent(bytes);
                 updateStatus(data);
             } catch (error) {
+                console.error('[Status] Protobuf decode error:', error);
                 statusBadge.textContent = 'Waiting for data...';
             }
         });
         stream.addEventListener('error', () => {
             stream.close();
+            console.warn('[Status] SSE error, falling back to JSON polling');
             fetchStatus();
             setInterval(fetchStatus, 1500);
         });
