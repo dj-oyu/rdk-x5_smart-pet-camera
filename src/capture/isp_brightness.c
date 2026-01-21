@@ -83,10 +83,12 @@ static void lowlight_log(const char *level, const char *fmt, ...) {
 #define THRESHOLD_LUX_DARK 100
 
 BrightnessZone isp_classify_brightness_zone(float brightness_avg, uint32_t cur_lux) {
-    // Use both brightness_avg and cur_lux for classification
-    // cur_lux provides environmental context even when image is artificially bright
+    // Classify based on brightness_avg only
+    // cur_lux retrieval is skipped to reduce ISP API calls and avoid frame drops
+    // When cur_lux is 0 (not retrieved), ignore it in classification
+    (void)cur_lux;  // Unused - kept for API compatibility
 
-    if (brightness_avg < THRESHOLD_DARK || cur_lux < THRESHOLD_LUX_DARK) {
+    if (brightness_avg < THRESHOLD_DARK) {
         return BRIGHTNESS_ZONE_DARK;
     } else if (brightness_avg < THRESHOLD_DIM) {
         return BRIGHTNESS_ZONE_DIM;
@@ -159,17 +161,11 @@ int isp_get_brightness(hbn_vnode_handle_t isp_handle, isp_brightness_result_t *r
 
     result->frame_id = ae_stats.frame_id;
 
-    // 2. Get cur_lux from exposure attributes
-    hbn_isp_exposure_attr_t exp_attr = {0};
-    ret = hbn_isp_get_exposure_attr(isp_handle, &exp_attr);
-    if (ret == 0) {
-        result->brightness_lux = exp_attr.manual_attr.cur_lux;
-    } else {
-        LOG_WARN("ISP_Brightness", "Failed to get exposure attr: %d (using lux=0)", ret);
-        result->brightness_lux = 0;
-    }
+    // Skip hbn_isp_get_exposure_attr() to reduce API calls and avoid frame drops
+    // cur_lux is not critical - brightness_avg alone is sufficient for zone classification
+    result->brightness_lux = 0;
 
-    // 3. Classify brightness zone
+    // 2. Classify brightness zone
     result->zone = isp_classify_brightness_zone(result->brightness_avg, result->brightness_lux);
     result->valid = true;
 
@@ -187,8 +183,8 @@ void isp_fill_frame_brightness(Frame *frame, const isp_brightness_result_t *resu
         frame->brightness_zone = (uint8_t)result->zone;
         // correction_applied is set separately when ISP correction is actually applied
     } else {
-        // Mark as invalid/unknown
-        frame->brightness_avg = 0.0f;
+        // Mark as invalid/unknown (-1.0f indicates no brightness data available)
+        frame->brightness_avg = -1.0f;
         frame->brightness_lux = 0;
         frame->brightness_zone = BRIGHTNESS_ZONE_NORMAL;  // Default to normal
     }
@@ -222,44 +218,21 @@ int isp_apply_lowlight_profile(hbn_vnode_handle_t isp_handle, BrightnessZone zon
     isp_lowlight_profile_t profile = isp_get_profile_for_zone(zone);
     int ret;
 
-    // Apply 3DNR (Temporal Noise Reduction)
+    // Apply 3DNR (Temporal Noise Reduction) only
+    // 2DNR is disabled to minimize ISP API calls and avoid frame drops
+    // Skip hbn_isp_get_3dnr_attr() - directly set to avoid frame drops
     hbn_isp_3dnr_attr_t tnr_attr = {0};
-    ret = hbn_isp_get_3dnr_attr(isp_handle, &tnr_attr);
-    if (ret != 0) {
-        LOG_WARN("ISP_Lowlight", "Failed to get 3DNR attr: %d", ret);
-    } else {
-        int old_3dnr = tnr_attr.manual_attr.tnr_strength;
-        tnr_attr.mode = HBN_ISP_MODE_MANUAL;
-        tnr_attr.manual_attr.tnr_strength = (uint8_t)profile.denoise_3d;
+    tnr_attr.mode = HBN_ISP_MODE_MANUAL;
+    tnr_attr.manual_attr.tnr_strength = (uint8_t)profile.denoise_3d;
 
-        ret = hbn_isp_set_3dnr_attr(isp_handle, &tnr_attr);
-        if (ret != 0) {
-            LOG_WARN("ISP_Lowlight", "Failed to set 3DNR attr: %d", ret);
-        } else {
-            LOWLIGHT_LOG_INFO("3DNR: %d -> %d", old_3dnr, profile.denoise_3d);
-        }
+    ret = hbn_isp_set_3dnr_attr(isp_handle, &tnr_attr);
+    if (ret != 0) {
+        LOG_WARN("ISP_Lowlight", "Failed to set 3DNR attr: %d", ret);
+    } else {
+        LOWLIGHT_LOG_INFO("3DNR: -> %d (zone=%d)", profile.denoise_3d, zone);
     }
 
-    // Apply 2DNR (Spatial Noise Reduction)
-    hbn_isp_2dnr_attr_t snr_attr = {0};
-    ret = hbn_isp_get_2dnr_attr(isp_handle, &snr_attr);
-    if (ret != 0) {
-        LOG_WARN("ISP_Lowlight", "Failed to get 2DNR attr: %d", ret);
-    } else {
-        float old_2dnr = snr_attr.manual_attr.blend_static;
-        snr_attr.mode = HBN_ISP_MODE_MANUAL;
-        snr_attr.manual_attr.blend_static = profile.denoise_2d;
-
-        ret = hbn_isp_set_2dnr_attr(isp_handle, &snr_attr);
-        if (ret != 0) {
-            LOG_WARN("ISP_Lowlight", "Failed to set 2DNR attr: %d", ret);
-        } else {
-            LOWLIGHT_LOG_INFO("2DNR: %.1f -> %.1f", old_2dnr, profile.denoise_2d);
-        }
-    }
-
-    LOG_INFO("ISP_Lowlight", "Applied zone %d: 3DNR=%d, 2DNR=%.1f",
-             zone, profile.denoise_3d, profile.denoise_2d);
+    LOG_INFO("ISP_Lowlight", "Applied zone %d: 3DNR=%d", zone, profile.denoise_3d);
 
     return 0;
 }
