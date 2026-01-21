@@ -43,11 +43,13 @@ except OSError as e:
 SHM_NAME_ACTIVE_FRAME = "/pet_camera_active_frame"
 SHM_NAME_STREAM = "/pet_camera_stream"
 SHM_NAME_YOLO_INPUT = "/pet_camera_yolo_input"
+SHM_NAME_BRIGHTNESS = "/pet_camera_brightness"  # Lightweight brightness data
 SHM_NAME_FRAMES = os.getenv("SHM_NAME_FRAMES", SHM_NAME_ACTIVE_FRAME)
 SHM_NAME_DETECTIONS = os.getenv("SHM_NAME_DETECTIONS", "/pet_camera_detections")
 RING_BUFFER_SIZE = 30
 MAX_DETECTIONS = 10
 MAX_FRAME_SIZE = 1920 * 1080 * 3 // 2  # Max NV12 frame size (1080p)
+NUM_CAMERAS = 2  # DAY=0, NIGHT=1
 
 
 # C structure definitions using ctypes
@@ -84,6 +86,12 @@ class CFrame(Structure):
         ("height", c_int),
         ("format", c_int),
         ("data_size", c_size_t),
+        # Brightness metrics (Phase 0: ISP low-light enhancement)
+        ("brightness_avg", c_float),  # Y-plane average brightness (0-255)
+        ("brightness_lux", c_uint32),  # Environment illuminance from ISP cur_lux
+        ("brightness_zone", c_uint8),  # 0=dark, 1=dim, 2=normal, 3=bright
+        ("correction_applied", c_uint8),  # 1 if ISP low-light correction is active
+        ("_reserved", c_uint8 * 2),  # Padding for alignment
         ("data", c_uint8 * MAX_FRAME_SIZE),
     ]
 
@@ -105,6 +113,28 @@ class CLatestDetectionResult(Structure):
         ("detections", CDetection * MAX_DETECTIONS),
         ("version", c_uint32),
         ("detection_update_sem", c_uint8 * 32),  # sem_t semaphore (32 bytes on Linux)
+    ]
+
+
+class CCameraBrightness(Structure):
+    """Lightweight brightness data for a single camera (~32 bytes)"""
+    _fields_ = [
+        ("frame_number", c_uint64),
+        ("timestamp", CTimespec),
+        ("brightness_avg", c_float),
+        ("brightness_lux", c_uint32),
+        ("brightness_zone", c_uint8),
+        ("correction_applied", c_uint8),
+        ("_reserved", c_uint8 * 2),
+    ]
+
+
+class CSharedBrightnessData(Structure):
+    """Shared brightness data for all cameras"""
+    _fields_ = [
+        ("version", c_uint32),
+        ("cameras", CCameraBrightness * NUM_CAMERAS),
+        ("update_sem", c_uint8 * 32),  # sem_t semaphore (32 bytes on Linux)
     ]
 
 
@@ -133,6 +163,11 @@ class Frame:
     height: int
     format: int  # 0=JPEG, 1=NV12, 2=RGB
     data: bytes | memoryview  # memoryview for zero-copy optimization
+    # Brightness metrics (Phase 0: ISP low-light enhancement)
+    brightness_avg: float = 0.0  # Y-plane average brightness (0-255)
+    brightness_lux: int = 0  # Environment illuminance from ISP cur_lux
+    brightness_zone: int = 2  # 0=dark, 1=dim, 2=normal, 3=bright
+    correction_applied: bool = False  # True if ISP low-light correction is active
 
 
 class RealSharedMemory:
@@ -281,6 +316,10 @@ class RealSharedMemory:
             height=c_frame.height,
             format=c_frame.format,
             data=data_view,  # memoryview（ゼロコピー）
+            brightness_avg=c_frame.brightness_avg,
+            brightness_lux=c_frame.brightness_lux,
+            brightness_zone=c_frame.brightness_zone,
+            correction_applied=bool(c_frame.correction_applied),
         )
 
         return frame
@@ -554,11 +593,93 @@ class RealSharedMemory:
             )
 
 
-if __name__ == "__main__":
-    # Test program
+def monitor_brightness():
+    """Monitor brightness from both cameras using lightweight shared memory."""
     import time
 
-    print("=== Real Shared Memory Test ===\n")
+    ZONE_NAMES = ["DARK", "DIM", "NORMAL", "BRIGHT"]
+    CAMERA_NAMES = ["DAY", "NIGHT"]
+
+    print("=== Camera Brightness Monitor ===\n")
+    print(f"SHM: {SHM_NAME_BRIGHTNESS} (lightweight, ~100 bytes)")
+    print("-" * 70)
+
+    # Open brightness shared memory
+    shm_path = f"/dev/shm{SHM_NAME_BRIGHTNESS}"
+    brightness_fd = None
+    brightness_mmap = None
+
+    try:
+        brightness_fd = os.open(shm_path, os.O_RDONLY)
+        brightness_mmap = mmap.mmap(
+            brightness_fd, sizeof(CSharedBrightnessData), mmap.MAP_SHARED, mmap.PROT_READ
+        )
+        print(f"[Info] Opened {shm_path}")
+    except FileNotFoundError:
+        print(f"[Error] Brightness SHM not found: {shm_path}")
+        print("Is camera daemon running?")
+        return
+    except Exception as e:
+        print(f"[Error] Failed to open brightness SHM: {e}")
+        return
+
+    print("\nMonitoring brightness (Ctrl+C to stop)...\n")
+    print(f"{'Time':<12} {'Camera':<8} {'Frame':<10} {'Bright':>8} {'Lux':>8} {'Zone':<8} {'Corr':<5}")
+    print("=" * 70)
+
+    last_version = 0
+    last_frames = [-1, -1]  # Track frame numbers for each camera
+
+    try:
+        while True:
+            # Read brightness data
+            brightness_mmap.seek(0)
+            data = brightness_mmap.read(sizeof(CSharedBrightnessData))
+            shm_data = CSharedBrightnessData.from_buffer_copy(data)
+
+            # Check if there's new data
+            if shm_data.version != last_version:
+                last_version = shm_data.version
+                now = time.strftime("%H:%M:%S")
+
+                # Print brightness for each camera if updated
+                for cam_id in range(NUM_CAMERAS):
+                    cam = shm_data.cameras[cam_id]
+                    if cam.frame_number != last_frames[cam_id] and cam.frame_number > 0:
+                        last_frames[cam_id] = cam.frame_number
+                        zone_name = ZONE_NAMES[cam.brightness_zone] if cam.brightness_zone < 4 else "?"
+                        corr = "ON" if cam.correction_applied else "OFF"
+                        cam_name = CAMERA_NAMES[cam_id]
+                        print(
+                            f"{now:<12} {cam_name:<8} {cam.frame_number:<10} "
+                            f"{cam.brightness_avg:>8.1f} {cam.brightness_lux:>8} "
+                            f"{zone_name:<8} {corr:<5}"
+                        )
+
+            time.sleep(0.1)
+
+    except KeyboardInterrupt:
+        print("\n[Info] Stopped by user")
+    finally:
+        if brightness_mmap:
+            brightness_mmap.close()
+        if brightness_fd:
+            os.close(brightness_fd)
+
+
+if __name__ == "__main__":
+    import sys
+    import time
+
+    # Check for brightness monitoring mode
+    if len(sys.argv) > 1 and sys.argv[1] in ("-b", "--brightness"):
+        monitor_brightness()
+        sys.exit(0)
+
+    # Default: original test program
+    print("=== Real Shared Memory Test ===")
+    print("Usage: python real_shared_memory.py [-b|--brightness]")
+    print("  -b, --brightness  Monitor brightness from both cameras\n")
 
     shm = RealSharedMemory()
 
@@ -574,7 +695,8 @@ if __name__ == "__main__":
                     f"Frame {frame.frame_number}: "
                     f"{frame.width}x{frame.height}, "
                     f"{len(frame.data)} bytes, "
-                    f"camera_id={frame.camera_id}"
+                    f"camera_id={frame.camera_id}, "
+                    f"brightness={frame.brightness_avg:.1f}"
                 )
 
                 # Try to decode if JPEG

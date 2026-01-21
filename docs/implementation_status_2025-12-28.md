@@ -5,7 +5,7 @@
 ### 1. Option B ゼロコピーアーキテクチャの実装
 
 **コア変更**:
-- ✅ `shared_memory.h`: 新しいSHM名定義 (`active_frame`, `stream`, `probe_frame`)
+- ✅ `shared_memory.h`: 新しいSHM名定義 (`active_frame`, `stream`, `brightness`)
 - ✅ `camera_daemon_main.c`: シグナルハンドラ追加 (SIGUSR1/SIGUSR2/SIGRTMIN)
 - ✅ `camera_pipeline.h/c`: 条件付き書き込み実装
 - ✅ `camera_switcher_daemon.c`: publish_frame_cb削除、シグナルベース制御
@@ -70,7 +70,7 @@ Before (削除):
 After (実装済み):
 /pet_camera_active_frame    # アクティブカメラNV12 (30fps)
 /pet_camera_stream          # アクティブカメラH.264 (30fps)
-/pet_camera_probe_frame     # プローブNV12 (オンデマンド)
+/pet_camera_brightness      # 軽量明るさデータ (~100 bytes, 両カメラ)
 ```
 
 ### シグナル制御プロトコル
@@ -79,7 +79,8 @@ After (実装済み):
 |---------|-------|--------|------|
 | SIGUSR1 | camera_switcher_daemon | camera_daemon | アクティブ化 (active_frame/stream書き込み開始) |
 | SIGUSR2 | camera_switcher_daemon | camera_daemon | 非アクティブ化 (書き込み停止) |
-| SIGRTMIN | camera_switcher_daemon | camera_daemon | プローブ要求 (probe_frameに1フレーム書き込み) |
+
+※ 明るさデータは軽量共有メモリ経由で常時更新されるため、SIGRTMIN によるプローブは不要になりました。
 
 ### 明度チェック頻度
 
