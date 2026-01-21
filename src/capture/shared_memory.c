@@ -205,15 +205,19 @@ int shm_frame_buffer_write(SharedFrameBuffer* shm, const Frame* frame) {
         return -1;
     }
 
-    // Atomically increment write_index and get the slot
-    uint32_t idx = __atomic_fetch_add(&shm->write_index, 1, __ATOMIC_SEQ_CST);
-    idx = idx % RING_BUFFER_SIZE;
+    // 1. Read current write_index to determine slot
+    uint32_t current_idx = __atomic_load_n(&shm->write_index, __ATOMIC_ACQUIRE);
+    uint32_t slot = current_idx % RING_BUFFER_SIZE;
 
-    // Copy frame data to the slot
-    memcpy(&shm->frames[idx], frame, sizeof(Frame));
+    // 2. Copy frame data FIRST (before incrementing write_index)
+    memcpy(&shm->frames[slot], frame, sizeof(Frame));
 
-    // Memory barrier to ensure frame data is visible before semaphore post
+    // 3. Memory barrier: ensure memcpy visible before index update
     __atomic_thread_fence(__ATOMIC_RELEASE);
+
+    // 4. Increment write_index AFTER data is ready
+    // Reader sees write_index = N only AFTER slot (N-1) % 30 is fully written
+    __atomic_store_n(&shm->write_index, current_idx + 1, __ATOMIC_RELEASE);
 
     // Notify waiting readers that a new frame is available
     sem_post(&shm->new_frame_sem);

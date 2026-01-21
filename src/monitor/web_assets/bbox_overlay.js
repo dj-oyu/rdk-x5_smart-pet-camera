@@ -3,7 +3,10 @@
  *
  * ビデオ上にバウンディングボックスをオーバーレイ描画
  * Server-Sent Eventsで検出結果をリアルタイム受信
+ * Protobuf/JSON両形式対応
  */
+
+import { decodeDetectionEvent, decodeStatusEvent, base64ToBytes } from './protobuf_decoder.js';
 
 // 色定義（web_monitor.pyと同じ）
 const COLORS = {
@@ -27,31 +30,42 @@ export class BBoxOverlay {
     /**
      * @param {HTMLVideoElement} videoElement - Source video element
      * @param {HTMLCanvasElement} canvasElement - Canvas for overlay
-     * @param {string} sseUrl - Server-Sent Events URL for detections
      * @param {Object} options - Configuration options
+     * @param {string} options.format - 'protobuf' (default, efficient) or 'json'
+     * @param {Function} options.onStatsUpdate - Callback for stats updates
      */
-    constructor(videoElement, canvasElement, sseUrl = '/api/detections/stream', options = {}) {
+    constructor(videoElement, canvasElement, options = {}) {
         this.video = videoElement;
         this.canvas = canvasElement;
         this.ctx = canvasElement.getContext('2d');
-        this.sseUrl = sseUrl;
 
-        // Format configuration
-        this.useProtobuf = options.useProtobuf || false;
-        this.onFormatChange = options.onFormatChange || null;
+        // Format configuration: protobuf is default (more efficient)
+        this.format = options.format || 'protobuf';
+        this.onStatsUpdate = options.onStatsUpdate || null;
 
         // Detection state
-        this.detections = [];
+        this.currentDetections = []; // Current frame's detections (no smoothing)
         this.latestDetection = null;
-        this.lastDetectionTime = 0; // Timestamp of last valid detection update
-        this.eventSource = null;
+        this.detectionEventSource = null;
+        this.statusEventSource = null;
+
+        // Frame info from status SSE (updated independently of detections)
+        this.frameInfo = {
+            frameNumber: 0,
+            timestamp: 0,
+            lastUpdateTime: 0,
+            // For smooth interpolation between SSE updates
+            baseFrameNumber: 0,
+            baseTime: 0,
+            estimatedFps: 30
+        };
 
         // Animation control
         this.animationId = null;
         this.isRunning = false;
 
-        // Persistence settings
-        this.PERSISTENCE_MS = 2000; // Keep bbox for 2000ms (SSE sends every ~1s)
+        // Stale detection threshold
+        this.STALE_THRESHOLD_MS = 1500; // Clear detections after this many ms without events (YOLO runs ~2FPS)
 
         // Stats
         this.stats = {
@@ -66,9 +80,6 @@ export class BBoxOverlay {
         this._setupCanvas();
     }
 
-    /**
-     * Setup canvas to match video size
-     */
     _setupCanvas() {
         const updateCanvasSize = () => {
             if (this.video.videoWidth > 0 && this.video.videoHeight > 0) {
@@ -77,174 +88,197 @@ export class BBoxOverlay {
                 console.log(`[BBox] Canvas sized to ${this.canvas.width}x${this.canvas.height}`);
             }
         };
-
-        // Update on video metadata load
         this.video.addEventListener('loadedmetadata', updateCanvasSize);
-
-        // Also try to update immediately
         updateCanvasSize();
     }
 
-    /**
-     * Start receiving detections and rendering
-     */
     start() {
         if (this.isRunning) {
             console.warn('[BBox] Already running');
             return;
         }
-
         console.log('[BBox] Starting overlay renderer...');
-
-        // Start SSE connection
-        this._connectSSE();
-
-        // Start render loop
+        this._connectDetectionSSE();
+        this._connectStatusSSE();
         this.isRunning = true;
         this._renderLoop();
-
         console.log('[BBox] Overlay renderer started');
     }
 
-    /**
-     * Stop rendering and close SSE connection
-     */
     stop() {
         console.log('[BBox] Stopping overlay renderer...');
-
         this.isRunning = false;
 
         if (this.animationId) {
             cancelAnimationFrame(this.animationId);
             this.animationId = null;
         }
-
-        if (this.eventSource) {
-            this.eventSource.close();
-            this.eventSource = null;
+        if (this.detectionEventSource) {
+            this.detectionEventSource.close();
+            this.detectionEventSource = null;
         }
-
-        // Clear canvas
+        if (this.statusEventSource) {
+            this.statusEventSource.close();
+            this.statusEventSource = null;
+        }
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-
         console.log('[BBox] Overlay renderer stopped');
     }
 
-    /**
-     * Switch detection format (JSON/Protobuf)
-     * @param {boolean} useProtobuf - Use Protobuf format
-     */
-    setFormat(useProtobuf) {
-        if (this.useProtobuf === useProtobuf) return;
+    _connectDetectionSSE() {
+        // Construct URL with format query parameter
+        const baseUrl = '/api/detections/stream';
+        const url = this.format === 'protobuf' ? `${baseUrl}?format=protobuf` : baseUrl;
 
-        console.log(`[BBox] Switching format to: ${useProtobuf ? 'Protobuf' : 'JSON'}`);
-        this.useProtobuf = useProtobuf;
+        console.log(`[BBox] Connecting to detection SSE: ${url}`);
+        this.detectionEventSource = new EventSource(url);
 
-        // Reconnect with new format
-        if (this.isRunning) {
-            if (this.eventSource) {
-                this.eventSource.close();
-                this.eventSource = null;
-            }
-            this._connectSSE();
-        }
-    }
-
-    /**
-     * Connect to detection SSE stream
-     * Uses EventSource for JSON (standard), fetch for Protobuf (custom header)
-     */
-    _connectSSE() {
-        console.log(`[BBox] Connecting to SSE: ${this.sseUrl} (format: ${this.useProtobuf ? 'Protobuf' : 'JSON'})`);
-
-        // EventSource doesn't support custom headers, so use JSON only
-        // For Protobuf support, would need to use fetch + ReadableStream
-        this.eventSource = new EventSource(this.sseUrl);
-
-        this.eventSource.onmessage = (event) => {
-            try {
-                // Track bandwidth
-                this.stats.eventsReceived++;
-                this.stats.bytesReceived += event.data.length;
-                this.stats.lastEventTime = performance.now();
-
-                const data = JSON.parse(event.data);
-
-                // Update detections
-                // Support both formats: direct detections array and wrapped in latest_detection
-                let newDetections = [];
-                if (data.detections) {
-                    newDetections = data.detections;
-                    this.latestDetection = data;
-                } else if (data.latest_detection && data.latest_detection.detections) {
-                    newDetections = data.latest_detection.detections;
-                    this.latestDetection = data.latest_detection;
-                }
-
-                // Log frame number every 30 frames to check order
-                const frameNum = data.frame_number || (data.latest_detection && data.latest_detection.frame_number) || 0;
-                if (frameNum % 30 === 0) {
-                    console.log(`[BBox SSE] Received frame#${frameNum} (${this.stats.eventsReceived} events, ${(this.stats.bytesReceived / 1024).toFixed(1)} KB)`);
-                }
-
-                // Only update if we have detections or if we received an empty list (to clear eventually)
-                // If newDetections is not empty, update immediately and reset timer
-                if (newDetections && newDetections.length > 0) {
-                    this.detections = newDetections;
-                    this.lastDetectionTime = performance.now();
-                } else if (data.frame_number) {
-                    // Update stats even if no detections
-                    this.latestDetection = data;
-                }
-
-                // Notify format change callback with stats
-                if (this.onFormatChange) {
-                    this.onFormatChange(this.stats);
-                }
-
-            } catch (error) {
-                console.error('[BBox] Error parsing SSE data:', error);
-            }
+        this.detectionEventSource.onmessage = (event) => {
+            this._handleDetectionData(event.data);
         };
-
-        this.eventSource.onerror = (error) => {
-            console.error('[BBox] SSE error:', error);
-            // Will auto-reconnect
+        this.detectionEventSource.onerror = (error) => {
+            console.error('[BBox] Detection SSE error:', error);
         };
-
-        this.eventSource.onopen = () => {
-            console.log('[BBox] SSE connected');
+        this.detectionEventSource.onopen = () => {
+            console.log(`[BBox] Detection SSE connected (${this.format})`);
             this.stats.bytesReceived = 0;
             this.stats.eventsReceived = 0;
         };
     }
 
+    _connectStatusSSE() {
+        // Status SSE for frame info (updates every 2s regardless of detections)
+        const baseUrl = '/api/status/stream';
+        const url = this.format === 'protobuf' ? `${baseUrl}?format=protobuf` : baseUrl;
+
+        console.log(`[BBox] Connecting to status SSE: ${url}`);
+        this.statusEventSource = new EventSource(url);
+
+        this.statusEventSource.onmessage = (event) => {
+            this._handleStatusData(event.data);
+        };
+        this.statusEventSource.onerror = (error) => {
+            console.error('[BBox] Status SSE error:', error);
+        };
+        this.statusEventSource.onopen = () => {
+            console.log(`[BBox] Status SSE connected`);
+        };
+    }
+
+    _handleDetectionData(data) {
+        try {
+            this.stats.eventsReceived++;
+            this.stats.bytesReceived += data.length;
+            this.stats.lastEventTime = performance.now();
+
+            let parsed;
+            if (this.format === 'protobuf') {
+                const bytes = base64ToBytes(data);
+                parsed = decodeDetectionEvent(bytes);
+            } else {
+                parsed = JSON.parse(data);
+            }
+
+            let newDetections = [];
+            if (parsed.detections) {
+                newDetections = parsed.detections;
+                this.latestDetection = parsed;
+            } else if (parsed.latest_detection?.detections) {
+                newDetections = parsed.latest_detection.detections;
+                this.latestDetection = parsed.latest_detection;
+            }
+
+            const frameNum = parsed.frame_number || parsed.latest_detection?.frame_number || 0;
+            if (frameNum % 30 === 0) {
+                const fmt = this.format === 'protobuf' ? 'PB' : 'JSON';
+                console.log(`[BBox ${fmt}] frame#${frameNum} (${this.stats.eventsReceived} events, ${(this.stats.bytesReceived / 1024).toFixed(1)} KB)`);
+            }
+
+            // Update current detections (no smoothing)
+            this._updateDetections(newDetections);
+
+            if (this.onStatsUpdate) {
+                this.onStatsUpdate(this.stats);
+            }
+        } catch (error) {
+            console.error('[BBox] Error parsing detection data:', error, data.substring(0, 100));
+        }
+    }
+
+    _handleStatusData(data) {
+        try {
+            let parsed;
+            if (this.format === 'protobuf') {
+                const bytes = base64ToBytes(data);
+                parsed = decodeStatusEvent(bytes);
+            } else {
+                parsed = JSON.parse(data);
+            }
+
+            // Extract frame info from status event
+            // Status format: { shared_memory: {...}, latest_detection: {...}, monitor: {...}, timestamp: ... }
+            if (parsed.shared_memory) {
+                // Use total_frames_written as frame counter (updates regardless of detection)
+                let frameNumber = parsed.shared_memory.total_frames_written || 0;
+                let timestamp = parsed.timestamp || 0;
+
+                // If we have latest_detection, only use its frame_number if recent
+                if (parsed.latest_detection) {
+                    const detectionFrame = parsed.latest_detection.frame_number || 0;
+                    // Only use detection frame if it's within 30 frames of camera frame
+                    // (prevents stale detection data from overwriting current frame number)
+                    if (detectionFrame > 0 && (frameNumber - detectionFrame) < 30) {
+                        frameNumber = detectionFrame;
+                    }
+                    timestamp = parsed.latest_detection.timestamp || timestamp;
+                }
+
+                // Update base values for interpolation
+                this.frameInfo.baseFrameNumber = frameNumber;
+                this.frameInfo.baseTime = performance.now();
+                this.frameInfo.frameNumber = frameNumber;
+                this.frameInfo.timestamp = timestamp;
+                this.frameInfo.lastUpdateTime = performance.now();
+
+                // Get FPS from monitor stats if available
+                if (parsed.monitor && parsed.monitor.current_fps > 0) {
+                    this.frameInfo.estimatedFps = parsed.monitor.current_fps;
+                }
+            }
+        } catch (error) {
+            console.error('[BBox] Error parsing status data:', error, data.substring(0, 100));
+        }
+    }
+
     /**
-     * Render loop (requestAnimationFrame)
+     * Update current detections (no smoothing - direct replacement)
      */
+    _updateDetections(newDetections) {
+        this.currentDetections = newDetections;
+    }
+
     _renderLoop() {
         if (!this.isRunning) return;
 
-        // Clear canvas
+        const now = performance.now();
+
+        // Time-based stale detection cleanup
+        if (this.stats.lastEventTime > 0 &&
+            now - this.stats.lastEventTime > this.STALE_THRESHOLD_MS) {
+            this._cleanupStaleDetections();
+        }
+
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-        // Check persistence
-        const now = performance.now();
-        const showDetections = (now - this.lastDetectionTime) < this.PERSISTENCE_MS;
-
-        // Draw bounding boxes if within persistence window
-        if (showDetections) {
-            this.detections.forEach(detection => {
-                this._drawBBox(detection);
-            });
+        // Draw current bboxes (no smoothing)
+        for (const detection of this.currentDetections) {
+            this._drawBBox(detection);
         }
 
-        // Draw stats (always draw latest available stats)
-        if (this.latestDetection) {
-            this._drawStats(this.latestDetection);
-        }
+        // Draw stats using frame info from status SSE (updates independently of detections)
+        this._drawStats();
 
-        // Update stats
+        // Update FPS stats
         this.stats.framesRendered++;
         if (now - this.stats.lastUpdateTime >= 1000) {
             this.stats.renderFps = this.stats.framesRendered;
@@ -252,17 +286,37 @@ export class BBoxOverlay {
             this.stats.lastUpdateTime = now;
         }
 
-        // Schedule next frame
         this.animationId = requestAnimationFrame(() => this._renderLoop());
     }
 
     /**
-     * Draw frame stats (Frame number, timestamp)
-     * @param {Object} detectionData - Detection object with metadata
+     * Clean up stale detections when no detection events arrive
+     * Called from render loop when detection events are stale
      */
-    _drawStats(detectionData) {
-        const frameNum = detectionData.frame_number || 0;
-        const timestamp = detectionData.timestamp || 0;
+    _cleanupStaleDetections() {
+        if (this.currentDetections.length === 0) return;
+
+        // Clear all detections when stale
+        this.currentDetections = [];
+
+        // Reset lastEventTime to prevent continuous cleanup
+        this.stats.lastEventTime = performance.now();
+    }
+
+    _drawStats() {
+        // Interpolate frame number and timestamp between SSE updates for smooth display
+        let frameNum = this.frameInfo.baseFrameNumber || 0;
+        let timestamp = this.frameInfo.timestamp || 0;
+
+        if (this.frameInfo.baseTime > 0 && this.frameInfo.estimatedFps > 0) {
+            const elapsedMs = performance.now() - this.frameInfo.baseTime;
+            const estimatedFrames = Math.floor(elapsedMs / 1000 * this.frameInfo.estimatedFps);
+            frameNum = this.frameInfo.baseFrameNumber + estimatedFrames;
+            // Also interpolate timestamp (add elapsed seconds)
+            if (timestamp > 0) {
+                timestamp = this.frameInfo.timestamp + elapsedMs / 1000;
+            }
+        }
 
         let timeStr = '--';
         if (timestamp > 0) {
@@ -276,42 +330,27 @@ export class BBoxOverlay {
             timeStr = `${yyyy}/${mm}/${dd} ${HH}:${MM}:${ss}`;
         }
 
-        // Fixed-width frame number per digit group (prevents jitter)
-        // Determine minimum width based on current digits
         const frameDigits = String(frameNum).length;
-        const minDigits = Math.max(6, Math.ceil(frameDigits / 2) * 2); // Round up to even number, min 6
+        const minDigits = Math.max(6, Math.ceil(frameDigits / 2) * 2);
         const frameStr = String(frameNum).padStart(minDigits, ' ');
         const text = `Frame: ${frameStr}  Time: ${timeStr}`;
 
         this.ctx.font = '16px monospace';
-
-        // Calculate fixed background width based on digit count
-        // Each digit ≈ 9.6px in 16px monospace, plus margins
-        // "Frame: " = 7 chars, "  Time: " = 8 chars, timestamp = 19 chars
-        // Total base = 34 chars + minDigits
-        const charWidth = 9.6; // 16px monospace character width
+        const charWidth = 9.6;
         const totalChars = 34 + minDigits;
-        const bgWidth = totalChars * charWidth + 20; // Add padding
+        const bgWidth = totalChars * charWidth + 20;
 
-        // Draw background (stable width per digit group)
         this.ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
         this.ctx.fillRect(10, 10, bgWidth, 24);
-
-        // Draw text
-        this.ctx.fillStyle = '#FFFF00'; // Yellow
+        this.ctx.fillStyle = '#FFFF00';
         this.ctx.fillText(text, 15, 27);
     }
 
-    /**
-     * Draw a single bounding box
-     * @param {Object} detection - Detection object with bbox, class_name, confidence
-     */
     _drawBBox(detection) {
         const { bbox, class_name, confidence } = detection;
         const color = COLORS[class_name] || '#FFFFFF';
 
-        // Scale bbox to canvas size
-        const scaleX = this.canvas.width / 640;  // Assume 640x480 detection resolution
+        const scaleX = this.canvas.width / 640;
         const scaleY = this.canvas.height / 480;
 
         const x = bbox.x * scaleX;
@@ -319,12 +358,10 @@ export class BBoxOverlay {
         const w = bbox.w * scaleX;
         const h = bbox.h * scaleY;
 
-        // Draw rectangle
         this.ctx.strokeStyle = color;
         this.ctx.lineWidth = 2;
         this.ctx.strokeRect(x, y, w, h);
 
-        // Draw label background
         const label = `${class_name}: ${(confidence * 100).toFixed(0)}%`;
         this.ctx.font = '14px Arial';
         const metrics = this.ctx.measureText(label);
@@ -334,20 +371,14 @@ export class BBoxOverlay {
 
         this.ctx.fillStyle = color;
         this.ctx.fillRect(x, labelY, labelWidth, labelHeight);
-
-        // Draw label text
         this.ctx.fillStyle = '#000000';
         this.ctx.fillText(label, x + 4, labelY + 13);
     }
 
-    /**
-     * Get render statistics
-     * @returns {Object}
-     */
     getStats() {
         return {
             ...this.stats,
-            detectionCount: this.detections.length
+            detectionCount: this.currentDetections.length
         };
     }
 }

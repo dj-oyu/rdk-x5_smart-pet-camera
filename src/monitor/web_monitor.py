@@ -638,8 +638,8 @@ def create_app(
                         await webrtcClient.start();
                         console.log('[App] WebRTC connection initiated');
 
-                        // Initialize BBox overlay
-                        bboxOverlay = new BBoxOverlay(video, canvas, '/api/detections/stream');
+                        // Initialize BBox overlay (Protobuf format by default)
+                        bboxOverlay = new BBoxOverlay(video, canvas);
                         bboxOverlay.start();
                         console.log('[App] BBox overlay started');
 

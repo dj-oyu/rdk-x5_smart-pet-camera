@@ -23,3 +23,35 @@ message DetectionEvent {
     double timestamp = 2;
     repeated Detection detections = 3;
 }
+
+// Status stream messages
+
+message MonitorStats {
+    int32 frames_processed = 1;
+    double current_fps = 2;
+    int32 detection_count = 3;
+    int32 target_fps = 4;
+}
+
+message SharedMemoryStats {
+    int32 frame_count = 1;
+    int32 total_frames_written = 2;
+    int32 detection_version = 3;
+    int32 has_detection = 4;
+}
+
+message DetectionResult {
+    uint64 frame_number = 1;
+    double timestamp = 2;
+    int32 num_detections = 3;
+    int32 version = 4;
+    repeated Detection detections = 5;
+}
+
+message StatusEvent {
+    MonitorStats monitor = 1;
+    SharedMemoryStats shared_memory = 2;
+    DetectionResult latest_detection = 3;
+    repeated DetectionResult detection_history = 4;
+    double timestamp = 5;
+}

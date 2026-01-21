@@ -73,13 +73,17 @@ curl http://localhost:8080/stream --output stream.mjpeg
 
 ### GET /api/detections/stream
 
-**✨ NEW: Event-Driven SSE Stream**
+**✨ Event-Driven SSE Stream (Optimized)**
 
-Real-time object detection events. Supports both JSON and Protocol Buffers.
+Real-time object detection events. Events are pushed **only when objects are detected**.
 
-**Request Headers**:
-- `Accept: application/json` (default) - JSON format
-- `Accept: application/protobuf` - Protocol Buffers format (base64-encoded)
+**Query Parameters**:
+- `?format=protobuf` - Protocol Buffers format (base64-encoded, 60-80% smaller)
+- (default) - JSON format
+
+**Request Headers** (alternative):
+- `Accept: application/protobuf` - Protocol Buffers format
+- `Accept: application/json` - JSON format (default)
 
 **Response Headers**:
 - `Content-Type: text/event-stream`
@@ -88,10 +92,10 @@ Real-time object detection events. Supports both JSON and Protocol Buffers.
 - `X-Content-Format: application/json` or `application/protobuf`
 
 **Event-Driven Behavior**:
-- Events pushed **only when detections change**
-- Utilizes semaphore-based notification from detection daemon
-- Typical rate: 0-5 events/sec (vs. 30 events/sec in polling mode)
-- Keepalive comment every 30 seconds
+- Events pushed **only when objects are detected** (no empty frames)
+- Synchronized with YOLO detector via semaphore notification
+- Typical rate: 0-5 events/sec (only when detections exist)
+- Keepalive comment every 30 seconds (connection health)
 
 **JSON Response Format**:
 ```json
@@ -116,16 +120,14 @@ data: <base64-encoded protobuf binary>
 
 See [Protobuf Support](#protobuf-support) for schema details.
 
-**Example (JSON)**:
+**Example (JSON - default)**:
 ```bash
-curl -N -H "Accept: application/json" \
-  http://localhost:8080/api/detections/stream
+curl -N http://localhost:8080/api/detections/stream
 ```
 
-**Example (Protobuf)**:
+**Example (Protobuf - query parameter)**:
 ```bash
-curl -N -H "Accept: application/protobuf" \
-  http://localhost:8080/api/detections/stream
+curl -N "http://localhost:8080/api/detections/stream?format=protobuf"
 ```
 
 **JavaScript Client Example**:
@@ -137,15 +139,11 @@ eventSource.onmessage = (event) => {
   console.log('Detections:', detection.detections);
 };
 
-// Protobuf (requires protobuf.js)
-const eventSource = new EventSource('/api/detections/stream');
-eventSource.onmessage = (event) => {
-  const bytes = atob(event.data); // base64 decode
-  const buffer = new Uint8Array(bytes.length);
-  for (let i = 0; i < bytes.length; i++) {
-    buffer[i] = bytes.charCodeAt(i);
-  }
-  const detection = DetectionEvent.decode(buffer);
+// Protobuf (query parameter, works with EventSource)
+const eventSourcePb = new EventSource('/api/detections/stream?format=protobuf');
+eventSourcePb.onmessage = (event) => {
+  const bytes = base64ToBytes(event.data);
+  const detection = decodeDetectionEvent(bytes);
   console.log('Detections:', detection.detections);
 };
 ```
@@ -202,25 +200,56 @@ curl http://localhost:8080/api/status | jq
 
 ### GET /api/status/stream
 
-SSE stream of status updates (polled every 2 seconds for health monitoring).
+**✨ Event-Driven SSE Stream with Protobuf Support**
+
+SSE stream of status updates (broadcast every 2 seconds, fan-out architecture).
+
+**Query Parameters**:
+- `?format=protobuf` - Protocol Buffers format (base64-encoded, 60-80% smaller)
+- (default) - JSON format
+
+**Request Headers** (alternative):
+- `Accept: application/protobuf` - Protocol Buffers format
+- `Accept: application/json` - JSON format (default)
 
 **Response Headers**:
 - `Content-Type: text/event-stream`
 - `Cache-Control: no-cache`
 - `Connection: keep-alive`
+- `X-Content-Format: application/json` or `application/protobuf`
+
+**Architecture**:
+- Single-source broadcast: All clients receive from a shared broadcaster
+- Proper client disconnect handling: Resources freed when clients leave
+- Non-blocking: Slow clients skip updates without blocking others
 
 **Response Format**: Same as `/api/status`, sent every 2 seconds.
 
-**Example**:
+**Example (JSON - default)**:
 ```bash
 curl -N http://localhost:8080/api/status/stream
 ```
 
-**JavaScript Example**:
+**Example (Protobuf - query parameter)**:
+```bash
+curl -N "http://localhost:8080/api/status/stream?format=protobuf"
+```
+
+**JavaScript Example (JSON)**:
 ```javascript
 const eventSource = new EventSource('/api/status/stream');
 eventSource.onmessage = (event) => {
   const status = JSON.parse(event.data);
+  console.log('FPS:', status.monitor.current_fps);
+};
+```
+
+**JavaScript Example (Protobuf)**:
+```javascript
+const eventSource = new EventSource('/api/status/stream?format=protobuf');
+eventSource.onmessage = (event) => {
+  const bytes = base64ToBytes(event.data);
+  const status = decodeStatusEvent(bytes);
   console.log('FPS:', status.monitor.current_fps);
 };
 ```
@@ -428,6 +457,38 @@ message DetectionEvent {
     uint64 frame_number = 1;
     double timestamp = 2;
     repeated Detection detections = 3;
+}
+
+// Status stream messages
+
+message MonitorStats {
+    int32 frames_processed = 1;
+    double current_fps = 2;
+    int32 detection_count = 3;
+    int32 target_fps = 4;
+}
+
+message SharedMemoryStats {
+    int32 frame_count = 1;
+    int32 total_frames_written = 2;
+    int32 detection_version = 3;
+    int32 has_detection = 4;
+}
+
+message DetectionResult {
+    uint64 frame_number = 1;
+    double timestamp = 2;
+    int32 num_detections = 3;
+    int32 version = 4;
+    repeated Detection detections = 5;
+}
+
+message StatusEvent {
+    MonitorStats monitor = 1;
+    SharedMemoryStats shared_memory = 2;
+    DetectionResult latest_detection = 3;
+    repeated DetectionEvent detection_history = 4;
+    double timestamp = 5;
 }
 ```
 
@@ -647,5 +708,5 @@ For issues or questions:
 
 ---
 
-**Last Updated**: 2025-12-29
-**Version**: 1.0.0 (Event-Driven + Protobuf Support)
+**Last Updated**: 2026-01-21
+**Version**: 1.1.0 (Status Stream Protobuf + Fan-out Architecture)
