@@ -52,6 +52,6 @@ message StatusEvent {
     MonitorStats monitor = 1;
     SharedMemoryStats shared_memory = 2;
     DetectionResult latest_detection = 3;
-    repeated DetectionEvent detection_history = 4;
+    repeated DetectionResult detection_history = 4;
     double timestamp = 5;
 }
