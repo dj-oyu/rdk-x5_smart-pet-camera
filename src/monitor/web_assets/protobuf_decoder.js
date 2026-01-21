@@ -258,7 +258,7 @@ export function decodeStatusEvent(bytes) {
             case 1: event.monitor = decodeMonitorStats(decoder.readBytes()); break;
             case 2: event.shared_memory = decodeSharedMemoryStats(decoder.readBytes()); break;
             case 3: event.latest_detection = decodeDetectionResult(decoder.readBytes()); break;
-            case 4: event.detection_history.push(decodeDetectionEvent(decoder.readBytes())); break;
+            case 4: event.detection_history.push(decodeDetectionResult(decoder.readBytes())); break;
             case 5: event.timestamp = decoder.readDouble(); break;
             default: decoder.skipField(tag.wireType);
         }

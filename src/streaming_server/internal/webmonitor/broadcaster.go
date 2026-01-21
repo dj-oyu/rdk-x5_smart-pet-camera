@@ -720,9 +720,9 @@ func (sb *StatusBroadcaster) buildProtoStatus(
 		pbLatest = convertDetectionResultToProto(latest)
 	}
 
-	pbHistory := make([]*pb.DetectionEvent, len(history))
+	pbHistory := make([]*pb.DetectionResult, len(history))
 	for i, h := range history {
-		pbHistory[i] = convertDetectionResultToEvent(&h)
+		pbHistory[i] = convertDetectionResultToProto(&h)
 	}
 
 	return &pb.StatusEvent{

@@ -434,7 +434,7 @@ type StatusEvent struct {
 	Monitor          *MonitorStats          `protobuf:"bytes,1,opt,name=monitor,proto3" json:"monitor,omitempty"`
 	SharedMemory     *SharedMemoryStats     `protobuf:"bytes,2,opt,name=shared_memory,json=sharedMemory,proto3" json:"shared_memory,omitempty"`
 	LatestDetection  *DetectionResult       `protobuf:"bytes,3,opt,name=latest_detection,json=latestDetection,proto3" json:"latest_detection,omitempty"`
-	DetectionHistory []*DetectionEvent      `protobuf:"bytes,4,rep,name=detection_history,json=detectionHistory,proto3" json:"detection_history,omitempty"`
+	DetectionHistory []*DetectionResult     `protobuf:"bytes,4,rep,name=detection_history,json=detectionHistory,proto3" json:"detection_history,omitempty"`
 	Timestamp        float64                `protobuf:"fixed64,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
@@ -491,7 +491,7 @@ func (x *StatusEvent) GetLatestDetection() *DetectionResult {
 	return nil
 }
 
-func (x *StatusEvent) GetDetectionHistory() []*DetectionEvent {
+func (x *StatusEvent) GetDetectionHistory() []*DetectionResult {
 	if x != nil {
 		return x.DetectionHistory
 	}
@@ -548,12 +548,12 @@ const file_proto_detection_proto_rawDesc = "" +
 	"\aversion\x18\x04 \x01(\x05R\aversion\x124\n" +
 	"\n" +
 	"detections\x18\x05 \x03(\v2\x14.petcamera.DetectionR\n" +
-	"detections\"\xb0\x02\n" +
+	"detections\"\xb1\x02\n" +
 	"\vStatusEvent\x121\n" +
 	"\amonitor\x18\x01 \x01(\v2\x17.petcamera.MonitorStatsR\amonitor\x12A\n" +
 	"\rshared_memory\x18\x02 \x01(\v2\x1c.petcamera.SharedMemoryStatsR\fsharedMemory\x12E\n" +
-	"\x10latest_detection\x18\x03 \x01(\v2\x1a.petcamera.DetectionResultR\x0flatestDetection\x12F\n" +
-	"\x11detection_history\x18\x04 \x03(\v2\x19.petcamera.DetectionEventR\x10detectionHistory\x12\x1c\n" +
+	"\x10latest_detection\x18\x03 \x01(\v2\x1a.petcamera.DetectionResultR\x0flatestDetection\x12G\n" +
+	"\x11detection_history\x18\x04 \x03(\v2\x1a.petcamera.DetectionResultR\x10detectionHistory\x12\x1c\n" +
 	"\ttimestamp\x18\x05 \x01(\x01R\ttimestampBFZDgithub.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/pkg/protob\x06proto3"
 
 var (
@@ -585,7 +585,7 @@ var file_proto_detection_proto_depIdxs = []int32{
 	3, // 3: petcamera.StatusEvent.monitor:type_name -> petcamera.MonitorStats
 	4, // 4: petcamera.StatusEvent.shared_memory:type_name -> petcamera.SharedMemoryStats
 	5, // 5: petcamera.StatusEvent.latest_detection:type_name -> petcamera.DetectionResult
-	2, // 6: petcamera.StatusEvent.detection_history:type_name -> petcamera.DetectionEvent
+	5, // 6: petcamera.StatusEvent.detection_history:type_name -> petcamera.DetectionResult
 	7, // [7:7] is the sub-list for method output_type
 	7, // [7:7] is the sub-list for method input_type
 	7, // [7:7] is the sub-list for extension type_name
