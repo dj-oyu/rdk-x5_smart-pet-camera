@@ -574,12 +574,7 @@ class RealSharedMemory:
                 ret = librt.sem_post(c_void_p(sem_addr))
                 if ret != 0:
                     logger.warning(f"sem_post failed with return code: {ret}")
-                else:
-                    # DEBUG: セマフォpost成功を確認
-                    logger.debug(
-                        f"sem_post SUCCESS: frame={frame_number}, "
-                        f"num_det={c_det.num_detections}, version={c_det.version}"
-                    )
+                # NOTE: sem_post成功時のログは出さない（頻度が高すぎる）
             except Exception as e:
                 logger.warning(f"Failed to post detection semaphore: {e}")
         else:
