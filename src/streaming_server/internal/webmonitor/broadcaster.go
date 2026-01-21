@@ -1,12 +1,15 @@
 package webmonitor
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/logger"
 	pb "github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/pkg/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 // FrameBroadcaster manages fanout of JPEG frames to multiple clients.
@@ -205,11 +208,18 @@ func (fb *FrameBroadcaster) broadcast(data []byte) {
 	}
 }
 
+// SerializedEvent holds pre-serialized data in both formats.
+// This avoids redundant serialization when broadcasting to multiple clients.
+type SerializedEvent struct {
+	JSONData     []byte // Pre-serialized JSON
+	ProtobufData []byte // Pre-serialized Protobuf (base64 encoded for SSE)
+}
+
 // DetectionBroadcaster manages fanout of detection events to multiple SSE clients.
-// Internal representation uses Protocol Buffers for efficiency.
+// Pre-serializes both JSON and Protobuf formats for efficiency.
 type DetectionBroadcaster struct {
 	mu               sync.Mutex
-	clients          map[int]chan *pb.DetectionEvent // Channel carries Protobuf messages
+	clients          map[int]chan *SerializedEvent // Channel carries pre-serialized data
 	nextID           int
 	shm              *shmReader
 	monitor          *Monitor
@@ -221,7 +231,7 @@ type DetectionBroadcaster struct {
 // NewDetectionBroadcaster creates a broadcaster for detection events.
 func NewDetectionBroadcaster(shm *shmReader, monitor *Monitor) *DetectionBroadcaster {
 	return &DetectionBroadcaster{
-		clients: make(map[int]chan *pb.DetectionEvent),
+		clients: make(map[int]chan *SerializedEvent),
 		shm:     shm,
 		monitor: monitor,
 		stop:    make(chan struct{}),
@@ -229,13 +239,13 @@ func NewDetectionBroadcaster(shm *shmReader, monitor *Monitor) *DetectionBroadca
 }
 
 // Subscribe adds a new client and returns a channel for receiving detection events.
-func (db *DetectionBroadcaster) Subscribe() (int, <-chan *pb.DetectionEvent) {
+func (db *DetectionBroadcaster) Subscribe() (int, <-chan *SerializedEvent) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	id := db.nextID
 	db.nextID++
-	ch := make(chan *pb.DetectionEvent, 2) // Buffer 2 events to avoid blocking
+	ch := make(chan *SerializedEvent, 2) // Buffer 2 events to avoid blocking
 	db.clients[id] = ch
 
 	logger.Debug("DetectionBroadcaster", "Client #%d subscribed (total clients: %d)", id, len(db.clients))
@@ -407,17 +417,325 @@ func (db *DetectionBroadcaster) run() {
 			db.lastEventVersion = det.Version
 			db.monitor.mu.Unlock()
 
-			// Process and broadcast
-			db.processAndBroadcast(det)
+			// Only broadcast if there are actual detections (safety filter)
+			// YOLO detector already filters empty results, but double-check here
+			if len(det.Detections) > 0 {
+				db.processAndBroadcast(det)
+			}
 		} else {
 			db.monitor.mu.Unlock()
 		}
 	}
 }
 
-// processAndBroadcast converts detection result to Protobuf and broadcasts to all clients
+// processAndBroadcast pre-serializes detection result to both formats and broadcasts
 func (db *DetectionBroadcaster) processAndBroadcast(det *DetectionResult) {
-	// Convert Go types to Protobuf
+	// Serialize to JSON (direct from Go struct - no Protobuf intermediate)
+	jsonEvent := map[string]interface{}{
+		"frame_number": det.FrameNumber,
+		"timestamp":    det.Timestamp,
+		"detections":   convertDetectionsToJSON(det.Detections),
+	}
+	jsonData, err := json.Marshal(jsonEvent)
+	if err != nil {
+		logger.Error("DetectionBroadcaster", "JSON marshal error: %v", err)
+		return
+	}
+
+	// Serialize to Protobuf
+	pbEvent := &pb.DetectionEvent{
+		FrameNumber: uint64(det.FrameNumber),
+		Timestamp:   det.Timestamp,
+		Detections:  convertDetectionsToProto(det.Detections),
+	}
+	pbData, err := proto.Marshal(pbEvent)
+	if err != nil {
+		logger.Error("DetectionBroadcaster", "Protobuf marshal error: %v", err)
+		return
+	}
+
+	// Base64 encode for SSE transport
+	pbBase64 := []byte(base64.StdEncoding.EncodeToString(pbData))
+
+	// Broadcast pre-serialized event
+	db.broadcast(&SerializedEvent{
+		JSONData:     jsonData,
+		ProtobufData: pbBase64,
+	})
+}
+
+// convertDetectionsToJSON converts detections to JSON-compatible format
+func convertDetectionsToJSON(detections []Detection) []map[string]interface{} {
+	result := make([]map[string]interface{}, len(detections))
+	for i, d := range detections {
+		result[i] = map[string]interface{}{
+			"bbox": map[string]int{
+				"x": d.BBox.X,
+				"y": d.BBox.Y,
+				"w": d.BBox.W,
+				"h": d.BBox.H,
+			},
+			"confidence": d.Confidence,
+			"class_id":   0,
+			"class_name": d.ClassName,
+		}
+	}
+	return result
+}
+
+// convertDetectionsToProto converts detections to Protobuf format
+func convertDetectionsToProto(detections []Detection) []*pb.Detection {
+	result := make([]*pb.Detection, len(detections))
+	for i, d := range detections {
+		result[i] = &pb.Detection{
+			Bbox: &pb.BBox{
+				X: int32(d.BBox.X),
+				Y: int32(d.BBox.Y),
+				W: int32(d.BBox.W),
+				H: int32(d.BBox.H),
+			},
+			Confidence: float32(d.Confidence),
+			ClassId:    0,
+			Label:      d.ClassName,
+		}
+	}
+	return result
+}
+
+func (db *DetectionBroadcaster) broadcast(event *SerializedEvent) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	for id, ch := range db.clients {
+		select {
+		case ch <- event:
+			// Sent successfully
+		default:
+			// Client too slow, skip this event for this client
+			_ = id
+		}
+	}
+}
+
+// StatusBroadcaster manages fanout of status events to multiple SSE clients.
+// Pre-serializes both JSON and Protobuf formats for efficiency.
+type StatusBroadcaster struct {
+	mu       sync.Mutex
+	clients  map[int]chan *SerializedEvent // Channel carries pre-serialized data
+	nextID   int
+	shm      *shmReader
+	monitor  *Monitor
+	stop     chan struct{}
+	stopped  bool
+	interval time.Duration
+}
+
+// NewStatusBroadcaster creates a broadcaster for status events.
+func NewStatusBroadcaster(shm *shmReader, monitor *Monitor, interval time.Duration) *StatusBroadcaster {
+	return &StatusBroadcaster{
+		clients:  make(map[int]chan *SerializedEvent),
+		shm:      shm,
+		monitor:  monitor,
+		stop:     make(chan struct{}),
+		interval: interval,
+	}
+}
+
+// Subscribe adds a new client and returns a channel for receiving status events.
+func (sb *StatusBroadcaster) Subscribe() (int, <-chan *SerializedEvent) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+
+	id := sb.nextID
+	sb.nextID++
+	ch := make(chan *SerializedEvent, 2) // Buffer 2 events to avoid blocking
+	sb.clients[id] = ch
+
+	logger.Debug("StatusBroadcaster", "Client #%d subscribed (total clients: %d)", id, len(sb.clients))
+	return id, ch
+}
+
+// Unsubscribe removes a client.
+func (sb *StatusBroadcaster) Unsubscribe(id int) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+
+	if ch, ok := sb.clients[id]; ok {
+		close(ch)
+		delete(sb.clients, id)
+		logger.Debug("StatusBroadcaster", "Client #%d unsubscribed (remaining clients: %d)", id, len(sb.clients))
+	}
+}
+
+// Start begins the status event loop.
+func (sb *StatusBroadcaster) Start() {
+	go sb.run()
+}
+
+// Stop halts the broadcaster.
+func (sb *StatusBroadcaster) Stop() {
+	sb.mu.Lock()
+	if !sb.stopped {
+		close(sb.stop)
+		sb.stopped = true
+	}
+	sb.mu.Unlock()
+}
+
+func (sb *StatusBroadcaster) run() {
+	logger.Info("StatusBroadcaster", "Starting status event broadcaster (interval=%v)...", sb.interval)
+	ticker := time.NewTicker(sb.interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-sb.stop:
+			return
+		case <-ticker.C:
+			// Check client count before generating status
+			sb.mu.Lock()
+			clientCount := len(sb.clients)
+			sb.mu.Unlock()
+
+			if clientCount == 0 {
+				continue
+			}
+
+			// Generate and broadcast pre-serialized status event
+			event := sb.generateSerializedEvent()
+			if event != nil {
+				sb.broadcast(event)
+			}
+		}
+	}
+}
+
+func (sb *StatusBroadcaster) generateSerializedEvent() *SerializedEvent {
+	// Get snapshot from monitor
+	monitorStats, shmStats, latest, history := sb.monitor.Snapshot()
+	timestamp := float64(time.Now().Unix())
+
+	// Build JSON directly from Go structs (no Protobuf intermediate)
+	jsonEvent := sb.buildJSONStatus(monitorStats, shmStats, latest, history, timestamp)
+	jsonData, err := json.Marshal(jsonEvent)
+	if err != nil {
+		logger.Error("StatusBroadcaster", "JSON marshal error: %v", err)
+		return nil
+	}
+
+	// Build Protobuf
+	pbEvent := sb.buildProtoStatus(monitorStats, shmStats, latest, history, timestamp)
+	pbData, err := proto.Marshal(pbEvent)
+	if err != nil {
+		logger.Error("StatusBroadcaster", "Protobuf marshal error: %v", err)
+		return nil
+	}
+
+	// Base64 encode for SSE transport
+	pbBase64 := []byte(base64.StdEncoding.EncodeToString(pbData))
+
+	return &SerializedEvent{
+		JSONData:     jsonData,
+		ProtobufData: pbBase64,
+	}
+}
+
+func (sb *StatusBroadcaster) buildJSONStatus(
+	monitorStats MonitorStats,
+	shmStats SharedMemoryStats,
+	latest *DetectionResult,
+	history []DetectionResult,
+	timestamp float64,
+) map[string]interface{} {
+	// Monitor stats
+	jsonMonitor := map[string]interface{}{
+		"frames_processed": monitorStats.FramesProcessed,
+		"current_fps":      monitorStats.CurrentFPS,
+		"detection_count":  monitorStats.DetectionCount,
+		"target_fps":       monitorStats.TargetFPS,
+	}
+
+	// Shared memory stats
+	jsonShmStats := map[string]interface{}{
+		"frame_count":          shmStats.FrameCount,
+		"total_frames_written": shmStats.TotalFramesWritten,
+		"detection_version":    shmStats.DetectionVersion,
+		"has_detection":        shmStats.HasDetection,
+	}
+
+	// Latest detection
+	var jsonLatest interface{}
+	if latest != nil {
+		jsonLatest = map[string]interface{}{
+			"frame_number":   latest.FrameNumber,
+			"timestamp":      latest.Timestamp,
+			"num_detections": latest.NumDetections,
+			"version":        latest.Version,
+			"detections":     convertDetectionsToJSON(latest.Detections),
+		}
+	}
+
+	// Detection history
+	jsonHistory := make([]map[string]interface{}, len(history))
+	for i, h := range history {
+		jsonHistory[i] = map[string]interface{}{
+			"frame_number": h.FrameNumber,
+			"timestamp":    h.Timestamp,
+			"detections":   convertDetectionsToJSON(h.Detections),
+		}
+	}
+
+	return map[string]interface{}{
+		"monitor":           jsonMonitor,
+		"shared_memory":     jsonShmStats,
+		"latest_detection":  jsonLatest,
+		"detection_history": jsonHistory,
+		"timestamp":         timestamp,
+	}
+}
+
+func (sb *StatusBroadcaster) buildProtoStatus(
+	monitorStats MonitorStats,
+	shmStats SharedMemoryStats,
+	latest *DetectionResult,
+	history []DetectionResult,
+	timestamp float64,
+) *pb.StatusEvent {
+	pbMonitor := &pb.MonitorStats{
+		FramesProcessed: int32(monitorStats.FramesProcessed),
+		CurrentFps:      monitorStats.CurrentFPS,
+		DetectionCount:  int32(monitorStats.DetectionCount),
+		TargetFps:       int32(monitorStats.TargetFPS),
+	}
+
+	pbShmStats := &pb.SharedMemoryStats{
+		FrameCount:         int32(shmStats.FrameCount),
+		TotalFramesWritten: int32(shmStats.TotalFramesWritten),
+		DetectionVersion:   int32(shmStats.DetectionVersion),
+		HasDetection:       int32(shmStats.HasDetection),
+	}
+
+	var pbLatest *pb.DetectionResult
+	if latest != nil {
+		pbLatest = convertDetectionResultToProto(latest)
+	}
+
+	pbHistory := make([]*pb.DetectionEvent, len(history))
+	for i, h := range history {
+		pbHistory[i] = convertDetectionResultToEvent(&h)
+	}
+
+	return &pb.StatusEvent{
+		Monitor:          pbMonitor,
+		SharedMemory:     pbShmStats,
+		LatestDetection:  pbLatest,
+		DetectionHistory: pbHistory,
+		Timestamp:        timestamp,
+	}
+}
+
+// convertDetectionResultToProto converts DetectionResult to pb.DetectionResult
+func convertDetectionResultToProto(det *DetectionResult) *pb.DetectionResult {
 	pbDetections := make([]*pb.Detection, len(det.Detections))
 	for i, d := range det.Detections {
 		pbDetections[i] = &pb.Detection{
@@ -428,26 +746,73 @@ func (db *DetectionBroadcaster) processAndBroadcast(det *DetectionResult) {
 				H: int32(d.BBox.H),
 			},
 			Confidence: float32(d.Confidence),
-			ClassId:    0, // Not used in current schema
+			ClassId:    0,
 			Label:      d.ClassName,
 		}
 	}
 
-	event := &pb.DetectionEvent{
+	return &pb.DetectionResult{
+		FrameNumber:   uint64(det.FrameNumber),
+		Timestamp:     det.Timestamp,
+		NumDetections: int32(det.NumDetections),
+		Version:       int32(det.Version),
+		Detections:    pbDetections,
+	}
+}
+
+// convertDetectionEventToProto converts DetectionEvent to pb.DetectionEvent
+func convertDetectionEventToProto(det *DetectionEvent) *pb.DetectionEvent {
+	pbDetections := make([]*pb.Detection, len(det.Detections))
+	for i, d := range det.Detections {
+		pbDetections[i] = &pb.Detection{
+			Bbox: &pb.BBox{
+				X: int32(d.BBox.X),
+				Y: int32(d.BBox.Y),
+				W: int32(d.BBox.W),
+				H: int32(d.BBox.H),
+			},
+			Confidence: float32(d.Confidence),
+			ClassId:    0,
+			Label:      d.ClassName,
+		}
+	}
+
+	return &pb.DetectionEvent{
 		FrameNumber: uint64(det.FrameNumber),
 		Timestamp:   det.Timestamp,
 		Detections:  pbDetections,
 	}
-
-	// Broadcast to all subscribed clients
-	db.broadcast(event)
 }
 
-func (db *DetectionBroadcaster) broadcast(event *pb.DetectionEvent) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
+// convertDetectionResultToEvent converts DetectionResult to pb.DetectionEvent (for history)
+func convertDetectionResultToEvent(det *DetectionResult) *pb.DetectionEvent {
+	pbDetections := make([]*pb.Detection, len(det.Detections))
+	for i, d := range det.Detections {
+		pbDetections[i] = &pb.Detection{
+			Bbox: &pb.BBox{
+				X: int32(d.BBox.X),
+				Y: int32(d.BBox.Y),
+				W: int32(d.BBox.W),
+				H: int32(d.BBox.H),
+			},
+			Confidence: float32(d.Confidence),
+			ClassId:    0,
+			Label:      d.ClassName,
+		}
+	}
 
-	for id, ch := range db.clients {
+	return &pb.DetectionEvent{
+		FrameNumber: uint64(det.FrameNumber),
+		Timestamp:   det.Timestamp,
+		Detections:  pbDetections,
+	}
+}
+
+func (sb *StatusBroadcaster) broadcast(event *SerializedEvent) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+
+	for id, ch := range sb.clients {
 		select {
 		case ch <- event:
 			// Sent successfully

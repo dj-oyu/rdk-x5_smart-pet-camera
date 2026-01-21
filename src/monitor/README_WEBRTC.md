@@ -95,8 +95,8 @@ const canvas = document.getElementById('bbox-canvas');
 const client = new WebRTCVideoClient(video, 'http://localhost:8081');
 await client.start();
 
-// BBoxオーバーレイ
-const overlay = new BBoxOverlay(video, canvas, '/api/detections/stream');
+// BBoxオーバーレイ (Protobuf format by default)
+const overlay = new BBoxOverlay(video, canvas);
 overlay.start();
 ```
 

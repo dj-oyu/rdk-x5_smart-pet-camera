@@ -217,6 +217,294 @@ func (x *DetectionEvent) GetDetections() []*Detection {
 	return nil
 }
 
+type MonitorStats struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	FramesProcessed int32                  `protobuf:"varint,1,opt,name=frames_processed,json=framesProcessed,proto3" json:"frames_processed,omitempty"`
+	CurrentFps      float64                `protobuf:"fixed64,2,opt,name=current_fps,json=currentFps,proto3" json:"current_fps,omitempty"`
+	DetectionCount  int32                  `protobuf:"varint,3,opt,name=detection_count,json=detectionCount,proto3" json:"detection_count,omitempty"`
+	TargetFps       int32                  `protobuf:"varint,4,opt,name=target_fps,json=targetFps,proto3" json:"target_fps,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *MonitorStats) Reset() {
+	*x = MonitorStats{}
+	mi := &file_proto_detection_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MonitorStats) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MonitorStats) ProtoMessage() {}
+
+func (x *MonitorStats) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_detection_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MonitorStats.ProtoReflect.Descriptor instead.
+func (*MonitorStats) Descriptor() ([]byte, []int) {
+	return file_proto_detection_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *MonitorStats) GetFramesProcessed() int32 {
+	if x != nil {
+		return x.FramesProcessed
+	}
+	return 0
+}
+
+func (x *MonitorStats) GetCurrentFps() float64 {
+	if x != nil {
+		return x.CurrentFps
+	}
+	return 0
+}
+
+func (x *MonitorStats) GetDetectionCount() int32 {
+	if x != nil {
+		return x.DetectionCount
+	}
+	return 0
+}
+
+func (x *MonitorStats) GetTargetFps() int32 {
+	if x != nil {
+		return x.TargetFps
+	}
+	return 0
+}
+
+type SharedMemoryStats struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	FrameCount         int32                  `protobuf:"varint,1,opt,name=frame_count,json=frameCount,proto3" json:"frame_count,omitempty"`
+	TotalFramesWritten int32                  `protobuf:"varint,2,opt,name=total_frames_written,json=totalFramesWritten,proto3" json:"total_frames_written,omitempty"`
+	DetectionVersion   int32                  `protobuf:"varint,3,opt,name=detection_version,json=detectionVersion,proto3" json:"detection_version,omitempty"`
+	HasDetection       int32                  `protobuf:"varint,4,opt,name=has_detection,json=hasDetection,proto3" json:"has_detection,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *SharedMemoryStats) Reset() {
+	*x = SharedMemoryStats{}
+	mi := &file_proto_detection_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SharedMemoryStats) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SharedMemoryStats) ProtoMessage() {}
+
+func (x *SharedMemoryStats) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_detection_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SharedMemoryStats.ProtoReflect.Descriptor instead.
+func (*SharedMemoryStats) Descriptor() ([]byte, []int) {
+	return file_proto_detection_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *SharedMemoryStats) GetFrameCount() int32 {
+	if x != nil {
+		return x.FrameCount
+	}
+	return 0
+}
+
+func (x *SharedMemoryStats) GetTotalFramesWritten() int32 {
+	if x != nil {
+		return x.TotalFramesWritten
+	}
+	return 0
+}
+
+func (x *SharedMemoryStats) GetDetectionVersion() int32 {
+	if x != nil {
+		return x.DetectionVersion
+	}
+	return 0
+}
+
+func (x *SharedMemoryStats) GetHasDetection() int32 {
+	if x != nil {
+		return x.HasDetection
+	}
+	return 0
+}
+
+type DetectionResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	FrameNumber   uint64                 `protobuf:"varint,1,opt,name=frame_number,json=frameNumber,proto3" json:"frame_number,omitempty"`
+	Timestamp     float64                `protobuf:"fixed64,2,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	NumDetections int32                  `protobuf:"varint,3,opt,name=num_detections,json=numDetections,proto3" json:"num_detections,omitempty"`
+	Version       int32                  `protobuf:"varint,4,opt,name=version,proto3" json:"version,omitempty"`
+	Detections    []*Detection           `protobuf:"bytes,5,rep,name=detections,proto3" json:"detections,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DetectionResult) Reset() {
+	*x = DetectionResult{}
+	mi := &file_proto_detection_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DetectionResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DetectionResult) ProtoMessage() {}
+
+func (x *DetectionResult) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_detection_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DetectionResult.ProtoReflect.Descriptor instead.
+func (*DetectionResult) Descriptor() ([]byte, []int) {
+	return file_proto_detection_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *DetectionResult) GetFrameNumber() uint64 {
+	if x != nil {
+		return x.FrameNumber
+	}
+	return 0
+}
+
+func (x *DetectionResult) GetTimestamp() float64 {
+	if x != nil {
+		return x.Timestamp
+	}
+	return 0
+}
+
+func (x *DetectionResult) GetNumDetections() int32 {
+	if x != nil {
+		return x.NumDetections
+	}
+	return 0
+}
+
+func (x *DetectionResult) GetVersion() int32 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *DetectionResult) GetDetections() []*Detection {
+	if x != nil {
+		return x.Detections
+	}
+	return nil
+}
+
+type StatusEvent struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Monitor          *MonitorStats          `protobuf:"bytes,1,opt,name=monitor,proto3" json:"monitor,omitempty"`
+	SharedMemory     *SharedMemoryStats     `protobuf:"bytes,2,opt,name=shared_memory,json=sharedMemory,proto3" json:"shared_memory,omitempty"`
+	LatestDetection  *DetectionResult       `protobuf:"bytes,3,opt,name=latest_detection,json=latestDetection,proto3" json:"latest_detection,omitempty"`
+	DetectionHistory []*DetectionEvent      `protobuf:"bytes,4,rep,name=detection_history,json=detectionHistory,proto3" json:"detection_history,omitempty"`
+	Timestamp        float64                `protobuf:"fixed64,5,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *StatusEvent) Reset() {
+	*x = StatusEvent{}
+	mi := &file_proto_detection_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StatusEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StatusEvent) ProtoMessage() {}
+
+func (x *StatusEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_detection_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StatusEvent.ProtoReflect.Descriptor instead.
+func (*StatusEvent) Descriptor() ([]byte, []int) {
+	return file_proto_detection_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *StatusEvent) GetMonitor() *MonitorStats {
+	if x != nil {
+		return x.Monitor
+	}
+	return nil
+}
+
+func (x *StatusEvent) GetSharedMemory() *SharedMemoryStats {
+	if x != nil {
+		return x.SharedMemory
+	}
+	return nil
+}
+
+func (x *StatusEvent) GetLatestDetection() *DetectionResult {
+	if x != nil {
+		return x.LatestDetection
+	}
+	return nil
+}
+
+func (x *StatusEvent) GetDetectionHistory() []*DetectionEvent {
+	if x != nil {
+		return x.DetectionHistory
+	}
+	return nil
+}
+
+func (x *StatusEvent) GetTimestamp() float64 {
+	if x != nil {
+		return x.Timestamp
+	}
+	return 0
+}
+
 var File_proto_detection_proto protoreflect.FileDescriptor
 
 const file_proto_detection_proto_rawDesc = "" +
@@ -239,7 +527,34 @@ const file_proto_detection_proto_rawDesc = "" +
 	"\ttimestamp\x18\x02 \x01(\x01R\ttimestamp\x124\n" +
 	"\n" +
 	"detections\x18\x03 \x03(\v2\x14.petcamera.DetectionR\n" +
-	"detectionsBFZDgithub.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/pkg/protob\x06proto3"
+	"detections\"\xa2\x01\n" +
+	"\fMonitorStats\x12)\n" +
+	"\x10frames_processed\x18\x01 \x01(\x05R\x0fframesProcessed\x12\x1f\n" +
+	"\vcurrent_fps\x18\x02 \x01(\x01R\n" +
+	"currentFps\x12'\n" +
+	"\x0fdetection_count\x18\x03 \x01(\x05R\x0edetectionCount\x12\x1d\n" +
+	"\n" +
+	"target_fps\x18\x04 \x01(\x05R\ttargetFps\"\xb8\x01\n" +
+	"\x11SharedMemoryStats\x12\x1f\n" +
+	"\vframe_count\x18\x01 \x01(\x05R\n" +
+	"frameCount\x120\n" +
+	"\x14total_frames_written\x18\x02 \x01(\x05R\x12totalFramesWritten\x12+\n" +
+	"\x11detection_version\x18\x03 \x01(\x05R\x10detectionVersion\x12#\n" +
+	"\rhas_detection\x18\x04 \x01(\x05R\fhasDetection\"\xc9\x01\n" +
+	"\x0fDetectionResult\x12!\n" +
+	"\fframe_number\x18\x01 \x01(\x04R\vframeNumber\x12\x1c\n" +
+	"\ttimestamp\x18\x02 \x01(\x01R\ttimestamp\x12%\n" +
+	"\x0enum_detections\x18\x03 \x01(\x05R\rnumDetections\x12\x18\n" +
+	"\aversion\x18\x04 \x01(\x05R\aversion\x124\n" +
+	"\n" +
+	"detections\x18\x05 \x03(\v2\x14.petcamera.DetectionR\n" +
+	"detections\"\xb0\x02\n" +
+	"\vStatusEvent\x121\n" +
+	"\amonitor\x18\x01 \x01(\v2\x17.petcamera.MonitorStatsR\amonitor\x12A\n" +
+	"\rshared_memory\x18\x02 \x01(\v2\x1c.petcamera.SharedMemoryStatsR\fsharedMemory\x12E\n" +
+	"\x10latest_detection\x18\x03 \x01(\v2\x1a.petcamera.DetectionResultR\x0flatestDetection\x12F\n" +
+	"\x11detection_history\x18\x04 \x03(\v2\x19.petcamera.DetectionEventR\x10detectionHistory\x12\x1c\n" +
+	"\ttimestamp\x18\x05 \x01(\x01R\ttimestampBFZDgithub.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/pkg/protob\x06proto3"
 
 var (
 	file_proto_detection_proto_rawDescOnce sync.Once
@@ -253,20 +568,29 @@ func file_proto_detection_proto_rawDescGZIP() []byte {
 	return file_proto_detection_proto_rawDescData
 }
 
-var file_proto_detection_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_proto_detection_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_proto_detection_proto_goTypes = []any{
-	(*BBox)(nil),           // 0: petcamera.BBox
-	(*Detection)(nil),      // 1: petcamera.Detection
-	(*DetectionEvent)(nil), // 2: petcamera.DetectionEvent
+	(*BBox)(nil),              // 0: petcamera.BBox
+	(*Detection)(nil),         // 1: petcamera.Detection
+	(*DetectionEvent)(nil),    // 2: petcamera.DetectionEvent
+	(*MonitorStats)(nil),      // 3: petcamera.MonitorStats
+	(*SharedMemoryStats)(nil), // 4: petcamera.SharedMemoryStats
+	(*DetectionResult)(nil),   // 5: petcamera.DetectionResult
+	(*StatusEvent)(nil),       // 6: petcamera.StatusEvent
 }
 var file_proto_detection_proto_depIdxs = []int32{
 	0, // 0: petcamera.Detection.bbox:type_name -> petcamera.BBox
 	1, // 1: petcamera.DetectionEvent.detections:type_name -> petcamera.Detection
-	2, // [2:2] is the sub-list for method output_type
-	2, // [2:2] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	1, // 2: petcamera.DetectionResult.detections:type_name -> petcamera.Detection
+	3, // 3: petcamera.StatusEvent.monitor:type_name -> petcamera.MonitorStats
+	4, // 4: petcamera.StatusEvent.shared_memory:type_name -> petcamera.SharedMemoryStats
+	5, // 5: petcamera.StatusEvent.latest_detection:type_name -> petcamera.DetectionResult
+	2, // 6: petcamera.StatusEvent.detection_history:type_name -> petcamera.DetectionEvent
+	7, // [7:7] is the sub-list for method output_type
+	7, // [7:7] is the sub-list for method input_type
+	7, // [7:7] is the sub-list for extension type_name
+	7, // [7:7] is the sub-list for extension extendee
+	0, // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_proto_detection_proto_init() }
@@ -280,7 +604,7 @@ func file_proto_detection_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_detection_proto_rawDesc), len(file_proto_detection_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   3,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
