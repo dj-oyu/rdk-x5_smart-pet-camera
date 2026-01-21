@@ -202,6 +202,7 @@ class YoloDetectorDaemon:
                     nv12_data=yolo_frame.data,  # memoryview（ゼロコピー）
                     width=yolo_frame.width,
                     height=yolo_frame.height,
+                    brightness_avg=yolo_frame.brightness_avg,  # CLAHE判定用
                 )
                 t3 = time_module.perf_counter()
                 time_detect = (t3 - t2) * 1000
