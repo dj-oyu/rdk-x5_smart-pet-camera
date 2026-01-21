@@ -70,6 +70,12 @@ static void lowlight_log(const char *level, const char *fmt, ...) {
 #define AE_GRID_ITEMS (AE_GRID_SIZE * AE_GRID_SIZE)
 #define AE_CHANNELS 4
 
+// Fixed bit depth for AE statistics normalization
+// Sensor: 10-bit RAW input, ISP internally expands to ~15-bit range
+// Observed AE stat values: avg ~10000, max ~40000-48000 (approx 15.5-bit effective)
+// Use fixed 7-bit shift to normalize to 0-255 range
+#define AE_STAT_SHIFT_BITS 7
+
 // Brightness zone thresholds
 #define THRESHOLD_DARK 50
 #define THRESHOLD_DIM 70
@@ -142,20 +148,10 @@ int isp_get_brightness(hbn_vnode_handle_t isp_handle, isp_brightness_result_t *r
             debug_counter = 0;
         }
 
-        // Normalize to 0-255 range based on detected bit depth
-        // Different sensors/cameras may use different formats:
-        // - 8-bit:  max ~255    -> no shift
-        // - 12-bit: max ~4095   -> shift 4
-        // - 16-bit: max ~65535  -> shift 8
-        int shift_bits = 0;
-        if (max_val > 4095) {
-            shift_bits = 8;  // 16-bit to 8-bit
-        } else if (max_val > 255) {
-            shift_bits = 4;  // 12-bit to 8-bit
-        }
-        // else: already 8-bit range, no shift needed
-
-        result->brightness_avg = (float)(raw_avg >> shift_bits);
+        // Normalize to 0-255 range using fixed bit depth
+        // Based on known sensor configuration: 10-bit RAW input
+        // ISP AE statistics use ~15-bit effective range (max observed ~48000)
+        result->brightness_avg = (float)(raw_avg >> AE_STAT_SHIFT_BITS);
         if (result->brightness_avg > 255.0f) {
             result->brightness_avg = 255.0f;
         }

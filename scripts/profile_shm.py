@@ -33,7 +33,7 @@ except ImportError:
     sys.exit(1)
 
 # New shared memory names (Option B design)
-SHM_NAME_PROBE_FRAME = "/pet_camera_probe_frame"
+SHM_NAME_BRIGHTNESS = "/pet_camera_brightness"  # Lightweight brightness data
 
 
 def find_switcher_daemon_pid() -> Optional[int]:
@@ -505,12 +505,11 @@ def main():
 Shared Memory Design (Option B - Zero-Copy):
   - /pet_camera_active_frame   : Active camera NV12 (30fps, written by active camera daemon)
   - /pet_camera_stream         : Active camera H.264 (30fps, written by active camera daemon)
-  - /pet_camera_probe_frame    : Probe NV12 (on-demand, written on SIGRTMIN request)
+  - /pet_camera_brightness     : Lightweight brightness data (~100 bytes, both cameras)
 
 Camera daemons receive signals from camera_switcher_daemon:
   - SIGUSR1: Activate (start writing to active_frame/stream)
   - SIGUSR2: Deactivate (stop writing)
-  - SIGRTMIN: Probe request (write one frame to probe_frame)
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )

@@ -772,6 +772,215 @@ GPUオフロードが効果的な処理:
 
 ---
 
+## カメラ切り替えシステム
+
+### 概要
+
+昼用カメラ（DAY）と夜用カメラ（NIGHT）を明るさに基づいて自動切り替えするシステム。
+
+### プロセス構成
+
+```
+camera_switcher_daemon (親プロセス)
+    │
+    ├── fork() ──→ camera_daemon DAY  (子プロセス)
+    │                    │
+    │                    ├── ISPハードウェア (handle A)
+    │                    ├── /pet_camera_brightness に明るさ書き込み
+    │                    └── /pet_camera_active_frame に映像書き込み (active時)
+    │
+    └── fork() ──→ camera_daemon NIGHT (子プロセス)
+                         │
+                         ├── ISPハードウェア (handle B)
+                         └── /pet_camera_active_frame に映像書き込み (active時)
+```
+
+### 明るさ計算
+
+#### データソース
+
+ISPハードウェアのAE (Auto Exposure) 統計を使用:
+
+```
+ISP AE Statistics (32×32 grid = 1024 zones)
+          ↓
+    raw_avg (~15-bit range: 10000-48000)
+          ↓
+    >> 7 (7-bit固定シフト)
+          ↓
+    brightness_avg (0-255)
+```
+
+| パラメータ | 値 |
+|-----------|-----|
+| AE Grid | 32×32 = 1024 zones |
+| Raw値範囲 | ~10000-48000 (15.5-bit effective) |
+| 正規化シフト | 7-bit (固定) |
+| 出力範囲 | 0-255 |
+
+#### 明るさゾーン分類
+
+| ゾーン | 条件 | 用途 |
+|--------|------|------|
+| DARK | brightness < 50 OR lux < 100 | ISP低照度補正ON |
+| DIM | 50 ≤ brightness < 70 | 軽度ISP補正 |
+| NORMAL | 70 ≤ brightness < 180 | 補正なし |
+| BRIGHT | brightness ≥ 180 | 補正なし |
+
+### カメラ切り替え判定
+
+#### 判定ロジック
+
+| 切り替え | 判定対象 | 閾値 | 保持時間 |
+|---------|---------|------|---------|
+| DAY→NIGHT | DAYカメラのbrightness | < 50 | 10秒 |
+| NIGHT→DAY | DAYカメラのbrightness | > 60 | 10秒 |
+
+**重要**: 切り替え判定は**常にDAYカメラ (index=0) の明るさ**を使用する。
+NIGHTカメラの明るさは判定に使用しない。
+
+#### 判定フロー
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    camera_daemon (DAY)                       │
+│                                                              │
+│  ISP AE Stats ──→ brightness_avg ──→ /pet_camera_brightness │
+│                                                              │
+│  書き込み頻度:                                               │
+│    Active時:   8フレーム毎 (~3.75Hz)                        │
+│    Inactive時: 64フレーム毎 (~0.47Hz, ~2.1秒)               │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│                  camera_switcher_daemon                      │
+│                                                              │
+│  /pet_camera_brightness から DAY (index=0) を読み取り        │
+│                              ↓                               │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ DAYカメラがActive時:                                 │   │
+│  │   brightness < 50 が10秒継続 → NIGHTに切り替え       │   │
+│  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ NIGHTカメラがActive時:                               │   │
+│  │   brightness > 60 が10秒継続 → DAYに切り替え         │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                              ↓                               │
+│  SIGUSR1 (→DAY) / SIGUSR2 (→NIGHT) を子プロセスに送信       │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 共有メモリ方式を採用した理由
+
+#### アーキテクチャの制約
+
+ISP handleは**プロセスローカル**であり、`camera_switcher_daemon`から直接アクセスできない:
+
+```
+❌ camera_switcher_daemon が ISP を直接読む
+   → ISP handle は camera_daemon プロセス内でのみ有効
+   → プロセス間で ISP handle を共有する方法がない
+
+✅ 共有メモリ経由
+   → camera_daemon が ISP から読み取り → 共有メモリに書き込み
+   → camera_switcher_daemon が共有メモリから読み取り → 判定
+```
+
+#### 代替案との比較
+
+| 方式 | メリット | デメリット |
+|------|---------|-----------|
+| **共有メモリ (採用)** | デバッグ容易、関心の分離、柔軟性 | 若干のIPC overhead (~100B) |
+| ISP直接 (daemon内判定) | レイテンシ最小 | 密結合、デバッグ困難、実装複雑 |
+| パイプ/ソケット | 標準的なIPC | シリアライズのオーバーヘッド |
+
+#### 共有メモリ方式のメリット
+
+1. **デバッグ容易性**
+   - `real_shared_memory.py` で明るさをリアルタイム監視可能
+   - 判定に使用されているデータを直接確認できる
+
+2. **関心の分離**
+   - `camera_daemon`: キャプチャと明るさ測定に専念
+   - `camera_switcher_daemon`: 切り替えロジックに専念
+   - 各コンポーネントが独立してテスト可能
+
+3. **オーバーヘッドの軽さ**
+   - 共有メモリサイズ: ~100 bytes
+   - メモリコピーなし (mmap)
+   - セマフォによる効率的な同期
+
+4. **柔軟性**
+   - 将来的に他のプロセスからも明るさデータを参照可能
+   - 閾値やロジックの変更が容易
+
+### 共有メモリ構造
+
+#### `/pet_camera_brightness` (~100 bytes)
+
+```c
+typedef struct {
+    uint64_t frame_number;      // 8B  フレーム番号
+    struct timespec timestamp;  // 16B タイムスタンプ
+    float brightness_avg;       // 4B  明るさ (0-255)
+    uint32_t brightness_lux;    // 4B  環境照度
+    uint8_t brightness_zone;    // 1B  ゾーン (0-3)
+    uint8_t correction_applied; // 1B  ISP補正中フラグ
+    uint8_t _reserved[2];       // 2B  パディング
+} CameraBrightness;             // 36B per camera
+
+typedef struct {
+    volatile uint32_t version;           // 4B  更新カウンタ
+    CameraBrightness cameras[2];         // 72B (36B × 2カメラ)
+    sem_t update_sem;                    // 32B セマフォ
+} SharedBrightnessData;                  // ~108 bytes total
+```
+
+#### 書き込みタイミング (camera_pipeline.c)
+
+```c
+// 2のべき乗マスクによる高速判定
+#define ISP_BRIGHTNESS_MASK_ACTIVE 7    // 8フレーム毎 (2^3 - 1)
+#define ISP_BRIGHTNESS_MASK_INACTIVE 63 // 64フレーム毎 (2^6 - 1)
+
+bool is_brightness_frame = (frame_count & brightness_mask) == 0;
+
+// DAYカメラのみ書き込み (NIGHTカメラは書き込まない)
+if (is_day_camera && is_brightness_frame && brightness_result.valid) {
+    shm_brightness_write(pipeline->shm_brightness, camera_index, &brightness);
+}
+```
+
+### ISP低照度補正との違い
+
+| 機能 | データソース | 判定プロセス | 頻度 |
+|------|-------------|-------------|------|
+| **カメラ切り替え** | 共有メモリ (`/pet_camera_brightness`) | switcher_daemon | 2秒毎 |
+| **ISP低照度補正** | ISPハードウェア直接 | camera_daemon (自身) | 32フレーム毎 (~1Hz) |
+
+ISP低照度補正は同一プロセス内でISPパラメータを調整するため、
+共有メモリを経由せず直接ISPから読み取る。
+
+### シグナル制御
+
+| シグナル | 送信元 | 受信先 | 動作 |
+|---------|-------|--------|------|
+| SIGUSR1 | switcher_daemon | camera_daemon | DAYをActive化 |
+| SIGUSR2 | switcher_daemon | camera_daemon | NIGHTをActive化 |
+
+Active化されたカメラのみが `/pet_camera_active_frame` と `/pet_camera_stream` に書き込む。
+
+### 関連ファイル
+
+- `src/capture/camera_switcher_daemon.c`: 切り替えデーモン本体
+- `src/capture/camera_switcher.c`: 切り替えロジック
+- `src/capture/camera_pipeline.c`: 明るさ取得・共有メモリ書き込み
+- `src/capture/isp_brightness.c`: ISP明るさ計算
+- `src/capture/shared_memory.h`: 共有メモリ構造定義
+- `src/capture/real_shared_memory.py`: 明るさモニタリングツール
+
+---
+
 ## まとめ
 
 このアーキテクチャは以下の原則に基づいて設計されている：

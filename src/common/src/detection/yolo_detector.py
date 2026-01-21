@@ -129,6 +129,7 @@ class YoloDetector:
         strides: list[int] = [8, 16, 32],
         input_size: tuple[int, int] = (640, 640),
         auto_download: bool = True,
+        brightness_target: int = 100,
     ) -> None:
         """
         初期化
@@ -141,6 +142,7 @@ class YoloDetector:
             strides: ストライド値
             input_size: 入力画像サイズ (height, width)
             auto_download: モデルが存在しない場合に自動ダウンロード
+            brightness_target: 低照度時の目標輝度 (0=無効, 1-255=目標値)
         """
         self.model_path = model_path
         self.score_threshold = score_threshold
@@ -148,6 +150,13 @@ class YoloDetector:
         self.reg = reg
         self.strides = strides
         self.input_size = input_size
+
+        # 低照度補正設定
+        self.brightness_target = brightness_target  # 目標輝度 (0=無効)
+        self.brightness_enabled = brightness_target > 0  # 動的ON/OFF
+        self.brightness_ab_test = False  # A/Bテストモード
+        self.brightness_max_gain = 4.0  # 最大ゲイン制限
+        self.brightness_min_threshold = 60  # この輝度以下で補正適用
 
         # モデルの自動ダウンロード
         if auto_download and not os.path.exists(model_path):
@@ -194,11 +203,24 @@ class YoloDetector:
         self._total_calls = 0
         self._total_inference_time = 0.0
 
+        # 輝度補正統計
+        self._brightness_stats = {
+            "frames_boosted": 0,          # 補正が適用されたフレーム数
+            "frames_skipped": 0,          # 補正がスキップされたフレーム数
+            "total_gain_applied": 0.0,    # 適用されたゲインの合計
+            "detections_with_boost": 0,   # 補正ありでの検出数
+            "detections_without_boost": 0,  # 補正なしでの検出数 (A/Bテスト)
+            "last_input_brightness": 0.0,   # 最後の入力輝度
+            "last_output_brightness": 0.0,  # 最後の出力輝度
+            "last_gain": 1.0,               # 最後に適用したゲイン
+        }
+
         # 詳細タイミング情報
         self._last_timing = {
             "preprocessing": 0.0,
             "inference": 0.0,
             "postprocessing": 0.0,
+            "brightness_boost": 0.0,
             "total": 0.0,
         }
 

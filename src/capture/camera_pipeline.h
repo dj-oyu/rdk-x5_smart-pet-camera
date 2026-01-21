@@ -37,7 +37,7 @@ typedef struct {
     // Shared memory output (new design: fixed names, conditional write)
     SharedFrameBuffer *shm_active_nv12;   // Active camera NV12 (only when active)
     SharedFrameBuffer *shm_active_h264;   // Active camera H.264 (only when active)
-    SharedFrameBuffer *shm_probe_nv12;    // Probe NV12 (only on probe request)
+    SharedBrightnessData *shm_brightness; // Lightweight brightness data (always updated)
     SharedFrameBuffer *shm_yolo_input;    // YOLO 640x640 NV12 input (VSE Ch1, always active)
     SharedFrameBuffer *shm_mjpeg_frame;   // MJPEG 640x480 NV12 input (VSE Ch2, always active, writable)
 
@@ -84,8 +84,9 @@ typedef struct {
  *   0 on success, negative error code on failure
  *
  * Note:
- *   - Shared memory names are fixed: SHM_NAME_ACTIVE_FRAME, SHM_NAME_STREAM, SHM_NAME_PROBE_FRAME
- *   - Frames are written conditionally based on is_active_flag and probe_requested_flag
+ *   - Shared memory names are fixed: SHM_NAME_ACTIVE_FRAME, SHM_NAME_STREAM, SHM_NAME_BRIGHTNESS
+ *   - Frames are written conditionally based on is_active_flag
+ *   - Brightness is always written to lightweight shared memory
  */
 int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
                     int sensor_width, int sensor_height,

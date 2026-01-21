@@ -348,3 +348,88 @@ uint32_t shm_detection_read(LatestDetectionResult* shm,
 
     return version;
 }
+
+// Brightness shared memory functions
+
+SharedBrightnessData* shm_brightness_create(void) {
+    bool created_new = false;
+    SharedBrightnessData* shm = (SharedBrightnessData*)shm_create_or_open_ex(
+        SHM_NAME_BRIGHTNESS,
+        sizeof(SharedBrightnessData),
+        true,  // create
+        &created_new
+    );
+
+    if (shm) {
+        if (created_new) {
+            // Initialize semaphore for inter-process notification
+            if (sem_init(&shm->update_sem, 1, 0) != 0) {
+                LOG_ERROR("SharedMemory", "sem_init failed for brightness: %s", strerror(errno));
+                munmap(shm, sizeof(SharedBrightnessData));
+                shm_unlink(SHM_NAME_BRIGHTNESS);
+                return NULL;
+            }
+            LOG_INFO("SharedMemory", "Brightness shared memory created: %s (size=%zu bytes)",
+                     SHM_NAME_BRIGHTNESS, sizeof(SharedBrightnessData));
+        } else {
+            LOG_INFO("SharedMemory", "Brightness shared memory opened (already exists): %s",
+                     SHM_NAME_BRIGHTNESS);
+        }
+    }
+
+    return shm;
+}
+
+SharedBrightnessData* shm_brightness_open(void) {
+    SharedBrightnessData* shm = (SharedBrightnessData*)shm_create_or_open(
+        SHM_NAME_BRIGHTNESS,
+        sizeof(SharedBrightnessData),
+        false  // open existing
+    );
+
+    if (shm) {
+        LOG_INFO("SharedMemory", "Brightness shared memory opened: %s", SHM_NAME_BRIGHTNESS);
+    }
+
+    return shm;
+}
+
+void shm_brightness_close(SharedBrightnessData* shm) {
+    if (shm) {
+        munmap(shm, sizeof(SharedBrightnessData));
+    }
+}
+
+void shm_brightness_write(SharedBrightnessData* shm, int camera_id,
+                          const CameraBrightness* brightness) {
+    if (!shm || !brightness || camera_id < 0 || camera_id >= NUM_CAMERAS) {
+        return;
+    }
+
+    // Copy brightness data for this camera
+    memcpy(&shm->cameras[camera_id], brightness, sizeof(CameraBrightness));
+
+    // Memory barrier
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+
+    // Atomically increment version
+    __atomic_fetch_add(&shm->version, 1, __ATOMIC_SEQ_CST);
+
+    // Notify waiting readers
+    sem_post(&shm->update_sem);
+}
+
+uint32_t shm_brightness_read(SharedBrightnessData* shm, int camera_id,
+                              CameraBrightness* brightness) {
+    if (!shm || !brightness || camera_id < 0 || camera_id >= NUM_CAMERAS) {
+        return 0;
+    }
+
+    // Atomically read version
+    uint32_t version = __atomic_load_n(&shm->version, __ATOMIC_SEQ_CST);
+
+    // Copy brightness data
+    memcpy(brightness, &shm->cameras[camera_id], sizeof(CameraBrightness));
+
+    return version;
+}
