@@ -72,11 +72,10 @@ config/config.yaml
 config/local_*.yaml
 
 # Models (large files, should be downloaded separately)
-models/*.tflite
-models/*.onnx
-models/*.pt
-models/*.pth
-models/*.pb
+models/
+
+# Test pictures (binary test data)
+test_pic/
 
 # Data directories
 /data/
