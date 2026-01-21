@@ -227,15 +227,18 @@ class YoloDetectorDaemon:
                 t5 = time_module.perf_counter()
                 time_scale = (t5 - t4) * 1000
 
-                # 検出結果を共有メモリに書き込み
+                # 検出結果を共有メモリに書き込み（検出があるときのみ）
+                # 検出がない場合は書き込みをスキップしてセマフォ通知を抑制
                 t6 = time_module.perf_counter()
-                self.shm_main.write_detection_result(
-                    frame_number=yolo_frame.frame_number,
-                    timestamp_sec=yolo_frame.timestamp_sec,
-                    detections=detection_dicts,
-                )
-                t7 = time_module.perf_counter()
-                time_write = (t7 - t6) * 1000
+                time_write = 0.0
+                if detection_dicts:
+                    self.shm_main.write_detection_result(
+                        frame_number=yolo_frame.frame_number,
+                        timestamp_sec=yolo_frame.timestamp_sec,
+                        detections=detection_dicts,
+                    )
+                    t7 = time_module.perf_counter()
+                    time_write = (t7 - t6) * 1000
 
                 # 統計更新
                 self.stats["frames_processed"] += 1

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -18,6 +19,7 @@ type Server struct {
 	webrtc               *http.Client
 	broadcaster          *FrameBroadcaster
 	detectionBroadcaster *DetectionBroadcaster
+	statusBroadcaster    *StatusBroadcaster
 }
 
 // NewServer returns a configured monitor server.
@@ -46,6 +48,9 @@ func NewServer(cfg Config) *Server {
 	detectionBroadcaster := NewDetectionBroadcaster(shm, monitor)
 	detectionBroadcaster.Start()
 
+	statusBroadcaster := NewStatusBroadcaster(shm, monitor, cfg.StatusInterval)
+	statusBroadcaster.Start()
+
 	return &Server{
 		cfg:                  cfg,
 		monitor:              monitor,
@@ -53,6 +58,7 @@ func NewServer(cfg Config) *Server {
 		webrtc:               &http.Client{Timeout: 5 * time.Second},
 		broadcaster:          broadcaster,
 		detectionBroadcaster: detectionBroadcaster,
+		statusBroadcaster:    statusBroadcaster,
 	}
 }
 
@@ -78,8 +84,9 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(indexHTML))
+	// Serve index.html from assets directory (supports LSP in editor)
+	indexPath := filepath.Join(s.cfg.AssetsDir, "index.html")
+	http.ServeFile(w, r, indexPath)
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
@@ -101,34 +108,29 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatusStream(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
-		return
+	// Subscribe to status events
+	id, eventCh := s.statusBroadcaster.Subscribe()
+	defer s.statusBroadcaster.Unsubscribe(id)
+
+	// Content negotiation: supports both query param and Accept header
+	// Query param: ?format=protobuf (for EventSource which can't set headers)
+	// Accept header: application/protobuf (for fetch API)
+	useProtobuf := false
+
+	// Check query parameter first (enables EventSource + Protobuf)
+	if r.URL.Query().Get("format") == "protobuf" {
+		useProtobuf = true
+	} else {
+		// Fall back to Accept header
+		accept := r.Header.Get("Accept")
+		if strings.Contains(accept, "application/protobuf") ||
+			strings.Contains(accept, "application/x-protobuf") {
+			useProtobuf = true
+		}
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	ticker := time.NewTicker(s.cfg.StatusInterval)
-	defer ticker.Stop()
-
-	for {
-		monitorStats, shmStats, latest, history := s.monitor.Snapshot()
-		payload := map[string]any{
-			"monitor":           monitorStats,
-			"shared_memory":     shmStats,
-			"latest_detection":  latest,
-			"detection_history": history,
-			"timestamp":         float64(time.Now().Unix()),
-		}
-		if err := writeSSE(w, payload); err != nil {
-			return
-		}
-		flusher.Flush()
-		<-ticker.C
-	}
+	// Stream events from channel with appropriate format
+	streamStatusEventsFromChannel(w, eventCh, useProtobuf)
 }
 
 func (s *Server) handleDetectionsStream(w http.ResponseWriter, r *http.Request) {
@@ -136,14 +138,21 @@ func (s *Server) handleDetectionsStream(w http.ResponseWriter, r *http.Request) 
 	id, eventCh := s.detectionBroadcaster.Subscribe()
 	defer s.detectionBroadcaster.Unsubscribe(id)
 
-	// Content negotiation based on Accept header
-	accept := r.Header.Get("Accept")
+	// Content negotiation: supports both query param and Accept header
+	// Query param: ?format=protobuf (for EventSource which can't set headers)
+	// Accept header: application/protobuf (for fetch API)
 	useProtobuf := false
 
-	// Check if client prefers Protobuf
-	if strings.Contains(accept, "application/protobuf") ||
-		strings.Contains(accept, "application/x-protobuf") {
+	// Check query parameter first (enables EventSource + Protobuf)
+	if r.URL.Query().Get("format") == "protobuf" {
 		useProtobuf = true
+	} else {
+		// Fall back to Accept header
+		accept := r.Header.Get("Accept")
+		if strings.Contains(accept, "application/protobuf") ||
+			strings.Contains(accept, "application/x-protobuf") {
+			useProtobuf = true
+		}
 	}
 
 	// Stream events from channel with appropriate format

@@ -2,7 +2,6 @@ package webmonitor
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -12,8 +11,6 @@ import (
 	"time"
 
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/logger"
-	pb "github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/pkg/proto"
-	"google.golang.org/protobuf/proto"
 )
 
 func writeSSE(w http.ResponseWriter, payload any) error {
@@ -149,9 +146,9 @@ func streamMJPEG(w http.ResponseWriter, interval time.Duration, provider jpegPro
 	}
 }
 
-// streamDetectionEventsFromChannel streams detection events to SSE client.
-// Supports both JSON (default) and Protobuf formats based on useProtobuf flag.
-func streamDetectionEventsFromChannel(w http.ResponseWriter, eventCh <-chan *pb.DetectionEvent, useProtobuf bool) {
+// streamDetectionEventsFromChannel streams pre-serialized detection events to SSE client.
+// Data is already serialized in both formats by the broadcaster.
+func streamDetectionEventsFromChannel(w http.ResponseWriter, eventCh <-chan *SerializedEvent, useProtobuf bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
@@ -177,25 +174,12 @@ func streamDetectionEventsFromChannel(w http.ResponseWriter, eventCh <-chan *pb.
 				return
 			}
 
-			// Convert Protobuf to appropriate format
-			var data string
-
+			// Use pre-serialized data (no conversion needed)
+			var data []byte
 			if useProtobuf {
-				// Serialize Protobuf to binary, then base64 encode for SSE
-				bytes, err := proto.Marshal(event)
-				if err != nil {
-					logger.Error("SSE", "Protobuf marshal error: %v", err)
-					continue
-				}
-				data = base64.StdEncoding.EncodeToString(bytes)
+				data = event.ProtobufData
 			} else {
-				// Convert Protobuf to JSON for backward compatibility
-				jsonBytes, err := protobufToJSON(event)
-				if err != nil {
-					logger.Error("SSE", "JSON conversion error: %v", err)
-					continue
-				}
-				data = string(jsonBytes)
+				data = event.JSONData
 			}
 
 			// Send SSE event with error checking
@@ -218,29 +202,59 @@ func streamDetectionEventsFromChannel(w http.ResponseWriter, eventCh <-chan *pb.
 	}
 }
 
-// protobufToJSON converts Protobuf DetectionEvent to JSON format compatible with existing clients.
-func protobufToJSON(event *pb.DetectionEvent) ([]byte, error) {
-	// Convert to Go struct that matches existing JSON format
-	detections := make([]map[string]interface{}, len(event.Detections))
-	for i, det := range event.Detections {
-		detections[i] = map[string]interface{}{
-			"bbox": map[string]int{
-				"x": int(det.Bbox.X),
-				"y": int(det.Bbox.Y),
-				"w": int(det.Bbox.W),
-				"h": int(det.Bbox.H),
-			},
-			"confidence": det.Confidence,
-			"class_id":   det.ClassId,
-			"class_name": det.Label,
+// streamStatusEventsFromChannel streams pre-serialized status events to SSE client.
+// Data is already serialized in both formats by the broadcaster.
+func streamStatusEventsFromChannel(w http.ResponseWriter, eventCh <-chan *SerializedEvent, useProtobuf bool) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	// Add custom header to indicate format
+	if useProtobuf {
+		w.Header().Set("X-Content-Format", "application/protobuf")
+	} else {
+		w.Header().Set("X-Content-Format", "application/json")
+	}
+
+	for {
+		select {
+		case event, ok := <-eventCh:
+			if !ok {
+				// Channel closed, client should disconnect
+				return
+			}
+
+			// Use pre-serialized data (no conversion needed)
+			var data []byte
+			if useProtobuf {
+				data = event.ProtobufData
+			} else {
+				data = event.JSONData
+			}
+
+			// Send SSE event with error checking
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+				// Client disconnected
+				logger.Debug("SSE", "Client disconnected during status event write: %v", err)
+				return
+			}
+			flusher.Flush()
+
+		case <-time.After(30 * time.Second):
+			// Send keepalive comment to prevent timeout
+			if _, err := fmt.Fprintf(w, ": keepalive\n\n"); err != nil {
+				// Client disconnected
+				logger.Debug("SSE", "Client disconnected during keepalive: %v", err)
+				return
+			}
+			flusher.Flush()
 		}
 	}
-
-	jsonEvent := map[string]interface{}{
-		"frame_number": event.FrameNumber,
-		"timestamp":    event.Timestamp,
-		"detections":   detections,
-	}
-
-	return json.Marshal(jsonEvent)
 }
+
