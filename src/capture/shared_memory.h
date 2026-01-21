@@ -90,6 +90,7 @@ typedef struct {
 
     // Brightness metrics (Phase 0: ISP low-light enhancement)
     // Updated by camera daemon from ISP AE statistics
+    // -1.0f indicates invalid/not yet measured (used for CLAHE skip decision)
     float brightness_avg;       // Y-plane average brightness (0-255), from ISP AE stats
     uint32_t brightness_lux;    // Environment illuminance from ISP cur_lux
     uint8_t brightness_zone;    // BrightnessZone enum value

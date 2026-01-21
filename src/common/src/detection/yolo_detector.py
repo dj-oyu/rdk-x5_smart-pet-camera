@@ -129,7 +129,9 @@ class YoloDetector:
         strides: list[int] = [8, 16, 32],
         input_size: tuple[int, int] = (640, 640),
         auto_download: bool = True,
-        brightness_target: int = 100,
+        clahe_enabled: bool = True,
+        clahe_brightness_threshold: float = 60.0,
+        clahe_clip_limit: float = 3.0,
     ) -> None:
         """
         初期化
@@ -142,7 +144,9 @@ class YoloDetector:
             strides: ストライド値
             input_size: 入力画像サイズ (height, width)
             auto_download: モデルが存在しない場合に自動ダウンロード
-            brightness_target: 低照度時の目標輝度 (0=無効, 1-255=目標値)
+            clahe_enabled: CLAHE前処理を有効化
+            clahe_brightness_threshold: この輝度以下でCLAHE適用 (0-255)
+            clahe_clip_limit: CLAHEのコントラスト制限値 (大きいほど強調)
         """
         self.model_path = model_path
         self.score_threshold = score_threshold
@@ -151,12 +155,11 @@ class YoloDetector:
         self.strides = strides
         self.input_size = input_size
 
-        # 低照度補正設定
-        self.brightness_target = brightness_target  # 目標輝度 (0=無効)
-        self.brightness_enabled = brightness_target > 0  # 動的ON/OFF
-        self.brightness_ab_test = False  # A/Bテストモード
-        self.brightness_max_gain = 4.0  # 最大ゲイン制限
-        self.brightness_min_threshold = 60  # この輝度以下で補正適用
+        # CLAHE前処理設定 (ISP補正の代替)
+        # 実測brightness_avgは最大80程度のため、閾値を低めに設定
+        self.clahe_enabled = clahe_enabled
+        self.clahe_brightness_threshold = clahe_brightness_threshold
+        self.clahe = cv2.createCLAHE(clipLimit=clahe_clip_limit, tileGridSize=(8, 8))
 
         # モデルの自動ダウンロード
         if auto_download and not os.path.exists(model_path):
@@ -203,16 +206,13 @@ class YoloDetector:
         self._total_calls = 0
         self._total_inference_time = 0.0
 
-        # 輝度補正統計
+        # CLAHE/輝度補正統計
         self._brightness_stats = {
-            "frames_boosted": 0,          # 補正が適用されたフレーム数
-            "frames_skipped": 0,          # 補正がスキップされたフレーム数
-            "total_gain_applied": 0.0,    # 適用されたゲインの合計
-            "detections_with_boost": 0,   # 補正ありでの検出数
-            "detections_without_boost": 0,  # 補正なしでの検出数 (A/Bテスト)
-            "last_input_brightness": 0.0,   # 最後の入力輝度
-            "last_output_brightness": 0.0,  # 最後の出力輝度
-            "last_gain": 1.0,               # 最後に適用したゲイン
+            "frames_clahe_applied": 0,    # CLAHE適用フレーム数
+            "frames_clahe_skipped": 0,    # CLAHEスキップフレーム数
+            "clahe_time_total_ms": 0.0,   # CLAHE処理の累計時間
+            "last_brightness_avg": 0.0,   # 最後の入力輝度
+            "last_clahe_applied": False,  # 最後のフレームでCLAHE適用したか
         }
 
         # 詳細タイミング情報
@@ -220,7 +220,7 @@ class YoloDetector:
             "preprocessing": 0.0,
             "inference": 0.0,
             "postprocessing": 0.0,
-            "brightness_boost": 0.0,
+            "clahe": 0.0,
             "total": 0.0,
         }
 
@@ -285,7 +285,11 @@ class YoloDetector:
         return detections
 
     def detect_nv12(
-        self, nv12_data: bytes | memoryview, width: int, height: int
+        self,
+        nv12_data: bytes | memoryview,
+        width: int,
+        height: int,
+        brightness_avg: float = -1.0,
     ) -> list[Detection]:
         """
         NV12フォーマットのフレームから物体検出を実行（高速パス）
@@ -297,6 +301,7 @@ class YoloDetector:
             nv12_data: NV12フォーマットのフレームデータ (bytes or memoryview)
             width: フレーム幅
             height: フレーム高さ
+            brightness_avg: ISPからの平均輝度 (0-255)。-1の場合は自動計算
 
         Returns:
             検出結果のリスト
@@ -305,19 +310,44 @@ class YoloDetector:
         start_total = time.perf_counter()
         self._total_calls += 1
 
-        # 1. 前処理（既に640x640の場合はスキップ）
+        # 1. 前処理（CLAHE適用 + サイズ調整）
         start_prep = time.perf_counter()
+
+        # NV12データをnumpy配列に変換
+        y_size = width * height
+        nv12_array = np.frombuffer(nv12_data, dtype=np.uint8).copy()
+
+        # CLAHE適用（低照度時のみ、輝度が取得できない場合はスキップ）
+        clahe_applied = False
+        if brightness_avg >= 0:
+            self._brightness_stats["last_brightness_avg"] = brightness_avg
+            if self.clahe_enabled and brightness_avg < self.clahe_brightness_threshold:
+                start_clahe = time.perf_counter()
+                nv12_array = self._apply_clahe_nv12(nv12_array, width, height)
+                clahe_time = (time.perf_counter() - start_clahe) * 1000
+                self._brightness_stats["clahe_time_total_ms"] += clahe_time
+                self._brightness_stats["frames_clahe_applied"] += 1
+                clahe_applied = True
+                logger.debug(f"CLAHE applied: brightness={brightness_avg:.1f}, time={clahe_time:.2f}ms")
+            else:
+                self._brightness_stats["frames_clahe_skipped"] += 1
+        else:
+            # 輝度情報なし → CLAHEスキップ
+            self._brightness_stats["frames_clahe_skipped"] += 1
+
+        self._brightness_stats["last_clahe_applied"] = clahe_applied
+
         if width == self.input_w and height == self.input_h:
             # 既に正しいサイズ：そのまま使用（最速パス）
-            input_tensor = np.frombuffer(nv12_data, dtype=np.uint8)
+            input_tensor = nv12_array
             scale = (1.0, 1.0)
             shift = (0.0, 0.0)
             original_shape = (height, width)
-            logger.debug(f"NV12 direct path: {width}x{height} (no conversion needed)")
+            logger.debug(f"NV12 direct path: {width}x{height} (CLAHE={clahe_applied})")
         else:
             # サイズが異なる場合：NV12→BGR→前処理
             logger.debug(f"NV12 resize path: {width}x{height} → {self.input_w}x{self.input_h}")
-            img = self._decode_nv12(nv12_data, width, height)
+            img = self._decode_nv12(nv12_array.tobytes(), width, height)
             if img is None:
                 logger.warning("Failed to decode NV12 frame")
                 return []
@@ -385,6 +415,36 @@ class YoloDetector:
         except Exception as e:
             logger.error(f"NV12 decode failed: {e}")
             return None
+
+    def _apply_clahe_nv12(
+        self, nv12_array: np.ndarray, width: int, height: int
+    ) -> np.ndarray:
+        """
+        NV12のY平面にCLAHEを適用
+
+        CLAHEは局所的なコントラスト改善を行い、低照度画像の視認性を向上させる。
+        UV平面は変更しない（色情報は保持）。
+
+        Args:
+            nv12_array: NV12データ (Y + UV)
+            width: 画像幅
+            height: 画像高さ
+
+        Returns:
+            CLAHE適用後のNV12データ
+        """
+        y_size = width * height
+
+        # Y平面を抽出して2D配列に変換
+        y_plane = nv12_array[:y_size].reshape(height, width)
+
+        # CLAHEを適用
+        y_enhanced = self.clahe.apply(y_plane)
+
+        # 結果を元の配列に書き戻す
+        nv12_array[:y_size] = y_enhanced.flatten()
+
+        return nv12_array
 
     def _preprocess_yuv420sp(
         self, img: np.ndarray
@@ -644,6 +704,12 @@ class YoloDetector:
             else 0.0
         )
 
+        # CLAHE統計
+        clahe_applied = self._brightness_stats["frames_clahe_applied"]
+        clahe_skipped = self._brightness_stats["frames_clahe_skipped"]
+        clahe_rate = clahe_applied / (clahe_applied + clahe_skipped) if (clahe_applied + clahe_skipped) > 0 else 0.0
+        avg_clahe_time = self._brightness_stats["clahe_time_total_ms"] / clahe_applied if clahe_applied > 0 else 0.0
+
         return {
             "total_calls": self._total_calls,
             "total_detections": self._total_detections,
@@ -653,6 +719,13 @@ class YoloDetector:
             "last_inference_ms": self._last_timing["inference"] * 1000,
             "last_postprocessing_ms": self._last_timing["postprocessing"] * 1000,
             "last_total_ms": self._last_timing["total"] * 1000,
+            # CLAHE統計
+            "clahe_applied_frames": clahe_applied,
+            "clahe_skipped_frames": clahe_skipped,
+            "clahe_apply_rate": clahe_rate,
+            "avg_clahe_time_ms": avg_clahe_time,
+            "last_brightness_avg": self._brightness_stats["last_brightness_avg"],
+            "last_clahe_applied": self._brightness_stats["last_clahe_applied"],
         }
 
     def get_last_timing(self) -> dict[str, float]:
