@@ -65,7 +65,7 @@ export class BBoxOverlay {
         this.isRunning = false;
 
         // Stale detection threshold
-        this.STALE_THRESHOLD_MS = 500; // Clear detections after this many ms without events
+        this.STALE_THRESHOLD_MS = 1500; // Clear detections after this many ms without events (YOLO runs ~2FPS)
 
         // Stats
         this.stats = {
@@ -254,13 +254,6 @@ export class BBoxOverlay {
      * Update current detections (no smoothing - direct replacement)
      */
     _updateDetections(newDetections) {
-        // Debug: Log every update to understand what's happening
-        if (this.stats.eventsReceived % 30 === 1) {
-            console.log(`[BBox] _updateDetections: received ${newDetections.length} detections, current=${this.currentDetections.length}`);
-        }
-
-        // Always replace with new detections from the event
-        // Server only sends events when there are actual detections
         this.currentDetections = newDetections;
     }
 
@@ -269,11 +262,11 @@ export class BBoxOverlay {
 
         const now = performance.now();
 
-        // Time-based stale detection cleanup - DISABLED for debugging
-        // if (this.stats.lastEventTime > 0 &&
-        //     now - this.stats.lastEventTime > this.STALE_THRESHOLD_MS) {
-        //     this._cleanupStaleDetections();
-        // }
+        // Time-based stale detection cleanup
+        if (this.stats.lastEventTime > 0 &&
+            now - this.stats.lastEventTime > this.STALE_THRESHOLD_MS) {
+            this._cleanupStaleDetections();
+        }
 
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 

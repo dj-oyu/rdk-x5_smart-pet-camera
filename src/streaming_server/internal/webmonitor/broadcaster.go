@@ -140,12 +140,16 @@ func (fb *FrameBroadcaster) generateOverlay() []byte {
 		return nil
 	}
 
-	// Get latest detection
+	// Get latest detection (only if fresh - within 30 frames of current frame)
 	fb.monitor.mu.Lock()
 	fb.monitor.refreshFromSharedMemoryLocked()
 	var detections []Detection
 	if fb.monitor.latestDetection != nil {
-		detections = fb.monitor.latestDetection.Detections
+		// Check if detection is fresh (frame number difference < 30)
+		frameDiff := int(frame.FrameNumber) - fb.monitor.latestDetection.FrameNumber
+		if frameDiff >= 0 && frameDiff < 30 {
+			detections = fb.monitor.latestDetection.Detections
+		}
 	}
 	fb.monitor.mu.Unlock()
 
@@ -170,12 +174,24 @@ func (fb *FrameBroadcaster) generateOverlay() []byte {
 			// Label above bounding box (bright green text on black background)
 			label := fmt.Sprintf("%.2f", det.Confidence)
 			labelY := det.BBox.Y - 20
+			labelX := det.BBox.X
+
+			// Ensure label stays within frame bounds
 			if labelY < 5 {
-				labelY = det.BBox.Y + det.BBox.H + 5
+				labelY = det.BBox.Y + det.BBox.H + 5 // Move below bbox
 			}
+			// Clamp to prevent going off bottom
+			if labelY > frame.Height-20 {
+				labelY = frame.Height - 20
+			}
+			// Clamp X to prevent negative padding in C function
+			if labelX < 4 {
+				labelX = 4
+			}
+
 			// Note: Text is Y-plane only, so we use bright Y value (200) for visibility
 			drawTextWithBackgroundNV12(frame.Data, frame.Width, frame.Height,
-				det.BBox.X, labelY, label, 200, 16, 2) // Bright text, Black bg
+				labelX, labelY, label, 200, 16, 2) // Bright text, Black bg
 		}
 
 		// Convert NV12 (with overlay) to JPEG
@@ -226,6 +242,10 @@ type DetectionBroadcaster struct {
 	stop             chan struct{}
 	stopped          bool
 	lastEventVersion int // Track last sent version to avoid duplicates
+
+	// Rate monitoring
+	broadcastCount  int
+	lastRateLogTime time.Time
 }
 
 // NewDetectionBroadcaster creates a broadcaster for detection events.
@@ -315,11 +335,8 @@ func (db *DetectionBroadcaster) run() {
 		time.Sleep(1 * time.Second)
 	}
 
-	// Enter event-driven mode with semaphore
-	logger.Info("DetectionBroadcaster", "Entering event-driven mode (semaphore-based)")
-
-	errorCount := 0
-	const maxConsecutiveErrors = 10
+	// Enter polling mode at ~30 FPS
+	logger.Info("DetectionBroadcaster", "Entering polling mode (~30 FPS)")
 
 	idleCount := 0
 
@@ -353,62 +370,17 @@ func (db *DetectionBroadcaster) run() {
 
 		// Reset idle counter when clients are present
 		if idleCount > 0 {
-			logger.Debug("DetectionBroadcaster", "Client connected, resuming event-driven mode")
+			logger.Debug("DetectionBroadcaster", "Client connected, resuming polling mode")
 			idleCount = 0
 		}
 
-		// Wait for semaphore signal (blocks until new detection)
-		err := db.shm.WaitNewDetection()
-		if err != nil {
-			errorCount++
-
-			// Log first error
-			if errorCount == 1 {
-				logger.Warn("DetectionBroadcaster", "Semaphore wait error: %v", err)
-			}
-
-			// If too many errors, fall back to polling temporarily
-			if errorCount >= maxConsecutiveErrors {
-				logger.Error("DetectionBroadcaster", "Too many semaphore errors (%d), falling back to polling for 10 seconds", errorCount)
-
-				// Polling fallback mode
-				ticker := time.NewTicker(100 * time.Millisecond)
-				for i := 0; i < 100; i++ { // 10 seconds
-					select {
-					case <-db.stop:
-						ticker.Stop()
-						return
-					case <-ticker.C:
-						db.monitor.mu.Lock()
-						db.monitor.refreshFromSharedMemoryLocked()
-
-						if db.monitor.latestDetection != nil && db.lastEventVersion != db.monitor.latestDetection.Version {
-							det := db.monitor.latestDetection
-							db.lastEventVersion = det.Version
-							db.monitor.mu.Unlock()
-							db.processAndBroadcast(det)
-						} else {
-							db.monitor.mu.Unlock()
-						}
-					}
-				}
-				ticker.Stop()
-
-				errorCount = 0
-				logger.Info("DetectionBroadcaster", "Retrying event-driven mode...")
-			} else {
-				time.Sleep(100 * time.Millisecond)
-			}
-			continue
-		}
-
-		// Success - reset error counter
-		if errorCount > 0 {
-			logger.Info("DetectionBroadcaster", "Semaphore recovered after %d errors", errorCount)
-			errorCount = 0
-		}
-
-		// Semaphore signaled - read and broadcast
+		// Poll at ~30 FPS for detection updates
+		// NOTE: Semaphore-based approach was removed because:
+		// - SHM stores only latest detection (not a queue)
+		// - Multiple sem_posts accumulate while processing
+		// - Version check prevents re-broadcast, causing events to be skipped
+		time.Sleep(33 * time.Millisecond) // ~30 FPS
+		// Semaphore signaled (or timeout) - read and broadcast
 		db.monitor.mu.Lock()
 		db.monitor.refreshFromSharedMemoryLocked()
 
@@ -430,6 +402,19 @@ func (db *DetectionBroadcaster) run() {
 
 // processAndBroadcast pre-serializes detection result to both formats and broadcasts
 func (db *DetectionBroadcaster) processAndBroadcast(det *DetectionResult) {
+	// Rate monitoring: log every 5 seconds
+	db.broadcastCount++
+	now := time.Now()
+	if db.lastRateLogTime.IsZero() {
+		db.lastRateLogTime = now
+	} else if elapsed := now.Sub(db.lastRateLogTime); elapsed >= 5*time.Second {
+		rate := float64(db.broadcastCount) / elapsed.Seconds()
+		logger.Info("DetectionBroadcaster", "Detection rate: %.1f events/sec (%d events in %.1fs)",
+			rate, db.broadcastCount, elapsed.Seconds())
+		db.broadcastCount = 0
+		db.lastRateLogTime = now
+	}
+
 	// Serialize to JSON (direct from Go struct - no Protobuf intermediate)
 	jsonEvent := map[string]interface{}{
 		"frame_number": det.FrameNumber,

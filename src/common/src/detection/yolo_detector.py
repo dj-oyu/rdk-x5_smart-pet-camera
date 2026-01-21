@@ -337,6 +337,14 @@ class YoloDetector:
 
         self._brightness_stats["last_clahe_applied"] = clahe_applied
 
+        # CLAHE統計を100フレームごとにDEBUGレベルで出力
+        total_clahe_frames = self._brightness_stats["frames_clahe_applied"] + self._brightness_stats["frames_clahe_skipped"]
+        if total_clahe_frames > 0 and total_clahe_frames % 100 == 0:
+            applied = self._brightness_stats["frames_clahe_applied"]
+            rate = applied / total_clahe_frames * 100
+            avg_time = self._brightness_stats["clahe_time_total_ms"] / applied if applied > 0 else 0
+            logger.debug(f"CLAHE stats: {applied}/{total_clahe_frames} frames ({rate:.1f}%), avg={avg_time:.2f}ms, brightness={brightness_avg:.1f}")
+
         if width == self.input_w and height == self.input_h:
             # 既に正しいサイズ：そのまま使用（最速パス）
             input_tensor = nv12_array
