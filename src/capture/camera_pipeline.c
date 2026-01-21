@@ -167,13 +167,12 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
     goto error_cleanup;
   }
 
-  // Probe NV12 (written only on probe request)
-  pipeline->shm_probe_nv12 =
-      shm_frame_buffer_create_named(SHM_NAME_PROBE_FRAME);
-  if (!pipeline->shm_probe_nv12) {
+  // Lightweight brightness shared memory (updated every brightness check)
+  pipeline->shm_brightness = shm_brightness_create();
+  if (!pipeline->shm_brightness) {
     LOG_ERROR(Pipeline_log_header,
-              "Failed to open/create probe NV12 shared memory: %s",
-              SHM_NAME_PROBE_FRAME);
+              "Failed to open/create brightness shared memory: %s",
+              SHM_NAME_BRIGHTNESS);
     ret = -1;
     goto error_cleanup;
   }
@@ -281,15 +280,28 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     bool write_active = *pipeline->is_active_flag == 1;
     bool write_probe = *pipeline->probe_requested_flag == 1;
 
-    // Get ISP brightness statistics with throttling (every 8 frames = ~3.75Hz)
-    // This reduces ISP API overhead and prevents video stuttering
-    // Use bitmask for efficient modulo: (frame_count & 7) == 0
-    #define ISP_BRIGHTNESS_MASK 7   // 8 frames interval for brightness measurement
-    #define ISP_CORRECTION_MASK 31  // 32 frames interval for correction update (~1Hz)
+    // Get ISP brightness statistics with throttling (using power-of-2 masks for fast bitwise AND)
+    // - Active camera: every 8 frames (~3.75Hz) for fast DAY→NIGHT detection
+    // - Inactive DAY camera: every 64 frames (~2.1 sec) for NIGHT→DAY detection
+    // - Inactive NIGHT camera: skip (not used for switching decisions)
+    #define ISP_BRIGHTNESS_MASK_ACTIVE 7    // 8 frames when active (2^3 - 1)
+    #define ISP_BRIGHTNESS_MASK_INACTIVE 63 // 64 frames when inactive (~2.1 sec, 2^6 - 1)
+    #define ISP_CORRECTION_MASK 31          // 32 frames for correction update (~1Hz, 2^5 - 1)
     static isp_brightness_result_t cached_brightness = {0};
-    bool is_brightness_frame = (frame_count & ISP_BRIGHTNESS_MASK) == 0;
+
+    // Determine brightness check interval based on camera state
+    // Use bitwise AND for fast modulo with power-of-2 intervals
+    bool is_day_camera = (pipeline->camera_index == 0);
+    int brightness_mask = write_active ? ISP_BRIGHTNESS_MASK_ACTIVE : ISP_BRIGHTNESS_MASK_INACTIVE;
+    bool is_brightness_frame = (frame_count & brightness_mask) == 0;
     bool is_correction_frame = (frame_count & ISP_CORRECTION_MASK) == 0;
-    if (is_brightness_frame) {
+
+    // Only DAY camera needs brightness for switching decisions
+    // NIGHT camera brightness is not used
+    if (is_day_camera && is_brightness_frame) {
+      isp_get_brightness(pipeline->vio.isp_handle, &cached_brightness);
+    } else if (write_active && is_brightness_frame) {
+      // Active NIGHT camera still measures for ISP correction
       isp_get_brightness(pipeline->vio.isp_handle, &cached_brightness);
     }
     isp_brightness_result_t brightness_result = cached_brightness;
@@ -358,19 +370,32 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
           }
         }
 
-        // Write to probe shared memory if probe requested
+        // Clear probe request flag (brightness is now always available)
         if (write_probe) {
-          if (shm_frame_buffer_write(pipeline->shm_probe_nv12, &nv12_frame) <
-              0) {
-            LOG_WARN(Pipeline_log_header, "Failed to write NV12 to probe shm");
-          }
-          // Clear probe request flag after writing one frame
           *pipeline->probe_requested_flag = 0;
         }
       } else {
         LOG_WARN(Pipeline_log_header, "NV12 frame too large (%zu bytes)",
                  nv12_size);
       }
+    }
+
+    // Write brightness to lightweight shared memory
+    // DAY camera (index 0) always writes - used for switching decisions
+    // Frequency: active=~3.75Hz (8 frames), inactive=~0.47Hz (64 frames, ~2.1 sec)
+    if (is_day_camera && is_brightness_frame && brightness_result.valid) {
+      struct timespec now_ts;
+      clock_gettime(CLOCK_REALTIME, &now_ts);
+      CameraBrightness cam_brightness = {
+          .frame_number = frame_count,
+          .timestamp = now_ts,
+          .brightness_avg = brightness_result.brightness_avg,
+          .brightness_lux = brightness_result.brightness_lux,
+          .brightness_zone = (uint8_t)brightness_result.zone,
+          .correction_applied = pipeline->lowlight_state.correction_active ? 1 : 0,
+      };
+      shm_brightness_write(pipeline->shm_brightness, pipeline->camera_index,
+                           &cam_brightness);
     }
 
     // Push frame to encoder thread only if camera is active
@@ -586,9 +611,9 @@ void pipeline_destroy(camera_pipeline_t *pipeline) {
     pipeline->shm_active_h264 = NULL;
   }
 
-  if (pipeline->shm_probe_nv12) {
-    shm_frame_buffer_close(pipeline->shm_probe_nv12);
-    pipeline->shm_probe_nv12 = NULL;
+  if (pipeline->shm_brightness) {
+    shm_brightness_close(pipeline->shm_brightness);
+    pipeline->shm_brightness = NULL;
   }
 
   if (pipeline->shm_yolo_input) {

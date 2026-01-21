@@ -39,8 +39,8 @@ typedef struct {
   pid_t day_pid;            // PID of day camera daemon (always running)
   pid_t night_pid;          // PID of night camera daemon (always running)
   CameraMode active_camera; // Currently active camera
-  SharedFrameBuffer
-      *probe_shm_nv12; // Probe frame shared memory (for brightness reading)
+  SharedBrightnessData
+      *brightness_shm; // Lightweight brightness shared memory
   SharedFrameBuffer *
       active_shm_nv12; // Active frame shared memory (for active thread reading)
 } DaemonContext;
@@ -177,8 +177,33 @@ static int wait_for_new_frame_cb(void *user_data) {
   return 0;
 }
 
-// Capture frame for ProbeThread - sends signal and reads from probe shared
-// memory
+// Wait for brightness shared memory to be created
+static SharedBrightnessData *wait_for_brightness_shm(int max_retries) {
+  SharedBrightnessData *shm = NULL;
+  int retries = 0;
+
+  while (retries < max_retries && !shm) {
+    shm = shm_brightness_open();
+    if (!shm) {
+      if (retries == 0) {
+        LOG_INFO("SwitcherDaemon", "Waiting for %s to be created...",
+                 SHM_NAME_BRIGHTNESS);
+      }
+      usleep(100000); // 100ms
+      retries++;
+    }
+  }
+
+  if (shm) {
+    LOG_INFO("SwitcherDaemon", "Opened %s", SHM_NAME_BRIGHTNESS);
+  } else {
+    LOG_ERROR("SwitcherDaemon", "Timeout waiting for %s", SHM_NAME_BRIGHTNESS);
+  }
+
+  return shm;
+}
+
+// Capture brightness for ProbeThread - reads from lightweight brightness shm
 // NOTE: camera parameter is always CAMERA_MODE_DAY (probe_thread always checks
 // DAY camera)
 static int capture_probe_frame_cb(CameraMode camera, Frame *out_frame,
@@ -186,26 +211,30 @@ static int capture_probe_frame_cb(CameraMode camera, Frame *out_frame,
   DaemonContext *ctx = (DaemonContext *)user_data;
   (void)camera; // Unused - always CAMERA_MODE_DAY from probe_thread
 
-  // Open probe shared memory on first use
-  if (!ctx->probe_shm_nv12) {
-    ctx->probe_shm_nv12 = wait_for_shm(SHM_NAME_PROBE_FRAME, 10);
-    if (!ctx->probe_shm_nv12) {
-      LOG_ERROR("SwitcherDaemon", "Failed to open probe shared memory");
+  // Open brightness shared memory on first use
+  if (!ctx->brightness_shm) {
+    ctx->brightness_shm = wait_for_brightness_shm(10);
+    if (!ctx->brightness_shm) {
+      LOG_ERROR("SwitcherDaemon", "Failed to open brightness shared memory");
       return -1;
     }
   }
 
-  // Send probe request signal to DAY camera
-  // probe_thread always probes DAY camera when NIGHT is active
-  if (ctx->day_pid > 0) {
-    kill(ctx->day_pid, SIGRTMIN);
-    LOG_DEBUG("SwitcherDaemon", "Sent SIGRTMIN to PID %d (probe DAY camera)",
-              ctx->day_pid);
-  }
+  // Read brightness for DAY camera (index 0)
+  CameraBrightness brightness;
+  shm_brightness_read(ctx->brightness_shm, CAMERA_MODE_DAY, &brightness);
 
-  // Read from probe shared memory
-  int ret = shm_frame_buffer_read_latest(ctx->probe_shm_nv12, out_frame);
-  return (ret >= 0) ? 0 : -1;
+  // Populate minimal Frame structure with brightness data
+  out_frame->frame_number = brightness.frame_number;
+  out_frame->timestamp = brightness.timestamp;
+  out_frame->camera_id = CAMERA_MODE_DAY;
+  out_frame->brightness_avg = brightness.brightness_avg;
+  out_frame->brightness_lux = brightness.brightness_lux;
+  out_frame->brightness_zone = brightness.brightness_zone;
+  out_frame->correction_applied = brightness.correction_applied;
+  out_frame->data_size = 0;  // No frame data
+
+  return 0;
 }
 
 // publish_frame_cb removed - camera_daemon writes directly to
@@ -279,7 +308,7 @@ int main(void) {
       .night_pid = -1,
       .active_camera =
           -1, // No active camera initially (will be set by first switch)
-      .probe_shm_nv12 = NULL,
+      .brightness_shm = NULL,
       .active_shm_nv12 = NULL,
   };
 
@@ -382,8 +411,8 @@ int main(void) {
   kill_daemon(ctx.night_pid);
 
   // Close shared memory opened by switcher
-  if (ctx.probe_shm_nv12) {
-    shm_frame_buffer_close(ctx.probe_shm_nv12);
+  if (ctx.brightness_shm) {
+    shm_brightness_close(ctx.brightness_shm);
   }
   if (ctx.active_shm_nv12) {
     shm_frame_buffer_close(ctx.active_shm_nv12);

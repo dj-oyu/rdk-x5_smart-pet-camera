@@ -2,7 +2,7 @@
 
 ## Development Philosophy
 - **Document First**: Always check `docs/` for specs and status before asking. Update docs when designs change.
-- **Spec-Driven**: Implement features based on defined requirements (`docs/02_requirements.md`, etc.).
+- **Spec-Driven**: Implement features based on defined requirements (@docs/02_requirements.md , etc.).
 - **Evidence-Based**: Use quantitative profiling tools instead of reading long logs to verify system health.
 
 ## Core Mandates & Constraints
@@ -42,8 +42,10 @@ Action: Call `gemini_search` with query "aiortc custom MediaStreamTrack implemen
 
 ## Project Structure Awareness
 - **`src/capture/`**: C/C++ camera daemons & Shared Memory (Core).
-- **`src/monitor/`**: WebRTC/MJPEG streaming & Signaling.
-- **`src/common/`**: Shared Python types & logic.
+- **`src/streaming_server/`**: WebRTC/MJPEG streaming & Signaling.
+- **`src/detector/`**: YOLO inferencing module.
+- **`src/common/`**: Shared Python Types & logic.
+- **`src/mock`**: Mocking each modules.
 - **`docs/`**: The source of truth. Read `*log.md` files for recent context.
 
 ## Commit Messages
