@@ -44,7 +44,7 @@ export class BBoxOverlay {
         this.onStatsUpdate = options.onStatsUpdate || null;
 
         // Detection state
-        this.smoothedDetections = new Map(); // class_name -> {bbox, confidence, missCount}
+        this.currentDetections = []; // Current frame's detections (no smoothing)
         this.latestDetection = null;
         this.detectionEventSource = null;
         this.statusEventSource = null;
@@ -64,10 +64,8 @@ export class BBoxOverlay {
         this.animationId = null;
         this.isRunning = false;
 
-        // Smoothing settings
-        this.SMOOTH_FACTOR = 0.4;    // EMA factor (0-1, higher = more responsive)
-        this.MAX_MISS_COUNT = 3;     // Remove after N consecutive misses
-        this.STALE_THRESHOLD_MS = 500; // Consider detections stale after this many ms without events
+        // Stale detection threshold
+        this.STALE_THRESHOLD_MS = 500; // Clear detections after this many ms without events
 
         // Stats
         this.stats = {
@@ -196,8 +194,8 @@ export class BBoxOverlay {
                 console.log(`[BBox ${fmt}] frame#${frameNum} (${this.stats.eventsReceived} events, ${(this.stats.bytesReceived / 1024).toFixed(1)} KB)`);
             }
 
-            // Update smoothed detections
-            this._updateSmoothedDetections(newDetections);
+            // Update current detections (no smoothing)
+            this._updateDetections(newDetections);
 
             if (this.onStatsUpdate) {
                 this.onStatsUpdate(this.stats);
@@ -224,9 +222,14 @@ export class BBoxOverlay {
                 let frameNumber = parsed.shared_memory.total_frames_written || 0;
                 let timestamp = parsed.timestamp || 0;
 
-                // If we have latest_detection, use its more accurate frame info
+                // If we have latest_detection, only use its frame_number if recent
                 if (parsed.latest_detection) {
-                    frameNumber = parsed.latest_detection.frame_number || frameNumber;
+                    const detectionFrame = parsed.latest_detection.frame_number || 0;
+                    // Only use detection frame if it's within 30 frames of camera frame
+                    // (prevents stale detection data from overwriting current frame number)
+                    if (detectionFrame > 0 && (frameNumber - detectionFrame) < 30) {
+                        frameNumber = detectionFrame;
+                    }
                     timestamp = parsed.latest_detection.timestamp || timestamp;
                 }
 
@@ -248,51 +251,17 @@ export class BBoxOverlay {
     }
 
     /**
-     * Update smoothed detections with new data
-     * Uses EMA for position smoothing and miss counting for removal
+     * Update current detections (no smoothing - direct replacement)
      */
-    _updateSmoothedDetections(newDetections) {
-        const seenClasses = new Set();
-
-        for (const det of newDetections) {
-            const key = det.class_name;
-            seenClasses.add(key);
-
-            if (this.smoothedDetections.has(key)) {
-                // Update existing: apply EMA smoothing to bbox
-                const prev = this.smoothedDetections.get(key);
-                const alpha = this.SMOOTH_FACTOR;
-                this.smoothedDetections.set(key, {
-                    bbox: {
-                        x: prev.bbox.x + alpha * (det.bbox.x - prev.bbox.x),
-                        y: prev.bbox.y + alpha * (det.bbox.y - prev.bbox.y),
-                        w: prev.bbox.w + alpha * (det.bbox.w - prev.bbox.w),
-                        h: prev.bbox.h + alpha * (det.bbox.h - prev.bbox.h),
-                    },
-                    confidence: det.confidence,
-                    class_name: det.class_name,
-                    missCount: 0
-                });
-            } else {
-                // New detection
-                this.smoothedDetections.set(key, {
-                    bbox: { ...det.bbox },
-                    confidence: det.confidence,
-                    class_name: det.class_name,
-                    missCount: 0
-                });
-            }
+    _updateDetections(newDetections) {
+        // Debug: Log every update to understand what's happening
+        if (this.stats.eventsReceived % 30 === 1) {
+            console.log(`[BBox] _updateDetections: received ${newDetections.length} detections, current=${this.currentDetections.length}`);
         }
 
-        // Increment miss count for detections not seen, remove if too many misses
-        for (const [key, det] of this.smoothedDetections) {
-            if (!seenClasses.has(key)) {
-                det.missCount++;
-                if (det.missCount > this.MAX_MISS_COUNT) {
-                    this.smoothedDetections.delete(key);
-                }
-            }
-        }
+        // Always replace with new detections from the event
+        // Server only sends events when there are actual detections
+        this.currentDetections = newDetections;
     }
 
     _renderLoop() {
@@ -300,17 +269,16 @@ export class BBoxOverlay {
 
         const now = performance.now();
 
-        // Time-based stale detection cleanup
-        // If no detection events for STALE_THRESHOLD_MS, increment miss counts
-        if (this.stats.lastEventTime > 0 &&
-            now - this.stats.lastEventTime > this.STALE_THRESHOLD_MS) {
-            this._cleanupStaleDetections();
-        }
+        // Time-based stale detection cleanup - DISABLED for debugging
+        // if (this.stats.lastEventTime > 0 &&
+        //     now - this.stats.lastEventTime > this.STALE_THRESHOLD_MS) {
+        //     this._cleanupStaleDetections();
+        // }
 
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-        // Draw smoothed bboxes
-        for (const detection of this.smoothedDetections.values()) {
+        // Draw current bboxes (no smoothing)
+        for (const detection of this.currentDetections) {
             this._drawBBox(detection);
         }
 
@@ -333,18 +301,12 @@ export class BBoxOverlay {
      * Called from render loop when detection events are stale
      */
     _cleanupStaleDetections() {
-        if (this.smoothedDetections.size === 0) return;
+        if (this.currentDetections.length === 0) return;
 
-        // Increment miss count for all detections
-        for (const [key, det] of this.smoothedDetections) {
-            det.missCount++;
-            if (det.missCount > this.MAX_MISS_COUNT) {
-                this.smoothedDetections.delete(key);
-            }
-        }
+        // Clear all detections when stale
+        this.currentDetections = [];
 
         // Reset lastEventTime to prevent continuous cleanup
-        // Next cleanup will happen after another STALE_THRESHOLD_MS
         this.stats.lastEventTime = performance.now();
     }
 
@@ -423,7 +385,7 @@ export class BBoxOverlay {
     getStats() {
         return {
             ...this.stats,
-            detectionCount: this.smoothedDetections.size
+            detectionCount: this.currentDetections.length
         };
     }
 }
