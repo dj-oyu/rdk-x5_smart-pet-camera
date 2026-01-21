@@ -33,6 +33,12 @@ typedef struct {
     int height;
     int format;
     size_t data_size;
+    // Brightness metrics (Phase 0: ISP low-light enhancement)
+    float brightness_avg;       // Y-plane average brightness (0-255)
+    uint32_t brightness_lux;    // Environment illuminance from ISP cur_lux
+    uint8_t brightness_zone;    // 0=dark, 1=dim, 2=normal, 3=bright
+    uint8_t correction_applied; // 1 if ISP low-light correction is active
+    uint8_t _reserved[2];       // Padding for alignment
     uint8_t data[MAX_FRAME_SIZE];
 } Frame;
 

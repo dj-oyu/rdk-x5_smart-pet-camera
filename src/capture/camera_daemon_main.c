@@ -48,8 +48,9 @@ static void signal_handler(int signum) {
     LOG_INFO(Main_log_header, "SIGUSR2: Camera deactivated");
   } else if (signum == SIGRTMIN) {
     // Probe request: write one frame to probe_frame
+    // Use DEBUG level since this is a routine operation (every 2 seconds)
     g_probe_requested = 1;
-    LOG_INFO(Main_log_header, "SIGRTMIN: Probe requested");
+    LOG_DEBUG(Main_log_header, "SIGRTMIN: Probe requested");
   } else {
     // SIGINT or SIGTERM
     LOG_INFO(Main_log_header, "Received signal %d, stopping...", signum);

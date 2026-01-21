@@ -23,10 +23,10 @@
 // Main shared memory (consumed by detection/monitoring/streaming)
 #define SHM_NAME_ACTIVE_FRAME "/pet_camera_active_frame"  // NV12 frame from active camera (30fps)
 #define SHM_NAME_STREAM "/pet_camera_stream"              // H.264 stream from active camera (30fps)
-#define SHM_NAME_PROBE_FRAME "/pet_camera_probe_frame"    // NV12 frame for brightness probing (on-demand)
 #define SHM_NAME_YOLO_INPUT "/pet_camera_yolo_input"      // 640x640 NV12 for YOLO (VSE Channel 1)
 #define SHM_NAME_MJPEG_FRAME "/pet_camera_mjpeg_frame"    // 640x480 NV12 for MJPEG/web_monitor (VSE Channel 2)
 #define SHM_NAME_DETECTIONS "/pet_camera_detections"      // YOLO detection results
+#define SHM_NAME_BRIGHTNESS "/pet_camera_brightness"      // Lightweight brightness data (per-camera)
 
 // Legacy name for backward compatibility (keep API names stable)
 #define SHM_NAME_FRAMES SHM_NAME_ACTIVE_FRAME
@@ -36,10 +36,47 @@
 #define MAX_FRAME_SIZE (1920 * 1080 * 3 / 2)  // Max NV12 frame size (1080p)
 
 /**
+ * Brightness zone classification for low-light detection
+ */
+typedef enum {
+    BRIGHTNESS_ZONE_DARK = 0,    // brightness_avg < 50 (needs correction)
+    BRIGHTNESS_ZONE_DIM = 1,     // 50 <= brightness_avg < 70 (mild correction)
+    BRIGHTNESS_ZONE_NORMAL = 2,  // 70 <= brightness_avg < 180
+    BRIGHTNESS_ZONE_BRIGHT = 3,  // brightness_avg >= 180
+} BrightnessZone;
+
+#define NUM_CAMERAS 2  // DAY=0, NIGHT=1
+
+/**
+ * Lightweight brightness data for a single camera
+ * ~32 bytes per camera (vs ~3MB for full Frame)
+ */
+typedef struct {
+    uint64_t frame_number;      // Frame counter when brightness was measured
+    struct timespec timestamp;  // Measurement timestamp
+    float brightness_avg;       // ISP brightness (0-255)
+    uint32_t brightness_lux;    // Environment illuminance
+    uint8_t brightness_zone;    // BrightnessZone enum
+    uint8_t correction_applied; // ISP low-light correction active
+    uint8_t _reserved[2];       // Alignment padding
+} CameraBrightness;
+
+/**
+ * Shared brightness data for all cameras
+ * Each camera daemon updates its own slot
+ */
+typedef struct {
+    volatile uint32_t version;           // Incremented on any update
+    CameraBrightness cameras[NUM_CAMERAS]; // Per-camera brightness
+    sem_t update_sem;                    // Semaphore for update notification
+} SharedBrightnessData;
+
+/**
  * Frame structure - represents a single camera frame
  *
  * Layout:
  * - Metadata (frame_number, timestamp, camera_id)
+ * - Brightness metrics (ISP statistics)
  * - Frame data (JPEG or raw YUV)
  */
 typedef struct {
@@ -50,6 +87,16 @@ typedef struct {
     int height;                 // Frame height in pixels
     int format;                 // 0=JPEG, 1=NV12, 2=RGB, 3=H264
     size_t data_size;           // Actual data size in bytes
+
+    // Brightness metrics (Phase 0: ISP low-light enhancement)
+    // Updated by camera daemon from ISP AE statistics
+    // -1.0f indicates invalid/not yet measured (used for CLAHE skip decision)
+    float brightness_avg;       // Y-plane average brightness (0-255), from ISP AE stats
+    uint32_t brightness_lux;    // Environment illuminance from ISP cur_lux
+    uint8_t brightness_zone;    // BrightnessZone enum value
+    uint8_t correction_applied; // 1 if ISP low-light correction is active
+    uint8_t _reserved[2];       // Padding for alignment
+
     uint8_t data[MAX_FRAME_SIZE]; // Frame data
 } Frame;
 
@@ -245,5 +292,45 @@ int shm_detection_write(LatestDetectionResult* shm,
 uint32_t shm_detection_read(LatestDetectionResult* shm,
                              Detection* detections,
                              int* num_detections);
+
+/**
+ * Create shared memory for brightness data
+ */
+SharedBrightnessData* shm_brightness_create(void);
+
+/**
+ * Open existing shared memory for brightness data
+ */
+SharedBrightnessData* shm_brightness_open(void);
+
+/**
+ * Close brightness shared memory
+ */
+void shm_brightness_close(SharedBrightnessData* shm);
+
+/**
+ * Write brightness for a specific camera
+ *
+ * Args:
+ *   shm: Shared memory pointer
+ *   camera_id: Camera index (0 or 1)
+ *   brightness: Brightness data to write
+ */
+void shm_brightness_write(SharedBrightnessData* shm, int camera_id,
+                          const CameraBrightness* brightness);
+
+/**
+ * Read brightness for a specific camera
+ *
+ * Args:
+ *   shm: Shared memory pointer
+ *   camera_id: Camera index (0 or 1)
+ *   brightness: Output buffer for brightness data
+ *
+ * Returns:
+ *   Current version number
+ */
+uint32_t shm_brightness_read(SharedBrightnessData* shm, int camera_id,
+                              CameraBrightness* brightness);
 
 #endif // SHARED_MEMORY_H

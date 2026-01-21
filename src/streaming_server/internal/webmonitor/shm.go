@@ -28,6 +28,12 @@ typedef struct {
     int height;
     int format;
     size_t data_size;
+    // Brightness metrics (Phase 0: ISP low-light enhancement)
+    float brightness_avg;       // Y-plane average brightness (0-255)
+    uint32_t brightness_lux;    // Environment illuminance from ISP cur_lux
+    uint8_t brightness_zone;    // 0=dark, 1=dim, 2=normal, 3=bright
+    uint8_t correction_applied; // 1 if ISP low-light correction is active
+    uint8_t _reserved[2];       // Padding for alignment
     uint8_t data[MAX_FRAME_SIZE];
 } Frame;
 
@@ -641,13 +647,17 @@ const (
 )
 
 type frameSnapshot struct {
-	FrameNumber uint64
-	Timestamp   time.Time
-	CameraID    int
-	Width       int
-	Height      int
-	Format      int
-	Data        []byte
+	FrameNumber       uint64
+	Timestamp         time.Time
+	CameraID          int
+	Width             int
+	Height            int
+	Format            int
+	BrightnessAvg     float32 // Y-plane average brightness (0-255)
+	BrightnessLux     uint32  // Environment illuminance from ISP cur_lux
+	BrightnessZone    uint8   // 0=dark, 1=dim, 2=normal, 3=bright
+	CorrectionApplied bool    // true if ISP low-light correction is active
+	Data              []byte
 }
 
 type shmReader struct {
@@ -805,13 +815,17 @@ func (r *shmReader) LatestFrame() (*frameSnapshot, bool) {
 	)
 
 	return &frameSnapshot{
-		FrameNumber: uint64(cFrame.frame_number),
-		Timestamp:   timestamp,
-		CameraID:    int(cFrame.camera_id),
-		Width:       int(cFrame.width),
-		Height:      int(cFrame.height),
-		Format:      int(cFrame.format),
-		Data:        data,
+		FrameNumber:       uint64(cFrame.frame_number),
+		Timestamp:         timestamp,
+		CameraID:          int(cFrame.camera_id),
+		Width:             int(cFrame.width),
+		Height:            int(cFrame.height),
+		Format:            int(cFrame.format),
+		BrightnessAvg:     float32(cFrame.brightness_avg),
+		BrightnessLux:     uint32(cFrame.brightness_lux),
+		BrightnessZone:    uint8(cFrame.brightness_zone),
+		CorrectionApplied: cFrame.correction_applied != 0,
+		Data:              data,
 	}, true
 }
 
@@ -842,13 +856,17 @@ func (r *shmReader) LatestFrameZeroCopy() (*frameSnapshot, bool) {
 	)
 
 	return &frameSnapshot{
-		FrameNumber: uint64(cFramePtr.frame_number),
-		Timestamp:   timestamp,
-		CameraID:    int(cFramePtr.camera_id),
-		Width:       int(cFramePtr.width),
-		Height:      int(cFramePtr.height),
-		Format:      int(cFramePtr.format),
-		Data:        cData,  // Zero-copy reference to shared memory
+		FrameNumber:       uint64(cFramePtr.frame_number),
+		Timestamp:         timestamp,
+		CameraID:          int(cFramePtr.camera_id),
+		Width:             int(cFramePtr.width),
+		Height:            int(cFramePtr.height),
+		Format:            int(cFramePtr.format),
+		BrightnessAvg:     float32(cFramePtr.brightness_avg),
+		BrightnessLux:     uint32(cFramePtr.brightness_lux),
+		BrightnessZone:    uint8(cFramePtr.brightness_zone),
+		CorrectionApplied: cFramePtr.correction_applied != 0,
+		Data:              cData, // Zero-copy reference to shared memory
 	}, true
 }
 

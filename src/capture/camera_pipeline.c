@@ -6,6 +6,7 @@
 
 #include "camera_pipeline.h"
 #include "hb_mem_mgr.h"
+#include "isp_brightness.h"
 #include "logger.h"
 #include <stdio.h>
 #include <string.h>
@@ -88,13 +89,12 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
     goto error_cleanup;
   }
 
-  // Probe NV12 (written only on probe request)
-  pipeline->shm_probe_nv12 =
-      shm_frame_buffer_create_named(SHM_NAME_PROBE_FRAME);
-  if (!pipeline->shm_probe_nv12) {
+  // Lightweight brightness shared memory (updated every brightness check)
+  pipeline->shm_brightness = shm_brightness_create();
+  if (!pipeline->shm_brightness) {
     LOG_ERROR(Pipeline_log_header,
-              "Failed to open/create probe NV12 shared memory: %s",
-              SHM_NAME_PROBE_FRAME);
+              "Failed to open/create brightness shared memory: %s",
+              SHM_NAME_BRIGHTNESS);
     ret = -1;
     goto error_cleanup;
   }
@@ -129,6 +129,9 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
     LOG_ERROR(Pipeline_log_header, "encoder_thread_create failed: %d", ret);
     goto error_cleanup;
   }
+
+  // Initialize low-light correction state (Phase 2)
+  isp_lowlight_state_init(&pipeline->lowlight_state);
 
   LOG_INFO(Pipeline_log_header, "Pipeline created successfully");
   return 0;
@@ -182,13 +185,15 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     // Get NV12 frame from VIO
     ret = vio_get_frame(&pipeline->vio, &vio_frame, 2000);
     if (ret != 0) {
-      // Non-active cameras may fail to get frames during probe (expected)
-      // Only log as WARN if camera is active, otherwise DEBUG to reduce noise
-      if (*pipeline->is_active_flag == 1) {
+      // Error -43 (HBN_STATUS_NODE_DEQUE_ERROR) is transient during camera
+      // switches - the VIO buffer isn't ready yet. Use DEBUG level to avoid log
+      // spam. Non-active cameras may also fail to get frames during probe
+      // (expected).
+      if (*pipeline->is_active_flag == 1 && ret != -43) {
         LOG_WARN(Pipeline_log_header, "vio_get_frame failed: %d", ret);
       } else {
-        LOG_DEBUG(Pipeline_log_header, "vio_get_frame failed (inactive): %d",
-                  ret);
+        LOG_DEBUG(Pipeline_log_header, "vio_get_frame failed: %d (active=%d)",
+                  ret, *pipeline->is_active_flag);
       }
       continue;
     }
@@ -197,13 +202,57 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     bool write_active = *pipeline->is_active_flag == 1;
     bool write_probe = *pipeline->probe_requested_flag == 1;
 
+    // Get ISP brightness statistics with throttling (using power-of-2 masks for fast bitwise AND)
+    // - DAY camera active: every 8 frames (~3.75Hz) for fast DAY→NIGHT detection
+    // - DAY camera inactive: every 64 frames (~2.1 sec) for NIGHT→DAY detection
+    // - NIGHT camera: every 128 frames (~4.3 sec) for CLAHE decision in YOLO
+    // NOTE: ISP lowlight correction is DISABLED - using CLAHE on YOLO side instead
+    #define ISP_BRIGHTNESS_MASK_DAY_ACTIVE 7      // 8 frames when active (2^3 - 1)
+    #define ISP_BRIGHTNESS_MASK_DAY_INACTIVE 63   // 64 frames when inactive (2^6 - 1)
+    #define ISP_BRIGHTNESS_MASK_NIGHT 127         // 128 frames (~4.3 sec, 2^7 - 1)
+    static isp_brightness_result_t cached_brightness = {.valid = false};
+    static bool prev_active = false;
+
+    // Detect camera switch: when this camera becomes active, reset brightness cache
+    // and immediately fetch fresh brightness from ISP
+    bool camera_just_activated = write_active && !prev_active;
+    if (camera_just_activated) {
+      cached_brightness.valid = false;
+      LOG_INFO(Pipeline_log_header, "Camera activated, resetting brightness cache");
+    }
+    prev_active = write_active;
+
+    // Determine brightness check interval based on camera type and state
+    // Use bitwise AND for fast modulo with power-of-2 intervals
+    bool is_day_camera = (pipeline->camera_index == 0);
+    int brightness_mask;
+    if (is_day_camera) {
+      brightness_mask = write_active ? ISP_BRIGHTNESS_MASK_DAY_ACTIVE : ISP_BRIGHTNESS_MASK_DAY_INACTIVE;
+    } else {
+      brightness_mask = ISP_BRIGHTNESS_MASK_NIGHT;  // NIGHT camera: ~4.3 sec interval
+    }
+    bool is_brightness_frame = (frame_count & brightness_mask) == 0;
+
+    // Both DAY and NIGHT cameras retrieve brightness
+    // - DAY: used for camera switching decisions
+    // - NIGHT: used for CLAHE decision in YOLO detector
+    // Also fetch immediately when camera is just activated
+    if (is_brightness_frame || camera_just_activated) {
+      isp_get_brightness(pipeline->vio.isp_handle, &cached_brightness);
+    }
+    isp_brightness_result_t brightness_result = cached_brightness;
+
+    // ISP lowlight correction is DISABLED to avoid frame drops
+    // Image enhancement is now done via CLAHE preprocessing on the YOLO detector side
+
     // Debug: log flags every 30 frames
     if (frame_count % 30 == 0) {
       LOG_DEBUG(
           Pipeline_log_header,
-          "Flags: is_active=%d, probe=%d, write_active=%d, write_probe=%d",
+          "Flags: is_active=%d, probe=%d, brightness=%.1f lux=%u zone=%d",
           *pipeline->is_active_flag, *pipeline->probe_requested_flag,
-          write_active, write_probe);
+          brightness_result.brightness_avg, brightness_result.brightness_lux,
+          brightness_result.zone);
     }
 
     if (write_active || write_probe) {
@@ -217,6 +266,10 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       nv12_frame.frame_number = frame_count;
       nv12_frame.camera_id = pipeline->camera_index;
       nv12_frame.timestamp = frame_timestamp;
+
+      // Apply brightness data from ISP
+      isp_fill_frame_brightness(&nv12_frame, &brightness_result);
+      nv12_frame.correction_applied = 0;
 
       // Calculate NV12 size from buffer metadata
       size_t nv12_size = 0;
@@ -247,19 +300,32 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
           }
         }
 
-        // Write to probe shared memory if probe requested
+        // Clear probe request flag (brightness is now always available)
         if (write_probe) {
-          if (shm_frame_buffer_write(pipeline->shm_probe_nv12, &nv12_frame) <
-              0) {
-            LOG_WARN(Pipeline_log_header, "Failed to write NV12 to probe shm");
-          }
-          // Clear probe request flag after writing one frame
           *pipeline->probe_requested_flag = 0;
         }
       } else {
         LOG_WARN(Pipeline_log_header, "NV12 frame too large (%zu bytes)",
                  nv12_size);
       }
+    }
+
+    // Write brightness to lightweight shared memory
+    // DAY camera (index 0) always writes - used for switching decisions
+    // Frequency: active=~3.75Hz (8 frames), inactive=~0.47Hz (64 frames, ~2.1 sec)
+    if (is_day_camera && is_brightness_frame && brightness_result.valid) {
+      struct timespec now_ts;
+      clock_gettime(CLOCK_REALTIME, &now_ts);
+      CameraBrightness cam_brightness = {
+          .frame_number = frame_count,
+          .timestamp = now_ts,
+          .brightness_avg = brightness_result.brightness_avg,
+          .brightness_lux = brightness_result.brightness_lux,
+          .brightness_zone = (uint8_t)brightness_result.zone,
+          .correction_applied = pipeline->lowlight_state.correction_active ? 1 : 0,
+      };
+      shm_brightness_write(pipeline->shm_brightness, pipeline->camera_index,
+                           &cam_brightness);
     }
 
     // Push frame to encoder thread only if camera is active
@@ -299,6 +365,10 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
         yolo_nv12_frame.camera_id = pipeline->camera_index;
         yolo_nv12_frame.timestamp = frame_timestamp;
 
+        // Apply brightness data from ISP (same for all channels)
+        isp_fill_frame_brightness(&yolo_nv12_frame, &brightness_result);
+        yolo_nv12_frame.correction_applied = 0;
+
         // Calculate NV12 size for 640x640
         size_t yolo_size = 0;
         for (int i = 0; i < yolo_frame.buffer.plane_cnt; i++) {
@@ -315,6 +385,10 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
             offset += yolo_frame.buffer.size[i];
           }
 
+          // NOTE: Gamma correction is DISABLED - using CLAHE on YOLO detector side
+          // This avoids CPU overhead in the capture pipeline
+          yolo_nv12_frame.correction_applied = 0;
+
           int write_ret = shm_frame_buffer_write(pipeline->shm_yolo_input, &yolo_nv12_frame);
           if (write_ret < 0) {
             LOG_WARN(Pipeline_log_header, "Failed to write YOLO input to shm");
@@ -326,8 +400,8 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
                        yolo_nv12_frame.width, yolo_nv12_frame.height, yolo_size);
             } else {
               LOG_DEBUG(Pipeline_log_header,
-                        "Wrote YOLO %dx%d frame#%d to shm (idx=%d)",
-                        yolo_nv12_frame.width, yolo_nv12_frame.height, frame_count, write_ret);
+                        "YOLO frame#%d brightness=%.1f",
+                        frame_count, brightness_result.brightness_avg);
             }
           }
         }
@@ -353,6 +427,10 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
         mjpeg_nv12_frame.frame_number = frame_count;
         mjpeg_nv12_frame.camera_id = pipeline->camera_index;
         mjpeg_nv12_frame.timestamp = frame_timestamp;
+
+        // Apply brightness data from ISP (same for all channels)
+        isp_fill_frame_brightness(&mjpeg_nv12_frame, &brightness_result);
+        mjpeg_nv12_frame.correction_applied = 0;
 
         // Calculate NV12 size for 640x480
         size_t mjpeg_size = 0;
@@ -458,9 +536,9 @@ void pipeline_destroy(camera_pipeline_t *pipeline) {
     pipeline->shm_active_h264 = NULL;
   }
 
-  if (pipeline->shm_probe_nv12) {
-    shm_frame_buffer_close(pipeline->shm_probe_nv12);
-    pipeline->shm_probe_nv12 = NULL;
+  if (pipeline->shm_brightness) {
+    shm_brightness_close(pipeline->shm_brightness);
+    pipeline->shm_brightness = NULL;
   }
 
   if (pipeline->shm_yolo_input) {

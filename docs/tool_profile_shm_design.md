@@ -177,6 +177,6 @@ uv run scripts/profile_shm.py --save-iframes --output-dir recordings
 新しい共有メモリ設計（Option B）に対応:
 - `/pet_camera_active_frame`: アクティブカメラのNV12（30fps）
 - `/pet_camera_stream`: アクティブカメラのH.264（30fps）
-- `/pet_camera_probe_frame`: プローブNV12（オンデマンド）
+- `/pet_camera_brightness`: 軽量明るさデータ（~100 bytes、両カメラ）
 
 プロファイラは`active_frame`をデフォルトでテストし、カメラ切り替え検出が可能。
