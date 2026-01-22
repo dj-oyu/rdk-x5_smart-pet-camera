@@ -437,3 +437,131 @@ uint32_t shm_brightness_read(SharedBrightnessData* shm, int camera_id,
 
     return version;
 }
+
+// ============================================================================
+// Zero-Copy Shared Memory Functions
+// ============================================================================
+
+ZeroCopyFrameBuffer* shm_zerocopy_create(const char* name) {
+    bool created_new = false;
+    ZeroCopyFrameBuffer* shm = (ZeroCopyFrameBuffer*)shm_create_or_open_ex(
+        name,
+        sizeof(ZeroCopyFrameBuffer),
+        true,  // create
+        &created_new
+    );
+
+    if (shm) {
+        if (created_new) {
+            // Initialize semaphores for SPSC synchronization
+            // new_frame_sem: producer posts when frame is ready
+            if (sem_init(&shm->new_frame_sem, 1, 0) != 0) {
+                LOG_ERROR("SharedMemory", "sem_init(new_frame_sem) failed for %s: %s",
+                          name, strerror(errno));
+                munmap(shm, sizeof(ZeroCopyFrameBuffer));
+                shm_unlink(name);
+                return NULL;
+            }
+            // consumed_sem: starts at 1 (first frame doesn't wait), consumer posts after processing
+            if (sem_init(&shm->consumed_sem, 1, 1) != 0) {
+                LOG_ERROR("SharedMemory", "sem_init(consumed_sem) failed for %s: %s",
+                          name, strerror(errno));
+                sem_destroy(&shm->new_frame_sem);
+                munmap(shm, sizeof(ZeroCopyFrameBuffer));
+                shm_unlink(name);
+                return NULL;
+            }
+
+            // Initialize frame to invalid state
+            shm->frame.version = 0;
+            shm->frame.consumed = 1;  // Ready for first write
+
+            LOG_INFO("SharedMemory", "Zero-copy shared memory created: %s (size=%zu bytes)",
+                     name, sizeof(ZeroCopyFrameBuffer));
+        } else {
+            LOG_INFO("SharedMemory", "Zero-copy shared memory opened (already exists): %s", name);
+        }
+    }
+
+    return shm;
+}
+
+ZeroCopyFrameBuffer* shm_zerocopy_open(const char* name) {
+    ZeroCopyFrameBuffer* shm = (ZeroCopyFrameBuffer*)shm_create_or_open(
+        name,
+        sizeof(ZeroCopyFrameBuffer),
+        false  // open existing
+    );
+
+    if (shm) {
+        LOG_INFO("SharedMemory", "Zero-copy shared memory opened: %s", name);
+    }
+
+    return shm;
+}
+
+void shm_zerocopy_close(ZeroCopyFrameBuffer* shm) {
+    if (shm) {
+        munmap(shm, sizeof(ZeroCopyFrameBuffer));
+    }
+}
+
+void shm_zerocopy_destroy(ZeroCopyFrameBuffer* shm, const char* name) {
+    if (shm) {
+        sem_destroy(&shm->new_frame_sem);
+        sem_destroy(&shm->consumed_sem);
+        munmap(shm, sizeof(ZeroCopyFrameBuffer));
+        shm_unlink(name);
+        LOG_INFO("SharedMemory", "Zero-copy shared memory destroyed: %s", name);
+    }
+}
+
+int shm_zerocopy_write(ZeroCopyFrameBuffer* shm, const ZeroCopyFrame* frame) {
+    if (!shm || !frame) {
+        return -1;
+    }
+
+    // Wait for consumer to finish with previous frame (throttles to consumer speed)
+    // For YOLO (~100ms), this naturally limits to ~10fps
+    // Use sem_trywait to check without blocking, then timeout-wait
+    struct timespec timeout;
+    clock_gettime(CLOCK_REALTIME, &timeout);
+    timeout.tv_nsec += 100000000;  // 100ms timeout
+    if (timeout.tv_nsec >= 1000000000) {
+        timeout.tv_sec += 1;
+        timeout.tv_nsec -= 1000000000;
+    }
+
+    int ret = sem_timedwait(&shm->consumed_sem, &timeout);
+    if (ret != 0 && errno == ETIMEDOUT) {
+        // Consumer is slow, skip this frame
+        LOG_DEBUG("SharedMemory", "Zero-copy write skipped: consumer not ready");
+        return -1;
+    }
+
+    // Copy frame metadata (NOT the actual frame data - that's the point of zero-copy)
+    memcpy(&shm->frame, frame, sizeof(ZeroCopyFrame));
+
+    // Mark as not yet consumed
+    __atomic_store_n(&shm->frame.consumed, 0, __ATOMIC_RELEASE);
+
+    // Increment version to signal new frame
+    __atomic_fetch_add(&shm->frame.version, 1, __ATOMIC_SEQ_CST);
+
+    // Notify consumer
+    sem_post(&shm->new_frame_sem);
+
+    return 0;
+}
+
+void shm_zerocopy_mark_consumed(ZeroCopyFrameBuffer* shm) {
+    if (!shm) {
+        return;
+    }
+
+    // Mark frame as consumed
+    __atomic_store_n(&shm->frame.consumed, 1, __ATOMIC_RELEASE);
+
+    // Signal producer that it can write next frame
+    sem_post(&shm->consumed_sem);
+}

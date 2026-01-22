@@ -41,6 +41,9 @@ typedef struct {
     SharedFrameBuffer *shm_yolo_input;    // YOLO 640x360 NV12 input (VSE Ch1, always active)
     SharedFrameBuffer *shm_mjpeg_frame;   // MJPEG 640x480 NV12 input (VSE Ch2, always active, writable)
 
+    // Zero-copy shared memory (Phase 2: share_id based, no memcpy)
+    ZeroCopyFrameBuffer *shm_yolo_zerocopy; // YOLO zero-copy (parallel with shm_yolo_input)
+
     // Runtime control
     volatile bool *running_flag;           // External running flag
     volatile sig_atomic_t *is_active_flag; // Active camera flag (controlled by SIGUSR1/SIGUSR2)
