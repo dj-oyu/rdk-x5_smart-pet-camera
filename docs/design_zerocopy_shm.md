@@ -1,8 +1,15 @@
-# Zero-Copy Shared Memory 設計 v3
+# Zero-Copy Shared Memory 設計 v4
 
 ## 概要
 
-カメラパイプラインからコンシューマへのフレーム転送でmemcpyを排除し、VIOバッファのshare_idを直接共有する。エンコーダ入力も`external_frame_buf`で最適化。
+カメラパイプラインからコンシューマへのフレーム転送でmemcpyを排除し、VIOバッファのshare_idを直接共有する。エンコーダ入力は`external_frame_buf`で、エンコーダ出力も`fd`から`share_id`を取得してzero-copy化。
+
+## 設計原則
+
+1. **両カメラのフレームが常に取得可能** - active/inactive に関係なく
+2. **アクティブカメラは共有メモリで公開** - シグナル不要
+3. **brightness は ZeroCopyFrame に含める** - 別途 shm_brightness 不要
+4. **NV12 も H.264 も zero-copy で取得可能**
 
 ## 現状のアーキテクチャ
 
@@ -266,6 +273,298 @@ encoder_thread.c     yolo_detector_daemon.py
 | `/pet_camera_active_zc` | Active NV12 zero-copy (両カメラ) |
 | `/pet_camera_stream` | H.264出力 (従来通りmemcpy) |
 
+## H.264 出力の Zero-Copy
+
+### エンコーダ出力バッファ構造
+
+```c
+// SDK の mc_video_stream_buffer_info_t
+typedef struct {
+    hb_u8 *vir_ptr;    // 仮想アドレス
+    hb_u64 phy_ptr;    // 物理アドレス
+    hb_u32 size;       // サイズ
+    hb_s32 fd;         // ION fd ← share_id 取得に使用
+    ...
+} mc_video_stream_buffer_info_t;
+```
+
+### fd から share_id を取得
+
+```c
+// hb_mem API
+int32_t hb_mem_get_com_buf(int32_t fd, hb_mem_common_buf_t *buf);
+// → buf->share_id でプロセス間共有可能
+```
+
+### H.264 Zero-Copy 実装
+
+```c
+// encoder_lowlevel.c
+int encoder_encode_frame_zerocopy(encoder_context_t *ctx,
+                                   uint64_t phy_addr_y, uint64_t phy_addr_uv,
+                                   int32_t *h264_share_id_out,
+                                   size_t *h264_size_out) {
+    // 1. 入力: VIO バッファの物理アドレスを直接渡す (memcpy 不要)
+    input_buffer.vframe_buf.phy_ptr[0] = phy_addr_y;
+    input_buffer.vframe_buf.phy_ptr[1] = phy_addr_uv;
+    hb_mm_mc_queue_input_buffer(&ctx->codec_ctx, &input_buffer, timeout);
+
+    // 2. 出力: エンコード結果を取得
+    hb_mm_mc_dequeue_output_buffer(&ctx->codec_ctx, &output_buffer, &info, timeout);
+
+    // 3. fd から share_id を取得 (memcpy 不要)
+    hb_mem_common_buf_t buf;
+    hb_mem_get_com_buf(output_buffer.vstream_buf.fd, &buf);
+    *h264_share_id_out = buf.share_id;
+    *h264_size_out = output_buffer.vstream_buf.size;
+
+    // 4. 出力バッファは Consumer が consumed を通知するまで保持
+    return 0;
+}
+```
+
+### H.264 ZeroCopyFrame 構造
+
+```c
+typedef struct {
+    uint64_t frame_number;
+    struct timespec timestamp;
+    int32_t share_id;           // H.264 バッファの share_id
+    uint64_t size;              // H.264 データサイズ
+    uint8_t is_keyframe;        // IDR フレームか
+    volatile uint32_t version;
+    volatile uint8_t consumed;
+} ZeroCopyH264Frame;
+
+typedef struct {
+    volatile int active_camera_index;
+    sem_t new_frame_sem[NUM_CAMERAS];
+    sem_t consumed_sem[NUM_CAMERAS];
+    ZeroCopyH264Frame frames[NUM_CAMERAS];
+} ZeroCopyH264Buffer;
+```
+
+### Consumer 側 (streaming-server)
+
+```c
+// Go または C から
+hb_mem_common_buf_t in_buf = { .share_id = frame->share_id };
+hb_mem_common_buf_t out_buf;
+hb_mem_import_com_buf(&in_buf, &out_buf);
+
+// H.264 データに直接アクセス
+uint8_t *h264_data = (uint8_t *)out_buf.virt_addr;
+size_t h264_size = frame->size;
+
+// WebRTC に送信...
+
+// 完了通知
+hb_mem_free_buf(&out_buf);
+frame->consumed = 1;
+sem_post(&buffer->consumed_sem[camera_index]);
+```
+
+## Camera Switcher Daemon の簡素化
+
+### 現状の問題点
+
+```
+現在のアーキテクチャ:
+┌─────────────────────────────────────────────────────────────┐
+│ camera_switcher_daemon                                       │
+│   ├── active_thread (フレーム取得、brightness チェック)      │
+│   ├── probe_thread (非アクティブカメラの brightness)         │
+│   ├── capture_active_frame_cb (コールバック)                 │
+│   ├── capture_probe_frame_cb (コールバック)                  │
+│   ├── wait_for_new_frame_cb (セマフォ待ち)                   │
+│   └── シグナル送信 (SIGUSR1/SIGUSR2 でカメラ切り替え)        │
+└─────────────────────────────────────────────────────────────┘
+
+問題:
+- 複雑なコールバック機構
+- シグナルベースのカメラ切り替え
+- shm_brightness という別の共有メモリ
+- probe_thread の存在意義が薄い
+```
+
+### 新設計: シンプルなポーリング
+
+```
+新アーキテクチャ:
+┌─────────────────────────────────────────────────────────────┐
+│ camera_switcher_daemon (単一スレッド)                        │
+│                                                              │
+│   while (running) {                                          │
+│       // DAY カメラの brightness を直接読み取り              │
+│       day_frame = read_zerocopy_shm("/pet_camera_zc_0");     │
+│       brightness = day_frame.brightness_avg;                 │
+│                                                              │
+│       // 切り替え判定                                        │
+│       if (should_switch_to_night(brightness)) {              │
+│           control->active_camera_index = NIGHT;              │
+│       } else if (should_switch_to_day(brightness)) {         │
+│           control->active_camera_index = DAY;                │
+│       }                                                      │
+│                                                              │
+│       // チェック間隔は状況に応じて変化                       │
+│       // DAY active: 短い (暗くなったらすぐ検知)             │
+│       // NIGHT active: 長い (明るくなるまで待つ)             │
+│       sleep(check_interval);                                 │
+│   }                                                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 削除できるもの
+
+| コンポーネント | 理由 |
+|---------------|------|
+| `probe_thread` | DAY カメラの ZeroCopyFrame から直接 brightness 取得 |
+| `active_thread` | 単一ループで十分 |
+| `capture_active_frame_cb` | 共有メモリを直接読む |
+| `capture_probe_frame_cb` | 共有メモリを直接読む |
+| `wait_for_new_frame_cb` | 不要 (ポーリングで十分) |
+| `shm_brightness` | ZeroCopyFrame.brightness_avg で代替 |
+| `SIGUSR1/SIGUSR2` | active_camera_index の書き換えで代替 |
+| `probe_requested_flag` | 不要 |
+| `camera_switcher_runtime.c/h` | 大幅に簡素化可能 |
+
+### カメラデーモン側の変更
+
+```c
+// camera_daemon_main.c - 簡素化
+while (running) {
+    // 常にフレームを取得・書き込み
+    vio_get_frame(&vio, &frame);
+    write_zerocopy_shm(my_shm, &frame, brightness);
+
+    // アクティブかどうかは共有メモリで確認
+    if (control->active_camera_index == my_camera_id) {
+        // H.264 エンコード・書き込み
+        encoder_encode_frame_zerocopy(...);
+        write_h264_zerocopy_shm(h264_shm, ...);
+    }
+
+    vio_release_frame(&vio, &frame);
+}
+```
+
+### 期待効果
+
+| 項目 | Before | After |
+|------|--------|-------|
+| スレッド数 | 2 (active + probe) | 1 |
+| コールバック | 4種類 | 0 |
+| シグナル | SIGUSR1/SIGUSR2 | 不要 |
+| 共有メモリ | shm_brightness + 複数 | ZeroCopyFrame のみ |
+| コード行数 | camera_switcher_runtime.c ~200行 | ~50行 |
+| 遅延 | シグナル伝搬 + コールバック | 即座 (次フレームから) |
+
+## カメラデーモンの省電力設計
+
+### セマフォベースのスリープ
+
+ビジーループを排除し、セマフォで必要な時だけ起床する設計。
+
+```
+共有メモリ /pet_camera_control:
+  - active_camera_index
+  - sem_t wakeup_sem[2]        // カメラ起床用
+  - sem_t brightness_req_sem   // brightness 要求用 (DAY 向け)
+  - sem_t brightness_updated_sem  // switcher 通知用
+
+DAY カメラ:
+  while running:
+    if active:
+      sem_wait(&new_frame_sem)   // VIO から新フレーム通知待ち
+      process_frame()            // NV12 + H.264
+    else:
+      sem_timedwait(&brightness_req_sem, 2秒)  // 要求 or タイムアウト
+      vio_get_frame()
+      write_brightness()
+      sem_post(&brightness_updated_sem)
+      vio_release_frame()
+
+NIGHT カメラ:
+  while running:
+    sem_wait(&wakeup_sem[NIGHT])  // 起床待ち (inactive 時はここでブロック)
+    vio_start()                   // パイプライン再開
+
+    while active && running:
+      sem_wait(&new_frame_sem)
+      process_frame()
+
+    vio_stop()  // inactive になったらパイプライン停止
+
+camera_switcher:
+  while running:
+    interval = (active == DAY) ? 250ms : 5秒
+    sem_timedwait(&brightness_updated_sem, interval)
+    brightness = read_from_shm()
+
+    if should_switch():
+      control->active_camera_index = new_camera
+      sem_post(&wakeup_sem[new_camera])  // 新カメラ起床
+```
+
+### カメラ動作モード
+
+| Active Camera | DAY カメラ | NIGHT カメラ |
+|---------------|------------|--------------|
+| DAY | フル稼働 (30fps, NV12+H.264) | 完全スリープ (CPU 0%) |
+| NIGHT | brightness のみ (2秒おき) | フル稼働 (30fps, NV12+H.264) |
+
+### Probe 間隔テーブル
+
+| 状況 | 動作 | 間隔 | セマフォ |
+|------|------|------|----------|
+| DAY active, brightness 取得 | ISP から取得、SHM 書込み | 8 frames (~267ms) | new_frame_sem |
+| DAY inactive, brightness 取得 | ISP から取得、SHM 書込み | 2秒 | brightness_req_sem (timedwait) |
+| NIGHT active | フル稼働 | 30fps | new_frame_sem |
+| NIGHT inactive | VIO 停止、スリープ | - | wakeup_sem (無期限待ち) |
+| Switcher (DAY active) | DAY brightness 監視 | 250ms | brightness_updated_sem |
+| Switcher (NIGHT active) | DAY brightness 監視 | 5秒 | brightness_updated_sem (timedwait) |
+
+### 切り替え条件
+
+| 遷移 | 条件 | 応答時間目標 | 理由 |
+|------|------|-------------|------|
+| DAY → NIGHT | brightness < 閾値 が N 秒継続 | ~1秒 | 暗転は即座に対応 |
+| NIGHT → DAY | brightness > 閾値 が N 秒継続 | ~10秒 | 明転は急がない |
+
+### NIGHT カメラ起動時間
+
+| フェーズ | 所要時間 (推定) |
+|----------|----------------|
+| sem_post (起床) | < 1ms |
+| vio_start() | 100-500ms |
+| 最初のフレーム出力 | 1-2 frames (~33-66ms) |
+| **合計** | **~200-600ms** |
+
+※ DAY → NIGHT 切り替え時、NIGHT カメラ起動中は DAY カメラがフレーム出力を継続するため、視聴者への影響は最小限。
+
+## 新しい共有メモリ構成
+
+```
+/pet_camera_control
+    └─ active_camera_index (0=DAY, 1=NIGHT)
+
+/pet_camera_zc_0 (DAY カメラ NV12)
+    └─ ZeroCopyFrame (share_id, brightness_avg, ...)
+    └─ 常に更新
+
+/pet_camera_zc_1 (NIGHT カメラ NV12)
+    └─ ZeroCopyFrame (share_id, brightness_avg, ...)
+    └─ 常に更新
+
+/pet_camera_h264_zc_0 (DAY カメラ H.264)
+    └─ ZeroCopyH264Frame (share_id, size, is_keyframe, ...)
+    └─ active 時のみ更新
+
+/pet_camera_h264_zc_1 (NIGHT カメラ H.264)
+    └─ ZeroCopyH264Frame (share_id, size, is_keyframe, ...)
+    └─ active 時のみ更新
+```
+
 ## 注意事項
 
 ### VIOバッファのライフサイクル
@@ -276,12 +575,21 @@ getframe() → share_id取得 → Consumer処理 → consumed通知 → releasef
                              66ms以内に完了必要
 ```
 
+### エンコーダ出力バッファのライフサイクル
+
+```
+dequeue_output() → fd→share_id → Consumer処理 → consumed通知 → queue_output()
+                                      │
+                                 Consumer は hb_mem_import で直接アクセス
+```
+
 ### カメラ切り替え
 
 ```
-1. camera_switcher: active_camera_index を更新
-2. Consumer: 次フレームから新しいカメラを使用
-3. 遅延ゼロで切り替え完了
+1. camera_switcher: active_camera_index を更新 (共有メモリ書き換え)
+2. カメラデーモン: 次のループで active_camera_index を確認
+3. Consumer: 次フレームから新しいカメラを使用
+4. 遅延ゼロで切り替え完了 (シグナル伝搬なし)
 ```
 
 ### フォールバック
