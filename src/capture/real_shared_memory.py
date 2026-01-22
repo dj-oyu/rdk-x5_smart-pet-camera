@@ -29,16 +29,22 @@ from typing import Optional
 import numpy as np
 
 # Load librt for semaphore operations
+librt = None
 try:
     librt = CDLL("librt.so.1")
     # Define sem_post function signature
     # int sem_post(sem_t *sem)
     librt.sem_post.argtypes = [c_void_p]
     librt.sem_post.restype = c_int
-except OSError as e:
-    import logging
-    logging.warning(f"Failed to load librt for semaphore support: {e}")
-    librt = None
+except OSError:
+    # Try libpthread as fallback (sem_post is sometimes there)
+    try:
+        librt = CDLL("libpthread.so.0")
+        librt.sem_post.argtypes = [c_void_p]
+        librt.sem_post.restype = c_int
+    except OSError as e:
+        import logging
+        logging.warning(f"Failed to load librt/libpthread for semaphore support: {e}")
 
 # Constants (must match C definitions)
 SHM_NAME_ACTIVE_FRAME = "/pet_camera_active_frame"
@@ -256,9 +262,21 @@ class ZeroCopySharedMemory:
         shm_path = f"/dev/shm{self.shm_name}"
         try:
             self.fd = os.open(shm_path, os.O_RDWR)
+
+            # Get actual file size to verify structure match
+            file_size = os.fstat(self.fd).st_size
+            expected_size = sizeof(CZeroCopyFrameBuffer)
+            print(f"[Info] Zero-copy SHM size: actual={file_size}, expected={expected_size}")
+            print(f"[Info] CZeroCopyFrame size: {sizeof(CZeroCopyFrame)}")
+            print(f"[Info] Frame offset: new_frame_sem=0, consumed_sem=32, frame=64")
+
+            if file_size != expected_size:
+                print(f"[WARN] Size mismatch! C struct may have different layout.")
+                print(f"[WARN] Using actual file size for mmap: {file_size}")
+
             self.mmap_obj = mmap.mmap(
                 self.fd,
-                sizeof(CZeroCopyFrameBuffer),
+                file_size,  # Use actual size
                 mmap.MAP_SHARED,
                 mmap.PROT_READ | mmap.PROT_WRITE,
             )
@@ -301,6 +319,12 @@ class ZeroCopySharedMemory:
 
         self.last_version = buf.frame.version
 
+        # Validate plane_cnt to avoid invalid array access
+        plane_cnt = buf.frame.plane_cnt
+        if plane_cnt < 0 or plane_cnt > ZEROCOPY_MAX_PLANES:
+            print(f"[ERROR] Invalid plane_cnt: {plane_cnt}, expected 0-{ZEROCOPY_MAX_PLANES}")
+            return None
+
         # Convert to Python dataclass
         timestamp_sec = buf.frame.timestamp.tv_sec + buf.frame.timestamp.tv_nsec / 1e9
         return ZeroCopyFrame(
@@ -312,9 +336,9 @@ class ZeroCopySharedMemory:
             format=buf.frame.format,
             brightness_avg=buf.frame.brightness_avg,
             correction_applied=bool(buf.frame.correction_applied),
-            share_id=[buf.frame.share_id[i] for i in range(buf.frame.plane_cnt)],
-            plane_size=[buf.frame.plane_size[i] for i in range(buf.frame.plane_cnt)],
-            plane_cnt=buf.frame.plane_cnt,
+            share_id=[buf.frame.share_id[i] for i in range(plane_cnt)],
+            plane_size=[buf.frame.plane_size[i] for i in range(plane_cnt)],
+            plane_cnt=plane_cnt,
             version=buf.frame.version,
         )
 
@@ -337,11 +361,16 @@ class ZeroCopySharedMemory:
         self.mmap_obj.write(b'\x01')
         self.mmap_obj.flush()
 
-        # Post consumed_sem (32 bytes after new_frame_sem)
+        # Post consumed_sem (at offset 32 in the buffer)
         if librt:
-            # Get address of consumed_sem
-            sem_addr = addressof(c_uint8.from_buffer(self.mmap_obj, 32))
-            librt.sem_post(c_void_p(sem_addr))
+            # Create a ctypes array backed by the mmap at offset 32 (consumed_sem location)
+            # sem_t is 32 bytes on Linux
+            sem_array_type = c_uint8 * 32
+            sem_buf = sem_array_type.from_buffer(self.mmap_obj, 32)
+            ret = librt.sem_post(addressof(sem_buf))
+            if ret != 0:
+                import logging
+                logging.warning(f"sem_post failed: {ret}")
 
 
 class RealSharedMemory:

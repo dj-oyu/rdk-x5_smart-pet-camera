@@ -359,12 +359,9 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
         LOG_WARN(Pipeline_log_header, "Encoder queue full, frame %d dropped",
                  frame_count);
       }
-    } else {
-      // Release VIO frame immediately
-      vio_release_frame(&pipeline->vio, &vio_frame);
     }
 
-    // Release VIO frame immediately
+    // Release main VIO frame (always release after use)
     vio_release_frame(&pipeline->vio, &vio_frame);
 
     // Get YOLO input frame from VSE Channel 1 (640x360 letterbox)
@@ -424,17 +421,10 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
           }
         }
 
-        // Zero-copy path (Phase 2: writes share_id for testing, parallel with memcpy)
-        // NOTE: This phase tests share_id writing. VIO frame is still released immediately,
-        // which means consumer must process quickly before buffer is reused.
-        // Phase 3 will implement proper deferred release for true zero-copy.
+        // Zero-copy path: share_id based, deferred VIO frame release
+        // Consumer imports VIO buffer via share_id, processes, then signals consumed.
+        // We release the PREVIOUS frame only AFTER consumer signals it's done.
         if (pipeline->shm_yolo_zerocopy) {
-          // Release any pending frame from previous iteration first
-          if (has_pending_yolo_frame) {
-            vio_release_frame_ch1(&pipeline->vio, &pending_yolo_frame);
-            has_pending_yolo_frame = false;
-          }
-
           ZeroCopyFrame zc_frame = {0};
           zc_frame.frame_number = frame_count;
           zc_frame.timestamp = frame_timestamp;
@@ -452,10 +442,16 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
             zc_frame.plane_size[i] = yolo_frame.buffer.size[i];
           }
 
+          // shm_zerocopy_write waits for consumer to signal consumed_sem
+          // If it succeeds, consumer has finished with the PREVIOUS frame
           int zc_ret = shm_zerocopy_write(pipeline->shm_yolo_zerocopy, &zc_frame);
           if (zc_ret == 0) {
-            // Zero-copy write succeeded - defer VIO frame release
-            // Consumer must call shm_zerocopy_mark_consumed() when done
+            // Consumer finished with previous frame - safe to release it now
+            if (has_pending_yolo_frame) {
+              vio_release_frame_ch1(&pipeline->vio, &pending_yolo_frame);
+            }
+
+            // Keep current frame as pending until consumer finishes
             pending_yolo_frame = yolo_frame;
             has_pending_yolo_frame = true;
 
@@ -465,7 +461,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
                        zc_frame.share_id[0], zc_frame.share_id[1], zc_frame.plane_cnt);
             }
           } else {
-            // Zero-copy write failed (consumer busy) - release immediately
+            // Consumer busy (timeout) - release current frame, keep pending as-is
             vio_release_frame_ch1(&pipeline->vio, &yolo_frame);
           }
         } else {

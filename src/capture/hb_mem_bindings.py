@@ -29,6 +29,7 @@ from ctypes import (
     POINTER,
     Structure,
     byref,
+    addressof,
 )
 from typing import Optional
 import numpy as np
@@ -60,6 +61,7 @@ class hb_mem_common_buf_t(Structure):
         int32_t reserved[8];
     } hb_mem_common_buf_t;
     """
+
     _fields_ = [
         ("fd", c_int32),
         ("phys_addr", c_uint64),
@@ -93,6 +95,7 @@ class hb_mem_graphic_buf_t(Structure):
         int32_t reserved[8];
     } hb_mem_graphic_buf_t;
     """
+
     _fields_ = [
         ("fd", c_int32 * HB_MEM_GRAPHIC_MAX_PLANE),
         ("phys_addr", c_uint64 * HB_MEM_GRAPHIC_MAX_PLANE),
@@ -163,13 +166,14 @@ def _setup_function_signatures(lib: ctypes.CDLL) -> None:
     lib.hb_mem_module_close.argtypes = []
     lib.hb_mem_module_close.restype = None
 
-    # int hb_mem_import_com_buf(int32_t share_id, hb_mem_common_buf_t *buf)
-    lib.hb_mem_import_com_buf.argtypes = [c_int32, POINTER(hb_mem_common_buf_t)]
-    lib.hb_mem_import_com_buf.restype = c_int
+    # int32_t hb_mem_import_com_buf(hb_mem_common_buf_t *buf, hb_mem_common_buf_t *out_buf)
+    # Note: First param is INPUT buffer with share_id set, second is OUTPUT buffer
+    lib.hb_mem_import_com_buf.argtypes = [POINTER(hb_mem_common_buf_t), POINTER(hb_mem_common_buf_t)]
+    lib.hb_mem_import_com_buf.restype = c_int32
 
-    # int hb_mem_free_com_buf(hb_mem_common_buf_t *buf)
-    lib.hb_mem_free_com_buf.argtypes = [POINTER(hb_mem_common_buf_t)]
-    lib.hb_mem_free_com_buf.restype = c_int
+    # int hb_mem_free_buf(hb_mem_common_buf_t *buf)
+    lib.hb_mem_free_buf.argtypes = [POINTER(hb_mem_common_buf_t)]
+    lib.hb_mem_free_buf.restype = c_int
 
     # int hb_mem_invalidate_buf_with_vaddr(uint64_t vaddr, uint64_t size)
     lib.hb_mem_invalidate_buf_with_vaddr.argtypes = [c_uint64, c_uint64]
@@ -235,6 +239,7 @@ def close_module() -> None:
 # HbMemBuffer Class
 # ============================================================================
 
+
 class HbMemBuffer:
     """
     Wrapper for hb_mem imported buffer.
@@ -253,7 +258,8 @@ class HbMemBuffer:
         Raises:
             RuntimeError: If import fails
         """
-        self._buf = hb_mem_common_buf_t()
+        self._in_buf = hb_mem_common_buf_t()  # Input buffer with share_id
+        self._buf = hb_mem_common_buf_t()     # Output buffer (actual imported data)
         self._imported = False
         self._share_id = share_id
         self._expected_size = expected_size
@@ -263,14 +269,23 @@ class HbMemBuffer:
             raise RuntimeError("hb_mem library not available")
 
         if not _module_initialized:
-            raise RuntimeError("hb_mem module not initialized - call init_module() first")
+            raise RuntimeError(
+                "hb_mem module not initialized - call init_module() first"
+            )
 
-        ret = lib.hb_mem_import_com_buf(share_id, byref(self._buf))
+        # Set up input buffer with share_id
+        self._in_buf.share_id = c_int32(share_id)
+
+        ret = lib.hb_mem_import_com_buf(byref(self._in_buf), byref(self._buf))
         if ret != 0:
-            raise RuntimeError(f"hb_mem_import_com_buf failed: {ret} (share_id={share_id})")
+            raise RuntimeError(
+                f"hb_mem_import_com_buf failed: {ret} (share_id={share_id})"
+            )
 
         self._imported = True
-        logger.debug(f"Imported buffer: share_id={share_id}, size={self._buf.size}, vaddr=0x{self._buf.virt_addr:x}")
+        logger.debug(
+            f"Imported buffer: share_id={share_id}, size={self._buf.size}, vaddr=0x{self._buf.virt_addr:x}"
+        )
 
     @classmethod
     def import_from_share_id(cls, share_id: int, expected_size: int) -> "HbMemBuffer":
@@ -364,9 +379,9 @@ class HbMemBuffer:
 
         lib = _load_libhbmem()
         if lib is not None:
-            ret = lib.hb_mem_free_com_buf(byref(self._buf))
+            ret = lib.hb_mem_free_buf(byref(self._buf))
             if ret != 0:
-                logger.warning(f"hb_mem_free_com_buf failed: {ret}")
+                logger.warning(f"hb_mem_free_buf failed: {ret}")
 
         self._imported = False
         logger.debug(f"Released buffer: share_id={self._share_id}")
@@ -389,6 +404,7 @@ class HbMemBuffer:
 # Convenience Functions
 # ============================================================================
 
+
 def import_nv12_planes(
     share_id_y: int,
     share_id_uv: int,
@@ -398,9 +414,13 @@ def import_nv12_planes(
     """
     Import Y and UV planes of an NV12 buffer.
 
+    For D-Robotics VIO, NV12 buffers may use:
+    - Separate share_ids for Y and UV (share_id_uv != 0)
+    - Single contiguous buffer with Y share_id only (share_id_uv == 0)
+
     Args:
         share_id_y: share_id for Y plane
-        share_id_uv: share_id for UV plane
+        share_id_uv: share_id for UV plane (0 if contiguous with Y)
         y_size: Size of Y plane in bytes
         uv_size: Size of UV plane in bytes
 
@@ -410,16 +430,44 @@ def import_nv12_planes(
     """
     buffers = []
     try:
-        buf_y = HbMemBuffer.import_from_share_id(share_id_y, y_size)
-        buffers.append(buf_y)
+        # Case 1: Separate share_ids for Y and UV
+        if share_id_uv != 0 and share_id_uv != share_id_y:
+            buf_y = HbMemBuffer.import_from_share_id(share_id_y, y_size)
+            buffers.append(buf_y)
 
-        buf_uv = HbMemBuffer.import_from_share_id(share_id_uv, uv_size)
-        buffers.append(buf_uv)
+            buf_uv = HbMemBuffer.import_from_share_id(share_id_uv, uv_size)
+            buffers.append(buf_uv)
 
-        y_arr = buf_y.as_numpy()
-        uv_arr = buf_uv.as_numpy()
+            y_arr = buf_y.as_numpy()
+            uv_arr = buf_uv.as_numpy()
 
-        return y_arr, uv_arr, buffers
+            return y_arr, uv_arr, buffers
+
+        # Case 2: Contiguous NV12 buffer (UV at offset y_size within same buffer)
+        # VIO allocates NV12 as single contiguous buffer with share_id[1]=0
+        else:
+            buf = HbMemBuffer.import_from_share_id(share_id_y, y_size)
+            buffers.append(buf)
+
+            actual_size = buf.size
+            total_needed = y_size + uv_size
+
+            # Get Y plane
+            full_arr = buf.as_numpy()
+            y_arr = full_arr[:y_size]
+
+            # Check if UV is in the same buffer (contiguous NV12)
+            if actual_size >= total_needed:
+                # UV is contiguous after Y
+                uv_arr = full_arr[y_size:y_size + uv_size]
+            else:
+                # UV is not in this buffer - fall back to memcpy path
+                for b in buffers:
+                    b.release()
+                raise RuntimeError(f"UV plane not accessible via zero-copy (share_id[1]=0, Y buffer too small)")
+
+            return y_arr, uv_arr, buffers
+
     except Exception:
         # Clean up on error
         for buf in buffers:

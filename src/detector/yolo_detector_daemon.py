@@ -212,6 +212,10 @@ class YoloDetectorDaemon:
                     zc_frame = self.shm_zerocopy.get_frame()
                     if zc_frame is not None:
                         try:
+                            # Validate plane_cnt before accessing arrays
+                            if zc_frame.plane_cnt != 2:
+                                raise ValueError(f"Expected 2 planes for NV12, got {zc_frame.plane_cnt}")
+
                             # Import VIO buffers via share_id
                             y_arr, uv_arr, hb_mem_buffers = import_nv12_planes(
                                 zc_frame.share_id[0],
@@ -225,6 +229,8 @@ class YoloDetectorDaemon:
                             self.stats["zerocopy_frames"] += 1
                         except Exception as e:
                             logger.warning(f"Zero-copy import failed: {e}, falling back to memcpy")
+                            import traceback
+                            traceback.print_exc()
                             zc_frame = None
                             if hb_mem_buffers:
                                 release_buffers(hb_mem_buffers)
@@ -305,6 +311,8 @@ class YoloDetectorDaemon:
                     release_buffers(hb_mem_buffers)
                 if zc_frame and self.shm_zerocopy:
                     self.shm_zerocopy.mark_consumed()
+                    if self.stats["zerocopy_frames"] == 1:
+                        logger.info("Zero-copy: first frame processed and marked consumed")
                 timing = self.detector.get_last_timing()
 
                 # bbox座標をYOLO入力空間(640x360)からメイン解像度(1920x1080)へスケーリング
