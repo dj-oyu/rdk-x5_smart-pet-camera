@@ -23,7 +23,6 @@
 // Main shared memory (consumed by detection/monitoring/streaming)
 #define SHM_NAME_ACTIVE_FRAME "/pet_camera_active_frame"  // NV12 frame from active camera (30fps)
 #define SHM_NAME_STREAM "/pet_camera_stream"              // H.264 stream from active camera (30fps)
-#define SHM_NAME_YOLO_INPUT "/pet_camera_yolo_input"      // 640x360 NV12 for YOLO (VSE Channel 1)
 #define SHM_NAME_MJPEG_FRAME "/pet_camera_mjpeg_frame"    // 640x480 NV12 for MJPEG/web_monitor (VSE Channel 2)
 #define SHM_NAME_DETECTIONS "/pet_camera_detections"      // YOLO detection results
 #define SHM_NAME_BRIGHTNESS "/pet_camera_brightness"      // Lightweight brightness data (per-camera)

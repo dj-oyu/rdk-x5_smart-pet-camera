@@ -34,15 +34,14 @@ typedef struct {
     encoder_context_t encoder;
     encoder_thread_t encoder_thread;
 
-    // Shared memory output (new design: fixed names, conditional write)
+    // Shared memory output
     SharedFrameBuffer *shm_active_nv12;   // Active camera NV12 (only when active)
     SharedFrameBuffer *shm_active_h264;   // Active camera H.264 (only when active)
     SharedBrightnessData *shm_brightness; // Lightweight brightness data (always updated)
-    SharedFrameBuffer *shm_yolo_input;    // YOLO 640x360 NV12 input (VSE Ch1, always active)
     SharedFrameBuffer *shm_mjpeg_frame;   // MJPEG 640x480 NV12 input (VSE Ch2, always active, writable)
 
-    // Zero-copy shared memory (Phase 2: share_id based, no memcpy)
-    ZeroCopyFrameBuffer *shm_yolo_zerocopy; // YOLO zero-copy (parallel with shm_yolo_input)
+    // Zero-copy shared memory (share_id based, no memcpy)
+    ZeroCopyFrameBuffer *shm_yolo_zerocopy; // YOLO 640x360 zero-copy (VSE Ch1, always active)
 
     // Runtime control
     volatile bool *running_flag;           // External running flag
