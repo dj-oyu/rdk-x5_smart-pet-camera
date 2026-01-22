@@ -557,35 +557,8 @@ class RealSharedMemory:
         self.detection_mmap.write(data)
         self.detection_mmap.flush()
 
-        # Post semaphore to signal event-driven consumers (Go streaming server)
-        import logging
-        logger = logging.getLogger("RealSharedMemory")
-
-        if librt is not None:
-            try:
-                # Get pointer to the semaphore field in shared memory
-                # We need to read the structure from mmap and get the semaphore address
-                self.detection_mmap.seek(0)
-                # Create a ctypes structure from the mmap buffer
-                shm_struct = CLatestDetectionResult.from_buffer(self.detection_mmap)
-                # Get address of the semaphore field
-                sem_addr = addressof(shm_struct.detection_update_sem)
-                # Post semaphore
-                ret = librt.sem_post(c_void_p(sem_addr))
-                if ret != 0:
-                    logger.warning(f"sem_post failed with return code: {ret}")
-                # NOTE: sem_post成功時のログは出さない（頻度が高すぎる）
-            except Exception as e:
-                logger.warning(f"Failed to post detection semaphore: {e}")
-        else:
-            logger.debug("librt not available - semaphore signaling disabled")
-
-        # Debug: Verify version was written (only log when detections > 0)
-        if c_det.num_detections > 0:
-            logger.debug(
-                f"Wrote detection to SHM: frame={frame_number}, "
-                f"num_det={c_det.num_detections}, version={c_det.version}"
-            )
+        # NOTE: sem_post() removed - Go side uses polling mode (33ms interval)
+        # Semaphore signaling was causing unnecessary overhead
 
 
 def monitor_brightness():
