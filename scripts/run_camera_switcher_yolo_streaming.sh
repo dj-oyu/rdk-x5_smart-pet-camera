@@ -46,6 +46,9 @@ YOLO_NMS_THRESHOLD="${YOLO_NMS_THRESHOLD:-0.7}"
 # ログ設定
 LOG_LEVEL="${LOG_LEVEL:-info}"
 
+# Zero-copy設定 (デフォルトは無効 - 安定するまで)
+YOLO_NO_ZEROCOPY="${YOLO_NO_ZEROCOPY:-1}"
+
 # TLS設定 (HTTPS対応)
 TLS_CERT="${TLS_CERT:-}"
 TLS_KEY="${TLS_KEY:-}"
@@ -82,6 +85,8 @@ Options:
   --score-thres T   検出スコア閾値 (default: 0.6)
   --nms-thres T     NMS IoU閾値 (default: 0.7)
   --log-level L     ログレベル (debug/info/warn/error, default: info)
+  --zerocopy        YOLOでゼロコピーを有効化 (実験的)
+  --no-zerocopy     YOLOでゼロコピーを無効化 (default)
   --tls-cert FILE   TLS証明書ファイル (HTTPSを有効化)
   --tls-key FILE    TLS秘密鍵ファイル
   -h, --help        このヘルプを表示
@@ -100,6 +105,7 @@ Options:
   YOLO_MODEL             YOLOモデル (v8n/v11n/v13n)
   YOLO_SCORE_THRESHOLD   検出スコア閾値
   YOLO_NMS_THRESHOLD     NMS IoU閾値
+  YOLO_NO_ZEROCOPY       1でゼロコピー無効 (default: 1)
   LOG_LEVEL              ログレベル (debug/info/warn/error)
   TLS_CERT               TLS証明書ファイルパス
   TLS_KEY                TLS秘密鍵ファイルパス
@@ -184,6 +190,12 @@ while [[ $# -gt 0 ]]; do
     --log-level)
       LOG_LEVEL="${2:?--log-level requires value}"
       shift
+      ;;
+    --zerocopy)
+      YOLO_NO_ZEROCOPY=0
+      ;;
+    --no-zerocopy)
+      YOLO_NO_ZEROCOPY=1
       ;;
     --tls-cert)
       TLS_CERT="${2:?--tls-cert requires value}"
@@ -343,16 +355,23 @@ if [[ "${RUN_STREAMING}" -eq 1 ]]; then
 fi
 
 if [[ "${RUN_DETECTOR}" -eq 1 ]]; then
-  echo "[start] launching YOLO detector (model=${YOLO_MODEL}, score_thres=${YOLO_SCORE_THRESHOLD})..."
+  ZEROCOPY_ARG=""
+  ZEROCOPY_STATUS="enabled"
+  if [[ "${YOLO_NO_ZEROCOPY}" -eq 1 ]]; then
+    ZEROCOPY_ARG="--no-zerocopy"
+    ZEROCOPY_STATUS="disabled"
+  fi
+  echo "[start] launching YOLO detector (model=${YOLO_MODEL}, score_thres=${YOLO_SCORE_THRESHOLD}, zerocopy=${ZEROCOPY_STATUS})..."
   echo "        model_path: ${YOLO_MODEL_PATH}"
   echo "[log] YOLO detector log: /tmp/yolo_detector.log"
   (
     cd "${REPO_ROOT}"
+    # shellcheck disable=SC2086
     "${UV_BIN}" run src/detector/yolo_detector_daemon.py \
       --model-path "${YOLO_MODEL_PATH}" \
       --score-threshold "${YOLO_SCORE_THRESHOLD}" \
       --nms-threshold "${YOLO_NMS_THRESHOLD}" \
-      --log-level "${LOG_LEVEL}" 2>&1 | tee /tmp/yolo_detector.log
+      --log-level "${LOG_LEVEL}" ${ZEROCOPY_ARG} 2>&1 | tee /tmp/yolo_detector.log
   ) &
   PIDS+=("$!")
 fi

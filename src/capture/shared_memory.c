@@ -533,9 +533,13 @@ int shm_zerocopy_write(ZeroCopyFrameBuffer* shm, const ZeroCopyFrame* frame) {
     }
 
     int ret = sem_timedwait(&shm->consumed_sem, &timeout);
-    if (ret != 0 && errno == ETIMEDOUT) {
-        // Consumer is slow, skip this frame
-        LOG_DEBUG("SharedMemory", "Zero-copy write skipped: consumer not ready");
+    if (ret != 0) {
+        if (errno == ETIMEDOUT) {
+            // Consumer is slow, skip this frame
+            LOG_DEBUG("SharedMemory", "Zero-copy write skipped: consumer not ready (timeout)");
+        } else {
+            LOG_WARN("SharedMemory", "Zero-copy sem_timedwait failed: %s", strerror(errno));
+        }
         return -1;
     }
 
@@ -546,10 +550,18 @@ int shm_zerocopy_write(ZeroCopyFrameBuffer* shm, const ZeroCopyFrame* frame) {
     __atomic_store_n(&shm->frame.consumed, 0, __ATOMIC_RELEASE);
 
     // Increment version to signal new frame
-    __atomic_fetch_add(&shm->frame.version, 1, __ATOMIC_SEQ_CST);
+    uint32_t new_version = __atomic_fetch_add(&shm->frame.version, 1, __ATOMIC_SEQ_CST) + 1;
 
     // Notify consumer
     sem_post(&shm->new_frame_sem);
+
+    // Log first successful write
+    static int first_write_logged = 0;
+    if (!first_write_logged) {
+        LOG_INFO("SharedMemory", "Zero-copy first write: version=%u, share_id[0]=%d, planes=%d",
+                 new_version, frame->share_id[0], frame->plane_cnt);
+        first_write_logged = 1;
+    }
 
     return 0;
 }
