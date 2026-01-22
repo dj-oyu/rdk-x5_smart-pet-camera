@@ -99,28 +99,17 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
     goto error_cleanup;
   }
 
-  // YOLO input NV12 (640x360 from VSE Channel 1, always written when active)
-  pipeline->shm_yolo_input =
-      shm_frame_buffer_create_named(SHM_NAME_YOLO_INPUT);
-  if (!pipeline->shm_yolo_input) {
+  // Zero-copy YOLO input (share_id based, no memcpy)
+  pipeline->shm_yolo_zerocopy = shm_zerocopy_create(SHM_NAME_YOLO_ZEROCOPY);
+  if (!pipeline->shm_yolo_zerocopy) {
     LOG_ERROR(Pipeline_log_header,
-              "Failed to open/create YOLO input shared memory: %s",
-              SHM_NAME_YOLO_INPUT);
+              "Failed to create YOLO zero-copy shared memory: %s",
+              SHM_NAME_YOLO_ZEROCOPY);
     ret = -1;
     goto error_cleanup;
   }
-
-  // Zero-copy YOLO input (Phase 2: share_id based, parallel with shm_yolo_input)
-  pipeline->shm_yolo_zerocopy = shm_zerocopy_create(SHM_NAME_YOLO_ZEROCOPY);
-  if (!pipeline->shm_yolo_zerocopy) {
-    LOG_WARN(Pipeline_log_header,
-             "Failed to create YOLO zero-copy shared memory: %s (fallback to memcpy)",
-             SHM_NAME_YOLO_ZEROCOPY);
-    // Not fatal - fallback to memcpy version
-  } else {
-    LOG_INFO(Pipeline_log_header, "YOLO zero-copy shared memory created: %s",
-             SHM_NAME_YOLO_ZEROCOPY);
-  }
+  LOG_INFO(Pipeline_log_header, "YOLO zero-copy shared memory created: %s",
+           SHM_NAME_YOLO_ZEROCOPY);
 
   // MJPEG input NV12 (640x480 from VSE Channel 2, always written when active, writable by web_monitor)
   pipeline->shm_mjpeg_frame =
@@ -365,107 +354,49 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     vio_release_frame(&pipeline->vio, &vio_frame);
 
     // Get YOLO input frame from VSE Channel 1 (640x360 letterbox)
+    // Zero-copy: share VIO buffer via share_id, consumer imports via hb_mem
     if (write_active) {
       hbn_vnode_image_t yolo_frame = {0};
       ret = vio_get_frame_ch1(&pipeline->vio, &yolo_frame, 10);
       if (ret == 0) {
-        // Write YOLO frame to shared memory
-        Frame yolo_nv12_frame = {0};
-        // VSE Ch1 is configured for 640x360 (see vio_lowlevel.c:233-236)
-        // YOLO detector adds letterbox padding to make 640x640
-        yolo_nv12_frame.width = 640;
-        yolo_nv12_frame.height = 360;
-        yolo_nv12_frame.format = 1; // NV12
-        yolo_nv12_frame.frame_number = frame_count;
-        yolo_nv12_frame.camera_id = pipeline->camera_index;
-        yolo_nv12_frame.timestamp = frame_timestamp;
+        // Build zero-copy frame metadata
+        ZeroCopyFrame zc_frame = {0};
+        zc_frame.frame_number = frame_count;
+        zc_frame.timestamp = frame_timestamp;
+        zc_frame.camera_id = pipeline->camera_index;
+        zc_frame.width = 640;   // VSE Ch1 configured for 640x360
+        zc_frame.height = 360;
+        zc_frame.format = 1;    // NV12
+        zc_frame.brightness_avg = brightness_result.brightness_avg;
+        zc_frame.correction_applied = 0;
 
-        // Apply brightness data from ISP (same for all channels)
-        isp_fill_frame_brightness(&yolo_nv12_frame, &brightness_result);
-        yolo_nv12_frame.correction_applied = 0;
-
-        // Calculate NV12 size for 640x360
-        size_t yolo_size = 0;
-        for (int i = 0; i < yolo_frame.buffer.plane_cnt; i++) {
-          yolo_size += yolo_frame.buffer.size[i];
-        }
-        yolo_nv12_frame.data_size = yolo_size;
-
-        // Copy YOLO NV12 data (legacy memcpy path)
-        if (yolo_size <= sizeof(yolo_nv12_frame.data)) {
-          size_t offset = 0;
-          for (int i = 0; i < yolo_frame.buffer.plane_cnt; i++) {
-            memcpy(yolo_nv12_frame.data + offset, yolo_frame.buffer.virt_addr[i],
-                   yolo_frame.buffer.size[i]);
-            offset += yolo_frame.buffer.size[i];
-          }
-
-          // NOTE: Gamma correction is DISABLED - using CLAHE on YOLO detector side
-          // This avoids CPU overhead in the capture pipeline
-          yolo_nv12_frame.correction_applied = 0;
-
-          int write_ret = shm_frame_buffer_write(pipeline->shm_yolo_input, &yolo_nv12_frame);
-          if (write_ret < 0) {
-            LOG_WARN(Pipeline_log_header, "Failed to write YOLO input to shm");
-          } else if (frame_count == 0 || frame_count % 30 == 0) {
-            // Log first frame and every 30 frames to verify VSE Ch1 size
-            if (frame_count == 0) {
-              LOG_INFO(Pipeline_log_header,
-                       "VSE Ch1 output: %dx%d, %zu bytes (expected 640x360, ~346KB)",
-                       yolo_nv12_frame.width, yolo_nv12_frame.height, yolo_size);
-            } else {
-              LOG_DEBUG(Pipeline_log_header,
-                        "YOLO frame#%d brightness=%.1f",
-                        frame_count, brightness_result.brightness_avg);
-            }
-          }
+        // Copy share_id and plane info from VIO buffer
+        zc_frame.plane_cnt = yolo_frame.buffer.plane_cnt;
+        for (int i = 0; i < yolo_frame.buffer.plane_cnt && i < ZEROCOPY_MAX_PLANES; i++) {
+          zc_frame.share_id[i] = yolo_frame.buffer.share_id[i];
+          zc_frame.plane_size[i] = yolo_frame.buffer.size[i];
         }
 
-        // Zero-copy path: share_id based, deferred VIO frame release
-        // Consumer imports VIO buffer via share_id, processes, then signals consumed.
-        // We release the PREVIOUS frame only AFTER consumer signals it's done.
-        if (pipeline->shm_yolo_zerocopy) {
-          ZeroCopyFrame zc_frame = {0};
-          zc_frame.frame_number = frame_count;
-          zc_frame.timestamp = frame_timestamp;
-          zc_frame.camera_id = pipeline->camera_index;
-          zc_frame.width = 640;
-          zc_frame.height = 360;
-          zc_frame.format = 1;  // NV12
-          zc_frame.brightness_avg = brightness_result.brightness_avg;
-          zc_frame.correction_applied = 0;
-
-          // Copy share_id and plane info from VIO buffer
-          zc_frame.plane_cnt = yolo_frame.buffer.plane_cnt;
-          for (int i = 0; i < yolo_frame.buffer.plane_cnt && i < ZEROCOPY_MAX_PLANES; i++) {
-            zc_frame.share_id[i] = yolo_frame.buffer.share_id[i];
-            zc_frame.plane_size[i] = yolo_frame.buffer.size[i];
+        // shm_zerocopy_write waits for consumer to signal consumed_sem
+        // If it succeeds, consumer has finished with the PREVIOUS frame
+        int zc_ret = shm_zerocopy_write(pipeline->shm_yolo_zerocopy, &zc_frame);
+        if (zc_ret == 0) {
+          // Consumer finished with previous frame - safe to release it now
+          if (has_pending_yolo_frame) {
+            vio_release_frame_ch1(&pipeline->vio, &pending_yolo_frame);
           }
 
-          // shm_zerocopy_write waits for consumer to signal consumed_sem
-          // If it succeeds, consumer has finished with the PREVIOUS frame
-          int zc_ret = shm_zerocopy_write(pipeline->shm_yolo_zerocopy, &zc_frame);
-          if (zc_ret == 0) {
-            // Consumer finished with previous frame - safe to release it now
-            if (has_pending_yolo_frame) {
-              vio_release_frame_ch1(&pipeline->vio, &pending_yolo_frame);
-            }
+          // Keep current frame as pending until consumer finishes
+          pending_yolo_frame = yolo_frame;
+          has_pending_yolo_frame = true;
 
-            // Keep current frame as pending until consumer finishes
-            pending_yolo_frame = yolo_frame;
-            has_pending_yolo_frame = true;
-
-            if (frame_count == 0) {
-              LOG_INFO(Pipeline_log_header,
-                       "YOLO zero-copy: share_id[0]=%d, share_id[1]=%d, planes=%d",
-                       zc_frame.share_id[0], zc_frame.share_id[1], zc_frame.plane_cnt);
-            }
-          } else {
-            // Consumer busy (timeout) - release current frame, keep pending as-is
-            vio_release_frame_ch1(&pipeline->vio, &yolo_frame);
+          if (frame_count == 0) {
+            LOG_INFO(Pipeline_log_header,
+                     "YOLO zero-copy: share_id[0]=%d, share_id[1]=%d, planes=%d",
+                     zc_frame.share_id[0], zc_frame.share_id[1], zc_frame.plane_cnt);
           }
         } else {
-          // No zero-copy - release immediately
+          // Consumer busy (timeout) - release current frame, keep pending as-is
           vio_release_frame_ch1(&pipeline->vio, &yolo_frame);
         }
       } else if (frame_count % 30 == 0) {
@@ -606,11 +537,6 @@ void pipeline_destroy(camera_pipeline_t *pipeline) {
   if (pipeline->shm_brightness) {
     shm_brightness_close(pipeline->shm_brightness);
     pipeline->shm_brightness = NULL;
-  }
-
-  if (pipeline->shm_yolo_input) {
-    shm_frame_buffer_close(pipeline->shm_yolo_input);
-    pipeline->shm_yolo_input = NULL;
   }
 
   if (pipeline->shm_yolo_zerocopy) {

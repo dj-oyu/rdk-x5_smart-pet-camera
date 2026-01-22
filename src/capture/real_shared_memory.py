@@ -49,7 +49,6 @@ except OSError:
 # Constants (must match C definitions)
 SHM_NAME_ACTIVE_FRAME = "/pet_camera_active_frame"
 SHM_NAME_STREAM = "/pet_camera_stream"
-SHM_NAME_YOLO_INPUT = "/pet_camera_yolo_input"
 SHM_NAME_BRIGHTNESS = "/pet_camera_brightness"  # Lightweight brightness data
 SHM_NAME_FRAMES = os.getenv("SHM_NAME_FRAMES", SHM_NAME_ACTIVE_FRAME)
 SHM_NAME_DETECTIONS = os.getenv("SHM_NAME_DETECTIONS", "/pet_camera_detections")
@@ -58,7 +57,7 @@ MAX_DETECTIONS = 10
 MAX_FRAME_SIZE = 1920 * 1080 * 3 // 2  # Max NV12 frame size (1080p)
 NUM_CAMERAS = 2  # DAY=0, NIGHT=1
 
-# Zero-copy shared memory names (Phase 2)
+# Zero-copy shared memory names (share_id based, no memcpy)
 SHM_NAME_YOLO_ZEROCOPY = "/pet_camera_yolo_zc"
 SHM_NAME_MJPEG_ZEROCOPY = "/pet_camera_mjpeg_zc"
 SHM_NAME_ACTIVE_ZEROCOPY = "/pet_camera_active_zc"
