@@ -28,37 +28,55 @@ func NewProcessor() *Processor {
 }
 
 // Process processes a raw H.264 frame and extracts/caches headers
+// Optimized: only copies data for SPS/PPS (rare), avoids allocation for P-frames
 func (p *Processor) Process(frame *types.H264Frame) error {
-	// Parse NAL units from frame data
-	nalUnits, err := p.parseNALUnits(frame.Data)
-	if err != nil {
-		return fmt.Errorf("failed to parse NAL units: %w", err)
+	data := frame.Data
+	if len(data) == 0 {
+		return nil
 	}
 
-	// Process each NAL unit
-	for _, nal := range nalUnits {
-		nalType := nal.Type & 0x1F
+	offset := 0
+	for offset < len(data) {
+		// Find start code
+		startCodeLen := 0
+		if offset+4 <= len(data) && data[offset] == 0 && data[offset+1] == 0 && data[offset+2] == 0 && data[offset+3] == 1 {
+			startCodeLen = 4
+		} else if offset+3 <= len(data) && data[offset] == 0 && data[offset+1] == 0 && data[offset+2] == 1 {
+			startCodeLen = 3
+		} else {
+			offset++
+			continue
+		}
 
+		nalStart := offset
+		nalHeaderOffset := offset + startCodeLen
+		if nalHeaderOffset >= len(data) {
+			break
+		}
+
+		nalType := data[nalHeaderOffset] & 0x1F
+
+		// Find next start code to determine NAL end
+		nextStart := p.findNextStartCode(data, nalHeaderOffset+1)
+		nalEnd := nextStart
+		if nalEnd == -1 {
+			nalEnd = len(data)
+		}
+
+		// Only copy for SPS/PPS (rare - typically once per GOP)
 		switch nalType {
 		case types.NALTypeSPS:
-			// Cache SPS
-			p.spsCache = make([]byte, len(nal.Data))
-			copy(p.spsCache, nal.Data)
-
+			p.spsCache = append([]byte(nil), data[nalStart:nalEnd]...)
 		case types.NALTypePPS:
-			// Cache PPS
-			p.ppsCache = make([]byte, len(nal.Data))
-			copy(p.ppsCache, nal.Data)
-
-			// Mark headers as available when we have both SPS and PPS
+			p.ppsCache = append([]byte(nil), data[nalStart:nalEnd]...)
 			if len(p.spsCache) > 0 {
 				p.hasHeaders = true
 			}
-
 		case types.NALTypeIDR:
-			// Mark frame as IDR
 			frame.IsIDR = true
 		}
+
+		offset = nalEnd
 	}
 
 	return nil

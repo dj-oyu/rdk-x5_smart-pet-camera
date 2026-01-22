@@ -84,7 +84,7 @@ func (fb *FrameBroadcaster) Stop() {
 }
 
 func (fb *FrameBroadcaster) run() {
-	// Polling mode at ~30 FPS (same as DetectionBroadcaster)
+	// Polling mode at ~15 FPS (reduced from 30 FPS to lower CPU usage)
 	// NOTE: Semaphore-based approach removed to avoid CGo blocking issues
 
 	for {
@@ -117,7 +117,7 @@ func (fb *FrameBroadcaster) run() {
 			continue
 		}
 
-		// Poll at ~30 FPS
+		// Poll at ~30 FPS (33ms interval)
 		time.Sleep(33 * time.Millisecond)
 
 		// Generate overlay frame
