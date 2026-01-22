@@ -62,7 +62,7 @@ class YoloDetectorDaemon:
         self.nms_threshold = nms_threshold
 
         # 共有メモリ
-        self.shm_yolo: RealSharedMemory | None = None  # YOLO 640x640 input
+        self.shm_yolo: RealSharedMemory | None = None  # YOLO 640x360 input (letterbox to 640x640)
         self.shm_main: RealSharedMemory | None = None  # Main frame for resolution info
 
         # YOLODetector
@@ -93,7 +93,7 @@ class YoloDetectorDaemon:
 
         # 共有メモリを開く
         try:
-            # YOLO入力用 (640x640 NV12)
+            # YOLO入力用 (640x360 NV12, letterbox to 640x640)
             self.shm_yolo = RealSharedMemory(frame_shm_name=SHM_NAME_YOLO_INPUT)
             self.shm_yolo.open()
             logger.info(f"Connected to YOLO input shared memory: {SHM_NAME_YOLO_INPUT}")
@@ -170,6 +170,7 @@ class YoloDetectorDaemon:
                 # so duplicates rarely occur, and processing same frame twice is harmless
 
                 # 最適化2: メイン解像度とスケール係数を初回のみ取得してキャッシュ
+                # Note: YOLO入力はletterbox前のサイズ(640x360)を使用
                 if self.scale_x is None or self.scale_y is None:
                     main_frame = self.shm_main.get_latest_frame()
                     if main_frame is None:
@@ -177,22 +178,25 @@ class YoloDetectorDaemon:
                         continue
                     self.target_width = main_frame.width
                     self.target_height = main_frame.height
-                    self.scale_x = self.target_width / 640.0
-                    self.scale_y = self.target_height / 640.0
+                    # YOLOの出力座標はletterbox前の空間(640x360)
+                    # VSEがアスペクト比を維持してスケールするので、x/yスケールは同じ値になる
+                    self.scale_x = self.target_width / float(yolo_frame.width)
+                    self.scale_y = self.target_height / float(yolo_frame.height)
                     logger.info(
                         f"Detected output resolution: {self.target_width}x{self.target_height} "
-                        f"(YOLO input: 640x640, scale={self.scale_x:.3f}x{self.scale_y:.3f})"
+                        f"(YOLO input: {yolo_frame.width}x{yolo_frame.height}, scale={self.scale_x:.3f}x{self.scale_y:.3f})"
                     )
 
-                # 初回のみVSE Ch1が正しく640x640を出力しているか確認
+                # 初回のみVSE Ch1の出力サイズを確認（letterbox: 640x360）
                 if self.stats["frames_processed"] == 0:
                     logger.info(
                         f"YOLO input frame size: {yolo_frame.width}x{yolo_frame.height} "
-                        f"(expected 640x640), format={yolo_frame.format}, data_len={len(yolo_frame.data)}"
+                        f"(expected 640x360 for letterbox), format={yolo_frame.format}, data_len={len(yolo_frame.data)}"
                     )
-                    if yolo_frame.width != 640 or yolo_frame.height != 640:
+                    if yolo_frame.width != 640 or yolo_frame.height != 360:
                         logger.warning(
-                            "⚠️ YOLO input is NOT 640x640! VSE Channel 1 may not be working correctly."
+                            f"⚠️ YOLO input is NOT 640x360! VSE Channel 1 may not be configured for letterbox. "
+                            f"Got {yolo_frame.width}x{yolo_frame.height}"
                         )
 
                 # NV12を直接BPU推論へ
@@ -204,7 +208,8 @@ class YoloDetectorDaemon:
                 )
                 timing = self.detector.get_last_timing()
 
-                # bbox座標を640x640からメイン解像度へスケーリング（scale_x/scale_yはキャッシュ済み）
+                # bbox座標をYOLO入力空間(640x360)からメイン解像度(1920x1080)へスケーリング
+                # Note: detectorが返すbboxはletterbox補正済み（640x360空間）
                 detection_dicts = [
                     {
                         "class_name": det.class_name.value,
@@ -218,6 +223,7 @@ class YoloDetectorDaemon:
                     }
                     for det in detections
                 ]
+
 
                 # 検出結果を共有メモリに書き込み（検出があるときのみ）
                 if detection_dicts:

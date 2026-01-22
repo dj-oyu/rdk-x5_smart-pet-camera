@@ -38,7 +38,7 @@ typedef struct {
     SharedFrameBuffer *shm_active_nv12;   // Active camera NV12 (only when active)
     SharedFrameBuffer *shm_active_h264;   // Active camera H.264 (only when active)
     SharedBrightnessData *shm_brightness; // Lightweight brightness data (always updated)
-    SharedFrameBuffer *shm_yolo_input;    // YOLO 640x640 NV12 input (VSE Ch1, always active)
+    SharedFrameBuffer *shm_yolo_input;    // YOLO 640x360 NV12 input (VSE Ch1, always active)
     SharedFrameBuffer *shm_mjpeg_frame;   // MJPEG 640x480 NV12 input (VSE Ch2, always active, writable)
 
     // Runtime control

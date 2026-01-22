@@ -99,7 +99,7 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
     goto error_cleanup;
   }
 
-  // YOLO input NV12 (640x640 from VSE Channel 1, always written when active)
+  // YOLO input NV12 (640x360 from VSE Channel 1, always written when active)
   pipeline->shm_yolo_input =
       shm_frame_buffer_create_named(SHM_NAME_YOLO_INPUT);
   if (!pipeline->shm_yolo_input) {
@@ -350,16 +350,17 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     // Release VIO frame immediately
     vio_release_frame(&pipeline->vio, &vio_frame);
 
-    // Get YOLO input frame from VSE Channel 1 (640x640)
+    // Get YOLO input frame from VSE Channel 1 (640x360 letterbox)
     if (write_active) {
       hbn_vnode_image_t yolo_frame = {0};
       ret = vio_get_frame_ch1(&pipeline->vio, &yolo_frame, 10);
       if (ret == 0) {
         // Write YOLO frame to shared memory
         Frame yolo_nv12_frame = {0};
-        // VSE Ch1 is configured for 640x640 (see vio_lowlevel.c:233-236)
+        // VSE Ch1 is configured for 640x360 (see vio_lowlevel.c:233-236)
+        // YOLO detector adds letterbox padding to make 640x640
         yolo_nv12_frame.width = 640;
-        yolo_nv12_frame.height = 640;
+        yolo_nv12_frame.height = 360;
         yolo_nv12_frame.format = 1; // NV12
         yolo_nv12_frame.frame_number = frame_count;
         yolo_nv12_frame.camera_id = pipeline->camera_index;
@@ -369,7 +370,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
         isp_fill_frame_brightness(&yolo_nv12_frame, &brightness_result);
         yolo_nv12_frame.correction_applied = 0;
 
-        // Calculate NV12 size for 640x640
+        // Calculate NV12 size for 640x360
         size_t yolo_size = 0;
         for (int i = 0; i < yolo_frame.buffer.plane_cnt; i++) {
           yolo_size += yolo_frame.buffer.size[i];
@@ -396,7 +397,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
             // Log first frame and every 30 frames to verify VSE Ch1 size
             if (frame_count == 0) {
               LOG_INFO(Pipeline_log_header,
-                       "VSE Ch1 output: %dx%d, %zu bytes (expected 640x640, ~614KB)",
+                       "VSE Ch1 output: %dx%d, %zu bytes (expected 640x360, ~346KB)",
                        yolo_nv12_frame.width, yolo_nv12_frame.height, yolo_size);
             } else {
               LOG_DEBUG(Pipeline_log_header,

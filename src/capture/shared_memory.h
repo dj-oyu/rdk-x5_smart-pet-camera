@@ -23,7 +23,7 @@
 // Main shared memory (consumed by detection/monitoring/streaming)
 #define SHM_NAME_ACTIVE_FRAME "/pet_camera_active_frame"  // NV12 frame from active camera (30fps)
 #define SHM_NAME_STREAM "/pet_camera_stream"              // H.264 stream from active camera (30fps)
-#define SHM_NAME_YOLO_INPUT "/pet_camera_yolo_input"      // 640x640 NV12 for YOLO (VSE Channel 1)
+#define SHM_NAME_YOLO_INPUT "/pet_camera_yolo_input"      // 640x360 NV12 for YOLO (VSE Channel 1)
 #define SHM_NAME_MJPEG_FRAME "/pet_camera_mjpeg_frame"    // 640x480 NV12 for MJPEG/web_monitor (VSE Channel 2)
 #define SHM_NAME_DETECTIONS "/pet_camera_detections"      // YOLO detection results
 #define SHM_NAME_BRIGHTNESS "/pet_camera_brightness"      // Lightweight brightness data (per-camera)
@@ -115,6 +115,70 @@ typedef struct {
     sem_t new_frame_sem; // Semaphore for new frame notification (posted on each write)
     Frame frames[RING_BUFFER_SIZE]; // Ring buffer of frames
 } SharedFrameBuffer;
+
+// ============================================================================
+// Zero-Copy Shared Memory (VIO buffer sharing via hb_mem share_id)
+// ============================================================================
+
+#define ZEROCOPY_MAX_PLANES 2    // NV12 has 2 planes (Y, UV)
+
+/**
+ * Zero-copy frame - VIO buffer shared directly without memcpy
+ *
+ * Each VSE channel has its own 3-buffer pool managed by SDK.
+ * We share VIO buffers directly using hb_mem share_id.
+ *
+ * Lifecycle:
+ * 1. Camera daemon: hbn_vnode_getframe() → gets VIO buffer with share_id
+ * 2. Camera daemon: writes share_id + metadata to ZeroCopyFrame
+ * 3. Consumer: hb_mem_import_com_buf(share_id) → maps same buffer
+ * 4. Consumer: processes frame, sets consumed=1
+ * 5. Camera daemon: waits for consumed=1, calls hbn_vnode_releaseframe()
+ *
+ * Timing constraint: consumer must finish within ~66ms (2 frames at 30fps)
+ * to avoid VIO pipeline stall (3-buffer pool allows 2 frames in-flight).
+ */
+typedef struct {
+    // Frame metadata
+    uint64_t frame_number;      // Monotonic frame counter
+    struct timespec timestamp;  // Capture timestamp
+    int camera_id;              // Camera index (0 or 1)
+    int width;                  // Frame width in pixels
+    int height;                 // Frame height in pixels
+    int format;                 // 1=NV12
+
+    // Brightness metrics (from ISP)
+    float brightness_avg;       // Y-plane average (0-255)
+    uint8_t correction_applied; // ISP correction active
+    uint8_t _pad1[3];
+
+    // VIO buffer info (from hb_mem_graphic_buf_t)
+    int32_t share_id[ZEROCOPY_MAX_PLANES];    // hb_mem share_id for Y/UV
+    uint64_t plane_size[ZEROCOPY_MAX_PLANES]; // Size of each plane
+    int32_t plane_cnt;                        // Number of planes (2 for NV12)
+
+    // Synchronization (single-producer single-consumer)
+    volatile uint32_t version;  // Incremented when frame is ready
+    volatile uint8_t consumed;  // Consumer sets to 1 when done processing
+    uint8_t _pad2[3];
+} ZeroCopyFrame;
+
+/**
+ * Zero-copy shared memory - single frame slot for SPSC pattern
+ *
+ * Simple design: one slot per channel, camera waits for consumed before next frame.
+ * This naturally throttles to consumer speed (good for YOLO which is slower than 30fps).
+ */
+typedef struct {
+    sem_t new_frame_sem;        // Posted when new frame is ready
+    sem_t consumed_sem;         // Posted when consumer is done (camera waits on this)
+    ZeroCopyFrame frame;        // Current frame
+} ZeroCopyFrameBuffer;
+
+// Zero-copy shared memory names
+#define SHM_NAME_YOLO_ZEROCOPY "/pet_camera_yolo_zc"     // Zero-copy YOLO input
+#define SHM_NAME_MJPEG_ZEROCOPY "/pet_camera_mjpeg_zc"   // Zero-copy MJPEG input
+#define SHM_NAME_ACTIVE_ZEROCOPY "/pet_camera_active_zc" // Zero-copy active frame
 
 /**
  * Bounding box for object detection
