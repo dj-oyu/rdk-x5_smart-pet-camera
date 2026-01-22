@@ -12,6 +12,9 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// Cached timezone for overlay rendering (avoid allocation per frame)
+var jstTimezone = time.FixedZone("JST", 9*3600)
+
 // FrameBroadcaster manages fanout of JPEG frames to multiple clients.
 type FrameBroadcaster struct {
 	mu        sync.Mutex
@@ -81,6 +84,9 @@ func (fb *FrameBroadcaster) Stop() {
 }
 
 func (fb *FrameBroadcaster) run() {
+	// Polling mode at ~30 FPS (same as DetectionBroadcaster)
+	// NOTE: Semaphore-based approach removed to avoid CGo blocking issues
+
 	for {
 		select {
 		case <-fb.stop:
@@ -88,14 +94,13 @@ func (fb *FrameBroadcaster) run() {
 		default:
 		}
 
-		// OPTIMIZATION: Check client count BEFORE consuming semaphore
-		// This avoids unnecessary semaphore operations when no clients are connected
+		// Check client count before processing
 		fb.mu.Lock()
 		clientCount := len(fb.clients)
 		fb.mu.Unlock()
 
 		if clientCount == 0 {
-			// No clients - sleep instead of consuming semaphores (reduces CPU usage)
+			// No clients - sleep longer to reduce CPU usage
 			fb.skipCount++
 			if fb.skipCount%10 == 0 {
 				logger.Debug("FrameBroadcaster", "No clients connected, sleeping (idle for %d cycles)", fb.skipCount)
@@ -107,18 +112,15 @@ func (fb *FrameBroadcaster) run() {
 		// Reset skip counter when clients are present
 		fb.skipCount = 0
 
-		// Wait for new frame via semaphore (blocks until frame available)
 		if fb.shm == nil {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
-		if err := fb.shm.WaitNewFrame(); err != nil {
-			// sem_wait failed (e.g., interrupted), retry
-			continue
-		}
+		// Poll at ~30 FPS
+		time.Sleep(33 * time.Millisecond)
 
-		// Generate overlay frame (semaphore guarantees new frame)
+		// Generate overlay frame
 		jpegData := fb.generateOverlay()
 		if jpegData == nil {
 			continue
@@ -157,9 +159,8 @@ func (fb *FrameBroadcaster) generateOverlay() []byte {
 	switch frame.Format {
 	case 1: // NV12 - TRUE ZERO-COPY: draw directly on shared memory (MJPEG dedicated, destructive OK)
 		// Draw stats text with background (white text on black background)
-		// Use JST (Asia/Tokyo) for display instead of system local time
-		jst := time.FixedZone("JST", 9*3600)
-		timeStr := frame.Timestamp.In(jst).Format("2006/01/02 15:04:05")
+		// Use cached JST timezone to avoid allocation per frame
+		timeStr := frame.Timestamp.In(jstTimezone).Format("2006/01/02 15:04:05")
 		stats := fmt.Sprintf("Frame: %d  Time: %s", frame.FrameNumber, timeStr)
 		drawTextWithBackgroundNV12(frame.Data, frame.Width, frame.Height,
 			10, 10, stats, 255, 16, 2) // White text (Y=255), Black bg (Y=16)

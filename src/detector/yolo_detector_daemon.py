@@ -80,6 +80,8 @@ class YoloDetectorDaemon:
         # 解像度キャッシュ（初回のみ取得）
         self.target_width = None
         self.target_height = None
+        self.scale_x = None  # Cached: target_width / 640.0
+        self.scale_y = None  # Cached: target_height / 640.0
 
     def setup(self) -> None:
         """セットアップ"""
@@ -144,45 +146,42 @@ class YoloDetectorDaemon:
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
 
-        last_frame_number = -1
-
         logger.info("Starting detection loop (Press Ctrl+C to stop)")
         logger.info("")
 
         try:
             import time as time_module
 
-            while self.running:
-                loop_start = time_module.perf_counter()
+            # Cache DEBUG check outside loop
+            is_debug = logger.isEnabledFor(logging.DEBUG)
 
-                # 最適化1: VSE Ch1から640x640 NV12を取得（ゼロコピー: memoryview使用）
-                t0 = time_module.perf_counter()
+            while self.running:
+                # Timing only in DEBUG mode
+                if is_debug:
+                    loop_start = time_module.perf_counter()
+
                 yolo_frame = self.shm_yolo.get_latest_frame()
-                t1 = time_module.perf_counter()
-                time_get_frame = (t1 - t0) * 1000
 
                 if yolo_frame is None:
                     time.sleep(0.01)
                     continue
 
-                # 同じフレームはスキップ
-                if yolo_frame.frame_number == last_frame_number:
-                    time.sleep(0.01)
-                    continue
+                # NOTE: Frame duplicate check removed - YOLO inference time > frame interval
+                # so duplicates rarely occur, and processing same frame twice is harmless
 
-                last_frame_number = yolo_frame.frame_number
-
-                # 最適化2: メイン解像度を初回のみ取得してキャッシュ（毎フレーム3MBコピーを回避）
-                if self.target_width is None or self.target_height is None:
+                # 最適化2: メイン解像度とスケール係数を初回のみ取得してキャッシュ
+                if self.scale_x is None or self.scale_y is None:
                     main_frame = self.shm_main.get_latest_frame()
                     if main_frame is None:
                         time.sleep(0.01)
                         continue
                     self.target_width = main_frame.width
                     self.target_height = main_frame.height
+                    self.scale_x = self.target_width / 640.0
+                    self.scale_y = self.target_height / 640.0
                     logger.info(
                         f"Detected output resolution: {self.target_width}x{self.target_height} "
-                        f"(YOLO input: 640x640)"
+                        f"(YOLO input: 640x640, scale={self.scale_x:.3f}x{self.scale_y:.3f})"
                     )
 
                 # 初回のみVSE Ch1が正しく640x640を出力しているか確認
@@ -196,69 +195,47 @@ class YoloDetectorDaemon:
                             "⚠️ YOLO input is NOT 640x640! VSE Channel 1 may not be working correctly."
                         )
 
-                # 最適化3: NV12を直接BPU推論へ（JPEG変換・リサイズを完全にスキップ）
-                t2 = time_module.perf_counter()
+                # NV12を直接BPU推論へ
                 detections = self.detector.detect_nv12(
-                    nv12_data=yolo_frame.data,  # memoryview（ゼロコピー）
+                    nv12_data=yolo_frame.data,
                     width=yolo_frame.width,
                     height=yolo_frame.height,
-                    brightness_avg=yolo_frame.brightness_avg,  # CLAHE判定用
+                    brightness_avg=yolo_frame.brightness_avg,
                 )
-                t3 = time_module.perf_counter()
-                time_detect = (t3 - t2) * 1000
                 timing = self.detector.get_last_timing()
 
-                # bbox座標を640x640からメイン解像度へスケーリング
-                t4 = time_module.perf_counter()
-                scale_x = self.target_width / 640.0
-                scale_y = self.target_height / 640.0
+                # bbox座標を640x640からメイン解像度へスケーリング（scale_x/scale_yはキャッシュ済み）
                 detection_dicts = [
                     {
                         "class_name": det.class_name.value,
                         "confidence": det.confidence,
                         "bbox": {
-                            "x": int(det.bbox.x * scale_x),
-                            "y": int(det.bbox.y * scale_y),
-                            "w": int(det.bbox.w * scale_x),
-                            "h": int(det.bbox.h * scale_y),
+                            "x": int(det.bbox.x * self.scale_x),
+                            "y": int(det.bbox.y * self.scale_y),
+                            "w": int(det.bbox.w * self.scale_x),
+                            "h": int(det.bbox.h * self.scale_y),
                         },
                     }
                     for det in detections
                 ]
-                t5 = time_module.perf_counter()
-                time_scale = (t5 - t4) * 1000
 
                 # 検出結果を共有メモリに書き込み（検出があるときのみ）
-                # 検出がない場合は書き込みをスキップしてセマフォ通知を抑制
-                t6 = time_module.perf_counter()
-                time_write = 0.0
                 if detection_dicts:
                     self.shm_main.write_detection_result(
                         frame_number=yolo_frame.frame_number,
                         timestamp_sec=yolo_frame.timestamp_sec,
                         detections=detection_dicts,
                     )
-                    t7 = time_module.perf_counter()
-                    time_write = (t7 - t6) * 1000
 
                 # 統計更新
                 self.stats["frames_processed"] += 1
                 self.stats["total_detections"] += len(detections)
                 self.stats["avg_inference_time_ms"] = timing["total"] * 1000
 
-                # ループ全体の時間を計測
-                loop_end = time_module.perf_counter()
-                time_loop = (loop_end - loop_start) * 1000
-                time_other = time_loop - (
-                    time_get_frame + time_detect + time_scale + time_write
-                )
-
-                # ログレベルに応じた出力制御
-                # INFO: 30フレームごとに検出結果のみ
-                # DEBUG: 毎フレームパフォーマンス測定を出力
-
-                if logger.isEnabledFor(logging.DEBUG):
-                    # DEBUGレベル: 毎フレーム詳細なパフォーマンス測定
+                # DEBUG: 詳細なパフォーマンス測定
+                if is_debug:
+                    loop_end = time_module.perf_counter()
+                    time_loop = (loop_end - loop_start) * 1000
                     classes = [d["class_name"] for d in detection_dicts]
                     logger.debug(
                         f"Frame #{self.stats['frames_processed']}: "
@@ -270,16 +247,7 @@ class YoloDetectorDaemon:
                         f"infer={timing['inference'] * 1000:.1f}ms, "
                         f"post={timing['postprocessing'] * 1000:.1f}ms)"
                     )
-                    logger.debug(
-                        f"  Loop: {time_loop:.1f}ms "
-                        f"(get_frame={time_get_frame:.1f}ms, "
-                        f"detect={time_detect:.1f}ms, "
-                        f"scale={time_scale:.1f}ms, "
-                        f"write={time_write:.1f}ms, "
-                        f"other={time_other:.1f}ms)"
-                    )
-
-                    # 検出詳細
+                    logger.debug(f"  Loop: {time_loop:.1f}ms")
                     if detections:
                         for det in detections:
                             logger.debug(
