@@ -23,10 +23,19 @@ sys.path.insert(0, str(COMMON_SRC))
 
 from real_shared_memory import (
     RealSharedMemory,
+    ZeroCopySharedMemory,
     SHM_NAME_ACTIVE_FRAME,
     SHM_NAME_YOLO_INPUT,
+    SHM_NAME_YOLO_ZEROCOPY,
 )
 from detection.yolo_detector import YoloDetector
+
+# Try to import hb_mem bindings (only available on D-Robotics hardware)
+try:
+    from hb_mem_bindings import init_module as hb_mem_init, HbMemBuffer, import_nv12_planes, release_buffers
+    HB_MEM_AVAILABLE = True
+except ImportError:
+    HB_MEM_AVAILABLE = False
 
 # ロガー設定（後でmain()で上書きされる）
 logging.basicConfig(
@@ -48,6 +57,7 @@ class YoloDetectorDaemon:
         model_path: str,
         score_threshold: float = 0.6,
         nms_threshold: float = 0.7,
+        use_zerocopy: bool = True,
     ):
         """
         初期化
@@ -56,14 +66,17 @@ class YoloDetectorDaemon:
             model_path: YOLOモデルのパス
             score_threshold: 信頼度閾値
             nms_threshold: NMS IoU閾値
+            use_zerocopy: Enable zero-copy mode (requires hb_mem bindings)
         """
         self.model_path = model_path
         self.score_threshold = score_threshold
         self.nms_threshold = nms_threshold
+        self.use_zerocopy = use_zerocopy and HB_MEM_AVAILABLE
 
         # 共有メモリ
         self.shm_yolo: RealSharedMemory | None = None  # YOLO 640x360 input (letterbox to 640x640)
         self.shm_main: RealSharedMemory | None = None  # Main frame for resolution info
+        self.shm_zerocopy: ZeroCopySharedMemory | None = None  # Zero-copy YOLO input
 
         # YOLODetector
         self.detector: YoloDetector | None = None
@@ -73,6 +86,8 @@ class YoloDetectorDaemon:
             "frames_processed": 0,
             "total_detections": 0,
             "avg_inference_time_ms": 0.0,
+            "zerocopy_frames": 0,
+            "memcpy_frames": 0,
         }
 
         self.running = True
@@ -89,14 +104,37 @@ class YoloDetectorDaemon:
         logger.info(f"Model: {self.model_path}")
         logger.info(f"Score threshold: {self.score_threshold}")
         logger.info(f"NMS threshold: {self.nms_threshold}")
+        logger.info(f"Zero-copy mode: {self.use_zerocopy} (hb_mem: {HB_MEM_AVAILABLE})")
         logger.info("")
+
+        # Initialize hb_mem module if zero-copy enabled
+        if self.use_zerocopy:
+            try:
+                if hb_mem_init():
+                    logger.info("hb_mem module initialized successfully")
+                else:
+                    logger.warning("hb_mem module init failed, disabling zero-copy")
+                    self.use_zerocopy = False
+            except Exception as e:
+                logger.warning(f"hb_mem init error: {e}, disabling zero-copy")
+                self.use_zerocopy = False
 
         # 共有メモリを開く
         try:
-            # YOLO入力用 (640x360 NV12, letterbox to 640x640)
+            # YOLO入力用 (640x360 NV12, letterbox to 640x640) - memcpy fallback
             self.shm_yolo = RealSharedMemory(frame_shm_name=SHM_NAME_YOLO_INPUT)
             self.shm_yolo.open()
             logger.info(f"Connected to YOLO input shared memory: {SHM_NAME_YOLO_INPUT}")
+
+            # Zero-copy YOLO input (if enabled)
+            if self.use_zerocopy:
+                self.shm_zerocopy = ZeroCopySharedMemory(SHM_NAME_YOLO_ZEROCOPY)
+                if self.shm_zerocopy.open():
+                    logger.info(f"Connected to zero-copy shared memory: {SHM_NAME_YOLO_ZEROCOPY}")
+                else:
+                    logger.warning("Zero-copy SHM not available, using memcpy fallback")
+                    self.shm_zerocopy = None
+                    self.use_zerocopy = False
 
             # メイン解像度参照用 (bbox座標スケーリングに使用)
             self.shm_main = RealSharedMemory(frame_shm_name=SHM_NAME_ACTIVE_FRAME)
@@ -124,11 +162,15 @@ class YoloDetectorDaemon:
 
     def cleanup(self) -> None:
         """クリーンアップ"""
+        if self.shm_zerocopy:
+            self.shm_zerocopy.close()
         if self.shm_yolo:
             self.shm_yolo.close()
         if self.shm_main:
             self.shm_main.close()
         logger.info(f"Total frames processed: {self.stats['frames_processed']}")
+        logger.info(f"  Zero-copy frames: {self.stats['zerocopy_frames']}")
+        logger.info(f"  Memcpy frames: {self.stats['memcpy_frames']}")
         logger.info(f"Total detections: {self.stats['total_detections']}")
         if self.stats["frames_processed"] > 0:
             avg_dets = self.stats["total_detections"] / self.stats["frames_processed"]
@@ -160,11 +202,56 @@ class YoloDetectorDaemon:
                 if is_debug:
                     loop_start = time_module.perf_counter()
 
-                yolo_frame = self.shm_yolo.get_latest_frame()
+                # Try zero-copy first, fallback to memcpy
+                zc_frame = None
+                yolo_frame = None
+                hb_mem_buffers = None
+                nv12_data = None
 
-                if yolo_frame is None:
-                    time.sleep(0.01)
-                    continue
+                if self.use_zerocopy and self.shm_zerocopy:
+                    zc_frame = self.shm_zerocopy.get_frame()
+                    if zc_frame is not None:
+                        try:
+                            # Import VIO buffers via share_id
+                            y_arr, uv_arr, hb_mem_buffers = import_nv12_planes(
+                                zc_frame.share_id[0],
+                                zc_frame.share_id[1],
+                                zc_frame.plane_size[0],
+                                zc_frame.plane_size[1],
+                            )
+                            # Concatenate Y and UV for NV12
+                            import numpy as np
+                            nv12_data = np.concatenate([y_arr, uv_arr])
+                            self.stats["zerocopy_frames"] += 1
+                        except Exception as e:
+                            logger.warning(f"Zero-copy import failed: {e}, falling back to memcpy")
+                            zc_frame = None
+                            if hb_mem_buffers:
+                                release_buffers(hb_mem_buffers)
+                                hb_mem_buffers = None
+
+                # Fallback to memcpy if zero-copy not available
+                if zc_frame is None:
+                    yolo_frame = self.shm_yolo.get_latest_frame()
+                    if yolo_frame is None:
+                        time.sleep(0.01)
+                        continue
+                    nv12_data = yolo_frame.data
+                    self.stats["memcpy_frames"] += 1
+
+                # Determine frame properties
+                if zc_frame:
+                    frame_width = zc_frame.width
+                    frame_height = zc_frame.height
+                    frame_number = zc_frame.frame_number
+                    timestamp_sec = zc_frame.timestamp_sec
+                    brightness_avg = zc_frame.brightness_avg
+                else:
+                    frame_width = yolo_frame.width
+                    frame_height = yolo_frame.height
+                    frame_number = yolo_frame.frame_number
+                    timestamp_sec = yolo_frame.timestamp_sec
+                    brightness_avg = yolo_frame.brightness_avg
 
                 # NOTE: Frame duplicate check removed - YOLO inference time > frame interval
                 # so duplicates rarely occur, and processing same frame twice is harmless
@@ -174,38 +261,50 @@ class YoloDetectorDaemon:
                 if self.scale_x is None or self.scale_y is None:
                     main_frame = self.shm_main.get_latest_frame()
                     if main_frame is None:
+                        if hb_mem_buffers:
+                            release_buffers(hb_mem_buffers)
+                        if zc_frame and self.shm_zerocopy:
+                            self.shm_zerocopy.mark_consumed()
                         time.sleep(0.01)
                         continue
                     self.target_width = main_frame.width
                     self.target_height = main_frame.height
                     # YOLOの出力座標はletterbox前の空間(640x360)
                     # VSEがアスペクト比を維持してスケールするので、x/yスケールは同じ値になる
-                    self.scale_x = self.target_width / float(yolo_frame.width)
-                    self.scale_y = self.target_height / float(yolo_frame.height)
+                    self.scale_x = self.target_width / float(frame_width)
+                    self.scale_y = self.target_height / float(frame_height)
                     logger.info(
                         f"Detected output resolution: {self.target_width}x{self.target_height} "
-                        f"(YOLO input: {yolo_frame.width}x{yolo_frame.height}, scale={self.scale_x:.3f}x{self.scale_y:.3f})"
+                        f"(YOLO input: {frame_width}x{frame_height}, scale={self.scale_x:.3f}x{self.scale_y:.3f})"
                     )
 
                 # 初回のみVSE Ch1の出力サイズを確認（letterbox: 640x360）
                 if self.stats["frames_processed"] == 0:
+                    mode_str = "zero-copy" if zc_frame else "memcpy"
+                    data_len = len(nv12_data) if nv12_data is not None else 0
                     logger.info(
-                        f"YOLO input frame size: {yolo_frame.width}x{yolo_frame.height} "
-                        f"(expected 640x360 for letterbox), format={yolo_frame.format}, data_len={len(yolo_frame.data)}"
+                        f"YOLO input frame size: {frame_width}x{frame_height} "
+                        f"(expected 640x360 for letterbox), mode={mode_str}, data_len={data_len}"
                     )
-                    if yolo_frame.width != 640 or yolo_frame.height != 360:
+                    if frame_width != 640 or frame_height != 360:
                         logger.warning(
-                            f"⚠️ YOLO input is NOT 640x360! VSE Channel 1 may not be configured for letterbox. "
-                            f"Got {yolo_frame.width}x{yolo_frame.height}"
+                            f"YOLO input is NOT 640x360! VSE Channel 1 may not be configured for letterbox. "
+                            f"Got {frame_width}x{frame_height}"
                         )
 
                 # NV12を直接BPU推論へ
                 detections = self.detector.detect_nv12(
-                    nv12_data=yolo_frame.data,
-                    width=yolo_frame.width,
-                    height=yolo_frame.height,
-                    brightness_avg=yolo_frame.brightness_avg,
+                    nv12_data=nv12_data,
+                    width=frame_width,
+                    height=frame_height,
+                    brightness_avg=brightness_avg,
                 )
+
+                # Release zero-copy buffers and mark consumed
+                if hb_mem_buffers:
+                    release_buffers(hb_mem_buffers)
+                if zc_frame and self.shm_zerocopy:
+                    self.shm_zerocopy.mark_consumed()
                 timing = self.detector.get_last_timing()
 
                 # bbox座標をYOLO入力空間(640x360)からメイン解像度(1920x1080)へスケーリング
@@ -228,8 +327,8 @@ class YoloDetectorDaemon:
                 # 検出結果を共有メモリに書き込み（検出があるときのみ）
                 if detection_dicts:
                     self.shm_main.write_detection_result(
-                        frame_number=yolo_frame.frame_number,
-                        timestamp_sec=yolo_frame.timestamp_sec,
+                        frame_number=frame_number,
+                        timestamp_sec=timestamp_sec,
                         detections=detection_dicts,
                     )
 
@@ -311,6 +410,11 @@ def main() -> int:
         choices=["debug", "info", "warn", "error"],
         help="Log level (default: info)",
     )
+    parser.add_argument(
+        "--no-zerocopy",
+        action="store_true",
+        help="Disable zero-copy mode (always use memcpy)",
+    )
 
     args = parser.parse_args()
 
@@ -331,6 +435,7 @@ def main() -> int:
         model_path=args.model_path,
         score_threshold=args.score_threshold,
         nms_threshold=args.nms_threshold,
+        use_zerocopy=not args.no_zerocopy,
     )
 
     try:

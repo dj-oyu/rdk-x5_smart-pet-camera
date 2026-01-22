@@ -14,6 +14,7 @@ from ctypes import (
     c_uint32,
     c_uint64,
     c_int,
+    c_int32,
     c_float,
     c_char,
     c_size_t,
@@ -50,6 +51,12 @@ RING_BUFFER_SIZE = 30
 MAX_DETECTIONS = 10
 MAX_FRAME_SIZE = 1920 * 1080 * 3 // 2  # Max NV12 frame size (1080p)
 NUM_CAMERAS = 2  # DAY=0, NIGHT=1
+
+# Zero-copy shared memory names (Phase 2)
+SHM_NAME_YOLO_ZEROCOPY = "/pet_camera_yolo_zc"
+SHM_NAME_MJPEG_ZEROCOPY = "/pet_camera_mjpeg_zc"
+SHM_NAME_ACTIVE_ZEROCOPY = "/pet_camera_active_zc"
+ZEROCOPY_MAX_PLANES = 2  # NV12 has 2 planes (Y, UV)
 
 
 # C structure definitions using ctypes
@@ -138,6 +145,49 @@ class CSharedBrightnessData(Structure):
     ]
 
 
+# Zero-copy structures (Phase 2: share_id based, no memcpy)
+class CZeroCopyFrame(Structure):
+    """
+    Zero-copy frame - VIO buffer shared directly without memcpy.
+
+    Consumer uses share_id to import the VIO buffer via hb_mem_import_com_buf().
+    """
+    _fields_ = [
+        # Frame metadata
+        ("frame_number", c_uint64),
+        ("timestamp", CTimespec),
+        ("camera_id", c_int),
+        ("width", c_int),
+        ("height", c_int),
+        ("format", c_int),  # 1=NV12
+        # Brightness metrics
+        ("brightness_avg", c_float),
+        ("correction_applied", c_uint8),
+        ("_pad1", c_uint8 * 3),
+        # VIO buffer info
+        ("share_id", c_int32 * ZEROCOPY_MAX_PLANES),  # hb_mem share_id for Y/UV
+        ("plane_size", c_uint64 * ZEROCOPY_MAX_PLANES),  # Size of each plane
+        ("plane_cnt", c_int32),  # Number of planes (2 for NV12)
+        # Synchronization
+        ("version", c_uint32),
+        ("consumed", c_uint8),
+        ("_pad2", c_uint8 * 3),
+    ]
+
+
+class CZeroCopyFrameBuffer(Structure):
+    """
+    Zero-copy shared memory - single frame slot for SPSC pattern.
+
+    Camera waits on consumed_sem before writing next frame (throttles to consumer speed).
+    """
+    _fields_ = [
+        ("new_frame_sem", c_uint8 * 32),  # sem_t (32 bytes on Linux)
+        ("consumed_sem", c_uint8 * 32),   # sem_t (32 bytes on Linux)
+        ("frame", CZeroCopyFrame),
+    ]
+
+
 # Python data classes
 @dataclass
 class BoundingBox:
@@ -168,6 +218,130 @@ class Frame:
     brightness_lux: int = 0  # Environment illuminance from ISP cur_lux
     brightness_zone: int = 2  # 0=dark, 1=dim, 2=normal, 3=bright
     correction_applied: bool = False  # True if ISP low-light correction is active
+
+
+@dataclass
+class ZeroCopyFrame:
+    """Zero-copy frame metadata (no actual data, just share_id references)."""
+    frame_number: int
+    timestamp_sec: float
+    camera_id: int
+    width: int
+    height: int
+    format: int  # 1=NV12
+    brightness_avg: float
+    correction_applied: bool
+    share_id: list[int]  # share_id for each plane [Y, UV]
+    plane_size: list[int]  # size of each plane
+    plane_cnt: int
+    version: int
+
+
+class ZeroCopySharedMemory:
+    """
+    Zero-copy shared memory interface for VIO buffer sharing.
+
+    Uses share_id to import VIO buffers directly without memcpy.
+    Consumer must call mark_consumed() after processing each frame.
+    """
+
+    def __init__(self, shm_name: str = SHM_NAME_YOLO_ZEROCOPY):
+        self.shm_name = shm_name
+        self.fd: Optional[int] = None
+        self.mmap_obj: Optional[mmap.mmap] = None
+        self.last_version = 0
+
+    def open(self) -> bool:
+        """Open the zero-copy shared memory segment."""
+        shm_path = f"/dev/shm{self.shm_name}"
+        try:
+            self.fd = os.open(shm_path, os.O_RDWR)
+            self.mmap_obj = mmap.mmap(
+                self.fd,
+                sizeof(CZeroCopyFrameBuffer),
+                mmap.MAP_SHARED,
+                mmap.PROT_READ | mmap.PROT_WRITE,
+            )
+            print(f"[Info] Opened zero-copy shared memory: {shm_path}")
+            return True
+        except FileNotFoundError:
+            print(f"[Warn] Zero-copy SHM not found: {shm_path} (fallback to memcpy)")
+            return False
+        except Exception as e:
+            print(f"[Error] Failed to open zero-copy SHM: {e}")
+            return False
+
+    def close(self) -> None:
+        """Close the shared memory segment."""
+        if self.mmap_obj:
+            self.mmap_obj.close()
+            self.mmap_obj = None
+        if self.fd:
+            os.close(self.fd)
+            self.fd = None
+
+    def get_frame(self) -> Optional[ZeroCopyFrame]:
+        """
+        Get the latest frame metadata (non-blocking).
+
+        Returns:
+            ZeroCopyFrame if new frame available, None otherwise
+        """
+        if not self.mmap_obj:
+            return None
+
+        # Read the buffer structure
+        self.mmap_obj.seek(0)
+        data = self.mmap_obj.read(sizeof(CZeroCopyFrameBuffer))
+        buf = CZeroCopyFrameBuffer.from_buffer_copy(data)
+
+        # Check version
+        if buf.frame.version == self.last_version:
+            return None  # No new frame
+
+        self.last_version = buf.frame.version
+
+        # Convert to Python dataclass
+        timestamp_sec = buf.frame.timestamp.tv_sec + buf.frame.timestamp.tv_nsec / 1e9
+        return ZeroCopyFrame(
+            frame_number=buf.frame.frame_number,
+            timestamp_sec=timestamp_sec,
+            camera_id=buf.frame.camera_id,
+            width=buf.frame.width,
+            height=buf.frame.height,
+            format=buf.frame.format,
+            brightness_avg=buf.frame.brightness_avg,
+            correction_applied=bool(buf.frame.correction_applied),
+            share_id=[buf.frame.share_id[i] for i in range(buf.frame.plane_cnt)],
+            plane_size=[buf.frame.plane_size[i] for i in range(buf.frame.plane_cnt)],
+            plane_cnt=buf.frame.plane_cnt,
+            version=buf.frame.version,
+        )
+
+    def mark_consumed(self) -> None:
+        """
+        Mark the current frame as consumed.
+
+        MUST be called after processing each frame to allow camera to write next frame.
+        """
+        if not self.mmap_obj:
+            return
+
+        # Calculate offset to consumed field
+        # Offset = sizeof(new_frame_sem) + sizeof(consumed_sem) + offset of consumed in CZeroCopyFrame
+        frame_offset = 32 + 32  # sem_t sizes
+        consumed_offset = frame_offset + CZeroCopyFrame.consumed.offset
+
+        # Write consumed = 1
+        self.mmap_obj.seek(consumed_offset)
+        self.mmap_obj.write(b'\x01')
+        self.mmap_obj.flush()
+
+        # Post consumed_sem (32 bytes after new_frame_sem)
+        if librt:
+            # Get address of consumed_sem
+            sem_addr = addressof(c_uint8.from_buffer(self.mmap_obj, 32))
+            librt.sem_post(c_void_p(sem_addr))
 
 
 class RealSharedMemory:

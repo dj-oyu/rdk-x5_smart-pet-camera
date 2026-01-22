@@ -1,253 +1,289 @@
-# Zero-Copy Shared Memory 設計
+# Zero-Copy Shared Memory 設計 v3
 
 ## 概要
 
-カメラパイプラインからコンシューマ（YOLO, MJPEG, streaming-server）へのフレーム転送で、memcpyを排除してDMAバッファを直接共有する。
+カメラパイプラインからコンシューマへのフレーム転送でmemcpyを排除し、VIOバッファのshare_idを直接共有する。エンコーダ入力も`external_frame_buf`で最適化。
 
 ## 現状のアーキテクチャ
 
-```
-┌─────────────┐     ┌──────────────┐     ┌──────────────┐     ┌─────────────┐
-│   Camera    │────▶│     VSE      │────▶│   memcpy     │────▶│ SharedFrame │
-│   Sensor    │     │  (Hardware)  │     │   (CPU)      │     │   Buffer    │
-└─────────────┘     └──────────────┘     └──────────────┘     └─────────────┘
-                           │                                         │
-                           ▼                                         ▼
-                    VIO Buffer (DMA)                          Consumer Process
-                    - 3 buffers/channel                       (別プロセス)
-                    - share_id あり
-```
-
-### 問題点
-
-| チャンネル | 用途 | サイズ | memcpy負荷 |
-|-----------|------|--------|------------|
-| Ch0 | Active NV12 | 640x480 | ~460KB/frame |
-| Ch1 | YOLO入力 | 640x360 | ~346KB/frame |
-| Ch2 | MJPEG入力 | 640x480 | ~460KB/frame |
-
-**合計: 約1.27MB/frame × 30fps ≈ 38MB/s の不要なCPU memcpy**
-
-## 提案: Zero-Copy アーキテクチャ
+### カメラデーモン構成
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌──────────────┐     ┌─────────────┐
-│   Camera    │────▶│     VSE      │────▶│  share_id    │────▶│  Consumer   │
-│   Sensor    │     │  (Hardware)  │     │  (metadata)  │     │  Process    │
-└─────────────┘     └──────────────┘     └──────────────┘     └─────────────┘
-                           │                    │                     │
-                           ▼                    ▼                     ▼
-                    VIO Buffer (DMA)      ZeroCopyFrame        hb_mem_import
-                    - share_id[2]         - share_id           - virt_addr取得
-                    - plane_size[2]       - メタデータ         - 同一バッファ参照
+camera_switcher_daemon
+    │
+    ├── camera_daemon(0: DAY)  ── 常時30fps稼働
+    │
+    └── camera_daemon(1: NIGHT) ── 常時30fps稼働
+
+※両カメラは常時稼働、シグナルで active/inactive を切り替え
 ```
 
-### 動作フロー
+### 現状のデータフロー (memcpyあり)
 
 ```
-Camera Daemon                              Consumer (YOLO/MJPEG/streaming)
-     │                                              │
-     │  1. hbn_vnode_getframe()                     │
-     │     └─▶ VIOバッファ取得 (share_id含む)       │
-     │                                              │
-     │  2. ZeroCopyFrameに書き込み                  │
-     │     - share_id[0], share_id[1]              │
-     │     - width, height, metadata               │
-     │                                              │
-     │  3. sem_post(new_frame_sem)                  │
-     │     └─▶ コンシューマに通知 ─────────────────▶│
-     │                                              │
-     │  4. sem_wait(consumed_sem)                   │  5. hb_mem_import_com_buf()
-     │     └─▶ 処理完了を待機                       │     └─▶ 同じバッファをマップ
-     │         ┌──────────────────────────────────◀─│
-     │         │                                    │  6. フレーム処理
-     │         │                                    │     (YOLO推論など)
-     │         │                                    │
-     │         │◀────────────────────────────────────  7. sem_post(consumed_sem)
-     │                                              │     └─▶ 処理完了通知
-     │  8. hbn_vnode_releaseframe()                 │
-     │     └─▶ VIOバッファを解放                    │
-     ▼                                              ▼
+VIO Ch0 ──memcpy──▶ Active NV12共有メモリ ──▶ streaming-server
+    │
+    └──memcpy──▶ エンコーダキュー ──memcpy──▶ HWエンコーダ ──memcpy──▶ H.264共有メモリ
+
+VIO Ch1 ──memcpy──▶ YOLO共有メモリ ──▶ YOLO daemon
+
+VIO Ch2 ──memcpy──▶ MJPEG共有メモリ ──▶ web_monitor
 ```
 
-## タイミング制約
+**問題: 約38MB/s + エンコーダ460KB/frame のCPU memcpy**
 
-### VIOバッファプール
+## 新設計: Zero-Copy + デュアルカメラ
 
-各VSEチャンネルは3つのDMAバッファを持つ：
+### アーキテクチャ
 
 ```
-Buffer 0: VSEが書き込み中
-Buffer 1: コンシューマが処理中
-Buffer 2: 次のVSE出力用に待機
+Camera 0                              Camera 1
+    │                                     │
+    ▼                                     ▼
+VIO Ch0 ─────────────────────────────VIO Ch0
+    │                                     │
+    ├─▶ share_id ──┐                      ├─▶ share_id ──┐
+    │              │                      │              │
+    │              ▼                      │              ▼
+    │    ZeroCopy共有メモリ               │    (同一共有メモリ)
+    │    ├─ active_camera_index           │
+    │    ├─ frames[0] (Camera 0)          │
+    │    └─ frames[1] (Camera 1) ◀────────┘
+    │              │
+    │              ▼
+    │         Consumer
+    │    (active_indexで選択)
+    │
+    └─▶ HWエンコーダ (external_frame_buf)
+              │
+              ▼
+         H.264共有メモリ (memcpy ~30KB - 許容)
 ```
 
-### 処理時間の制約
+### チャンネル構成の変更
 
-- フレーム間隔: 33ms (30fps)
-- コンシューマの処理時間制限: **~66ms** (2フレーム分)
-- これを超えるとVIOパイプラインがストール
+| Channel | 現状 | 新設計 |
+|---------|------|--------|
+| Ch0 | Active NV12 (640x480) | Active NV12 + エンコーダ入力 (zero-copy) |
+| Ch1 | YOLO入力 (640x360) | YOLO入力 (zero-copy) |
+| Ch2 | MJPEG入力 (640x480) | **廃止** (Ch0を使用) |
 
-| Consumer | 処理時間 | 制約内？ |
-|----------|----------|----------|
-| YOLO | 30-50ms | ✅ OK |
-| MJPEG encode | ~5ms | ✅ OK |
-| streaming-server | ~1ms | ✅ OK |
-
-## データ構造
-
-### ZeroCopyFrame
+### データ構造
 
 ```c
+#define NUM_CAMERAS 2
+#define ZEROCOPY_MAX_PLANES 2
+
 typedef struct {
-    // フレームメタデータ
+    // Frame metadata
     uint64_t frame_number;
     struct timespec timestamp;
-    int camera_id;
     int width;
     int height;
-    int format;  // 1=NV12
 
-    // 明るさ情報
+    // Brightness
     float brightness_avg;
     uint8_t correction_applied;
 
-    // VIOバッファ情報 (hb_mem_graphic_buf_tから)
-    int32_t share_id[2];      // Y/UV planes
-    uint64_t plane_size[2];   // 各プレーンのサイズ
-    int32_t plane_cnt;        // プレーン数 (NV12=2)
+    // VIO buffer (from hb_mem_graphic_buf_t)
+    int32_t share_id[ZEROCOPY_MAX_PLANES];
+    uint64_t plane_size[ZEROCOPY_MAX_PLANES];
+    uint64_t phys_addr[ZEROCOPY_MAX_PLANES];  // エンコーダ用
+    int32_t plane_cnt;
 
-    // 同期
-    volatile uint32_t version;  // フレーム更新時にインクリメント
-    volatile uint8_t consumed;  // Consumer完了フラグ
+    // Sync
+    volatile uint32_t version;
+    volatile uint8_t consumed;
 } ZeroCopyFrame;
-```
 
-### ZeroCopyFrameBuffer
-
-```c
 typedef struct {
-    sem_t new_frame_sem;   // 新フレーム通知
-    sem_t consumed_sem;    // 処理完了通知
-    ZeroCopyFrame frame;   // 現在のフレーム
-} ZeroCopyFrameBuffer;
+    volatile int active_camera_index;
+    sem_t new_frame_sem[NUM_CAMERAS];
+    sem_t consumed_sem[NUM_CAMERAS];
+    ZeroCopyFrame frames[NUM_CAMERAS];
+} ZeroCopyDualFrameBuffer;
 ```
 
-## hb_mem API
-
-### Producer (Camera Daemon)
+### エンコーダ Zero-Copy
 
 ```c
-// VIOフレーム取得
-hbn_vnode_image_t vio_frame;
-hbn_vnode_getframe(vse_handle, channel, timeout, &vio_frame);
+// encoder_lowlevel.c - 設定変更
+encoder->video_enc_params.external_frame_buf = 1;  // 外部バッファ使用
 
-// share_id取得
-int32_t share_id_y = vio_frame.buffer.share_id[0];
-int32_t share_id_uv = vio_frame.buffer.share_id[1];
-
-// 共有メモリに書き込み
-zc_frame->share_id[0] = share_id_y;
-zc_frame->share_id[1] = share_id_uv;
-zc_frame->plane_size[0] = vio_frame.buffer.size[0];
-zc_frame->plane_size[1] = vio_frame.buffer.size[1];
+// encoder_encode_frame() - VIOバッファを直接渡す
+input_buffer.vframe_buf.phy_ptr[0] = phy_addr_y;   // VIOの物理アドレス
+input_buffer.vframe_buf.phy_ptr[1] = phy_addr_uv;
+input_buffer.vframe_buf.vir_ptr[0] = vir_addr_y;
+input_buffer.vframe_buf.vir_ptr[1] = vir_addr_uv;
+// memcpy不要！
 ```
 
-### Consumer (Python)
+## モジュール依存関係
 
-```python
-# ctypesでhb_mem APIを呼び出し
-import ctypes
-
-libhbmem = ctypes.CDLL("libhbmem.so")
-
-# バッファインポート
-class HbMemCommonBuf(ctypes.Structure):
-    _fields_ = [
-        ("fd", ctypes.c_int32),
-        ("share_id", ctypes.c_int32),
-        ("flags", ctypes.c_int64),
-        ("size", ctypes.c_uint64),
-        ("virt_addr", ctypes.POINTER(ctypes.c_uint8)),
-        ("phys_addr", ctypes.c_uint64),
-        ("offset", ctypes.c_uint64),
-    ]
-
-def import_buffer(share_id: int, size: int) -> memoryview:
-    in_buf = HbMemCommonBuf()
-    in_buf.share_id = share_id
-    in_buf.size = size
-
-    out_buf = HbMemCommonBuf()
-
-    ret = libhbmem.hb_mem_import_com_buf(ctypes.byref(in_buf), ctypes.byref(out_buf))
-    if ret != 0:
-        raise RuntimeError(f"hb_mem_import_com_buf failed: {ret}")
-
-    # virt_addrからnumpy配列を作成
-    arr = np.ctypeslib.as_array(out_buf.virt_addr, shape=(size,))
-    return arr
+```
+shared_memory.h/c (データ構造)
+        │
+        ▼
+camera_pipeline.c (share_id書込み)
+        │
+        ├────────────────┬─────────────────┐
+        ▼                ▼                 ▼
+encoder_lowlevel.c   hb_mem_bindings.py  (Go bindings)
+(external_frame_buf)  (Python用)          (将来)
+        │                │
+        ▼                ▼
+encoder_thread.c     yolo_detector_daemon.py
+                         │
+                         ▼
+                     web_monitor (Python)
 ```
 
-## 共有メモリ名
+## 開発パス
 
-| 名前 | 用途 |
-|------|------|
-| `/pet_camera_yolo_zc` | YOLO入力 (640x360) |
-| `/pet_camera_mjpeg_zc` | MJPEG入力 (640x480) |
-| `/pet_camera_active_zc` | Active NV12 (640x480) |
+### Phase 1: 基盤 (依存関係なし)
 
-## 実装計画
+**目標**: 共有メモリ構造の定義とPythonバインディング
 
-### Phase 1: YOLO入力のみ
+```
+1.1 shared_memory.h
+    └─ ZeroCopyFrame, ZeroCopyDualFrameBuffer 追加
 
-1. `shared_memory.c`: ZeroCopyFrameBuffer API追加
-2. `camera_pipeline.c`: Ch1でzero-copy使用
-3. `hb_mem_bindings.py`: Python用hb_memバインディング
-4. `yolo_detector_daemon.py`: zero-copy読み取り
+1.2 shared_memory.c
+    └─ shm_zerocopy_create/open/close API追加
 
-### Phase 2: MJPEG/Active
+1.3 hb_mem_bindings.py (新規)
+    └─ hb_mem_import_com_buf のctypesラッパー
+    └─ テスト: 既存share_idでバッファマップ確認
+```
 
-1. Ch2 (MJPEG) のzero-copy化
-2. Ch0 (Active) のzero-copy化
-3. streaming-server対応 (Go言語でCGO使用)
+**検証**: Pythonからhb_mem_importが動作することを確認
 
-## リスクと対策
+### Phase 2: Producer側 (YOLO Ch1)
 
-### 1. コンシューマが遅い場合
+**目標**: camera_pipelineがshare_idを書き込む
 
-**リスク**: 66ms以内に処理完了しないとVIOストール
+```
+2.1 camera_pipeline.c
+    └─ YOLO (Ch1) のwrite_active制限を外す
+    └─ share_id + phys_addr を ZeroCopyFrame に書込み
+    └─ 従来のmemcpy版と並行稼働 (フォールバック)
 
-**対策**:
-- タイムアウト付きsem_wait
-- タイムアウト時はフレームスキップ
+2.2 real_shared_memory.py
+    └─ ZeroCopyDualFrameBuffer 読み取り対応
+```
 
-### 2. コンシューマがクラッシュ
+**検証**: 両カメラのshare_idが共有メモリに書かれることを確認
 
-**リスク**: consumed_semがpostされずデッドロック
+### Phase 3: Consumer側 (YOLO daemon)
 
-**対策**:
-- タイムアウト付きsem_timedwait
-- watchdogでコンシューマ状態監視
+**目標**: YOLO daemonがzero-copyで読み取り
 
-### 3. 複数コンシューマ
+```
+3.1 yolo_detector_daemon.py
+    └─ active_camera_index確認
+    └─ hb_mem_importでバッファマップ
+    └─ consumed通知
 
-**リスク**: 1つのVIOバッファを複数プロセスが読む場合
+3.2 yolo_detector.py
+    └─ detect_nv12()がマップ済みバッファを受け取れるよう調整
+```
 
-**対策**:
-- 現状はSPSC (Single Producer Single Consumer)
-- 複数コンシューマはDMAコピーでバッファ複製
+**検証**: YOLO推論がzero-copyで動作、memcpy削減を確認
+
+### Phase 4: エンコーダ最適化
+
+**目標**: VIO → エンコーダのmemcpy削除
+
+```
+4.1 encoder_lowlevel.c
+    └─ external_frame_buf = 1 設定
+    └─ encode_frame_zerocopy() 新API (phys_addr受け取り)
+
+4.2 encoder_thread.c
+    └─ Y/UVコピーキュー廃止
+    └─ share_id/phys_addrをキューに入れる
+    └─ VIOバッファのreleaseタイミング調整
+
+4.3 camera_pipeline.c
+    └─ encoder_thread への受け渡し変更
+```
+
+**検証**: エンコード動作確認、CPU負荷測定
+
+### Phase 5: Ch2廃止 & web_monitor対応
+
+**目標**: MJPEGチャンネル廃止、Active NV12を共用
+
+```
+5.1 vio_lowlevel.c
+    └─ VSE Ch2 設定削除 (オプション)
+
+5.2 camera_pipeline.c
+    └─ Ch2 関連コード削除
+
+5.3 web_monitor
+    └─ Active NV12のzero-copyを使用
+```
+
+**検証**: web_monitorが正常動作
+
+### Phase 6: streaming-server (将来)
+
+**目標**: Go言語からzero-copy
+
+```
+6.1 Go用hb_memバインディング (CGO)
+6.2 streaming-server対応
+```
+
+## 各Phaseの成果物とリスク
+
+| Phase | 成果物 | リスク | ロールバック |
+|-------|--------|--------|-------------|
+| 1 | 共有メモリ構造、Pyバインディング | 低 | 既存コードに影響なし |
+| 2 | share_id書込み | 中 | memcpy版と並行稼働 |
+| 3 | YOLO zero-copy | 中 | 従来パスにフォールバック |
+| 4 | エンコーダ最適化 | 高 | external_frame_buf無効化 |
+| 5 | Ch2廃止 | 低 | Ch2復活可能 |
+| 6 | Go対応 | 中 | Python版で代替 |
 
 ## 期待効果
 
 | 項目 | Before | After |
 |------|--------|-------|
-| CPU memcpy | 38MB/s | 0 |
-| コンテキストスイッチ | 多い | 少ない |
-| キャッシュミス | 多い | 少ない |
-| フレームレイテンシ | memcpy分増加 | 最小 |
+| YOLO memcpy | 346KB × 30fps = 10MB/s | **0** |
+| Active NV12 memcpy | 460KB × 30fps = 14MB/s | **0** |
+| MJPEG memcpy | 460KB × 30fps = 14MB/s | **0** (Ch2廃止) |
+| エンコーダ入力 memcpy | 460KB × 30fps = 14MB/s | **0** |
+| H.264出力 memcpy | ~30KB × 30fps = 1MB/s | 1MB/s (維持) |
+| **合計** | **~53MB/s** | **~1MB/s** |
 
-## 参考
+## 共有メモリ名
 
-- D-Robotics hb_mem API: `/usr/include/hb_mem_mgr.h`
-- VIO API: `/usr/include/hbn_api.h`
+| 名前 | 用途 |
+|------|------|
+| `/pet_camera_yolo_zc` | YOLO入力 zero-copy (両カメラ) |
+| `/pet_camera_active_zc` | Active NV12 zero-copy (両カメラ) |
+| `/pet_camera_stream` | H.264出力 (従来通りmemcpy) |
+
+## 注意事項
+
+### VIOバッファのライフサイクル
+
+```
+getframe() → share_id取得 → Consumer処理 → consumed通知 → releaseframe()
+                                   │
+                             66ms以内に完了必要
+```
+
+### カメラ切り替え
+
+```
+1. camera_switcher: active_camera_index を更新
+2. Consumer: 次フレームから新しいカメラを使用
+3. 遅延ゼロで切り替え完了
+```
+
+### フォールバック
+
+Phase 2-3では従来のmemcpy版と並行稼働させ、問題発生時にフォールバック可能にする。

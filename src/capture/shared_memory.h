@@ -177,8 +177,76 @@ typedef struct {
 
 // Zero-copy shared memory names
 #define SHM_NAME_YOLO_ZEROCOPY "/pet_camera_yolo_zc"     // Zero-copy YOLO input
-#define SHM_NAME_MJPEG_ZEROCOPY "/pet_camera_mjpeg_zc"   // Zero-copy MJPEG input
+#define SHM_NAME_MJPEG_ZEROCOPY "/pet_camera_mjpeg_zc"   // Zero-copy MJPEG input (deprecated, use active)
 #define SHM_NAME_ACTIVE_ZEROCOPY "/pet_camera_active_zc" // Zero-copy active frame
+
+/**
+ * Create zero-copy shared memory
+ *
+ * Creates a ZeroCopyFrameBuffer for sharing VIO buffers via hb_mem share_id.
+ * Used by camera daemon (producer).
+ *
+ * Args:
+ *   name: Shared memory name (e.g., SHM_NAME_YOLO_ZEROCOPY)
+ *
+ * Returns:
+ *   Pointer to mapped ZeroCopyFrameBuffer, or NULL on error
+ */
+ZeroCopyFrameBuffer* shm_zerocopy_create(const char* name);
+
+/**
+ * Open existing zero-copy shared memory
+ *
+ * Opens a ZeroCopyFrameBuffer created by camera daemon.
+ * Used by consumers (YOLO daemon, web_monitor).
+ *
+ * Args:
+ *   name: Shared memory name (e.g., SHM_NAME_YOLO_ZEROCOPY)
+ *
+ * Returns:
+ *   Pointer to mapped ZeroCopyFrameBuffer, or NULL on error
+ */
+ZeroCopyFrameBuffer* shm_zerocopy_open(const char* name);
+
+/**
+ * Close zero-copy shared memory (consumer)
+ *
+ * Unmaps the shared memory. Does NOT delete the segment.
+ */
+void shm_zerocopy_close(ZeroCopyFrameBuffer* shm);
+
+/**
+ * Destroy zero-copy shared memory (producer)
+ *
+ * Unmaps and deletes the shared memory segment.
+ */
+void shm_zerocopy_destroy(ZeroCopyFrameBuffer* shm, const char* name);
+
+/**
+ * Write frame metadata to zero-copy shared memory (producer)
+ *
+ * Writes VIO buffer share_id and metadata. Does NOT copy frame data.
+ * Waits for consumed_sem before overwriting (throttles to consumer speed).
+ *
+ * Args:
+ *   shm: Zero-copy shared memory pointer
+ *   frame: Frame metadata including share_id
+ *
+ * Returns:
+ *   0 on success, -1 on error
+ */
+int shm_zerocopy_write(ZeroCopyFrameBuffer* shm, const ZeroCopyFrame* frame);
+
+/**
+ * Mark frame as consumed (consumer)
+ *
+ * Signals to producer that the frame has been processed and VIO buffer
+ * can be released. MUST be called after processing each frame.
+ *
+ * Args:
+ *   shm: Zero-copy shared memory pointer
+ */
+void shm_zerocopy_mark_consumed(ZeroCopyFrameBuffer* shm);
 
 /**
  * Bounding box for object detection
