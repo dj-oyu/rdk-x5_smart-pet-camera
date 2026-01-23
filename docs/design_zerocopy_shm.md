@@ -605,6 +605,7 @@ Phase 2-3では従来のmemcpy版と並行稼働させ、問題発生時にフ�
 | ファイル | 内容 |
 |----------|------|
 | `docs/api_hb_mem_zerocopy.md` | hb_mem API調査レポート（構造体レイアウト、バリデーション要件、代替API候補） |
+| `docs/plan_camera_switcher_refactor.md` | camera_switcherリファクタリング計画（コールバック・シグナル廃止、単一ループ化） |
 
 ### D-Robotics SDK ヘッダファイル
 
