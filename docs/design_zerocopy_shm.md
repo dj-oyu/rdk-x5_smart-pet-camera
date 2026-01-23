@@ -595,3 +595,79 @@ dequeue_output() → fd→share_id → Consumer処理 → consumed通知 → que
 ### フォールバック
 
 Phase 2-3では従来のmemcpy版と並行稼働させ、問題発生時にフォールバック可能にする。
+
+---
+
+## 参照リソース
+
+### プロジェクト内ドキュメント
+
+| ファイル | 内容 |
+|----------|------|
+| `docs/api_hb_mem_zerocopy.md` | hb_mem API調査レポート（構造体レイアウト、バリデーション要件、代替API候補） |
+
+### D-Robotics SDK ヘッダファイル
+
+| ファイル | 内容 |
+|----------|------|
+| `/usr/include/hb_mem_mgr.h` | hb_mem API定義（構造体、関数宣言） |
+| `/usr/include/hb_mem_err.h` | エラーコード定義 (`HB_MEM_ERR_*`) |
+| `/usr/include/hbmem.h` | 低レベルhbmem API (`hbmem_mmap_with_share_id`等) |
+| `/usr/include/hbn_api.h` | VIO構造体 (`hbn_vnode_image_t`, `hb_mem_graphic_buf_t`) |
+
+### SDK サンプルコード
+
+| ファイル | 内容 |
+|----------|------|
+| `/app/multimedia_samples/sample_hbmem/sample_share.c` | **★重要** クロスプロセス共有の実装例 |
+| `/app/multimedia_samples/sample_hbmem/sample_alloc.c` | バッファアロケーション例 |
+| `/app/multimedia_samples/sample_hbmem/sample_pool.c` | メモリプール使用例 |
+| `/app/multimedia_samples/sample_hbmem/sample_queue.c` | バッファキュー使用例 |
+
+### プロジェクト実装ファイル
+
+| ファイル | 内容 |
+|----------|------|
+| `src/capture/shared_memory.h` | `ZeroCopyFrame` 構造体定義 |
+| `src/capture/shared_memory.c` | 共有メモリ操作 (`shm_zerocopy_*`) |
+| `src/capture/camera_pipeline.c` | VIOフレーム取得、share_id書き込み |
+| `src/capture/hb_mem_bindings.py` | Python用hb_memバインディング（要修正） |
+| `src/capture/real_shared_memory.py` | Python共有メモリ読み取り |
+| `src/detector/yolo_detector_daemon.py` | YOLO daemon（zero-copyコンシューマ） |
+
+### 重要な構造体サイズ・オフセット
+
+```
+hb_mem_common_buf_t (48 bytes):
+  fd:        offset=0,  size=4
+  share_id:  offset=4,  size=4
+  flags:     offset=8,  size=8
+  size:      offset=16, size=8
+  virt_addr: offset=24, size=8
+  phys_addr: offset=32, size=8
+  offset:    offset=40, size=8
+
+hb_mem_graphic_buf_t (160 bytes):
+  fd[3]:      offset=0
+  plane_cnt:  offset=12
+  format:     offset=16
+  width:      offset=20
+  height:     offset=24
+  stride:     offset=28
+  vstride:    offset=32
+  is_contig:  offset=36
+  share_id[3]: offset=40
+  flags:      offset=56
+  size[3]:    offset=64
+  virt_addr[3]: offset=88
+  phys_addr[3]: offset=112
+  offset[3]:  offset=136
+```
+
+### エラーコード早見表
+
+| 値 | 名前 | 意味 |
+|----|------|------|
+| -16777214 | `HB_MEM_ERR_INVALID_PARAMS` | 無効なパラメータ（size=0, phys_addr=0等） |
+| -16777213 | `HB_MEM_ERR_INVALID_FD` | 無効なFD |
+| -16777208 | `HB_MEM_ERR_MODULE_NOT_FOUND` | `hb_mem_module_open()`未呼び出し |
