@@ -39,6 +39,7 @@ typedef struct {
   pid_t day_pid;            // PID of day camera daemon (always running)
   pid_t night_pid;          // PID of night camera daemon (always running)
   CameraMode active_camera; // Currently active camera
+  CameraControl *control_shm; // Camera control shared memory (active camera index)
   SharedBrightnessData
       *brightness_shm; // Lightweight brightness shared memory
   SharedFrameBuffer *
@@ -110,7 +111,14 @@ static int switch_camera_cb(CameraMode camera, void *user_data) {
   LOG_INFO("SwitcherDaemon", "Switching to %s camera",
            camera == CAMERA_MODE_DAY ? "DAY" : "NIGHT");
 
-  // Deactivate old camera (SIGUSR2)
+  // Update CameraControl shared memory (new mechanism - Phase 2)
+  // camera_daemons poll this to determine active state
+  if (ctx->control_shm) {
+    shm_control_set_active(ctx->control_shm, (int)camera);
+    LOG_DEBUG("SwitcherDaemon", "CameraControl SHM updated: active=%d", (int)camera);
+  }
+
+  // Legacy: Deactivate old camera (SIGUSR2) - kept for transition
   pid_t old_pid =
       (ctx->active_camera == CAMERA_MODE_DAY) ? ctx->day_pid : ctx->night_pid;
   if (old_pid > 0) {
@@ -118,7 +126,7 @@ static int switch_camera_cb(CameraMode camera, void *user_data) {
     LOG_DEBUG("SwitcherDaemon", "Sent SIGUSR2 to PID %d (deactivate)", old_pid);
   }
 
-  // Activate new camera (SIGUSR1)
+  // Legacy: Activate new camera (SIGUSR1) - kept for transition
   pid_t new_pid = (camera == CAMERA_MODE_DAY) ? ctx->day_pid : ctx->night_pid;
   if (new_pid > 0) {
     kill(new_pid, SIGUSR1);
@@ -303,11 +311,23 @@ int main(void) {
           30, // Night: every 30 frames = 1fps (slow bright detection)
   };
 
+  // Create CameraControl shared memory (Phase 2)
+  // Must be created before spawning camera_daemons so they can open it
+  CameraControl *control_shm = shm_control_create();
+  if (!control_shm) {
+    LOG_ERROR("SwitcherDaemon", "Failed to create CameraControl shared memory");
+    shm_detection_destroy(detection_shm);
+    return 1;
+  }
+  LOG_INFO("SwitcherDaemon", "CameraControl shared memory created: %s",
+           SHM_NAME_CONTROL);
+
   DaemonContext ctx = {
       .day_pid = -1,
       .night_pid = -1,
       .active_camera =
           -1, // No active camera initially (will be set by first switch)
+      .control_shm = control_shm,
       .brightness_shm = NULL,
       .active_shm_nv12 = NULL,
   };
@@ -416,6 +436,12 @@ int main(void) {
   }
   if (ctx.active_shm_nv12) {
     shm_frame_buffer_close(ctx.active_shm_nv12);
+  }
+
+  // Cleanup CameraControl shared memory
+  if (ctx.control_shm) {
+    shm_control_destroy(ctx.control_shm);
+    LOG_INFO("SwitcherDaemon", "CameraControl shared memory destroyed");
   }
 
   // Cleanup detection shared memory

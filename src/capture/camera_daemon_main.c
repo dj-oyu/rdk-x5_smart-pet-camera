@@ -31,31 +31,12 @@ static char Main_log_header[8];
 
 // Global state for signal handling
 static volatile bool g_running = true;
-static volatile sig_atomic_t g_is_active =
-    0; // Active camera flag (SIGUSR1=1, SIGUSR2=0)
-static volatile sig_atomic_t g_probe_requested =
-    0; // Probe request flag (SIGRTMIN=1)
 static camera_pipeline_t g_pipeline = {0};
 
 static void signal_handler(int signum) {
-  if (signum == SIGUSR1) {
-    // Activate camera: start writing to active_frame and stream
-    g_is_active = 1;
-    LOG_INFO(Main_log_header, "SIGUSR1: Camera activated");
-  } else if (signum == SIGUSR2) {
-    // Deactivate camera: stop writing to active_frame and stream
-    g_is_active = 0;
-    LOG_INFO(Main_log_header, "SIGUSR2: Camera deactivated");
-  } else if (signum == SIGRTMIN) {
-    // Probe request: write one frame to probe_frame
-    // Use DEBUG level since this is a routine operation (every 2 seconds)
-    g_probe_requested = 1;
-    LOG_DEBUG(Main_log_header, "SIGRTMIN: Probe requested");
-  } else {
-    // SIGINT or SIGTERM
-    LOG_INFO(Main_log_header, "Received signal %d, stopping...", signum);
-    g_running = false;
-  }
+  // SIGINT or SIGTERM - graceful shutdown
+  LOG_INFO(Main_log_header, "Received signal %d, stopping...", signum);
+  g_running = false;
 }
 
 static void print_usage(const char *prog_name) {
@@ -170,21 +151,18 @@ int main(int argc, char *argv[]) {
   LOG_INFO(Main_log_header, "Shared Memory: NV12=%s, H.264=%s",
            shm_nv12_name ? shm_nv12_name : "(disabled)", shm_h264_name);
 
-  // Setup signal handlers
+  // Setup signal handlers (Phase 2: only SIGINT/SIGTERM for graceful shutdown)
   struct sigaction sa;
   memset(&sa, 0, sizeof(sa));
   sa.sa_handler = signal_handler;
   sigaction(SIGINT, &sa, NULL);
   sigaction(SIGTERM, &sa, NULL);
-  sigaction(SIGUSR1, &sa, NULL);  // Activate camera
-  sigaction(SIGUSR2, &sa, NULL);  // Deactivate camera
-  sigaction(SIGRTMIN, &sa, NULL); // Probe request
+  // SIGUSR1/SIGUSR2/SIGRTMIN handlers removed (Phase 2)
+  // Active state is now determined by CameraControl SHM
 
-  // Create pipeline (new design: fixed shm names, conditional write based on
-  // signals)
+  // Create pipeline (Phase 2: active state from CameraControl SHM)
   ret = pipeline_create(&g_pipeline, camera_index, sensor_width, sensor_height,
-                        output_width, output_height, fps, bitrate, &g_is_active,
-                        &g_probe_requested);
+                        output_width, output_height, fps, bitrate);
   if (ret != 0) {
     LOG_ERROR(Main_log_header, "Failed to create pipeline: %d", ret);
     return 1;

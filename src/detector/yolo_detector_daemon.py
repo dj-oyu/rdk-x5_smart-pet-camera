@@ -24,13 +24,15 @@ sys.path.insert(0, str(COMMON_SRC))
 from real_shared_memory import (
     RealSharedMemory,
     ZeroCopySharedMemory,
+    CameraControlSharedMemory,
     SHM_NAME_ACTIVE_FRAME,
-    SHM_NAME_YOLO_ZEROCOPY,
+    SHM_NAME_ZEROCOPY_DAY,
+    SHM_NAME_ZEROCOPY_NIGHT,
 )
 from detection.yolo_detector import YoloDetector
 
 # hb_mem bindings (required for zero-copy)
-from hb_mem_bindings import init_module as hb_mem_init, import_nv12_planes, release_buffers
+from hb_mem_bindings import init_module as hb_mem_init, import_nv12_graph_buf
 
 # ロガー設定（後でmain()で上書きされる）
 logging.basicConfig(
@@ -65,7 +67,10 @@ class YoloDetectorDaemon:
 
         # 共有メモリ
         self.shm_main: RealSharedMemory | None = None  # Main frame for resolution info
-        self.shm_zerocopy: ZeroCopySharedMemory | None = None  # Zero-copy YOLO input
+        self.shm_zerocopy_day: ZeroCopySharedMemory | None = None  # DAY camera zero-copy
+        self.shm_zerocopy_night: ZeroCopySharedMemory | None = None  # NIGHT camera zero-copy
+        self.shm_control: CameraControlSharedMemory | None = None  # Camera control (active index)
+        self.active_camera: int = 0  # Currently active camera (0=DAY, 1=NIGHT)
 
         # YOLODetector
         self.detector: YoloDetector | None = None
@@ -100,11 +105,30 @@ class YoloDetectorDaemon:
 
         # 共有メモリを開く
         try:
-            # Zero-copy YOLO input
-            self.shm_zerocopy = ZeroCopySharedMemory(SHM_NAME_YOLO_ZEROCOPY)
-            if not self.shm_zerocopy.open():
-                raise RuntimeError(f"Zero-copy SHM not available: {SHM_NAME_YOLO_ZEROCOPY}")
-            logger.info(f"Connected to zero-copy shared memory: {SHM_NAME_YOLO_ZEROCOPY}")
+            # CameraControl SHM (to determine active camera)
+            self.shm_control = CameraControlSharedMemory()
+            if self.shm_control.open():
+                self.active_camera = self.shm_control.get_active()
+                logger.info(f"CameraControl SHM opened, active camera: {self.active_camera}")
+            else:
+                logger.warning("CameraControl SHM not available, defaulting to DAY camera")
+
+            # Per-camera zero-copy SHMs (Phase 2)
+            self.shm_zerocopy_day = ZeroCopySharedMemory(SHM_NAME_ZEROCOPY_DAY)
+            self.shm_zerocopy_night = ZeroCopySharedMemory(SHM_NAME_ZEROCOPY_NIGHT)
+
+            day_ok = self.shm_zerocopy_day.open()
+            night_ok = self.shm_zerocopy_night.open()
+
+            if not day_ok and not night_ok:
+                raise RuntimeError(
+                    f"Zero-copy SHM not available: {SHM_NAME_ZEROCOPY_DAY} and {SHM_NAME_ZEROCOPY_NIGHT}"
+                )
+
+            if day_ok:
+                logger.info(f"Connected to DAY zero-copy: {SHM_NAME_ZEROCOPY_DAY}")
+            if night_ok:
+                logger.info(f"Connected to NIGHT zero-copy: {SHM_NAME_ZEROCOPY_NIGHT}")
 
             # メイン解像度参照用 (bbox座標スケーリングに使用)
             self.shm_main = RealSharedMemory(frame_shm_name=SHM_NAME_ACTIVE_FRAME)
@@ -130,10 +154,25 @@ class YoloDetectorDaemon:
             logger.error(f"Failed to load YOLO model: {e}")
             raise
 
+    def _get_active_zerocopy(self) -> ZeroCopySharedMemory | None:
+        """Get the ZeroCopy SHM for the currently active camera."""
+        if self.shm_control:
+            self.active_camera = self.shm_control.get_active()
+        if self.active_camera == 0 and self.shm_zerocopy_day:
+            return self.shm_zerocopy_day
+        if self.active_camera == 1 and self.shm_zerocopy_night:
+            return self.shm_zerocopy_night
+        # Fallback: return whichever is available
+        return self.shm_zerocopy_day or self.shm_zerocopy_night
+
     def cleanup(self) -> None:
         """クリーンアップ"""
-        if self.shm_zerocopy:
-            self.shm_zerocopy.close()
+        if self.shm_zerocopy_day:
+            self.shm_zerocopy_day.close()
+        if self.shm_zerocopy_night:
+            self.shm_zerocopy_night.close()
+        if self.shm_control:
+            self.shm_control.close()
         if self.shm_main:
             self.shm_main.close()
         logger.info(f"Total frames processed: {self.stats['frames_processed']}")
@@ -166,10 +205,15 @@ class YoloDetectorDaemon:
                 if is_debug:
                     loop_start = time_module.perf_counter()
 
-                hb_mem_buffers = None
+                hb_mem_buffer = None
 
-                # Get frame via zero-copy
-                zc_frame = self.shm_zerocopy.get_frame()
+                # Get frame from active camera's zero-copy SHM
+                active_zc = self._get_active_zerocopy()
+                if active_zc is None:
+                    time.sleep(0.01)
+                    continue
+
+                zc_frame = active_zc.get_frame()
                 if zc_frame is None:
                     time.sleep(0.01)
                     continue
@@ -179,19 +223,17 @@ class YoloDetectorDaemon:
                     if zc_frame.plane_cnt != 2:
                         raise ValueError(f"Expected 2 planes for NV12, got {zc_frame.plane_cnt}")
 
-                    # Import VIO buffers via share_id
-                    y_arr, uv_arr, hb_mem_buffers = import_nv12_planes(
-                        zc_frame.share_id[0],
-                        zc_frame.share_id[1],
-                        zc_frame.plane_size[0],
-                        zc_frame.plane_size[1],
+                    # Import VIO buffer via raw hb_mem_graphic_buf_t bytes
+                    y_arr, uv_arr, hb_mem_buffer = import_nv12_graph_buf(
+                        raw_buf_data=zc_frame.hb_mem_buf_data,
+                        expected_plane_sizes=zc_frame.plane_size,
                     )
                     nv12_data = np.concatenate([y_arr, uv_arr])
                 except Exception as e:
                     logger.error(f"Zero-copy import failed: {e}")
-                    if hb_mem_buffers:
-                        release_buffers(hb_mem_buffers)
-                    self.shm_zerocopy.mark_consumed()
+                    if hb_mem_buffer:
+                        hb_mem_buffer.release()
+                    active_zc.mark_consumed()
                     continue
 
                 frame_width = zc_frame.width
@@ -204,8 +246,8 @@ class YoloDetectorDaemon:
                 if self.scale_x is None or self.scale_y is None:
                     main_frame = self.shm_main.get_latest_frame()
                     if main_frame is None:
-                        release_buffers(hb_mem_buffers)
-                        self.shm_zerocopy.mark_consumed()
+                        hb_mem_buffer.release()
+                        active_zc.mark_consumed()
                         time.sleep(0.01)
                         continue
                     self.target_width = main_frame.width
@@ -235,9 +277,9 @@ class YoloDetectorDaemon:
                     brightness_avg=brightness_avg,
                 )
 
-                # Release zero-copy buffers and signal consumed
-                release_buffers(hb_mem_buffers)
-                self.shm_zerocopy.mark_consumed()
+                # Release zero-copy buffer and signal consumed
+                hb_mem_buffer.release()
+                active_zc.mark_consumed()
 
                 timing = self.detector.get_last_timing()
 

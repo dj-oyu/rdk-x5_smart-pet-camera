@@ -181,6 +181,185 @@ void test_detection_version_increment(void) {
     TEST_PASSED();
 }
 
+// Test 6: Camera control create and destroy
+void test_camera_control_create_destroy(void) {
+    CameraControl* ctrl = shm_control_create();
+    assert(ctrl != NULL);
+
+    // Check initial state (should be DAY camera)
+    assert(ctrl->active_camera_index == 0);
+    assert(ctrl->version == 0);
+
+    shm_control_destroy(ctrl);
+    TEST_PASSED();
+}
+
+// Test 7: Camera control set and get active
+void test_camera_control_set_get(void) {
+    CameraControl* ctrl = shm_control_create();
+    assert(ctrl != NULL);
+
+    // Initial state should be DAY (0)
+    int active = shm_control_get_active(ctrl);
+    assert(active == 0);
+
+    // Switch to NIGHT (1)
+    shm_control_set_active(ctrl, 1);
+    active = shm_control_get_active(ctrl);
+    assert(active == 1);
+
+    // Check version incremented
+    uint32_t version = shm_control_get_version(ctrl);
+    assert(version == 1);
+
+    // Switch back to DAY (0)
+    shm_control_set_active(ctrl, 0);
+    active = shm_control_get_active(ctrl);
+    assert(active == 0);
+
+    // Version should be 2 now
+    version = shm_control_get_version(ctrl);
+    assert(version == 2);
+
+    shm_control_destroy(ctrl);
+    TEST_PASSED();
+}
+
+// Test 8: Camera control invalid values
+void test_camera_control_invalid_values(void) {
+    CameraControl* ctrl = shm_control_create();
+    assert(ctrl != NULL);
+
+    // Try to set invalid camera index (-1)
+    shm_control_set_active(ctrl, -1);
+    // Should not change (still 0)
+    assert(shm_control_get_active(ctrl) == 0);
+
+    // Try to set invalid camera index (2)
+    shm_control_set_active(ctrl, 2);
+    // Should not change (still 0)
+    assert(shm_control_get_active(ctrl) == 0);
+
+    // Version should not have changed (0)
+    assert(shm_control_get_version(ctrl) == 0);
+
+    shm_control_destroy(ctrl);
+    TEST_PASSED();
+}
+
+// Test 9: Camera control producer-consumer simulation
+void test_camera_control_producer_consumer(void) {
+    // Producer creates
+    CameraControl* producer = shm_control_create();
+    assert(producer != NULL);
+
+    // Consumer opens
+    CameraControl* consumer = shm_control_open();
+    assert(consumer != NULL);
+
+    // Producer sets to NIGHT
+    shm_control_set_active(producer, 1);
+
+    // Consumer should see NIGHT
+    int active = shm_control_get_active(consumer);
+    assert(active == 1);
+
+    // Consumer should see version 1
+    uint32_t version = shm_control_get_version(consumer);
+    assert(version == 1);
+
+    // Cleanup
+    shm_control_close(consumer);
+    shm_control_destroy(producer);
+    TEST_PASSED();
+}
+
+// Test 10: ZeroCopyFrame struct layout with hb_mem_buf_data
+void test_zerocopy_frame_layout(void) {
+    // Verify hb_mem_buf_data field exists and has correct size
+    ZeroCopyFrame frame = {0};
+
+    // Verify hb_mem_buf_data is 160 bytes
+    assert(sizeof(frame.hb_mem_buf_data) == HB_MEM_GRAPHIC_BUF_SIZE);
+    assert(HB_MEM_GRAPHIC_BUF_SIZE == 160);
+
+    // Write a test pattern to hb_mem_buf_data
+    for (int i = 0; i < HB_MEM_GRAPHIC_BUF_SIZE; i++) {
+        frame.hb_mem_buf_data[i] = (uint8_t)(i & 0xFF);
+    }
+
+    // Set other fields to known values
+    frame.frame_number = 12345;
+    frame.plane_cnt = 2;
+    frame.share_id[0] = 100;
+    frame.share_id[1] = 200;
+    frame.version = 42;
+    frame.consumed = 0;
+
+    // Verify hb_mem_buf_data didn't corrupt other fields
+    assert(frame.frame_number == 12345);
+    assert(frame.plane_cnt == 2);
+    assert(frame.share_id[0] == 100);
+    assert(frame.share_id[1] == 200);
+    assert(frame.version == 42);
+    assert(frame.consumed == 0);
+
+    // Verify hb_mem_buf_data content is intact
+    for (int i = 0; i < HB_MEM_GRAPHIC_BUF_SIZE; i++) {
+        assert(frame.hb_mem_buf_data[i] == (uint8_t)(i & 0xFF));
+    }
+
+    // Verify the field sits between plane_cnt and version
+    // (hb_mem_buf_data offset should be > plane_cnt offset and < version offset)
+    size_t offset_plane_cnt = (size_t)((char*)&frame.plane_cnt - (char*)&frame);
+    size_t offset_buf_data = (size_t)((char*)frame.hb_mem_buf_data - (char*)&frame);
+    size_t offset_version = (size_t)((char*)&frame.version - (char*)&frame);
+
+    assert(offset_buf_data > offset_plane_cnt);
+    assert(offset_buf_data + HB_MEM_GRAPHIC_BUF_SIZE <= offset_version);
+
+    printf("  ZeroCopyFrame size: %zu bytes\n", sizeof(ZeroCopyFrame));
+    printf("  hb_mem_buf_data offset: %zu, size: %d\n", offset_buf_data, HB_MEM_GRAPHIC_BUF_SIZE);
+    printf("  version offset: %zu\n", offset_version);
+
+    TEST_PASSED();
+}
+
+// Test 11: ZeroCopyFrameBuffer with hb_mem_buf_data via shared memory
+void test_zerocopy_shm_roundtrip(void) {
+    const char *test_name = "/pet_camera_test_zc";
+
+    ZeroCopyFrameBuffer *producer = shm_zerocopy_create(test_name);
+    assert(producer != NULL);
+
+    // Write a frame with hb_mem_buf_data
+    ZeroCopyFrame frame = {0};
+    frame.frame_number = 999;
+    frame.width = 640;
+    frame.height = 360;
+    frame.plane_cnt = 2;
+    for (int i = 0; i < HB_MEM_GRAPHIC_BUF_SIZE; i++) {
+        frame.hb_mem_buf_data[i] = (uint8_t)((i * 7) & 0xFF);
+    }
+
+    int ret = shm_zerocopy_write(producer, &frame);
+    assert(ret == 0);
+
+    // Verify the data is in shared memory
+    assert(producer->frame.frame_number == 999);
+    assert(producer->frame.width == 640);
+    assert(producer->frame.height == 360);
+    assert(producer->frame.plane_cnt == 2);
+
+    // Verify hb_mem_buf_data roundtrip
+    for (int i = 0; i < HB_MEM_GRAPHIC_BUF_SIZE; i++) {
+        assert(producer->frame.hb_mem_buf_data[i] == (uint8_t)((i * 7) & 0xFF));
+    }
+
+    shm_zerocopy_destroy(producer, test_name);
+    TEST_PASSED();
+}
+
 int main(void) {
     // Initialize logger
     log_init(LOG_LEVEL_INFO, stdout, 0);
@@ -192,6 +371,16 @@ int main(void) {
     test_shm_ring_buffer_wraparound();
     test_detection_write_read();
     test_detection_version_increment();
+
+    printf("\n--- Camera Control Tests ---\n");
+    test_camera_control_create_destroy();
+    test_camera_control_set_get();
+    test_camera_control_invalid_values();
+    test_camera_control_producer_consumer();
+
+    printf("\n--- ZeroCopy Layout Tests ---\n");
+    test_zerocopy_frame_layout();
+    test_zerocopy_shm_roundtrip();
 
     printf("\n=== All tests passed! ===\n");
     return 0;
