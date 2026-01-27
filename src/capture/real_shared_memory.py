@@ -58,13 +58,29 @@ MAX_FRAME_SIZE = 1920 * 1080 * 3 // 2  # Max NV12 frame size (1080p)
 NUM_CAMERAS = 2  # DAY=0, NIGHT=1
 
 # Zero-copy shared memory names (share_id based, no memcpy)
-SHM_NAME_YOLO_ZEROCOPY = "/pet_camera_yolo_zc"
+SHM_NAME_YOLO_ZEROCOPY = "/pet_camera_yolo_zc"  # Legacy (deprecated)
 SHM_NAME_MJPEG_ZEROCOPY = "/pet_camera_mjpeg_zc"
 SHM_NAME_ACTIVE_ZEROCOPY = "/pet_camera_active_zc"
 ZEROCOPY_MAX_PLANES = 2  # NV12 has 2 planes (Y, UV)
+HB_MEM_GRAPHIC_BUF_SIZE = 160  # sizeof(hb_mem_graphic_buf_t) - raw buffer descriptor
+
+# Per-camera zero-copy shared memory (Phase 2: replaces SHM_NAME_YOLO_ZEROCOPY)
+SHM_NAME_ZEROCOPY_DAY = "/pet_camera_zc_0"    # DAY camera zero-copy (YOLO + brightness)
+SHM_NAME_ZEROCOPY_NIGHT = "/pet_camera_zc_1"  # NIGHT camera zero-copy (YOLO + brightness)
+
+# Camera switcher control (Phase 2: active camera selection)
+SHM_NAME_CONTROL = "/pet_camera_control"
 
 
 # C structure definitions using ctypes
+
+class CCameraControl(Structure):
+    """Matches CameraControl in shared_memory.h"""
+    _fields_ = [
+        ("active_camera_index", c_int),   # 0=DAY, 1=NIGHT
+        ("version", c_uint32),            # Incremented on each switch
+    ]
+
 class CTimespec(Structure):
     _fields_ = [
         ("tv_sec", c_uint64),  # time_t on most systems
@@ -173,6 +189,8 @@ class CZeroCopyFrame(Structure):
         ("share_id", c_int32 * ZEROCOPY_MAX_PLANES),  # hb_mem share_id for Y/UV
         ("plane_size", c_uint64 * ZEROCOPY_MAX_PLANES),  # Size of each plane
         ("plane_cnt", c_int32),  # Number of planes (2 for NV12)
+        # Raw hb_mem_graphic_buf_t descriptor (opaque, for import API)
+        ("hb_mem_buf_data", c_uint8 * HB_MEM_GRAPHIC_BUF_SIZE),
         # Synchronization
         ("version", c_uint32),
         ("consumed", c_uint8),
@@ -239,7 +257,57 @@ class ZeroCopyFrame:
     share_id: list[int]  # share_id for each plane [Y, UV]
     plane_size: list[int]  # size of each plane
     plane_cnt: int
+    hb_mem_buf_data: bytes  # Raw 160-byte hb_mem_graphic_buf_t descriptor
     version: int
+
+
+class CameraControlSharedMemory:
+    """
+    Read-only interface to CameraControl shared memory.
+
+    Reads the active camera index set by the switcher daemon.
+    """
+
+    def __init__(self, shm_name: str = SHM_NAME_CONTROL):
+        self.shm_name = shm_name
+        self.fd: Optional[int] = None
+        self.mmap_obj: Optional[mmap.mmap] = None
+
+    def open(self) -> bool:
+        """Open the CameraControl shared memory segment."""
+        shm_path = f"/dev/shm{self.shm_name}"
+        try:
+            self.fd = os.open(shm_path, os.O_RDONLY)
+            self.mmap_obj = mmap.mmap(
+                self.fd,
+                sizeof(CCameraControl),
+                mmap.MAP_SHARED,
+                mmap.PROT_READ,
+            )
+            return True
+        except FileNotFoundError:
+            return False
+        except Exception as e:
+            print(f"[Error] Failed to open CameraControl SHM: {e}")
+            return False
+
+    def close(self) -> None:
+        """Close the shared memory segment."""
+        if self.mmap_obj:
+            self.mmap_obj.close()
+            self.mmap_obj = None
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    def get_active(self) -> int:
+        """Get the active camera index (0=DAY, 1=NIGHT). Returns 0 if unavailable."""
+        if not self.mmap_obj:
+            return 0
+        self.mmap_obj.seek(0)
+        data = self.mmap_obj.read(sizeof(CCameraControl))
+        ctrl = CCameraControl.from_buffer_copy(data)
+        return ctrl.active_camera_index
 
 
 class ZeroCopySharedMemory:
@@ -338,6 +406,7 @@ class ZeroCopySharedMemory:
             share_id=[buf.frame.share_id[i] for i in range(plane_cnt)],
             plane_size=[buf.frame.plane_size[i] for i in range(plane_cnt)],
             plane_cnt=plane_cnt,
+            hb_mem_buf_data=bytes(buf.frame.hb_mem_buf_data),
             version=buf.frame.version,
         )
 

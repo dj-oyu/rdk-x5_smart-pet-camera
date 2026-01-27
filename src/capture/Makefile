@@ -16,6 +16,7 @@ SWITCHER_DAEMON_SOURCES := camera_switcher_daemon.c camera_switcher_runtime.c ca
 POC_LOWLEVEL_SOURCES := camera_poc_lowlevel.c shared_memory.c logger.c
 POC_VSE_DUAL_SOURCES := camera_poc_vse_dual.c shared_memory.c logger.c
 ISP_LOWLIGHT_SOURCES := test_isp_lowlight.c logger.c
+HB_MEM_IMPORT_SOURCES := test_hb_mem_import.c shared_memory.c logger.c
 HAL_SOURCES := vio_lowlevel.c encoder_lowlevel.c logger.c
 
 DAEMON_OBJECTS := $(DAEMON_SOURCES:.c=.o)
@@ -27,6 +28,7 @@ SWITCHER_DAEMON_OBJECTS := $(SWITCHER_DAEMON_SOURCES:.c=.o)
 POC_LOWLEVEL_OBJECTS := $(POC_LOWLEVEL_SOURCES:.c=.o)
 POC_VSE_DUAL_OBJECTS := $(POC_VSE_DUAL_SOURCES:.c=.o)
 ISP_LOWLIGHT_OBJECTS := $(ISP_LOWLIGHT_SOURCES:.c=.o)
+HB_MEM_IMPORT_OBJECTS := $(HB_MEM_IMPORT_SOURCES:.c=.o)
 
 DAEMON_BINARY := $(BUILD_DIR)/camera_daemon_drobotics
 SHM_TEST_BINARY := $(BUILD_DIR)/test_shm
@@ -37,6 +39,7 @@ SWITCHER_DAEMON_BINARY := $(BUILD_DIR)/camera_switcher_daemon
 POC_LOWLEVEL_BINARY := $(BUILD_DIR)/camera_poc_lowlevel
 POC_VSE_DUAL_BINARY := $(BUILD_DIR)/camera_poc_vse_dual
 ISP_LOWLIGHT_BINARY := $(BUILD_DIR)/test_isp_lowlight
+HB_MEM_IMPORT_BINARY := $(BUILD_DIR)/test_hb_mem_import
 
 LDLIBS_COMMON := -lrt
 LDLIBS_DAEMON := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lmultimedia -lm
@@ -45,10 +48,11 @@ LDLIBS_POC_LOWLEVEL := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lmultimed
 LDLIBS_ISP_LOWLIGHT := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lm
 LDLIBS_SWITCHER_DEMO := $(LDLIBS_COMMON) -ljpeg
 LDLIBS_SWITCHER_DAEMON := $(LDLIBS_COMMON) -lpthread -ljpeg
+LDLIBS_HB_MEM_IMPORT := $(LDLIBS_COMMON) -lpthread -lhbmem
 
 DAEMON_ARGS ?= -C 0 -P 1
 
-.PHONY: all clean test switcher-demo switcher-runtime-lib switcher-daemon switcher-daemon-build run run-daemon cleanup kill-processes help poc-lowlevel poc-vse-dual isp-lowlight
+.PHONY: all clean test switcher-demo switcher-runtime-lib switcher-daemon switcher-daemon-build run run-daemon cleanup kill-processes help poc-lowlevel poc-vse-dual isp-lowlight test-hb-mem-import
 
 all: $(DAEMON_BINARY) $(SHM_TEST_BINARY) $(SWITCHER_DAEMON_BINARY)
 
@@ -60,6 +64,10 @@ poc-vse-dual: $(POC_VSE_DUAL_BINARY)
 
 isp-lowlight: $(ISP_LOWLIGHT_BINARY)
 	@echo "[PoC] ISP Low-Light Enhancement Tool ready at $(ISP_LOWLIGHT_BINARY)"
+
+test-hb-mem-import: $(HB_MEM_IMPORT_BINARY)
+	@echo "[Test] hb_mem import API test ready at $(HB_MEM_IMPORT_BINARY)"
+	@echo "[Test] Run with camera daemon active: $(HB_MEM_IMPORT_BINARY)"
 
 $(BUILD_DIR):
 	@mkdir -p $@
@@ -90,6 +98,9 @@ $(POC_VSE_DUAL_BINARY): $(POC_VSE_DUAL_OBJECTS) | $(BUILD_DIR)
 
 $(ISP_LOWLIGHT_BINARY): $(ISP_LOWLIGHT_OBJECTS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_ISP_LOWLIGHT)
+
+$(HB_MEM_IMPORT_BINARY): $(HB_MEM_IMPORT_OBJECTS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_HB_MEM_IMPORT)
 
 # Compile camera_switcher_daemon.c with absolute path to camera_daemon
 camera_switcher_daemon.o: camera_switcher_daemon.c
@@ -149,8 +160,8 @@ kill-processes:
 
 clean:
 	@echo "[Clean] Removing built binaries and objects"
-	@rm -f $(DAEMON_OBJECTS) $(SHM_TEST_OBJECTS) $(SWITCHER_DEMO_OBJECTS) $(SWITCHER_RUNTIME_OBJECTS) $(SWITCHER_DAEMON_OBJECTS) $(POC_LOWLEVEL_OBJECTS) $(ISP_LOWLIGHT_OBJECTS)
-	@rm -f $(DAEMON_BINARY) $(SHM_TEST_BINARY) $(SWITCHER_DEMO_BINARY) $(SWITCHER_RUNTIME_LIBRARY) $(SWITCHER_DAEMON_BINARY) $(POC_LOWLEVEL_BINARY) $(ISP_LOWLIGHT_BINARY)
+	@rm -f $(DAEMON_OBJECTS) $(SHM_TEST_OBJECTS) $(SWITCHER_DEMO_OBJECTS) $(SWITCHER_RUNTIME_OBJECTS) $(SWITCHER_DAEMON_OBJECTS) $(POC_LOWLEVEL_OBJECTS) $(ISP_LOWLIGHT_OBJECTS) $(HB_MEM_IMPORT_OBJECTS)
+	@rm -f $(DAEMON_BINARY) $(SHM_TEST_BINARY) $(SWITCHER_DEMO_BINARY) $(SWITCHER_RUNTIME_LIBRARY) $(SWITCHER_DAEMON_BINARY) $(POC_LOWLEVEL_BINARY) $(ISP_LOWLIGHT_BINARY) $(HB_MEM_IMPORT_BINARY)
 
 help:
 	@echo "Camera daemon build targets"
@@ -166,3 +177,4 @@ help:
 	@echo "  make kill-processes  Kill running camera_daemon_drobotics and cam-service processes"
 	@echo "  make clean           Remove built binaries and object files"
 	@echo "  make isp-lowlight    Build ISP low-light enhancement test tool"
+	@echo "  make test-hb-mem-import  Build hb_mem import API test (run with camera daemon active)"

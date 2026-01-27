@@ -577,3 +577,88 @@ void shm_zerocopy_mark_consumed(ZeroCopyFrameBuffer* shm) {
     // Signal producer that it can write next frame
     sem_post(&shm->consumed_sem);
 }
+
+// ============================================================================
+// Camera Control Shared Memory Functions
+// ============================================================================
+
+CameraControl* shm_control_create(void) {
+    bool created_new = false;
+    CameraControl* ctrl = (CameraControl*)shm_create_or_open_ex(
+        SHM_NAME_CONTROL,
+        sizeof(CameraControl),
+        true,  // create
+        &created_new
+    );
+
+    if (ctrl) {
+        if (created_new) {
+            // Initialize to DAY camera (index 0)
+            ctrl->active_camera_index = 0;
+            ctrl->version = 0;
+            LOG_INFO("SharedMemory", "Camera control shared memory created: %s (size=%zu bytes)",
+                     SHM_NAME_CONTROL, sizeof(CameraControl));
+        } else {
+            LOG_INFO("SharedMemory", "Camera control shared memory opened (already exists): %s",
+                     SHM_NAME_CONTROL);
+        }
+    }
+
+    return ctrl;
+}
+
+CameraControl* shm_control_open(void) {
+    CameraControl* ctrl = (CameraControl*)shm_create_or_open(
+        SHM_NAME_CONTROL,
+        sizeof(CameraControl),
+        false  // open existing
+    );
+
+    if (ctrl) {
+        LOG_INFO("SharedMemory", "Camera control shared memory opened: %s", SHM_NAME_CONTROL);
+    }
+
+    return ctrl;
+}
+
+void shm_control_close(CameraControl* ctrl) {
+    if (ctrl) {
+        munmap(ctrl, sizeof(CameraControl));
+    }
+}
+
+void shm_control_destroy(CameraControl* ctrl) {
+    if (ctrl) {
+        munmap(ctrl, sizeof(CameraControl));
+        shm_unlink(SHM_NAME_CONTROL);
+        LOG_INFO("SharedMemory", "Camera control shared memory destroyed: %s", SHM_NAME_CONTROL);
+    }
+}
+
+void shm_control_set_active(CameraControl* ctrl, int camera_index) {
+    if (!ctrl || camera_index < 0 || camera_index >= NUM_CAMERAS) {
+        return;
+    }
+
+    // Atomically update active camera index
+    __atomic_store_n(&ctrl->active_camera_index, camera_index, __ATOMIC_RELEASE);
+
+    // Increment version to signal change
+    __atomic_fetch_add(&ctrl->version, 1, __ATOMIC_SEQ_CST);
+}
+
+int shm_control_get_active(CameraControl* ctrl) {
+    if (!ctrl) {
+        return 0;  // Default to DAY camera
+    }
+
+    return __atomic_load_n(&ctrl->active_camera_index, __ATOMIC_ACQUIRE);
+}
+
+uint32_t shm_control_get_version(CameraControl* ctrl) {
+    if (!ctrl) {
+        return 0;
+    }
+
+    return __atomic_load_n(&ctrl->version, __ATOMIC_ACQUIRE);
+}

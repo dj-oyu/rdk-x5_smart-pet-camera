@@ -27,6 +27,9 @@
 #define SHM_NAME_DETECTIONS "/pet_camera_detections"      // YOLO detection results
 #define SHM_NAME_BRIGHTNESS "/pet_camera_brightness"      // Lightweight brightness data (per-camera)
 
+// Camera switcher control (active camera selection)
+#define SHM_NAME_CONTROL "/pet_camera_control"
+
 // Legacy name for backward compatibility (keep API names stable)
 #define SHM_NAME_FRAMES SHM_NAME_ACTIVE_FRAME
 
@@ -45,6 +48,18 @@ typedef enum {
 } BrightnessZone;
 
 #define NUM_CAMERAS 2  // DAY=0, NIGHT=1
+
+/**
+ * Camera control structure for switcher daemon
+ *
+ * Simple atomic flag to indicate which camera is active.
+ * Camera daemons read this to decide whether to encode H.264.
+ * Switcher daemon writes this when switching cameras.
+ */
+typedef struct {
+    volatile int active_camera_index;  // 0=DAY, 1=NIGHT
+    volatile uint32_t version;         // Incremented on each switch
+} CameraControl;
 
 /**
  * Lightweight brightness data for a single camera
@@ -120,6 +135,7 @@ typedef struct {
 // ============================================================================
 
 #define ZEROCOPY_MAX_PLANES 2    // NV12 has 2 planes (Y, UV)
+#define HB_MEM_GRAPHIC_BUF_SIZE 160  // sizeof(hb_mem_graphic_buf_t) - raw buffer descriptor
 
 /**
  * Zero-copy frame - VIO buffer shared directly without memcpy
@@ -156,6 +172,10 @@ typedef struct {
     uint64_t plane_size[ZEROCOPY_MAX_PLANES]; // Size of each plane
     int32_t plane_cnt;                        // Number of planes (2 for NV12)
 
+    // Raw hb_mem_graphic_buf_t descriptor (opaque bytes, for import API)
+    // C compiler writes correct binary layout; Python passes raw bytes to hb_mem_import_graph_buf
+    uint8_t hb_mem_buf_data[HB_MEM_GRAPHIC_BUF_SIZE];
+
     // Synchronization (single-producer single-consumer)
     volatile uint32_t version;  // Incremented when frame is ready
     volatile uint8_t consumed;  // Consumer sets to 1 when done processing
@@ -175,9 +195,13 @@ typedef struct {
 } ZeroCopyFrameBuffer;
 
 // Zero-copy shared memory names
-#define SHM_NAME_YOLO_ZEROCOPY "/pet_camera_yolo_zc"     // Zero-copy YOLO input
-#define SHM_NAME_MJPEG_ZEROCOPY "/pet_camera_mjpeg_zc"   // Zero-copy MJPEG input (deprecated, use active)
-#define SHM_NAME_ACTIVE_ZEROCOPY "/pet_camera_active_zc" // Zero-copy active frame
+#define SHM_NAME_YOLO_ZEROCOPY "/pet_camera_yolo_zc"     // Zero-copy YOLO input (legacy, use per-camera)
+#define SHM_NAME_MJPEG_ZEROCOPY "/pet_camera_mjpeg_zc"   // Zero-copy MJPEG input (deprecated)
+#define SHM_NAME_ACTIVE_ZEROCOPY "/pet_camera_active_zc" // Zero-copy active frame (deprecated)
+
+// Per-camera zero-copy shared memory (new design)
+#define SHM_NAME_ZEROCOPY_DAY "/pet_camera_zc_0"         // DAY camera zero-copy (YOLO + brightness)
+#define SHM_NAME_ZEROCOPY_NIGHT "/pet_camera_zc_1"       // NIGHT camera zero-copy (YOLO + brightness)
 
 /**
  * Create zero-copy shared memory
@@ -463,5 +487,77 @@ void shm_brightness_write(SharedBrightnessData* shm, int camera_id,
  */
 uint32_t shm_brightness_read(SharedBrightnessData* shm, int camera_id,
                               CameraBrightness* brightness);
+
+// ============================================================================
+// Camera Control Shared Memory (for switcher daemon)
+// ============================================================================
+
+/**
+ * Create camera control shared memory
+ *
+ * Creates CameraControl for active camera index communication.
+ * Used by switcher daemon (producer).
+ *
+ * Returns:
+ *   Pointer to mapped CameraControl, or NULL on error
+ */
+CameraControl* shm_control_create(void);
+
+/**
+ * Open existing camera control shared memory
+ *
+ * Opens CameraControl created by switcher daemon.
+ * Used by camera daemons (consumers).
+ *
+ * Returns:
+ *   Pointer to mapped CameraControl, or NULL on error
+ */
+CameraControl* shm_control_open(void);
+
+/**
+ * Close camera control shared memory (consumer)
+ *
+ * Unmaps the shared memory. Does NOT delete the segment.
+ */
+void shm_control_close(CameraControl* ctrl);
+
+/**
+ * Destroy camera control shared memory (producer)
+ *
+ * Unmaps and deletes the shared memory segment.
+ */
+void shm_control_destroy(CameraControl* ctrl);
+
+/**
+ * Set active camera index (switcher daemon only)
+ *
+ * Atomically updates the active camera index.
+ * Camera daemons poll this to decide whether to encode.
+ *
+ * Args:
+ *   ctrl: Camera control shared memory pointer
+ *   camera_index: 0=DAY, 1=NIGHT
+ */
+void shm_control_set_active(CameraControl* ctrl, int camera_index);
+
+/**
+ * Get active camera index
+ *
+ * Atomically reads the active camera index.
+ *
+ * Args:
+ *   ctrl: Camera control shared memory pointer
+ *
+ * Returns:
+ *   Active camera index (0=DAY, 1=NIGHT)
+ */
+int shm_control_get_active(CameraControl* ctrl);
+
+/**
+ * Get camera control version
+ *
+ * Returns the current version number for change detection.
+ */
+uint32_t shm_control_get_version(CameraControl* ctrl);
 
 #endif // SHARED_MEMORY_H
