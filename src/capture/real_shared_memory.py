@@ -322,7 +322,6 @@ class ZeroCopySharedMemory:
         self.shm_name = shm_name
         self.fd: Optional[int] = None
         self.mmap_obj: Optional[mmap.mmap] = None
-        self.last_version = 0
 
     def open(self) -> bool:
         """Open the zero-copy shared memory segment."""
@@ -379,12 +378,6 @@ class ZeroCopySharedMemory:
         self.mmap_obj.seek(0)
         data = self.mmap_obj.read(sizeof(CZeroCopyFrameBuffer))
         buf = CZeroCopyFrameBuffer.from_buffer_copy(data)
-
-        # Check version
-        if buf.frame.version == self.last_version:
-            return None  # No new frame
-
-        self.last_version = buf.frame.version
 
         # Validate plane_cnt to avoid invalid array access
         plane_cnt = buf.frame.plane_cnt
