@@ -521,25 +521,11 @@ int shm_zerocopy_write(ZeroCopyFrameBuffer* shm, const ZeroCopyFrame* frame) {
         return -1;
     }
 
-    // Wait for consumer to finish with previous frame (throttles to consumer speed)
-    // For YOLO (~100ms), this naturally limits to ~10fps
-    // Use sem_trywait to check without blocking, then timeout-wait
-    struct timespec timeout;
-    clock_gettime(CLOCK_REALTIME, &timeout);
-    timeout.tv_nsec += 100000000;  // 100ms timeout
-    if (timeout.tv_nsec >= 1000000000) {
-        timeout.tv_sec += 1;
-        timeout.tv_nsec -= 1000000000;
-    }
-
-    int ret = sem_timedwait(&shm->consumed_sem, &timeout);
+    // Non-blocking check: skip frame if consumer is still processing.
+    // YOLO runs at ~10fps; capture loop must stay at 30fps for streaming.
+    int ret = sem_trywait(&shm->consumed_sem);
     if (ret != 0) {
-        if (errno == ETIMEDOUT) {
-            // Consumer is slow, skip this frame
-            LOG_DEBUG("SharedMemory", "Zero-copy write skipped: consumer not ready (timeout)");
-        } else {
-            LOG_WARN("SharedMemory", "Zero-copy sem_timedwait failed: %s", strerror(errno));
-        }
+        // Consumer still processing - skip this frame (don't block capture loop)
         return -1;
     }
 
