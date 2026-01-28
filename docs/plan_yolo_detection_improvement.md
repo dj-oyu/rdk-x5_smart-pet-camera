@@ -8,7 +8,7 @@
   → ISP NV12
   → VSE Ch1: 640x360 NV12 (ハードウェア縮小, 16:9)
   → Python _letterbox_nv12(): 上下140px黒帯 → 640x640
-  → BPU YOLOv13n 推論 (~46ms warm)
+  → BPU YOLO11n 推論 (~9ms warm)  ← Phase 0 結果により yolov13n から切替
 ```
 
 ### レターボックスの状態
@@ -37,24 +37,25 @@
 | CPU | 8x Arm Cortex-A55 @ 1.5-1.8 GHz |
 | RAM | 4 GB LPDDR4 |
 
-### 現行モデル情報
+### 採用モデル: YOLO11n (Phase 0 結果により決定)
 
 | 項目 | 値 |
 |------|-----|
-| ファイル | `/tmp/yolo_models/yolov13n_detect_bayese_640x640_nv12.bin` |
+| ファイル | `/tmp/yolo_models/yolo11n_detect_bayese_640x640_nv12.bin` |
 | 入力 | `images`: (1, 3, 640, 640) uint8 NV12, 614400 bytes |
 | 出力 | 6ヘッド (split-head YOLO), 全て float32 NHWC |
-| 推論性能 | ~46.3 ms avg (warm) → ~21.7 FPS |
+| BPU推論 | **~8.9 ms** avg (warm), 112 FPS |
+| Python API 込み | ~9.5 ms avg |
 
-### Model Zoo 公式値 (参考)
+### モデル比較 (Phase 0 計測値)
 
-| モデル | スループット (FPS) | レイテンシ目安 |
-|--------|-------------------|---------------|
-| YOLOv5n v7.0 | 277 (3threads) | ~3.6ms |
-| YOLOv8n | ~220 (2threads) | ~4.5ms |
-| YOLO11n | ~200 | ~5ms |
+| モデル | BPU レイテンシ | FPS | 備考 |
+|--------|--------------|-----|------|
+| yolov13n (旧) | 45.5 ms | 22 | アーキテクチャが重く BPU 効率悪 |
+| **yolo11n** (採用) | **8.9 ms** | **112** | **5.1倍高速化、起動スクリプトのデフォルト** |
+| yolov8n | 7.7 ms | 129 | 最速だが 11n と大差なし |
 
-**現行モデルとの乖離**: 公式 YOLO11n ~5ms vs 当プロジェクト ~46ms (9倍遅い)
+切替理由の詳細は `docs/yolo_bpu_profiling_report.md` を参照
 
 ---
 
@@ -73,11 +74,11 @@
 
 **成果物**: `docs/yolo_bpu_profiling_report.md`
 
-### Phase 1: 推論速度改善 (Phase 0 結果に基づき選択)
+### Phase 1: 推論速度改善 → **シナリオ B で完了**
 
-- **シナリオ A**: BPU時間 ~5ms → Python API オーバーヘッドが原因 → `bpu_infer_lib` / C拡張
-- **シナリオ B**: モデル自体が ~46ms → 公式モデルに切り替え
-- **シナリオ C**: 両方 → モデル切り替え + API 最適化
+- ~~シナリオ A: Python API オーバーヘッド~~ → 実測 <1ms で問題なし
+- **シナリオ B**: モデル自体が ~46ms → **yolo11n に切替で 8.9ms を達成**
+- ~~シナリオ C~~ → API 最適化不要
 
 ### Phase 2: VSE 高解像度化 + 検出品質改善
 
@@ -96,10 +97,10 @@
 
 ## ステータス
 
-| Phase | ステータス | 開始日 | 完了日 |
-|-------|----------|--------|--------|
-| Phase 0 | **進行中** | 2026-01-28 | - |
-| Phase 1 | 未着手 | - | - |
-| Phase 2 | 未着手 | - | - |
-| Phase 3 | 未着手 | - | - |
-| Phase 4 | 未着手 | - | - |
+| Phase | ステータス | 開始日 | 完了日 | 備考 |
+|-------|----------|--------|--------|------|
+| Phase 0 | **完了** | 2026-01-28 | 2026-01-28 | プロファイリング完了。レポート: `yolo_bpu_profiling_report.md` |
+| Phase 1 | **完了** | 2026-01-28 | 2026-01-28 | yolov13n → yolo11n 切替 (45.5ms → 8.9ms) |
+| Phase 2 | 未着手 | - | - | VSE 高解像度化 |
+| Phase 3 | 未着手 | - | - | ROI クロップ巡回 |
+| Phase 4 | 未着手 | - | - | 適応型 ROI |
