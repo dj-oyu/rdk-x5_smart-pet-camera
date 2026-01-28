@@ -99,7 +99,7 @@ class YoloDetectorDaemon:
         # ROI cycling state
         self.roi_regions: list[tuple[int, int, int, int]] = []  # [(x, y, w, h), ...]
         self.roi_index: int = 0  # Current ROI index for round-robin
-        self.roi_enabled: bool = True  # Enable ROI mode for high-res input
+        self.roi_enabled: bool = False  # ROI mode disabled (640x360 letterbox)
 
         # Detection result cache for temporal integration
         self.detection_cache: list[list[dict]] = []  # [roi_0_dets, roi_1_dets, ...]

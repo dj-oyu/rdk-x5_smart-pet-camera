@@ -393,8 +393,8 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
         zc_frame.frame_number = frame_count;
         zc_frame.timestamp = frame_timestamp;
         zc_frame.camera_id = pipeline->camera_index;
-        zc_frame.width = 1280;   // VSE Ch1 configured for 1280x720
-        zc_frame.height = 720;
+        zc_frame.width = 640;   // VSE Ch1 configured for 640x360
+        zc_frame.height = 360;
         zc_frame.format = 1;    // NV12
         zc_frame.brightness_avg = brightness_result.brightness_avg;
         zc_frame.correction_applied = 0;
