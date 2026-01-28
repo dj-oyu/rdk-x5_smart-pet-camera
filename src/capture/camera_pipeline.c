@@ -382,7 +382,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     // Release main VIO frame (always release after use)
     vio_release_frame(&pipeline->vio, &vio_frame);
 
-    // Get YOLO input frame from VSE Channel 1 (640x360 letterbox)
+    // Get YOLO input frame from VSE Channel 1 (1280x720 for ROI detection)
     // Zero-copy: share VIO buffer via share_id, consumer imports via hb_mem
     if (write_active) {
       hbn_vnode_image_t yolo_frame = {0};
@@ -393,8 +393,8 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
         zc_frame.frame_number = frame_count;
         zc_frame.timestamp = frame_timestamp;
         zc_frame.camera_id = pipeline->camera_index;
-        zc_frame.width = 640;   // VSE Ch1 configured for 640x360
-        zc_frame.height = 360;
+        zc_frame.width = 1280;   // VSE Ch1 configured for 1280x720
+        zc_frame.height = 720;
         zc_frame.format = 1;    // NV12
         zc_frame.brightness_avg = brightness_result.brightness_avg;
         zc_frame.correction_applied = 0;

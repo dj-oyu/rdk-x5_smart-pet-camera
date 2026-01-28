@@ -41,7 +41,7 @@ typedef struct {
     SharedFrameBuffer *shm_mjpeg_frame;   // MJPEG 640x480 NV12 input (VSE Ch2, always active, writable)
 
     // Zero-copy shared memory (share_id based, no memcpy)
-    ZeroCopyFrameBuffer *shm_yolo_zerocopy; // YOLO 640x360 zero-copy (VSE Ch1, always active)
+    ZeroCopyFrameBuffer *shm_yolo_zerocopy; // YOLO 1280x720 zero-copy (VSE Ch1, always active)
 
     // Camera control (Phase 2: SHM-based instead of signal-based)
     CameraControl *control_shm;           // CameraControl shared memory (active camera index)

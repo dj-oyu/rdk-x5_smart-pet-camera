@@ -102,7 +102,7 @@ int vio_get_frame(vio_context_t *ctx, hbn_vnode_image_t *frame, int timeout_ms);
 /**
  * Get a frame from VIO pipeline Channel 1 (YOLO input)
  *
- * Retrieves a 640x360 NV12 frame from VSE Channel 1.
+ * Retrieves a 1280x720 NV12 frame from VSE Channel 1.
  * Blocks until a frame is available or timeout occurs.
  *
  * Args:
