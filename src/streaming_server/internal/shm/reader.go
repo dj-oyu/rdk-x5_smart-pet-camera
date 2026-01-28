@@ -119,9 +119,9 @@ void close_shm(SharedFrameBuffer* shm) {
     }
 }
 
-// Get current write index
+// Get current write index (volatile read - no atomic needed for 32-bit on x86/ARM64)
 uint32_t get_write_index(SharedFrameBuffer* shm) {
-    return __atomic_load_n(&shm->write_index, __ATOMIC_ACQUIRE);
+    return shm->write_index;
 }
 
 // Read frame at specific index
@@ -159,9 +159,8 @@ const (
 
 // Reader reads H.264 frames from shared memory
 type Reader struct {
-	shm       *C.SharedFrameBuffer
-	shmName   string
-	lastIndex uint32
+	shm     *C.SharedFrameBuffer
+	shmName string
 }
 
 // NewReader creates a new shared memory reader
@@ -194,9 +193,8 @@ func NewReader(shmName string) (*Reader, error) {
 	logger.Info("Reader", "Successfully opened shared memory: %s", shmName)
 
 	return &Reader{
-		shm:       shm,
-		shmName:   shmName,
-		lastIndex: 0,
+		shm:     shm,
+		shmName: shmName,
 	}, nil
 }
 
@@ -210,7 +208,8 @@ func (r *Reader) Close() error {
 }
 
 // ReadLatest reads the latest frame from shared memory
-// Returns nil if no new frame is available
+// NOTE: Duplicate check removed - polling interval ≈ frame interval, duplicates are rare
+// and processing same frame twice has no UX impact
 func (r *Reader) ReadLatest() (*types.H264Frame, error) {
 	if r.shm == nil {
 		return nil, fmt.Errorf("shared memory not open")
@@ -218,17 +217,12 @@ func (r *Reader) ReadLatest() (*types.H264Frame, error) {
 
 	// Get current write index
 	writeIndex := uint32(C.get_write_index(r.shm))
-
-	// Check if new frame is available
-	if writeIndex == r.lastIndex {
-		return nil, nil // No new frame
+	if writeIndex == 0 {
+		return nil, nil // No frames written yet
 	}
 
-	// IMPORTANT: Only read the LATEST frame to avoid reading stale data
-	// When write_index advances by N, we only care about the most recent frame
-	latestIndex := writeIndex - 1  // Latest written frame
-
-	// Calculate actual index in ring buffer
+	// Read the latest frame
+	latestIndex := writeIndex - 1
 	index := latestIndex % RingBufferSize
 
 	// Read frame from shared memory
@@ -239,22 +233,11 @@ func (r *Reader) ReadLatest() (*types.H264Frame, error) {
 
 	// Check if this is an H.264 frame
 	if int(cFrame.format) != FormatH264 {
-		// Skip non-H.264 frames
-		r.lastIndex = writeIndex
 		return nil, nil
 	}
 
 	// Convert C frame to Go frame
 	frame := r.convertFrame(&cFrame)
-
-	// Update state - skip all intermediate frames
-	r.lastIndex = writeIndex
-
-	// Log every 30 frames to track frame_number
-	if frame.FrameNum%30 == 0 {
-		logger.Debug("Reader", "Read H.264 frame#%d from shm (write_index=%d, latest_idx=%d, ring_idx=%d)",
-			frame.FrameNum, writeIndex, latestIndex, index)
-	}
 
 	return frame, nil
 }

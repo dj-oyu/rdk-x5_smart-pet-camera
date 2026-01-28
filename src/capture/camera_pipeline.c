@@ -2,8 +2,6 @@
  * camera_pipeline.c - Camera Pipeline Implementation
  */
 
-#define _POSIX_C_SOURCE 200809L
-
 #include "camera_pipeline.h"
 #include "hb_mem_mgr.h"
 #include "isp_brightness.h"
@@ -11,20 +9,22 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
+
+_Static_assert(sizeof(hb_mem_graphic_buf_t) == HB_MEM_GRAPHIC_BUF_SIZE,
+    "HB_MEM_GRAPHIC_BUF_SIZE must match sizeof(hb_mem_graphic_buf_t)");
 
 char Pipeline_log_header[16];
 
 int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
                     int sensor_width, int sensor_height, int output_width,
-                    int output_height, int fps, int bitrate,
-                    volatile sig_atomic_t *is_active_flag,
-                    volatile sig_atomic_t *probe_requested_flag) {
+                    int output_height, int fps, int bitrate) {
   int ret = 0;
 
   snprintf(Pipeline_log_header, sizeof(Pipeline_log_header), "Pipeline %d",
            camera_index);
 
-  if (!pipeline || !is_active_flag || !probe_requested_flag)
+  if (!pipeline)
     return -1;
 
   memset(pipeline, 0, sizeof(camera_pipeline_t));
@@ -36,12 +36,31 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
   pipeline->output_height = output_height;
   pipeline->fps = fps;
   pipeline->bitrate = bitrate;
-  pipeline->is_active_flag = is_active_flag;
-  pipeline->probe_requested_flag = probe_requested_flag;
 
   LOG_INFO(Pipeline_log_header,
            "Creating pipeline for Camera %d (%dx%d@%dfps, %dkbps)",
            camera_index, output_width, output_height, fps, bitrate / 1000);
+
+  // Open CameraControl shared memory (Phase 2: SHM-based activation)
+  // Retry for up to 5 seconds since switcher_daemon may not have created it yet
+  for (int i = 0; i < 50; i++) {
+    pipeline->control_shm = shm_control_open();
+    if (pipeline->control_shm) {
+      break;
+    }
+    if (i == 0) {
+      LOG_INFO(Pipeline_log_header, "Waiting for CameraControl SHM (%s)...",
+               SHM_NAME_CONTROL);
+    }
+    usleep(100000); // 100ms
+  }
+  if (!pipeline->control_shm) {
+    LOG_WARN(Pipeline_log_header,
+             "CameraControl SHM not available, defaulting to inactive");
+  } else {
+    LOG_INFO(Pipeline_log_header, "CameraControl SHM opened: %s",
+             SHM_NAME_CONTROL);
+  }
 
   // Initialize memory manager
   ret = hb_mem_module_open();
@@ -99,16 +118,21 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
     goto error_cleanup;
   }
 
-  // YOLO input NV12 (640x640 from VSE Channel 1, always written when active)
-  pipeline->shm_yolo_input =
-      shm_frame_buffer_create_named(SHM_NAME_YOLO_INPUT);
-  if (!pipeline->shm_yolo_input) {
+  // Zero-copy YOLO input (share_id based, no memcpy)
+  // Phase 2: per-camera ZeroCopy SHM (zc_0 for DAY, zc_1 for NIGHT)
+  const char *zerocopy_name = (camera_index == 0)
+                                  ? SHM_NAME_ZEROCOPY_DAY
+                                  : SHM_NAME_ZEROCOPY_NIGHT;
+  pipeline->shm_yolo_zerocopy = shm_zerocopy_create(zerocopy_name);
+  if (!pipeline->shm_yolo_zerocopy) {
     LOG_ERROR(Pipeline_log_header,
-              "Failed to open/create YOLO input shared memory: %s",
-              SHM_NAME_YOLO_INPUT);
+              "Failed to create zero-copy shared memory: %s",
+              zerocopy_name);
     ret = -1;
     goto error_cleanup;
   }
+  LOG_INFO(Pipeline_log_header, "Zero-copy shared memory created: %s",
+           zerocopy_name);
 
   // MJPEG input NV12 (640x480 from VSE Channel 2, always written when active, writable by web_monitor)
   pipeline->shm_mjpeg_frame =
@@ -176,6 +200,11 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
 
   hbn_vnode_image_t vio_frame = {0};
 
+  // Zero-copy: track pending YOLO frame for deferred release
+  // The frame must not be released until consumer finishes processing
+  hbn_vnode_image_t pending_yolo_frame = {0};
+  bool has_pending_yolo_frame = false;
+
   LOG_INFO(Pipeline_log_header,
            "Starting capture loop (threaded encoder, 30fps NV12+H.264)...");
 
@@ -187,20 +216,21 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     if (ret != 0) {
       // Error -43 (HBN_STATUS_NODE_DEQUE_ERROR) is transient during camera
       // switches - the VIO buffer isn't ready yet. Use DEBUG level to avoid log
-      // spam. Non-active cameras may also fail to get frames during probe
-      // (expected).
-      if (*pipeline->is_active_flag == 1 && ret != -43) {
+      // spam. Non-active cameras may also fail to get frames.
+      bool is_active = pipeline->control_shm &&
+                       shm_control_get_active(pipeline->control_shm) == pipeline->camera_index;
+      if (is_active && ret != -43) {
         LOG_WARN(Pipeline_log_header, "vio_get_frame failed: %d", ret);
       } else {
         LOG_DEBUG(Pipeline_log_header, "vio_get_frame failed: %d (active=%d)",
-                  ret, *pipeline->is_active_flag);
+                  ret, is_active);
       }
       continue;
     }
 
-    // Conditional NV12 write based on active/probe flags
-    bool write_active = *pipeline->is_active_flag == 1;
-    bool write_probe = *pipeline->probe_requested_flag == 1;
+    // Determine active state from CameraControl SHM (Phase 2)
+    bool write_active = pipeline->control_shm &&
+                        shm_control_get_active(pipeline->control_shm) == pipeline->camera_index;
 
     // Get ISP brightness statistics with throttling (using power-of-2 masks for fast bitwise AND)
     // - DAY camera active: every 8 frames (~3.75Hz) for fast DAY→NIGHT detection
@@ -249,13 +279,13 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     if (frame_count % 30 == 0) {
       LOG_DEBUG(
           Pipeline_log_header,
-          "Flags: is_active=%d, probe=%d, brightness=%.1f lux=%u zone=%d",
-          *pipeline->is_active_flag, *pipeline->probe_requested_flag,
+          "Flags: is_active=%d, brightness=%.1f lux=%u zone=%d",
+          write_active,
           brightness_result.brightness_avg, brightness_result.brightness_lux,
           brightness_result.zone);
     }
 
-    if (write_active || write_probe) {
+    if (write_active) {
       // Convert timeval to timespec
       clock_gettime(CLOCK_REALTIME, &frame_timestamp);
 
@@ -300,14 +330,19 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
           }
         }
 
-        // Clear probe request flag (brightness is now always available)
-        if (write_probe) {
-          *pipeline->probe_requested_flag = 0;
-        }
+        // Probe mechanism removed (Phase 2) - brightness always available via SHM
       } else {
         LOG_WARN(Pipeline_log_header, "NV12 frame too large (%zu bytes)",
                  nv12_size);
       }
+    }
+
+    // Phase 2: Always update brightness in per-camera ZeroCopy SHM
+    // Ensures switcher can read brightness from any camera's ZeroCopy (Phase 3)
+    if (is_brightness_frame && brightness_result.valid &&
+        pipeline->shm_yolo_zerocopy) {
+      pipeline->shm_yolo_zerocopy->frame.brightness_avg =
+          brightness_result.brightness_avg;
     }
 
     // Write brightness to lightweight shared memory
@@ -342,71 +377,160 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
         LOG_WARN(Pipeline_log_header, "Encoder queue full, frame %d dropped",
                  frame_count);
       }
-    } else {
-      // Release VIO frame immediately
-      vio_release_frame(&pipeline->vio, &vio_frame);
     }
 
-    // Release VIO frame immediately
+    // Release main VIO frame (always release after use)
     vio_release_frame(&pipeline->vio, &vio_frame);
 
-    // Get YOLO input frame from VSE Channel 1 (640x640)
+    // Get YOLO input frame from VSE Channel 1 (1280x720 for ROI detection)
+    // Zero-copy: share VIO buffer via share_id, consumer imports via hb_mem
     if (write_active) {
       hbn_vnode_image_t yolo_frame = {0};
       ret = vio_get_frame_ch1(&pipeline->vio, &yolo_frame, 10);
       if (ret == 0) {
-        // Write YOLO frame to shared memory
-        Frame yolo_nv12_frame = {0};
-        // VSE Ch1 is configured for 640x640 (see vio_lowlevel.c:233-236)
-        yolo_nv12_frame.width = 640;
-        yolo_nv12_frame.height = 640;
-        yolo_nv12_frame.format = 1; // NV12
-        yolo_nv12_frame.frame_number = frame_count;
-        yolo_nv12_frame.camera_id = pipeline->camera_index;
-        yolo_nv12_frame.timestamp = frame_timestamp;
+        // Build zero-copy frame metadata
+        ZeroCopyFrame zc_frame = {0};
+        zc_frame.frame_number = frame_count;
+        zc_frame.timestamp = frame_timestamp;
+        zc_frame.camera_id = pipeline->camera_index;
+        zc_frame.width = 640;   // VSE Ch1 configured for 640x360
+        zc_frame.height = 360;
+        zc_frame.format = 1;    // NV12
+        zc_frame.brightness_avg = brightness_result.brightness_avg;
+        zc_frame.correction_applied = 0;
 
-        // Apply brightness data from ISP (same for all channels)
-        isp_fill_frame_brightness(&yolo_nv12_frame, &brightness_result);
-        yolo_nv12_frame.correction_applied = 0;
-
-        // Calculate NV12 size for 640x640
-        size_t yolo_size = 0;
-        for (int i = 0; i < yolo_frame.buffer.plane_cnt; i++) {
-          yolo_size += yolo_frame.buffer.size[i];
-        }
-        yolo_nv12_frame.data_size = yolo_size;
-
-        // Copy YOLO NV12 data
-        if (yolo_size <= sizeof(yolo_nv12_frame.data)) {
-          size_t offset = 0;
-          for (int i = 0; i < yolo_frame.buffer.plane_cnt; i++) {
-            memcpy(yolo_nv12_frame.data + offset, yolo_frame.buffer.virt_addr[i],
-                   yolo_frame.buffer.size[i]);
-            offset += yolo_frame.buffer.size[i];
-          }
-
-          // NOTE: Gamma correction is DISABLED - using CLAHE on YOLO detector side
-          // This avoids CPU overhead in the capture pipeline
-          yolo_nv12_frame.correction_applied = 0;
-
-          int write_ret = shm_frame_buffer_write(pipeline->shm_yolo_input, &yolo_nv12_frame);
-          if (write_ret < 0) {
-            LOG_WARN(Pipeline_log_header, "Failed to write YOLO input to shm");
-          } else if (frame_count == 0 || frame_count % 30 == 0) {
-            // Log first frame and every 30 frames to verify VSE Ch1 size
-            if (frame_count == 0) {
-              LOG_INFO(Pipeline_log_header,
-                       "VSE Ch1 output: %dx%d, %zu bytes (expected 640x640, ~614KB)",
-                       yolo_nv12_frame.width, yolo_nv12_frame.height, yolo_size);
-            } else {
-              LOG_DEBUG(Pipeline_log_header,
-                        "YOLO frame#%d brightness=%.1f",
-                        frame_count, brightness_result.brightness_avg);
-            }
-          }
+        // Copy share_id and plane info from VIO buffer
+        zc_frame.plane_cnt = yolo_frame.buffer.plane_cnt;
+        for (int i = 0; i < yolo_frame.buffer.plane_cnt && i < ZEROCOPY_MAX_PLANES; i++) {
+          zc_frame.share_id[i] = yolo_frame.buffer.share_id[i];
+          zc_frame.plane_size[i] = yolo_frame.buffer.size[i];
         }
 
-        vio_release_frame_ch1(&pipeline->vio, &yolo_frame);
+        // Copy full hb_mem_graphic_buf_t as raw bytes for import API
+        memcpy(zc_frame.hb_mem_buf_data, &yolo_frame.buffer, sizeof(yolo_frame.buffer));
+
+        // shm_zerocopy_write waits for consumer to signal consumed_sem
+        // If it succeeds, consumer has finished with the PREVIOUS frame
+        int zc_ret = shm_zerocopy_write(pipeline->shm_yolo_zerocopy, &zc_frame);
+        if (zc_ret == 0) {
+          // Consumer finished with previous frame - safe to release it now
+          if (has_pending_yolo_frame) {
+            vio_release_frame_ch1(&pipeline->vio, &pending_yolo_frame);
+          }
+
+          // Keep current frame as pending until consumer finishes
+          pending_yolo_frame = yolo_frame;
+          has_pending_yolo_frame = true;
+
+          if (frame_count == 0) {
+            // === DIAGNOSTIC: Dump ALL fields of hb_mem_graphic_buf_t ===
+            // This is critical for diagnosing hb_mem_import failures on the consumer side.
+            const hb_mem_graphic_buf_t *gb = &yolo_frame.buffer;
+
+            LOG_INFO(Pipeline_log_header,
+                     "=== hb_mem_graphic_buf_t DUMP (sizeof=%zu) ===",
+                     sizeof(hb_mem_graphic_buf_t));
+            LOG_INFO(Pipeline_log_header,
+                     "  fd[3]          = {%d, %d, %d}",
+                     gb->fd[0], gb->fd[1], gb->fd[2]);
+            LOG_INFO(Pipeline_log_header,
+                     "  plane_cnt      = %d", gb->plane_cnt);
+            LOG_INFO(Pipeline_log_header,
+                     "  format         = %d", gb->format);
+            LOG_INFO(Pipeline_log_header,
+                     "  width          = %d", gb->width);
+            LOG_INFO(Pipeline_log_header,
+                     "  height         = %d", gb->height);
+            LOG_INFO(Pipeline_log_header,
+                     "  stride         = %d", gb->stride);
+            LOG_INFO(Pipeline_log_header,
+                     "  vstride        = %d", gb->vstride);
+            LOG_INFO(Pipeline_log_header,
+                     "  is_contig      = %d", gb->is_contig);
+            LOG_INFO(Pipeline_log_header,
+                     "  share_id[3]    = {%d, %d, %d}",
+                     gb->share_id[0], gb->share_id[1], gb->share_id[2]);
+            LOG_INFO(Pipeline_log_header,
+                     "  flags          = %ld", (long)gb->flags);
+            LOG_INFO(Pipeline_log_header,
+                     "  size[3]        = {%lu, %lu, %lu}",
+                     (unsigned long)gb->size[0],
+                     (unsigned long)gb->size[1],
+                     (unsigned long)gb->size[2]);
+            LOG_INFO(Pipeline_log_header,
+                     "  virt_addr[3]   = {0x%lx, 0x%lx, 0x%lx}",
+                     (unsigned long)gb->virt_addr[0],
+                     (unsigned long)gb->virt_addr[1],
+                     (unsigned long)gb->virt_addr[2]);
+            LOG_INFO(Pipeline_log_header,
+                     "  phys_addr[3]   = {0x%lx, 0x%lx, 0x%lx}",
+                     (unsigned long)gb->phys_addr[0],
+                     (unsigned long)gb->phys_addr[1],
+                     (unsigned long)gb->phys_addr[2]);
+            LOG_INFO(Pipeline_log_header,
+                     "  offset[3]      = {%lu, %lu, %lu}",
+                     (unsigned long)gb->offset[0],
+                     (unsigned long)gb->offset[1],
+                     (unsigned long)gb->offset[2]);
+
+            // Also dump raw hex of first 64 bytes for cross-checking with Python side
+            const uint8_t *raw = (const uint8_t *)gb;
+            LOG_INFO(Pipeline_log_header,
+                     "  raw[0..15]     = %02x %02x %02x %02x %02x %02x %02x %02x "
+                     "%02x %02x %02x %02x %02x %02x %02x %02x",
+                     raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+                     raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14], raw[15]);
+            LOG_INFO(Pipeline_log_header,
+                     "  raw[16..31]    = %02x %02x %02x %02x %02x %02x %02x %02x "
+                     "%02x %02x %02x %02x %02x %02x %02x %02x",
+                     raw[16], raw[17], raw[18], raw[19], raw[20], raw[21], raw[22], raw[23],
+                     raw[24], raw[25], raw[26], raw[27], raw[28], raw[29], raw[30], raw[31]);
+            LOG_INFO(Pipeline_log_header,
+                     "  raw[32..47]    = %02x %02x %02x %02x %02x %02x %02x %02x "
+                     "%02x %02x %02x %02x %02x %02x %02x %02x",
+                     raw[32], raw[33], raw[34], raw[35], raw[36], raw[37], raw[38], raw[39],
+                     raw[40], raw[41], raw[42], raw[43], raw[44], raw[45], raw[46], raw[47]);
+            LOG_INFO(Pipeline_log_header,
+                     "  raw[48..63]    = %02x %02x %02x %02x %02x %02x %02x %02x "
+                     "%02x %02x %02x %02x %02x %02x %02x %02x",
+                     raw[48], raw[49], raw[50], raw[51], raw[52], raw[53], raw[54], raw[55],
+                     raw[56], raw[57], raw[58], raw[59], raw[60], raw[61], raw[62], raw[63]);
+            LOG_INFO(Pipeline_log_header,
+                     "  raw[64..79]    = %02x %02x %02x %02x %02x %02x %02x %02x "
+                     "%02x %02x %02x %02x %02x %02x %02x %02x",
+                     raw[64], raw[65], raw[66], raw[67], raw[68], raw[69], raw[70], raw[71],
+                     raw[72], raw[73], raw[74], raw[75], raw[76], raw[77], raw[78], raw[79]);
+            LOG_INFO(Pipeline_log_header,
+                     "  raw[80..95]    = %02x %02x %02x %02x %02x %02x %02x %02x "
+                     "%02x %02x %02x %02x %02x %02x %02x %02x",
+                     raw[80], raw[81], raw[82], raw[83], raw[84], raw[85], raw[86], raw[87],
+                     raw[88], raw[89], raw[90], raw[91], raw[92], raw[93], raw[94], raw[95]);
+            LOG_INFO(Pipeline_log_header,
+                     "  raw[96..111]   = %02x %02x %02x %02x %02x %02x %02x %02x "
+                     "%02x %02x %02x %02x %02x %02x %02x %02x",
+                     raw[96], raw[97], raw[98], raw[99], raw[100], raw[101], raw[102], raw[103],
+                     raw[104], raw[105], raw[106], raw[107], raw[108], raw[109], raw[110], raw[111]);
+            LOG_INFO(Pipeline_log_header,
+                     "  raw[112..127]  = %02x %02x %02x %02x %02x %02x %02x %02x "
+                     "%02x %02x %02x %02x %02x %02x %02x %02x",
+                     raw[112], raw[113], raw[114], raw[115], raw[116], raw[117], raw[118], raw[119],
+                     raw[120], raw[121], raw[122], raw[123], raw[124], raw[125], raw[126], raw[127]);
+            LOG_INFO(Pipeline_log_header,
+                     "  raw[128..143]  = %02x %02x %02x %02x %02x %02x %02x %02x "
+                     "%02x %02x %02x %02x %02x %02x %02x %02x",
+                     raw[128], raw[129], raw[130], raw[131], raw[132], raw[133], raw[134], raw[135],
+                     raw[136], raw[137], raw[138], raw[139], raw[140], raw[141], raw[142], raw[143]);
+            LOG_INFO(Pipeline_log_header,
+                     "  raw[144..159]  = %02x %02x %02x %02x %02x %02x %02x %02x "
+                     "%02x %02x %02x %02x %02x %02x %02x %02x",
+                     raw[144], raw[145], raw[146], raw[147], raw[148], raw[149], raw[150], raw[151],
+                     raw[152], raw[153], raw[154], raw[155], raw[156], raw[157], raw[158], raw[159]);
+            LOG_INFO(Pipeline_log_header, "=== END hb_mem_graphic_buf_t DUMP ===");
+          }
+        } else {
+          // Consumer busy (timeout) - release current frame, keep pending as-is
+          vio_release_frame_ch1(&pipeline->vio, &yolo_frame);
+        }
       } else if (frame_count % 30 == 0) {
         LOG_DEBUG(Pipeline_log_header, "vio_get_frame_ch1 failed: %d", ret);
       }
@@ -486,6 +610,12 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     }
   }
 
+  // Release any pending zero-copy frame on exit
+  if (has_pending_yolo_frame) {
+    vio_release_frame_ch1(&pipeline->vio, &pending_yolo_frame);
+    has_pending_yolo_frame = false;
+  }
+
   // Final statistics
   clock_gettime(CLOCK_MONOTONIC, &current_time);
   double total_elapsed = (current_time.tv_sec - start_time.tv_sec) +
@@ -525,6 +655,12 @@ void pipeline_destroy(camera_pipeline_t *pipeline) {
   // Destroy VIO
   vio_destroy(&pipeline->vio);
 
+  // Close CameraControl SHM (do not destroy - owned by camera_switcher_daemon)
+  if (pipeline->control_shm) {
+    shm_control_close(pipeline->control_shm);
+    pipeline->control_shm = NULL;
+  }
+
   // Close shared memory (do not destroy - owned by camera_switcher_daemon)
   if (pipeline->shm_active_nv12) {
     shm_frame_buffer_close(pipeline->shm_active_nv12);
@@ -541,9 +677,9 @@ void pipeline_destroy(camera_pipeline_t *pipeline) {
     pipeline->shm_brightness = NULL;
   }
 
-  if (pipeline->shm_yolo_input) {
-    shm_frame_buffer_close(pipeline->shm_yolo_input);
-    pipeline->shm_yolo_input = NULL;
+  if (pipeline->shm_yolo_zerocopy) {
+    shm_zerocopy_close(pipeline->shm_yolo_zerocopy);
+    pipeline->shm_yolo_zerocopy = NULL;
   }
 
   if (pipeline->shm_mjpeg_frame) {

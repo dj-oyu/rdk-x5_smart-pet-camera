@@ -12,6 +12,9 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// Cached timezone for overlay rendering (avoid allocation per frame)
+var jstTimezone = time.FixedZone("JST", 9*3600)
+
 // FrameBroadcaster manages fanout of JPEG frames to multiple clients.
 type FrameBroadcaster struct {
 	mu        sync.Mutex
@@ -19,9 +22,8 @@ type FrameBroadcaster struct {
 	nextID    int
 	shm       *shmReader
 	monitor   *Monitor
-	stop      chan struct{}
-	stopped   bool
-	skipCount int // Count of frames skipped when no clients
+	stop    chan struct{}
+	stopped bool
 }
 
 // NewFrameBroadcaster creates a broadcaster that generates overlay frames and fans them out.
@@ -81,50 +83,36 @@ func (fb *FrameBroadcaster) Stop() {
 }
 
 func (fb *FrameBroadcaster) run() {
+	// Ticker-based polling at ~30 FPS
+	// Using ticker instead of sleep so encoding time overlaps with next tick,
+	// giving effective FPS = 1/max(33ms, encode) instead of 1/(33ms + encode).
+	ticker := time.NewTicker(33 * time.Millisecond)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-fb.stop:
 			return
-		default:
+		case <-ticker.C:
 		}
 
-		// OPTIMIZATION: Check client count BEFORE consuming semaphore
-		// This avoids unnecessary semaphore operations when no clients are connected
 		fb.mu.Lock()
 		clientCount := len(fb.clients)
 		fb.mu.Unlock()
 
 		if clientCount == 0 {
-			// No clients - sleep instead of consuming semaphores (reduces CPU usage)
-			fb.skipCount++
-			if fb.skipCount%10 == 0 {
-				logger.Debug("FrameBroadcaster", "No clients connected, sleeping (idle for %d cycles)", fb.skipCount)
-			}
-			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
-		// Reset skip counter when clients are present
-		fb.skipCount = 0
-
-		// Wait for new frame via semaphore (blocks until frame available)
 		if fb.shm == nil {
-			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
-		if err := fb.shm.WaitNewFrame(); err != nil {
-			// sem_wait failed (e.g., interrupted), retry
-			continue
-		}
-
-		// Generate overlay frame (semaphore guarantees new frame)
 		jpegData := fb.generateOverlay()
 		if jpegData == nil {
 			continue
 		}
 
-		// Broadcast to all clients
 		fb.broadcast(jpegData)
 	}
 }
@@ -157,9 +145,8 @@ func (fb *FrameBroadcaster) generateOverlay() []byte {
 	switch frame.Format {
 	case 1: // NV12 - TRUE ZERO-COPY: draw directly on shared memory (MJPEG dedicated, destructive OK)
 		// Draw stats text with background (white text on black background)
-		// Use JST (Asia/Tokyo) for display instead of system local time
-		jst := time.FixedZone("JST", 9*3600)
-		timeStr := frame.Timestamp.In(jst).Format("2006/01/02 15:04:05")
+		// Use cached JST timezone to avoid allocation per frame
+		timeStr := frame.Timestamp.In(jstTimezone).Format("2006/01/02 15:04:05")
 		stats := fmt.Sprintf("Frame: %d  Time: %s", frame.FrameNumber, timeStr)
 		drawTextWithBackgroundNV12(frame.Data, frame.Width, frame.Height,
 			10, 10, stats, 255, 16, 2) // White text (Y=255), Black bg (Y=16)
@@ -246,6 +233,10 @@ type DetectionBroadcaster struct {
 	// Rate monitoring
 	broadcastCount  int
 	lastRateLogTime time.Time
+
+	// Empty detection monitoring (observability for 0-detection case)
+	emptyUpdateCount  int
+	lastEmptyLogTime  time.Time
 }
 
 // NewDetectionBroadcaster creates a broadcaster for detection events.
@@ -389,10 +380,21 @@ func (db *DetectionBroadcaster) run() {
 			db.lastEventVersion = det.Version
 			db.monitor.mu.Unlock()
 
-			// Only broadcast if there are actual detections (safety filter)
-			// YOLO detector already filters empty results, but double-check here
 			if len(det.Detections) > 0 {
 				db.processAndBroadcast(det)
+			} else {
+				// Track empty detection updates for observability
+				db.emptyUpdateCount++
+				now := time.Now()
+				if db.lastEmptyLogTime.IsZero() {
+					db.lastEmptyLogTime = now
+				} else if elapsed := now.Sub(db.lastEmptyLogTime); elapsed >= 10*time.Second {
+					logger.Info("DetectionBroadcaster",
+						"Detector alive: %d empty updates in %.0fs (YOLO running, 0 detections)",
+						db.emptyUpdateCount, elapsed.Seconds())
+					db.emptyUpdateCount = 0
+					db.lastEmptyLogTime = now
+				}
 			}
 		} else {
 			db.monitor.mu.Unlock()

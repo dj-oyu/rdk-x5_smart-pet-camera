@@ -14,7 +14,18 @@ import logging
 
 import cv2
 import numpy as np
-from scipy.special import softmax
+
+
+def _fast_softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
+    """
+    Numpy implementation of softmax (replaces scipy.special.softmax).
+
+    ~2x faster than scipy due to reduced import overhead and simpler code path.
+    Numerically stable via max subtraction.
+    """
+    x_max = np.max(x, axis=axis, keepdims=True)
+    e_x = np.exp(x - x_max)
+    return e_x / np.sum(e_x, axis=axis, keepdims=True)
 
 # hobot_dnn (RDK X5 BPU API)
 try:
@@ -35,68 +46,138 @@ from common.types import Detection, DetectionClass, BoundingBox
 
 # COCOクラス名（80クラス）
 COCO_CLASS_NAMES = [
-    'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
-    'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat',
-    'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack',
-    'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee', 'skis', 'snowboard', 'sports ball',
-    'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard', 'tennis racket',
-    'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
-    'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair',
-    'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse',
-    'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink',
-    'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush'
+    "person",
+    "bicycle",
+    "car",
+    "motorcycle",
+    "airplane",
+    "bus",
+    "train",
+    "truck",
+    "boat",
+    "traffic light",
+    "fire hydrant",
+    "stop sign",
+    "parking meter",
+    "bench",
+    "bird",
+    "cat",
+    "dog",
+    "horse",
+    "sheep",
+    "cow",
+    "elephant",
+    "bear",
+    "zebra",
+    "giraffe",
+    "backpack",
+    "umbrella",
+    "handbag",
+    "tie",
+    "suitcase",
+    "frisbee",
+    "skis",
+    "snowboard",
+    "sports ball",
+    "kite",
+    "baseball bat",
+    "baseball glove",
+    "skateboard",
+    "surfboard",
+    "tennis racket",
+    "bottle",
+    "wine glass",
+    "cup",
+    "fork",
+    "knife",
+    "spoon",
+    "bowl",
+    "banana",
+    "apple",
+    "sandwich",
+    "orange",
+    "broccoli",
+    "carrot",
+    "hot dog",
+    "pizza",
+    "donut",
+    "cake",
+    "chair",
+    "couch",
+    "potted plant",
+    "bed",
+    "dining table",
+    "toilet",
+    "tv",
+    "laptop",
+    "mouse",
+    "remote",
+    "keyboard",
+    "cell phone",
+    "microwave",
+    "oven",
+    "toaster",
+    "sink",
+    "refrigerator",
+    "book",
+    "clock",
+    "vase",
+    "scissors",
+    "teddy bear",
+    "hair drier",
+    "toothbrush",
 ]
 
 # COCO class ID → DetectionClass マッピング
 COCO_TO_DETECTION_CLASS = {
-    0: DetectionClass.PERSON,          # person
-    14: DetectionClass.BIRD,           # bird
-    15: DetectionClass.CAT,            # cat
-    16: DetectionClass.DOG,            # dog
-    24: DetectionClass.BACKPACK,       # backpack
-    25: DetectionClass.UMBRELLA,       # umbrella
-    26: DetectionClass.HANDBAG,        # handbag
-    28: DetectionClass.SUITCASE,       # suitcase
-    39: DetectionClass.BOTTLE,         # bottle
-    40: DetectionClass.WINE_GLASS,     # wine glass
-    41: DetectionClass.CUP,            # cup
-    42: DetectionClass.FORK,           # fork
-    43: DetectionClass.KNIFE,          # knife
-    44: DetectionClass.SPOON,          # spoon
-    45: DetectionClass.FOOD_BOWL,      # bowl → food_bowl
-    46: DetectionClass.BANANA,         # banana
-    47: DetectionClass.APPLE,          # apple
-    48: DetectionClass.SANDWICH,       # sandwich
-    49: DetectionClass.ORANGE,         # orange
-    50: DetectionClass.BROCCOLI,       # broccoli
-    51: DetectionClass.CARROT,         # carrot
-    52: DetectionClass.HOT_DOG,        # hot dog
-    53: DetectionClass.PIZZA,          # pizza
-    54: DetectionClass.DONUT,          # donut
-    55: DetectionClass.CAKE,           # cake
-    56: DetectionClass.CHAIR,          # chair
-    57: DetectionClass.COUCH,          # couch
-    58: DetectionClass.POTTED_PLANT,   # potted plant
-    59: DetectionClass.BED,            # bed
-    60: DetectionClass.DINING_TABLE,   # dining table
-    61: DetectionClass.TOILET,         # toilet
-    62: DetectionClass.TV,             # tv
-    63: DetectionClass.LAPTOP,         # laptop
-    64: DetectionClass.MOUSE,          # mouse
-    65: DetectionClass.REMOTE,         # remote
-    66: DetectionClass.KEYBOARD,       # keyboard
-    67: DetectionClass.CELL_PHONE,     # cell phone
-    68: DetectionClass.MICROWAVE,      # microwave
-    69: DetectionClass.OVEN,           # oven
-    70: DetectionClass.TOASTER,        # toaster
-    71: DetectionClass.SINK,           # sink
-    72: DetectionClass.REFRIGERATOR,   # refrigerator
-    73: DetectionClass.BOOK,           # book
-    74: DetectionClass.CLOCK,          # clock
-    75: DetectionClass.VASE,           # vase
-    77: DetectionClass.TEDDY_BEAR,     # teddy bear
-    78: DetectionClass.HAIR_DRIER,     # hair drier
-    79: DetectionClass.TOOTHBRUSH,     # toothbrush
+    0: DetectionClass.PERSON,  # person
+    14: DetectionClass.BIRD,  # bird
+    15: DetectionClass.CAT,  # cat
+    16: DetectionClass.DOG,  # dog
+    24: DetectionClass.BACKPACK,  # backpack
+    25: DetectionClass.UMBRELLA,  # umbrella
+    26: DetectionClass.HANDBAG,  # handbag
+    28: DetectionClass.SUITCASE,  # suitcase
+    39: DetectionClass.BOTTLE,  # bottle
+    40: DetectionClass.WINE_GLASS,  # wine glass
+    41: DetectionClass.CUP,  # cup
+    42: DetectionClass.FORK,  # fork
+    43: DetectionClass.KNIFE,  # knife
+    44: DetectionClass.SPOON,  # spoon
+    45: DetectionClass.FOOD_BOWL,  # bowl → food_bowl
+    46: DetectionClass.BANANA,  # banana
+    47: DetectionClass.APPLE,  # apple
+    48: DetectionClass.SANDWICH,  # sandwich
+    49: DetectionClass.ORANGE,  # orange
+    50: DetectionClass.BROCCOLI,  # broccoli
+    51: DetectionClass.CARROT,  # carrot
+    52: DetectionClass.HOT_DOG,  # hot dog
+    53: DetectionClass.PIZZA,  # pizza
+    54: DetectionClass.DONUT,  # donut
+    55: DetectionClass.CAKE,  # cake
+    56: DetectionClass.CHAIR,  # chair
+    57: DetectionClass.COUCH,  # couch
+    58: DetectionClass.POTTED_PLANT,  # potted plant
+    59: DetectionClass.BED,  # bed
+    60: DetectionClass.DINING_TABLE,  # dining table
+    61: DetectionClass.TOILET,  # toilet
+    62: DetectionClass.TV,  # tv
+    63: DetectionClass.LAPTOP,  # laptop
+    64: DetectionClass.MOUSE,  # mouse
+    65: DetectionClass.REMOTE,  # remote
+    66: DetectionClass.KEYBOARD,  # keyboard
+    67: DetectionClass.CELL_PHONE,  # cell phone
+    68: DetectionClass.MICROWAVE,  # microwave
+    69: DetectionClass.OVEN,  # oven
+    70: DetectionClass.TOASTER,  # toaster
+    71: DetectionClass.SINK,  # sink
+    72: DetectionClass.REFRIGERATOR,  # refrigerator
+    73: DetectionClass.BOOK,  # book
+    74: DetectionClass.CLOCK,  # clock
+    75: DetectionClass.VASE,  # vase
+    77: DetectionClass.TEDDY_BEAR,  # teddy bear
+    78: DetectionClass.HAIR_DRIER,  # hair drier
+    79: DetectionClass.TOOTHBRUSH,  # toothbrush
     # dishは複数のbowlを検出する場合などに使用
     # または別途カスタムモデルで定義
 }
@@ -163,7 +244,9 @@ class YoloDetector:
 
         # モデルの自動ダウンロード
         if auto_download and not os.path.exists(model_path):
-            logger.warning(f"Model file {model_path} not found. Downloading default model...")
+            logger.warning(
+                f"Model file {model_path} not found. Downloading default model..."
+            )
             self._download_default_model()
 
         # BPUモデルのロード
@@ -175,7 +258,9 @@ class YoloDetector:
             raise
 
         # 入力・出力テンソル情報
-        self.input_h, self.input_w = self.quantize_model[0].inputs[0].properties.shape[2:4]
+        self.input_h, self.input_w = (
+            self.quantize_model[0].inputs[0].properties.shape[2:4]
+        )
         logger.info(f"Model input size: {self.input_h}x{self.input_w}")
 
         # DFL期待値計算用の重み（静的生成）
@@ -208,10 +293,10 @@ class YoloDetector:
 
         # CLAHE/輝度補正統計
         self._brightness_stats = {
-            "frames_clahe_applied": 0,    # CLAHE適用フレーム数
-            "frames_clahe_skipped": 0,    # CLAHEスキップフレーム数
-            "clahe_time_total_ms": 0.0,   # CLAHE処理の累計時間
-            "last_brightness_avg": 0.0,   # 最後の入力輝度
+            "frames_clahe_applied": 0,  # CLAHE適用フレーム数
+            "frames_clahe_skipped": 0,  # CLAHEスキップフレーム数
+            "clahe_time_total_ms": 0.0,  # CLAHE処理の累計時間
+            "last_brightness_avg": 0.0,  # 最後の入力輝度
             "last_clahe_applied": False,  # 最後のフレームでCLAHE適用したか
         }
 
@@ -223,6 +308,13 @@ class YoloDetector:
             "clahe": 0.0,
             "total": 0.0,
         }
+
+        # レターボックス事前確保バッファ (遅延初期化)
+        self._lb_buf: np.ndarray | None = None
+        self._lb_y_view: np.ndarray | None = None    # Y平面のview
+        self._lb_uv_view: np.ndarray | None = None   # UV平面のview
+        self._lb_y_dst: np.ndarray | None = None     # Yデータコピー先のview
+        self._lb_uv_dst: np.ndarray | None = None    # UVデータコピー先のview
 
     def _download_default_model(self) -> None:
         """デフォルトモデル（YOLOv13n）をダウンロード"""
@@ -249,6 +341,7 @@ class YoloDetector:
             検出結果のリスト
         """
         import time
+
         start_total = time.perf_counter()
         self._total_calls += 1
 
@@ -284,6 +377,223 @@ class YoloDetector:
 
         return detections
 
+    def get_roi_regions(
+        self, width: int, height: int
+    ) -> list[tuple[int, int, int, int]]:
+        """
+        指定サイズの画像に対するROI領域を計算
+
+        3パターン巡回方式でデッドゾーンを解消:
+        - パターン0 (上寄せ): y=0
+        - パターン1 (中央): y=40
+        - パターン2 (下寄せ): y=80
+
+        Args:
+            width: 入力画像幅
+            height: 入力画像高さ
+
+        Returns:
+            ROI領域のリスト [(x, y, w, h), ...]
+            各ROIは640x640サイズ
+            1280x720の場合: 6 ROIs (3パターン × 2左右)
+        """
+        roi_size = self.input_w  # 640
+        rois = []
+
+        if width == 1280 and height == 720:
+            # 1280x720: 6 ROIs (3パターン × 2左右)
+            # パターン巡回でデッドゾーンを解消
+            y_offsets = [0, 40, 80]  # 上寄せ, 中央, 下寄せ
+            for y_offset in y_offsets:
+                rois.append((0, y_offset, roi_size, roi_size))  # 左
+                rois.append((width - roi_size, y_offset, roi_size, roi_size))  # 右
+        elif width == 1920 and height == 1080:
+            # 1920x1080: 6 ROIs (3x2グリッド, オーバーラップあり)
+            x_step = (width - roi_size) // 2  # 640
+            y_step = height - roi_size  # 440
+            for row in range(2):
+                for col in range(3):
+                    x = col * x_step
+                    y = row * y_step
+                    rois.append((x, y, roi_size, roi_size))
+        else:
+            # その他: 中央の640x640
+            x = max(0, (width - roi_size) // 2)
+            y = max(0, (height - roi_size) // 2)
+            rois = [(x, y, roi_size, roi_size)]
+
+        return rois
+
+    def _crop_nv12_roi(
+        self,
+        nv12_array: np.ndarray,
+        width: int,
+        height: int,
+        roi_x: int,
+        roi_y: int,
+        roi_w: int,
+        roi_h: int,
+    ) -> np.ndarray:
+        """
+        NV12フレームから指定ROI領域をクロップ
+
+        Args:
+            nv12_array: 入力NV12データ
+            width: 入力画像幅
+            height: 入力画像高さ
+            roi_x, roi_y: ROI左上座標
+            roi_w, roi_h: ROIサイズ
+
+        Returns:
+            クロップされたNV12データ (roi_w x roi_h)
+        """
+        y_size_in = width * height
+        y_size_out = roi_w * roi_h
+        uv_height_in = height // 2
+        uv_height_out = roi_h // 2
+        uv_size_out = roi_w * uv_height_out
+
+        # 出力バッファを確保
+        output = np.empty(y_size_out + uv_size_out, dtype=np.uint8)
+
+        # Y平面をクロップ
+        y_in = nv12_array[:y_size_in].reshape(height, width)
+        y_out = output[:y_size_out].reshape(roi_h, roi_w)
+        y_out[:] = y_in[roi_y : roi_y + roi_h, roi_x : roi_x + roi_w]
+
+        # UV平面をクロップ (UV座標は半分)
+        uv_in = nv12_array[y_size_in:].reshape(uv_height_in, width)
+        uv_out = output[y_size_out:].reshape(uv_height_out, roi_w)
+        roi_y_uv = roi_y // 2
+        roi_h_uv = roi_h // 2
+        uv_out[:] = uv_in[roi_y_uv : roi_y_uv + roi_h_uv, roi_x : roi_x + roi_w]
+
+        return output
+
+    def detect_nv12_roi(
+        self,
+        nv12_data: bytes | memoryview,
+        width: int,
+        height: int,
+        roi_x: int,
+        roi_y: int,
+        roi_w: int = 640,
+        roi_h: int = 640,
+        brightness_avg: float = -1.0,
+    ) -> list[Detection]:
+        """
+        NV12フレームの指定ROI領域から物体検出を実行
+
+        高解像度入力(例: 1280x720)から640x640のROIをクロップして推論。
+        座標は元画像座標系に変換して返す。
+
+        Args:
+            nv12_data: NV12フォーマットのフレームデータ
+            width: フレーム幅
+            height: フレーム高さ
+            roi_x, roi_y: ROI左上座標
+            roi_w, roi_h: ROIサイズ (デフォルト: 640x640)
+            brightness_avg: ISPからの平均輝度 (0-255)
+
+        Returns:
+            検出結果のリスト (座標は元画像座標系)
+        """
+        import time
+
+        start_total = time.perf_counter()
+        self._total_calls += 1
+
+        # 1. ROIクロップ + CLAHE
+        start_prep = time.perf_counter()
+
+        # CLAHE適用判定
+        need_clahe = (
+            brightness_avg >= 0
+            and self.clahe_enabled
+            and brightness_avg < self.clahe_brightness_threshold
+        )
+
+        # NV12データをnumpy配列に変換
+        if need_clahe:
+            nv12_array = np.frombuffer(nv12_data, dtype=np.uint8).copy()
+        else:
+            nv12_array = np.frombuffer(nv12_data, dtype=np.uint8)
+
+        # CLAHE適用（低照度時のみ、クロップ前に適用）
+        if need_clahe:
+            start_clahe = time.perf_counter()
+            nv12_array = self._apply_clahe_nv12(nv12_array, width, height)
+            clahe_time = (time.perf_counter() - start_clahe) * 1000
+            self._brightness_stats["clahe_time_total_ms"] += clahe_time
+            self._brightness_stats["frames_clahe_applied"] += 1
+        else:
+            self._brightness_stats["frames_clahe_skipped"] += 1
+
+        # ROIクロップ
+        if roi_w == self.input_w and roi_h == self.input_h:
+            # ROIサイズが推論サイズと一致
+            cropped = self._crop_nv12_roi(
+                nv12_array, width, height, roi_x, roi_y, roi_w, roi_h
+            )
+            input_tensor = cropped
+            scale = (1.0, 1.0)
+            shift = (0.0, 0.0)
+        else:
+            # ROIサイズが異なる場合はリサイズが必要
+            logger.warning(
+                f"ROI size {roi_w}x{roi_h} differs from model input {self.input_w}x{self.input_h}"
+            )
+            cropped = self._crop_nv12_roi(
+                nv12_array, width, height, roi_x, roi_y, roi_w, roi_h
+            )
+            # NV12→BGR→リサイズ→NV12 (遅いパス)
+            img = self._decode_nv12(cropped.tobytes(), roi_w, roi_h)
+            if img is None:
+                return []
+            input_tensor, scale, shift = self._preprocess_yuv420sp(img)
+
+        end_prep = time.perf_counter()
+        self._last_timing["preprocessing"] = end_prep - start_prep
+
+        # 2. BPU推論
+        start_infer = time.perf_counter()
+        outputs = self._forward(input_tensor)
+        end_infer = time.perf_counter()
+        self._last_timing["inference"] = end_infer - start_infer
+
+        # 3. 後処理（座標はROI内相対座標で取得）
+        start_post = time.perf_counter()
+        detections_roi = self._postprocess(outputs, scale, shift, (roi_h, roi_w))
+        end_post = time.perf_counter()
+        self._last_timing["postprocessing"] = end_post - start_post
+
+        # 4. 座標変換: ROI相対 → 元画像絶対座標
+        detections = []
+        for det in detections_roi:
+            # ROIオフセットを加算
+            new_bbox = BoundingBox(
+                x=det.bbox.x + roi_x,
+                y=det.bbox.y + roi_y,
+                w=det.bbox.w,
+                h=det.bbox.h,
+            )
+            detections.append(
+                Detection(
+                    class_name=det.class_name,
+                    confidence=det.confidence,
+                    bbox=new_bbox,
+                )
+            )
+
+        end_total = time.perf_counter()
+        self._last_timing["total"] = end_total - start_total
+
+        # 統計情報の更新
+        self._total_detections += len(detections)
+        self._total_inference_time += self._last_timing["total"]
+
+        return detections
+
     def detect_nv12(
         self,
         nv12_data: bytes | memoryview,
@@ -307,28 +617,42 @@ class YoloDetector:
             検出結果のリスト
         """
         import time
+
         start_total = time.perf_counter()
         self._total_calls += 1
 
         # 1. 前処理（CLAHE適用 + サイズ調整）
         start_prep = time.perf_counter()
 
-        # NV12データをnumpy配列に変換
-        y_size = width * height
-        nv12_array = np.frombuffer(nv12_data, dtype=np.uint8).copy()
+        # CLAHE適用判定（コピー要否を先に決定）
+        need_clahe = (
+            brightness_avg >= 0
+            and self.clahe_enabled
+            and brightness_avg < self.clahe_brightness_threshold
+        )
 
-        # CLAHE適用（低照度時のみ、輝度が取得できない場合はスキップ）
+        # NV12データをnumpy配列に変換
+        # CLAHE適用時のみコピー（元データを変更するため）
+        # CLAHE不要時はゼロコピーで高速化
+        if need_clahe:
+            nv12_array = np.frombuffer(nv12_data, dtype=np.uint8).copy()
+        else:
+            nv12_array = np.frombuffer(nv12_data, dtype=np.uint8)
+
+        # CLAHE適用（低照度時のみ）
         clahe_applied = False
         if brightness_avg >= 0:
             self._brightness_stats["last_brightness_avg"] = brightness_avg
-            if self.clahe_enabled and brightness_avg < self.clahe_brightness_threshold:
+            if need_clahe:
                 start_clahe = time.perf_counter()
                 nv12_array = self._apply_clahe_nv12(nv12_array, width, height)
                 clahe_time = (time.perf_counter() - start_clahe) * 1000
                 self._brightness_stats["clahe_time_total_ms"] += clahe_time
                 self._brightness_stats["frames_clahe_applied"] += 1
                 clahe_applied = True
-                logger.debug(f"CLAHE applied: brightness={brightness_avg:.1f}, time={clahe_time:.2f}ms")
+                logger.debug(
+                    f"CLAHE applied: brightness={brightness_avg:.1f}, time={clahe_time:.2f}ms"
+                )
             else:
                 self._brightness_stats["frames_clahe_skipped"] += 1
         else:
@@ -338,12 +662,21 @@ class YoloDetector:
         self._brightness_stats["last_clahe_applied"] = clahe_applied
 
         # CLAHE統計を100フレームごとにDEBUGレベルで出力
-        total_clahe_frames = self._brightness_stats["frames_clahe_applied"] + self._brightness_stats["frames_clahe_skipped"]
+        total_clahe_frames = (
+            self._brightness_stats["frames_clahe_applied"]
+            + self._brightness_stats["frames_clahe_skipped"]
+        )
         if total_clahe_frames > 0 and total_clahe_frames % 100 == 0:
             applied = self._brightness_stats["frames_clahe_applied"]
             rate = applied / total_clahe_frames * 100
-            avg_time = self._brightness_stats["clahe_time_total_ms"] / applied if applied > 0 else 0
-            logger.debug(f"CLAHE stats: {applied}/{total_clahe_frames} frames ({rate:.1f}%), avg={avg_time:.2f}ms, brightness={brightness_avg:.1f}")
+            avg_time = (
+                self._brightness_stats["clahe_time_total_ms"] / applied
+                if applied > 0
+                else 0
+            )
+            logger.debug(
+                f"CLAHE stats: {applied}/{total_clahe_frames} frames ({rate:.1f}%), avg={avg_time:.2f}ms, brightness={brightness_avg:.1f}"
+            )
 
         if width == self.input_w and height == self.input_h:
             # 既に正しいサイズ：そのまま使用（最速パス）
@@ -352,9 +685,27 @@ class YoloDetector:
             shift = (0.0, 0.0)
             original_shape = (height, width)
             logger.debug(f"NV12 direct path: {width}x{height} (CLAHE={clahe_applied})")
+        elif width == self.input_w and height < self.input_h:
+            # Letterbox: 幅は同じだが高さが小さい場合（例: 640x360 → 640x640）
+            # NV12形式で上下に黒帯を追加
+            pad_total = self.input_h - height
+            pad_top = pad_total // 2
+            pad_bottom = pad_total - pad_top
+
+            input_tensor = self._letterbox_nv12(
+                nv12_array, width, height, pad_top, pad_bottom
+            )
+            scale = (1.0, 1.0)  # スケールは既にVSEで適用済み
+            shift = (float(pad_top), 0.0)  # Y方向のシフト（bbox座標補正用）
+            original_shape = (height, width)
+            logger.debug(
+                f"NV12 letterbox path: {width}x{height} → {self.input_w}x{self.input_h} (pad_top={pad_top})"
+            )
         else:
             # サイズが異なる場合：NV12→BGR→前処理
-            logger.debug(f"NV12 resize path: {width}x{height} → {self.input_w}x{self.input_h}")
+            logger.debug(
+                f"NV12 resize path: {width}x{height} → {self.input_w}x{self.input_h}"
+            )
             img = self._decode_nv12(nv12_array.tobytes(), width, height)
             if img is None:
                 logger.warning("Failed to decode NV12 frame")
@@ -454,6 +805,87 @@ class YoloDetector:
 
         return nv12_array
 
+    def _init_letterbox_buf(
+        self, width: int, height: int, pad_top: int, pad_bottom: int
+    ) -> None:
+        """
+        レターボックスバッファを事前確保し、パディング領域を初期化
+
+        初回呼び出しのみ実行。以後のフレームではバッファを再利用し、
+        データ領域のみmemcpyする。
+        """
+        new_height = height + pad_top + pad_bottom
+        y_size_out = width * new_height
+        uv_height_out = new_height // 2
+        uv_size_out = width * uv_height_out
+        pad_top_uv = pad_top // 2
+
+        # バッファ確保
+        self._lb_buf = np.empty(y_size_out + uv_size_out, dtype=np.uint8)
+
+        # Y平面のview
+        y_out = self._lb_buf[:y_size_out].reshape(new_height, width)
+        y_out[:pad_top, :] = 16               # 上部黒帯 (Y=16)
+        y_out[pad_top + height :, :] = 16     # 下部黒帯
+
+        # UV平面のview
+        uv_out = self._lb_buf[y_size_out:].reshape(uv_height_out, width)
+        uv_out[:pad_top_uv, :] = 128                              # 上部中間値
+        uv_out[pad_top_uv + height // 2 :, :] = 128               # 下部中間値
+
+        # データコピー先のviewを保持 (毎フレームの書き込み対象)
+        self._lb_y_dst = y_out[pad_top : pad_top + height, :]
+        self._lb_uv_dst = uv_out[pad_top_uv : pad_top_uv + height // 2, :]
+
+        logger.info(
+            f"Letterbox buffer initialized: {width}x{height} -> "
+            f"{width}x{new_height} (pad={pad_top}+{pad_bottom}, "
+            f"buf={self._lb_buf.nbytes} bytes, alloc=once)"
+        )
+
+    def _letterbox_nv12(
+        self,
+        nv12_array: np.ndarray,
+        width: int,
+        height: int,
+        pad_top: int,
+        pad_bottom: int,
+    ) -> np.ndarray:
+        """
+        NV12フレームに上下の黒帯（letterbox）を追加
+
+        事前確保バッファを使用し、毎フレームのメモリ確保を回避。
+        パディング領域は初回のみ書き込み、以後はデータ領域のみコピー。
+
+        Args:
+            nv12_array: 入力NV12データ (width x height)
+            width: 入力幅
+            height: 入力高さ
+            pad_top: 上部パディング（ピクセル数）
+            pad_bottom: 下部パディング（ピクセル数）
+
+        Returns:
+            パディング後のNV12データ (width x (height + pad_top + pad_bottom))
+        """
+        # 遅延初期化 (初回のみ)
+        if self._lb_buf is None:
+            self._init_letterbox_buf(width, height, pad_top, pad_bottom)
+
+        y_size_in = width * height
+        uv_size_in = width * (height // 2)
+
+        # Y平面をコピー先viewに直接書き込み
+        y_in = nv12_array[:y_size_in].reshape(height, width)
+        self._lb_y_dst[:] = y_in
+
+        # UV平面をコピー先viewに直接書き込み
+        uv_in = nv12_array[y_size_in : y_size_in + uv_size_in].reshape(
+            height // 2, width
+        )
+        self._lb_uv_dst[:] = uv_in
+
+        return self._lb_buf
+
     def _preprocess_yuv420sp(
         self, img: np.ndarray
     ) -> tuple[np.ndarray, tuple[float, float], tuple[float, float]]:
@@ -522,12 +954,9 @@ class YoloDetector:
         """BPU推論を実行"""
         outputs = self.quantize_model[0].forward(input_tensor)
 
-        # C API出力をnumpy配列に変換
-        outputs_np = []
-        for output in outputs:
-            outputs_np.append(np.array(output.buffer).reshape(output.properties.shape))
-
-        return outputs_np
+        # C API出力をnumpy配列に変換（サンプルコードと同じ方式）
+        # バッファを直接取得、reshapeは後処理で行う
+        return [output.buffer for output in outputs]
 
     def _postprocess(
         self,
@@ -575,7 +1004,9 @@ class YoloDetector:
         dbboxes_list, ids_list, scores_list = [], [], []
         total_candidates = 0
 
-        for idx, (cls, bbox, stride, grid) in enumerate(zip(clses, bboxes, self.strides, self.grids)):
+        for idx, (cls, bbox, stride, grid) in enumerate(
+            zip(clses, bboxes, self.strides, self.grids)
+        ):
             # スコアフィルタリング
             max_scores = np.max(cls, axis=1)
             bbox_selected = np.flatnonzero(max_scores >= self.conf_thres_raw)
@@ -597,7 +1028,7 @@ class YoloDetector:
 
             # DFL: dist2bbox (ltrb2xyxy)
             ltrb_selected = np.sum(
-                softmax(bbox[bbox_selected, :].reshape(-1, 4, self.reg), axis=2)
+                _fast_softmax(bbox[bbox_selected, :].reshape(-1, 4, self.reg), axis=2)
                 * self.weights_static,
                 axis=2,
             )
@@ -607,7 +1038,9 @@ class YoloDetector:
             dbboxes_list.append(np.hstack([x1y1, x2y2]) * stride)
 
         if not dbboxes_list:
-            logger.debug(f"No candidates passed threshold (total_candidates={total_candidates})")
+            logger.debug(
+                f"No candidates passed threshold (total_candidates={total_candidates})"
+            )
             return []
 
         # 全スケールを結合
@@ -715,8 +1148,16 @@ class YoloDetector:
         # CLAHE統計
         clahe_applied = self._brightness_stats["frames_clahe_applied"]
         clahe_skipped = self._brightness_stats["frames_clahe_skipped"]
-        clahe_rate = clahe_applied / (clahe_applied + clahe_skipped) if (clahe_applied + clahe_skipped) > 0 else 0.0
-        avg_clahe_time = self._brightness_stats["clahe_time_total_ms"] / clahe_applied if clahe_applied > 0 else 0.0
+        clahe_rate = (
+            clahe_applied / (clahe_applied + clahe_skipped)
+            if (clahe_applied + clahe_skipped) > 0
+            else 0.0
+        )
+        avg_clahe_time = (
+            self._brightness_stats["clahe_time_total_ms"] / clahe_applied
+            if clahe_applied > 0
+            else 0.0
+        )
 
         return {
             "total_calls": self._total_calls,

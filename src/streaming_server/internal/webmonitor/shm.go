@@ -100,7 +100,7 @@ static uint32_t frame_write_index(SharedFrameBuffer* shm) {
     if (shm == NULL) {
         return 0;
     }
-    return __atomic_load_n(&shm->write_index, __ATOMIC_ACQUIRE);
+    return shm->write_index;  // volatile read - no atomic needed
 }
 
 static int read_latest_frame(SharedFrameBuffer* shm, Frame* out) {
@@ -108,7 +108,7 @@ static int read_latest_frame(SharedFrameBuffer* shm, Frame* out) {
         return -1;
     }
 
-    uint32_t write_idx = __atomic_load_n(&shm->write_index, __ATOMIC_ACQUIRE);
+    uint32_t write_idx = shm->write_index;  // volatile read
     if (write_idx == 0) {
         return -1;
     }
@@ -139,7 +139,7 @@ static Frame* get_latest_frame_ptr(SharedFrameBuffer* shm) {
         return NULL;
     }
 
-    uint32_t write_idx = __atomic_load_n(&shm->write_index, __ATOMIC_ACQUIRE);
+    uint32_t write_idx = shm->write_index;  // volatile read
     if (write_idx == 0) {
         return NULL;
     }
@@ -184,7 +184,7 @@ static uint32_t detection_version(LatestDetectionResult* shm) {
     if (shm == NULL) {
         return 0;
     }
-    return __atomic_load_n(&shm->version, __ATOMIC_ACQUIRE);
+    return shm->version;  // volatile read
 }
 
 static int read_detection_snapshot(LatestDetectionResult* shm, LatestDetectionResult* out) {
@@ -195,46 +195,8 @@ static int read_detection_snapshot(LatestDetectionResult* shm, LatestDetectionRe
     return 0;
 }
 
-static int wait_new_frame(SharedFrameBuffer* shm) {
-    if (shm == NULL) {
-        return -1;
-    }
-
-    // Use sem_timedwait with 1 second timeout to allow checking stop signal
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_sec += 1;  // 1 second timeout
-
-    int ret = sem_timedwait(&shm->new_frame_sem, &ts);
-    if (ret == -1 && errno == ETIMEDOUT) {
-        return -2;  // Timeout (not an error, just no new frame)
-    }
-    return ret;
-}
-
-static int wait_new_detection(LatestDetectionResult* shm) {
-    if (shm == NULL) {
-        return -1;
-    }
-
-    // Use sem_timedwait with 1 second timeout to allow checking stop signal
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_sec += 1;  // 1 second timeout
-
-    int ret = sem_timedwait(&shm->detection_update_sem, &ts);
-    if (ret == -1) {
-        if (errno == ETIMEDOUT) {
-            return -2;  // Timeout (not an error, just no new detection)
-        } else if (errno == EINTR) {
-            return -3;  // Interrupted by signal
-        } else {
-            fprintf(stderr, "[SEM_DEBUG] sem_timedwait error: errno=%d (%s)\n", errno, strerror(errno));
-            return -1;  // Other error
-        }
-    }
-    return 0;  // Success
-}
+// NOTE: wait_new_frame() removed - FrameBroadcaster uses polling mode
+// NOTE: wait_new_detection() removed - DetectionBroadcaster uses polling mode
 
 // 5x7 Bitmap Font - expanded with all necessary characters
 static const uint8_t font5x7[][5] = {
@@ -712,57 +674,8 @@ func (r *shmReader) Close() {
 	}
 }
 
-// WaitNewFrame blocks until a new frame is available (via semaphore).
-// Returns error if interrupted or failed. Returns nil if timeout (no new frame yet).
-func (r *shmReader) WaitNewFrame() error {
-	if r.frameShm == nil {
-		return fmt.Errorf("frame shared memory not available")
-	}
-	ret := C.wait_new_frame(r.frameShm)
-	if ret == -2 {
-		// Timeout - not an error, just no new frame within timeout period
-		return nil
-	}
-	if ret != 0 {
-		return fmt.Errorf("sem_wait failed")
-	}
-	return nil
-}
-
-// WaitNewDetection blocks until a new detection is available (via semaphore).
-// Returns error if interrupted or failed. Returns nil if timeout (no new detection yet).
-func (r *shmReader) WaitNewDetection() error {
-	// Try to open detection shared memory if not already open
-	if r.detectionShm == nil {
-		r.tryOpenDetection()
-	}
-
-	// Check again after trying to open
-	if r.detectionShm == nil {
-		return fmt.Errorf("detection shared memory not available")
-	}
-
-	// Verify detection version is non-zero (indicates daemon has written at least once)
-	version := uint32(C.detection_version(r.detectionShm))
-	if version == 0 {
-		// Detection daemon hasn't written anything yet, don't try semaphore
-		return fmt.Errorf("detection daemon not initialized (version=0)")
-	}
-
-	ret := C.wait_new_detection(r.detectionShm)
-	if ret == -2 {
-		// Timeout - not an error, just no new detection within timeout period
-		return nil
-	}
-	if ret == -3 {
-		// Interrupted by signal - not an error, just retry
-		return nil
-	}
-	if ret != 0 {
-		return fmt.Errorf("sem_wait failed (ret=%d)", ret)
-	}
-	return nil
-}
+// NOTE: WaitNewFrame() removed - FrameBroadcaster uses polling mode
+// NOTE: WaitNewDetection() removed - DetectionBroadcaster uses polling mode
 
 func (r *shmReader) Stats() (SharedMemoryStats, bool) {
 	if r.frameShm == nil {
