@@ -221,8 +221,8 @@ int vio_create(vio_context_t *ctx, int camera_index,
         .bit_width = 8,
     };
 
-    // Channel 1: YOLO input (1280x720 for ROI-based detection)
-    // High resolution input allows 640x640 ROI crops without quality loss
+    // Channel 1: YOLO input (640x360, 16:9 aspect ratio preserved)
+    // Hardware scaling from sensor resolution, letterbox to 640x640 in software
     vse_ochn_attr_t vse_ochn_attr_ch1 = {
         .chn_en = CAM_TRUE,
         .roi = {
@@ -231,8 +231,8 @@ int vio_create(vio_context_t *ctx, int camera_index,
             .w = ctx->sensor_width,
             .h = ctx->sensor_height,
         },
-        .target_w = 1280,
-        .target_h = 720,
+        .target_w = 640,
+        .target_h = 360,
         .fmt = FRM_FMT_NV12,
         .bit_width = 8,
     };
