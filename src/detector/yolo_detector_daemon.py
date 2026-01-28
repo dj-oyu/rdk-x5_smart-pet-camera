@@ -311,6 +311,14 @@ class YoloDetectorDaemon:
                 self.stats["total_detections"] += len(detections)
                 self.stats["avg_inference_time_ms"] = timing["total"] * 1000
 
+                # Periodic stats log (every 100 frames)
+                if self.stats["frames_processed"] % 100 == 0:
+                    logger.info(
+                        f"Stats: {self.stats['frames_processed']} frames, "
+                        f"{self.stats['total_detections']} total detections, "
+                        f"avg inference: {self.stats['avg_inference_time_ms']:.1f}ms"
+                    )
+
                 # Debug logging
                 if is_debug:
                     loop_end = time_module.perf_counter()
