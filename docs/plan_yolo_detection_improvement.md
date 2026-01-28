@@ -44,8 +44,8 @@
 | ファイル | `/tmp/yolo_models/yolo11n_detect_bayese_640x640_nv12.bin` |
 | 入力 | `images`: (1, 3, 640, 640) uint8 NV12, 614400 bytes |
 | 出力 | 6ヘッド (split-head YOLO), 全て float32 NHWC |
-| BPU推論 | **~8.9 ms** avg (warm), 112 FPS |
-| Python API 込み | ~9.5 ms avg |
+| BPU推論 (ベンチマーク) | ~8.9 ms avg (warm), 112 FPS |
+| **実運用時** | **16-20 ms** avg (zero-copy + letterbox + 後処理込み) |
 
 ### モデル比較 (Phase 0 計測値)
 
