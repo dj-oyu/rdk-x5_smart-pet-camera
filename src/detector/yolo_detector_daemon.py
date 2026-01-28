@@ -101,6 +101,10 @@ class YoloDetectorDaemon:
         self.roi_index: int = 0  # Current ROI index for round-robin
         self.roi_enabled: bool = False  # ROI mode disabled (640x360 letterbox)
 
+        # Night camera ROI mode (1280x720 with 3 overlapping ROIs)
+        self.night_roi_mode: bool = False  # Enabled only for camera_id=1
+        self.night_roi_regions: list[tuple[int, int, int, int]] = []  # 3 ROIs for 720p
+
         # Detection result cache for temporal integration
         self.detection_cache: list[list[dict]] = []  # [roi_0_dets, roi_1_dets, ...]
         self.cache_frame_number: int = -1  # Frame number when cache started
@@ -288,6 +292,68 @@ class YoloDetectorDaemon:
 
         return result
 
+    def _merge_night_roi_detections(
+        self, all_detections: list[dict], nms_threshold: float = 0.4
+    ) -> list[dict]:
+        """
+        夜カメラ3列ROIからの検出結果を統合（オーバーラップ領域のNMS）
+
+        Args:
+            all_detections: 全ROIからの検出結果リスト（スケール後座標）
+            nms_threshold: NMS IoU閾値（0.4推奨 - オーバーラップ領域用）
+
+        Returns:
+            統合・重複除去後の検出結果
+        """
+        import cv2
+
+        if not all_detections:
+            return []
+
+        # Step 1: 2つの境界でマージ (x=320, x=640のスケール後座標)
+        # 夜カメラ1280x720 → 出力1920x1080の場合: scale_x = 1.5
+        boundary1_x = int(320 * (self.scale_x or 1.0))  # ROI0/ROI1境界
+        boundary2_x = int(640 * (self.scale_x or 1.0))  # ROI1/ROI2境界
+
+        all_detections = self._merge_boundary_bboxes(all_detections, boundary1_x, margin=50)
+        all_detections = self._merge_boundary_bboxes(all_detections, boundary2_x, margin=50)
+
+        # Step 2: クラス別NMSで重複除去
+        by_class: dict[str, list[dict]] = {}
+        for det in all_detections:
+            cls = det["class_name"]
+            if cls not in by_class:
+                by_class[cls] = []
+            by_class[cls].append(det)
+
+        merged = []
+        for cls, dets in by_class.items():
+            if len(dets) == 1:
+                merged.extend(dets)
+                continue
+
+            # NMS用にxywh形式で準備
+            boxes = []
+            scores = []
+            for det in dets:
+                b = det["bbox"]
+                boxes.append([b["x"], b["y"], b["w"], b["h"]])
+                scores.append(det["confidence"])
+
+            # OpenCV NMS
+            indices = cv2.dnn.NMSBoxes(boxes, scores, 0.0, nms_threshold)
+
+            if len(indices) < len(dets):
+                logger.debug(
+                    f"  Night ROI NMS [{cls}]: {len(dets)} -> {len(indices)} "
+                    f"(removed {len(dets) - len(indices)}, IoU threshold={nms_threshold})"
+                )
+
+            for idx in indices:
+                merged.append(dets[idx])
+
+        return merged
+
     def _merge_detections_with_nms(
         self, all_detections: list[dict], nms_threshold: float = 0.5
     ) -> list[dict]:
@@ -459,31 +525,64 @@ class YoloDetectorDaemon:
                 # Initialize ROI regions on first frame
                 if self.stats["frames_processed"] == 0:
                     logger.info(
-                        f"YOLO input: {frame_width}x{frame_height}, data_len={len(nv12_data)}"
+                        f"YOLO input: {frame_width}x{frame_height}, data_len={len(nv12_data)}, camera_id={zc_frame.camera_id}"
                     )
 
-                    # Get ROI regions for this resolution
-                    self.roi_regions = self.detector.get_roi_regions(
-                        frame_width, frame_height
-                    )
-
-                    if len(self.roi_regions) > 1:
+                    # Night camera (camera_id=1) with 1280x720: enable ROI mode
+                    if zc_frame.camera_id == 1 and frame_width == 1280 and frame_height == 720:
+                        self.night_roi_mode = True
+                        self.night_roi_regions = self.detector.get_roi_regions_720p()
                         logger.info(
-                            f"ROI mode enabled: {len(self.roi_regions)} regions "
-                            f"(full coverage every {len(self.roi_regions)} frames)"
+                            f"Night camera ROI mode enabled: {len(self.night_roi_regions)} regions "
+                            f"(50% overlap, stride=320px)"
                         )
-                        for i, (rx, ry, rw, rh) in enumerate(self.roi_regions):
+                        for i, (rx, ry, rw, rh) in enumerate(self.night_roi_regions):
                             logger.info(f"  ROI {i}: ({rx}, {ry}) - ({rx+rw}, {ry+rh})")
-                        # Initialize detection cache
-                        self.detection_cache = [[] for _ in self.roi_regions]
-                        logger.info("Detection cache initialized for temporal integration")
+                        # Initialize detection cache for 3 ROIs
+                        self.detection_cache = [[] for _ in self.night_roi_regions]
+                        self.roi_index = 0
+                        logger.info("Detection cache initialized for night camera ROI")
                     else:
-                        logger.info("ROI mode disabled: single region covers full frame")
-                        self.roi_enabled = False
+                        # Day camera or other resolutions: use original logic
+                        self.night_roi_mode = False
+                        self.roi_regions = self.detector.get_roi_regions(
+                            frame_width, frame_height
+                        )
+
+                        if len(self.roi_regions) > 1:
+                            logger.info(
+                                f"ROI mode enabled: {len(self.roi_regions)} regions "
+                                f"(full coverage every {len(self.roi_regions)} frames)"
+                            )
+                            for i, (rx, ry, rw, rh) in enumerate(self.roi_regions):
+                                logger.info(f"  ROI {i}: ({rx}, {ry}) - ({rx+rw}, {ry+rh})")
+                            # Initialize detection cache
+                            self.detection_cache = [[] for _ in self.roi_regions]
+                            logger.info("Detection cache initialized for temporal integration")
+                        else:
+                            logger.info("ROI mode disabled: single region covers full frame")
+                            self.roi_enabled = False
 
                 # Run YOLO inference
-                if self.roi_enabled and len(self.roi_regions) > 1:
-                    # ROI mode: cycle through regions
+                if self.night_roi_mode and len(self.night_roi_regions) > 0:
+                    # Night camera ROI mode: cycle through 3 overlapping regions
+                    current_roi = self.roi_index
+                    detections = self.detector.detect_nv12_roi_720p(
+                        nv12_data=nv12_data,
+                        roi_index=current_roi,
+                        brightness_avg=brightness_avg,
+                    )
+
+                    # Track cache start for first ROI
+                    if current_roi == 0:
+                        self.cache_frame_number = frame_number
+                        self.cache_timestamp = timestamp_sec
+
+                    # Advance to next ROI for next frame
+                    self.roi_index = (self.roi_index + 1) % len(self.night_roi_regions)
+                    cycle_complete = (self.roi_index == 0)
+                elif self.roi_enabled and len(self.roi_regions) > 1:
+                    # Day camera ROI mode: cycle through regions
                     current_roi = self.roi_index
                     roi_x, roi_y, roi_w, roi_h = self.roi_regions[current_roi]
                     detections = self.detector.detect_nv12_roi(
@@ -537,8 +636,51 @@ class YoloDetectorDaemon:
                     for det in detections
                 ]
 
-                # ROI mode: accumulate and merge detections
-                if self.roi_enabled and len(self.roi_regions) > 1:
+                # Night camera ROI mode: accumulate and merge detections
+                if self.night_roi_mode and len(self.night_roi_regions) > 0:
+                    # Store detections in cache for this ROI
+                    self.detection_cache[current_roi] = detection_dicts
+
+                    if cycle_complete:
+                        # Merge all ROI detections with NMS (using lower threshold for overlap)
+                        all_detections = []
+                        for roi_idx, roi_dets in enumerate(self.detection_cache):
+                            all_detections.extend(roi_dets)
+                            if roi_dets and is_debug:
+                                classes = [d["class_name"] for d in roi_dets]
+                                logger.debug(f"  Night ROI {roi_idx}: {classes}")
+
+                        if is_debug and all_detections:
+                            logger.debug(
+                                f"  Night camera: {len(all_detections)} detections before merge"
+                            )
+
+                        # Use specialized merge for night camera (handles 2 boundaries)
+                        merged_dicts = self._merge_night_roi_detections(
+                            all_detections, nms_threshold=0.4
+                        )
+
+                        if is_debug and all_detections:
+                            logger.debug(
+                                f"  Night camera: {len(merged_dicts)} detections after merge"
+                            )
+
+                        # Write merged results
+                        if merged_dicts:
+                            self.shm_main.write_detection_result(
+                                frame_number=self.cache_frame_number,
+                                timestamp_sec=self.cache_timestamp,
+                                detections=merged_dicts,
+                            )
+
+                        # Clear cache for next cycle
+                        self.detection_cache = [[] for _ in self.night_roi_regions]
+
+                        # Use merged results for stats/logging
+                        detection_dicts = merged_dicts
+
+                # Day camera ROI mode: accumulate and merge detections
+                elif self.roi_enabled and len(self.roi_regions) > 1:
                     # Store detections in cache for this ROI
                     self.detection_cache[current_roi] = detection_dicts
 
@@ -593,7 +735,10 @@ class YoloDetectorDaemon:
                 self.stats["avg_inference_time_ms"] = timing["total"] * 1000
 
                 # In ROI mode, count merged detections only at cycle completion
-                if self.roi_enabled and len(self.roi_regions) > 1:
+                if self.night_roi_mode and len(self.night_roi_regions) > 0:
+                    if cycle_complete:
+                        self.stats["total_detections"] += len(detection_dicts)
+                elif self.roi_enabled and len(self.roi_regions) > 1:
                     if cycle_complete:
                         self.stats["total_detections"] += len(detection_dicts)
                 else:
@@ -617,7 +762,7 @@ class YoloDetectorDaemon:
                         f"Frame #{self.stats['frames_processed']}{roi_info}: "
                         f"{len(detections)} raw detections {raw_classes if raw_classes else '(none)'}"
                     )
-                    if cycle_complete and self.roi_enabled and detection_dicts:
+                    if cycle_complete and (self.night_roi_mode or self.roi_enabled) and detection_dicts:
                         merged_classes = [d["class_name"] for d in detection_dicts]
                         logger.debug(
                             f"  -> Merged: {len(detection_dicts)} detections {merged_classes}"
@@ -631,7 +776,12 @@ class YoloDetectorDaemon:
                     logger.debug(f"  Loop: {time_loop:.1f}ms")
                 elif cycle_complete and detection_dicts:
                     classes = [d["class_name"] for d in detection_dicts]
-                    if self.roi_enabled and len(self.roi_regions) > 1:
+                    if self.night_roi_mode:
+                        logger.info(
+                            f"Frame #{self.stats['frames_processed']} [night-roi]: "
+                            f"{len(detection_dicts)} detections {classes}"
+                        )
+                    elif self.roi_enabled and len(self.roi_regions) > 1:
                         logger.info(
                             f"Frame #{self.stats['frames_processed']} [merged]: "
                             f"{len(detection_dicts)} detections {classes}"

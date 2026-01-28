@@ -389,12 +389,17 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       ret = vio_get_frame_ch1(&pipeline->vio, &yolo_frame, 10);
       if (ret == 0) {
         // Build zero-copy frame metadata
+        // VSE Ch1 resolution depends on camera:
+        // - Day camera (index 0): 640x360
+        // - Night camera (index 1): 1280x720 (for ROI-based detection)
+        int yolo_width = (pipeline->camera_index == 1) ? 1280 : 640;
+        int yolo_height = (pipeline->camera_index == 1) ? 720 : 360;
         ZeroCopyFrame zc_frame = {0};
         zc_frame.frame_number = frame_count;
         zc_frame.timestamp = frame_timestamp;
         zc_frame.camera_id = pipeline->camera_index;
-        zc_frame.width = 640;   // VSE Ch1 configured for 640x360
-        zc_frame.height = 360;
+        zc_frame.width = yolo_width;
+        zc_frame.height = yolo_height;
         zc_frame.format = 1;    // NV12
         zc_frame.brightness_avg = brightness_result.brightness_avg;
         zc_frame.correction_applied = 0;
