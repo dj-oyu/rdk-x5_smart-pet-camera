@@ -376,6 +376,11 @@ class YoloDetector:
         """
         指定サイズの画像に対するROI領域を計算
 
+        3パターン巡回方式でデッドゾーンを解消:
+        - パターン0 (上寄せ): y=0
+        - パターン1 (中央): y=40
+        - パターン2 (下寄せ): y=80
+
         Args:
             width: 入力画像幅
             height: 入力画像高さ
@@ -383,18 +388,18 @@ class YoloDetector:
         Returns:
             ROI領域のリスト [(x, y, w, h), ...]
             各ROIは640x640サイズ
+            1280x720の場合: 6 ROIs (3パターン × 2左右)
         """
         roi_size = self.input_w  # 640
         rois = []
 
         if width == 1280 and height == 720:
-            # 1280x720: 2 ROIs (横2分割, 縦は80px overlap)
-            # 720 - 640 = 80px → 上下40pxずつパディング相当
-            y_offset = (height - roi_size) // 2  # 40
-            rois = [
-                (0, y_offset, roi_size, roi_size),  # 左
-                (width - roi_size, y_offset, roi_size, roi_size),  # 右
-            ]
+            # 1280x720: 6 ROIs (3パターン × 2左右)
+            # パターン巡回でデッドゾーンを解消
+            y_offsets = [0, 40, 80]  # 上寄せ, 中央, 下寄せ
+            for y_offset in y_offsets:
+                rois.append((0, y_offset, roi_size, roi_size))  # 左
+                rois.append((width - roi_size, y_offset, roi_size, roi_size))  # 右
         elif width == 1920 and height == 1080:
             # 1920x1080: 6 ROIs (3x2グリッド, オーバーラップあり)
             x_step = (width - roi_size) // 2  # 640
