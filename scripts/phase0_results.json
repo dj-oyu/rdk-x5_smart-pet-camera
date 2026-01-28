@@ -1,0 +1,47 @@
+{
+  "core_verification": {
+    "core_0": {
+      "status": "OK",
+      "latency_ms": 48.84
+    },
+    "core_1": {
+      "status": "OK",
+      "latency_ms": 46.68
+    },
+    "core_2": {
+      "status": "ERROR",
+      "error": "<built-in method forward of dnnpy.Model object at 0xffff7ff236a0> returned a result with an exception set"
+    }
+  },
+  "api_comparison": {
+    "hobot_dnn": {
+      "model": "yolov13n",
+      "avg_ms": 46.25,
+      "std_ms": 0.12,
+      "min_ms": 46.03,
+      "max_ms": 46.53
+    },
+    "bpu_infer_lib": {
+      "status": "ERROR",
+      "error": "__init__(): incompatible constructor arguments. The following argument types are supported:\n    1. bpu_infer_lib.bpu_infer_lib.Infer(arg0: bool)\n\nInvoked with: "
+    },
+    "hobot_dnn_yolo11n": {
+      "model": "yolo11n",
+      "avg_ms": 9.5,
+      "std_ms": 0.11,
+      "min_ms": 9.31,
+      "max_ms": 9.75
+    },
+    "hobot_dnn_yolov8n": {
+      "model": "yolov8n",
+      "avg_ms": 8.18,
+      "std_ms": 0.1,
+      "min_ms": 8.01,
+      "max_ms": 8.43
+    }
+  },
+  "detection_baseline": {
+    "status": "SKIPPED",
+    "reason": "no test image"
+  }
+}

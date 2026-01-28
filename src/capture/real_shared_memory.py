@@ -14,6 +14,7 @@ from ctypes import (
     c_uint32,
     c_uint64,
     c_int,
+    c_int32,
     c_float,
     c_char,
     c_size_t,
@@ -28,21 +29,26 @@ from typing import Optional
 import numpy as np
 
 # Load librt for semaphore operations
+librt = None
 try:
     librt = CDLL("librt.so.1")
     # Define sem_post function signature
     # int sem_post(sem_t *sem)
     librt.sem_post.argtypes = [c_void_p]
     librt.sem_post.restype = c_int
-except OSError as e:
-    import logging
-    logging.warning(f"Failed to load librt for semaphore support: {e}")
-    librt = None
+except OSError:
+    # Try libpthread as fallback (sem_post is sometimes there)
+    try:
+        librt = CDLL("libpthread.so.0")
+        librt.sem_post.argtypes = [c_void_p]
+        librt.sem_post.restype = c_int
+    except OSError as e:
+        import logging
+        logging.warning(f"Failed to load librt/libpthread for semaphore support: {e}")
 
 # Constants (must match C definitions)
 SHM_NAME_ACTIVE_FRAME = "/pet_camera_active_frame"
 SHM_NAME_STREAM = "/pet_camera_stream"
-SHM_NAME_YOLO_INPUT = "/pet_camera_yolo_input"
 SHM_NAME_BRIGHTNESS = "/pet_camera_brightness"  # Lightweight brightness data
 SHM_NAME_FRAMES = os.getenv("SHM_NAME_FRAMES", SHM_NAME_ACTIVE_FRAME)
 SHM_NAME_DETECTIONS = os.getenv("SHM_NAME_DETECTIONS", "/pet_camera_detections")
@@ -51,8 +57,30 @@ MAX_DETECTIONS = 10
 MAX_FRAME_SIZE = 1920 * 1080 * 3 // 2  # Max NV12 frame size (1080p)
 NUM_CAMERAS = 2  # DAY=0, NIGHT=1
 
+# Zero-copy shared memory names (share_id based, no memcpy)
+SHM_NAME_YOLO_ZEROCOPY = "/pet_camera_yolo_zc"  # Legacy (deprecated)
+SHM_NAME_MJPEG_ZEROCOPY = "/pet_camera_mjpeg_zc"
+SHM_NAME_ACTIVE_ZEROCOPY = "/pet_camera_active_zc"
+ZEROCOPY_MAX_PLANES = 2  # NV12 has 2 planes (Y, UV)
+HB_MEM_GRAPHIC_BUF_SIZE = 160  # sizeof(hb_mem_graphic_buf_t) - raw buffer descriptor
+
+# Per-camera zero-copy shared memory (Phase 2: replaces SHM_NAME_YOLO_ZEROCOPY)
+SHM_NAME_ZEROCOPY_DAY = "/pet_camera_zc_0"    # DAY camera zero-copy (YOLO + brightness)
+SHM_NAME_ZEROCOPY_NIGHT = "/pet_camera_zc_1"  # NIGHT camera zero-copy (YOLO + brightness)
+
+# Camera switcher control (Phase 2: active camera selection)
+SHM_NAME_CONTROL = "/pet_camera_control"
+
 
 # C structure definitions using ctypes
+
+class CCameraControl(Structure):
+    """Matches CameraControl in shared_memory.h"""
+    _fields_ = [
+        ("active_camera_index", c_int),   # 0=DAY, 1=NIGHT
+        ("version", c_uint32),            # Incremented on each switch
+    ]
+
 class CTimespec(Structure):
     _fields_ = [
         ("tv_sec", c_uint64),  # time_t on most systems
@@ -138,6 +166,51 @@ class CSharedBrightnessData(Structure):
     ]
 
 
+# Zero-copy structures (Phase 2: share_id based, no memcpy)
+class CZeroCopyFrame(Structure):
+    """
+    Zero-copy frame - VIO buffer shared directly without memcpy.
+
+    Consumer uses share_id to import the VIO buffer via hb_mem_import_com_buf().
+    """
+    _fields_ = [
+        # Frame metadata
+        ("frame_number", c_uint64),
+        ("timestamp", CTimespec),
+        ("camera_id", c_int),
+        ("width", c_int),
+        ("height", c_int),
+        ("format", c_int),  # 1=NV12
+        # Brightness metrics
+        ("brightness_avg", c_float),
+        ("correction_applied", c_uint8),
+        ("_pad1", c_uint8 * 3),
+        # VIO buffer info
+        ("share_id", c_int32 * ZEROCOPY_MAX_PLANES),  # hb_mem share_id for Y/UV
+        ("plane_size", c_uint64 * ZEROCOPY_MAX_PLANES),  # Size of each plane
+        ("plane_cnt", c_int32),  # Number of planes (2 for NV12)
+        # Raw hb_mem_graphic_buf_t descriptor (opaque, for import API)
+        ("hb_mem_buf_data", c_uint8 * HB_MEM_GRAPHIC_BUF_SIZE),
+        # Synchronization
+        ("version", c_uint32),
+        ("consumed", c_uint8),
+        ("_pad2", c_uint8 * 3),
+    ]
+
+
+class CZeroCopyFrameBuffer(Structure):
+    """
+    Zero-copy shared memory - single frame slot for SPSC pattern.
+
+    Camera waits on consumed_sem before writing next frame (throttles to consumer speed).
+    """
+    _fields_ = [
+        ("new_frame_sem", c_uint8 * 32),  # sem_t (32 bytes on Linux)
+        ("consumed_sem", c_uint8 * 32),   # sem_t (32 bytes on Linux)
+        ("frame", CZeroCopyFrame),
+    ]
+
+
 # Python data classes
 @dataclass
 class BoundingBox:
@@ -168,6 +241,197 @@ class Frame:
     brightness_lux: int = 0  # Environment illuminance from ISP cur_lux
     brightness_zone: int = 2  # 0=dark, 1=dim, 2=normal, 3=bright
     correction_applied: bool = False  # True if ISP low-light correction is active
+
+
+@dataclass
+class ZeroCopyFrame:
+    """Zero-copy frame metadata (no actual data, just share_id references)."""
+    frame_number: int
+    timestamp_sec: float
+    camera_id: int
+    width: int
+    height: int
+    format: int  # 1=NV12
+    brightness_avg: float
+    correction_applied: bool
+    share_id: list[int]  # share_id for each plane [Y, UV]
+    plane_size: list[int]  # size of each plane
+    plane_cnt: int
+    hb_mem_buf_data: bytes  # Raw 160-byte hb_mem_graphic_buf_t descriptor
+    version: int
+
+
+class CameraControlSharedMemory:
+    """
+    Read-only interface to CameraControl shared memory.
+
+    Reads the active camera index set by the switcher daemon.
+    """
+
+    def __init__(self, shm_name: str = SHM_NAME_CONTROL):
+        self.shm_name = shm_name
+        self.fd: Optional[int] = None
+        self.mmap_obj: Optional[mmap.mmap] = None
+
+    def open(self) -> bool:
+        """Open the CameraControl shared memory segment."""
+        shm_path = f"/dev/shm{self.shm_name}"
+        try:
+            self.fd = os.open(shm_path, os.O_RDONLY)
+            self.mmap_obj = mmap.mmap(
+                self.fd,
+                sizeof(CCameraControl),
+                mmap.MAP_SHARED,
+                mmap.PROT_READ,
+            )
+            return True
+        except FileNotFoundError:
+            return False
+        except Exception as e:
+            print(f"[Error] Failed to open CameraControl SHM: {e}")
+            return False
+
+    def close(self) -> None:
+        """Close the shared memory segment."""
+        if self.mmap_obj:
+            self.mmap_obj.close()
+            self.mmap_obj = None
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    def get_active(self) -> int:
+        """Get the active camera index (0=DAY, 1=NIGHT). Returns 0 if unavailable."""
+        if not self.mmap_obj:
+            return 0
+        self.mmap_obj.seek(0)
+        data = self.mmap_obj.read(sizeof(CCameraControl))
+        ctrl = CCameraControl.from_buffer_copy(data)
+        return ctrl.active_camera_index
+
+
+class ZeroCopySharedMemory:
+    """
+    Zero-copy shared memory interface for VIO buffer sharing.
+
+    Uses share_id to import VIO buffers directly without memcpy.
+    Consumer must call mark_consumed() after processing each frame.
+    """
+
+    def __init__(self, shm_name: str = SHM_NAME_YOLO_ZEROCOPY):
+        self.shm_name = shm_name
+        self.fd: Optional[int] = None
+        self.mmap_obj: Optional[mmap.mmap] = None
+
+    def open(self) -> bool:
+        """Open the zero-copy shared memory segment."""
+        shm_path = f"/dev/shm{self.shm_name}"
+        try:
+            self.fd = os.open(shm_path, os.O_RDWR)
+
+            # Get actual file size to verify structure match
+            file_size = os.fstat(self.fd).st_size
+            expected_size = sizeof(CZeroCopyFrameBuffer)
+            print(f"[Info] Zero-copy SHM size: actual={file_size}, expected={expected_size}")
+            print(f"[Info] CZeroCopyFrame size: {sizeof(CZeroCopyFrame)}")
+            print(f"[Info] Frame offset: new_frame_sem=0, consumed_sem=32, frame=64")
+
+            if file_size != expected_size:
+                print(f"[WARN] Size mismatch! C struct may have different layout.")
+                print(f"[WARN] Using actual file size for mmap: {file_size}")
+
+            self.mmap_obj = mmap.mmap(
+                self.fd,
+                file_size,  # Use actual size
+                mmap.MAP_SHARED,
+                mmap.PROT_READ | mmap.PROT_WRITE,
+            )
+            print(f"[Info] Opened zero-copy shared memory: {shm_path}")
+            return True
+        except FileNotFoundError:
+            print(f"[Warn] Zero-copy SHM not found: {shm_path} (fallback to memcpy)")
+            return False
+        except Exception as e:
+            print(f"[Error] Failed to open zero-copy SHM: {e}")
+            return False
+
+    def close(self) -> None:
+        """Close the shared memory segment."""
+        if self.mmap_obj:
+            self.mmap_obj.close()
+            self.mmap_obj = None
+        if self.fd:
+            os.close(self.fd)
+            self.fd = None
+
+    def get_frame(self) -> Optional[ZeroCopyFrame]:
+        """
+        Get the latest frame metadata (non-blocking).
+
+        Returns:
+            ZeroCopyFrame if new frame available, None otherwise
+        """
+        if not self.mmap_obj:
+            return None
+
+        # Read the buffer structure
+        self.mmap_obj.seek(0)
+        data = self.mmap_obj.read(sizeof(CZeroCopyFrameBuffer))
+        buf = CZeroCopyFrameBuffer.from_buffer_copy(data)
+
+        # Validate plane_cnt to avoid invalid array access
+        plane_cnt = buf.frame.plane_cnt
+        if plane_cnt < 0 or plane_cnt > ZEROCOPY_MAX_PLANES:
+            print(f"[ERROR] Invalid plane_cnt: {plane_cnt}, expected 0-{ZEROCOPY_MAX_PLANES}")
+            return None
+
+        # Convert to Python dataclass
+        timestamp_sec = buf.frame.timestamp.tv_sec + buf.frame.timestamp.tv_nsec / 1e9
+        return ZeroCopyFrame(
+            frame_number=buf.frame.frame_number,
+            timestamp_sec=timestamp_sec,
+            camera_id=buf.frame.camera_id,
+            width=buf.frame.width,
+            height=buf.frame.height,
+            format=buf.frame.format,
+            brightness_avg=buf.frame.brightness_avg,
+            correction_applied=bool(buf.frame.correction_applied),
+            share_id=[buf.frame.share_id[i] for i in range(plane_cnt)],
+            plane_size=[buf.frame.plane_size[i] for i in range(plane_cnt)],
+            plane_cnt=plane_cnt,
+            hb_mem_buf_data=bytes(buf.frame.hb_mem_buf_data),
+            version=buf.frame.version,
+        )
+
+    def mark_consumed(self) -> None:
+        """
+        Mark the current frame as consumed.
+
+        MUST be called after processing each frame to allow camera to write next frame.
+        """
+        if not self.mmap_obj:
+            return
+
+        # Calculate offset to consumed field
+        # Offset = sizeof(new_frame_sem) + sizeof(consumed_sem) + offset of consumed in CZeroCopyFrame
+        frame_offset = 32 + 32  # sem_t sizes
+        consumed_offset = frame_offset + CZeroCopyFrame.consumed.offset
+
+        # Write consumed = 1
+        self.mmap_obj.seek(consumed_offset)
+        self.mmap_obj.write(b'\x01')
+        self.mmap_obj.flush()
+
+        # Post consumed_sem (at offset 32 in the buffer)
+        if librt:
+            # Create a ctypes array backed by the mmap at offset 32 (consumed_sem location)
+            # sem_t is 32 bytes on Linux
+            sem_array_type = c_uint8 * 32
+            sem_buf = sem_array_type.from_buffer(self.mmap_obj, 32)
+            ret = librt.sem_post(addressof(sem_buf))
+            if ret != 0:
+                import logging
+                logging.warning(f"sem_post failed: {ret}")
 
 
 class RealSharedMemory:
@@ -557,35 +821,8 @@ class RealSharedMemory:
         self.detection_mmap.write(data)
         self.detection_mmap.flush()
 
-        # Post semaphore to signal event-driven consumers (Go streaming server)
-        import logging
-        logger = logging.getLogger("RealSharedMemory")
-
-        if librt is not None:
-            try:
-                # Get pointer to the semaphore field in shared memory
-                # We need to read the structure from mmap and get the semaphore address
-                self.detection_mmap.seek(0)
-                # Create a ctypes structure from the mmap buffer
-                shm_struct = CLatestDetectionResult.from_buffer(self.detection_mmap)
-                # Get address of the semaphore field
-                sem_addr = addressof(shm_struct.detection_update_sem)
-                # Post semaphore
-                ret = librt.sem_post(c_void_p(sem_addr))
-                if ret != 0:
-                    logger.warning(f"sem_post failed with return code: {ret}")
-                # NOTE: sem_post成功時のログは出さない（頻度が高すぎる）
-            except Exception as e:
-                logger.warning(f"Failed to post detection semaphore: {e}")
-        else:
-            logger.debug("librt not available - semaphore signaling disabled")
-
-        # Debug: Verify version was written (only log when detections > 0)
-        if c_det.num_detections > 0:
-            logger.debug(
-                f"Wrote detection to SHM: frame={frame_number}, "
-                f"num_det={c_det.num_detections}, version={c_det.version}"
-            )
+        # NOTE: sem_post() removed - Go side uses polling mode (33ms interval)
+        # Semaphore signaling was causing unnecessary overhead
 
 
 def monitor_brightness():

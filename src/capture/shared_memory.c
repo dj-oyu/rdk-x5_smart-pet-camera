@@ -437,3 +437,219 @@ uint32_t shm_brightness_read(SharedBrightnessData* shm, int camera_id,
 
     return version;
 }
+
+// ============================================================================
+// Zero-Copy Shared Memory Functions
+// ============================================================================
+
+ZeroCopyFrameBuffer* shm_zerocopy_create(const char* name) {
+    bool created_new = false;
+    ZeroCopyFrameBuffer* shm = (ZeroCopyFrameBuffer*)shm_create_or_open_ex(
+        name,
+        sizeof(ZeroCopyFrameBuffer),
+        true,  // create
+        &created_new
+    );
+
+    if (shm) {
+        if (created_new) {
+            // Initialize semaphores for SPSC synchronization
+            // new_frame_sem: producer posts when frame is ready
+            if (sem_init(&shm->new_frame_sem, 1, 0) != 0) {
+                LOG_ERROR("SharedMemory", "sem_init(new_frame_sem) failed for %s: %s",
+                          name, strerror(errno));
+                munmap(shm, sizeof(ZeroCopyFrameBuffer));
+                shm_unlink(name);
+                return NULL;
+            }
+            // consumed_sem: starts at 1 (first frame doesn't wait), consumer posts after processing
+            if (sem_init(&shm->consumed_sem, 1, 1) != 0) {
+                LOG_ERROR("SharedMemory", "sem_init(consumed_sem) failed for %s: %s",
+                          name, strerror(errno));
+                sem_destroy(&shm->new_frame_sem);
+                munmap(shm, sizeof(ZeroCopyFrameBuffer));
+                shm_unlink(name);
+                return NULL;
+            }
+
+            // Initialize frame to invalid state
+            shm->frame.version = 0;
+            shm->frame.consumed = 1;  // Ready for first write
+
+            LOG_INFO("SharedMemory", "Zero-copy shared memory created: %s (size=%zu bytes)",
+                     name, sizeof(ZeroCopyFrameBuffer));
+        } else {
+            LOG_INFO("SharedMemory", "Zero-copy shared memory opened (already exists): %s", name);
+        }
+    }
+
+    return shm;
+}
+
+ZeroCopyFrameBuffer* shm_zerocopy_open(const char* name) {
+    ZeroCopyFrameBuffer* shm = (ZeroCopyFrameBuffer*)shm_create_or_open(
+        name,
+        sizeof(ZeroCopyFrameBuffer),
+        false  // open existing
+    );
+
+    if (shm) {
+        LOG_INFO("SharedMemory", "Zero-copy shared memory opened: %s", name);
+    }
+
+    return shm;
+}
+
+void shm_zerocopy_close(ZeroCopyFrameBuffer* shm) {
+    if (shm) {
+        munmap(shm, sizeof(ZeroCopyFrameBuffer));
+    }
+}
+
+void shm_zerocopy_destroy(ZeroCopyFrameBuffer* shm, const char* name) {
+    if (shm) {
+        sem_destroy(&shm->new_frame_sem);
+        sem_destroy(&shm->consumed_sem);
+        munmap(shm, sizeof(ZeroCopyFrameBuffer));
+        shm_unlink(name);
+        LOG_INFO("SharedMemory", "Zero-copy shared memory destroyed: %s", name);
+    }
+}
+
+int shm_zerocopy_write(ZeroCopyFrameBuffer* shm, const ZeroCopyFrame* frame) {
+    if (!shm || !frame) {
+        return -1;
+    }
+
+    // Non-blocking check: skip frame if consumer is still processing.
+    // YOLO runs at ~10fps; capture loop must stay at 30fps for streaming.
+    int ret = sem_trywait(&shm->consumed_sem);
+    if (ret != 0) {
+        // Consumer still processing - skip this frame (don't block capture loop)
+        return -1;
+    }
+
+    // Save current version before memcpy overwrites it
+    // (the source frame has version=0 which would reset the counter)
+    uint32_t cur_version = __atomic_load_n(&shm->frame.version, __ATOMIC_ACQUIRE);
+
+    // Copy frame metadata (NOT the actual frame data - that's the point of zero-copy)
+    memcpy(&shm->frame, frame, sizeof(ZeroCopyFrame));
+
+    // Mark as not yet consumed
+    __atomic_store_n(&shm->frame.consumed, 0, __ATOMIC_RELEASE);
+
+    // Restore and increment version to signal new frame
+    uint32_t new_version = cur_version + 1;
+    __atomic_store_n(&shm->frame.version, new_version, __ATOMIC_RELEASE);
+
+    // Notify consumer
+    sem_post(&shm->new_frame_sem);
+
+    // Log first successful write
+    static int first_write_logged = 0;
+    if (!first_write_logged) {
+        LOG_INFO("SharedMemory", "Zero-copy first write: version=%u, share_id[0]=%d, planes=%d",
+                 new_version, frame->share_id[0], frame->plane_cnt);
+        first_write_logged = 1;
+    }
+
+    return 0;
+}
+
+void shm_zerocopy_mark_consumed(ZeroCopyFrameBuffer* shm) {
+    if (!shm) {
+        return;
+    }
+
+    // Mark frame as consumed
+    __atomic_store_n(&shm->frame.consumed, 1, __ATOMIC_RELEASE);
+
+    // Signal producer that it can write next frame
+    sem_post(&shm->consumed_sem);
+}
+
+// ============================================================================
+// Camera Control Shared Memory Functions
+// ============================================================================
+
+CameraControl* shm_control_create(void) {
+    bool created_new = false;
+    CameraControl* ctrl = (CameraControl*)shm_create_or_open_ex(
+        SHM_NAME_CONTROL,
+        sizeof(CameraControl),
+        true,  // create
+        &created_new
+    );
+
+    if (ctrl) {
+        if (created_new) {
+            // Initialize to DAY camera (index 0)
+            ctrl->active_camera_index = 0;
+            ctrl->version = 0;
+            LOG_INFO("SharedMemory", "Camera control shared memory created: %s (size=%zu bytes)",
+                     SHM_NAME_CONTROL, sizeof(CameraControl));
+        } else {
+            LOG_INFO("SharedMemory", "Camera control shared memory opened (already exists): %s",
+                     SHM_NAME_CONTROL);
+        }
+    }
+
+    return ctrl;
+}
+
+CameraControl* shm_control_open(void) {
+    CameraControl* ctrl = (CameraControl*)shm_create_or_open(
+        SHM_NAME_CONTROL,
+        sizeof(CameraControl),
+        false  // open existing
+    );
+
+    if (ctrl) {
+        LOG_INFO("SharedMemory", "Camera control shared memory opened: %s", SHM_NAME_CONTROL);
+    }
+
+    return ctrl;
+}
+
+void shm_control_close(CameraControl* ctrl) {
+    if (ctrl) {
+        munmap(ctrl, sizeof(CameraControl));
+    }
+}
+
+void shm_control_destroy(CameraControl* ctrl) {
+    if (ctrl) {
+        munmap(ctrl, sizeof(CameraControl));
+        shm_unlink(SHM_NAME_CONTROL);
+        LOG_INFO("SharedMemory", "Camera control shared memory destroyed: %s", SHM_NAME_CONTROL);
+    }
+}
+
+void shm_control_set_active(CameraControl* ctrl, int camera_index) {
+    if (!ctrl || camera_index < 0 || camera_index >= NUM_CAMERAS) {
+        return;
+    }
+
+    // Atomically update active camera index
+    __atomic_store_n(&ctrl->active_camera_index, camera_index, __ATOMIC_RELEASE);
+
+    // Increment version to signal change
+    __atomic_fetch_add(&ctrl->version, 1, __ATOMIC_SEQ_CST);
+}
+
+int shm_control_get_active(CameraControl* ctrl) {
+    if (!ctrl) {
+        return 0;  // Default to DAY camera
+    }
+
+    return __atomic_load_n(&ctrl->active_camera_index, __ATOMIC_ACQUIRE);
+}
+
+uint32_t shm_control_get_version(CameraControl* ctrl) {
+    if (!ctrl) {
+        return 0;
+    }
+
+    return __atomic_load_n(&ctrl->version, __ATOMIC_ACQUIRE);
+}
