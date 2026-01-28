@@ -480,10 +480,140 @@ SDKサンプル（sample_share.c）で実証済みのパターン:
 
 ## 実装チェックリスト
 
-- [ ] `ZeroCopyFrame`に`hb_mem_graphic_buf_t buffer`を追加
-- [ ] `camera_pipeline.c`でbuffer全体をコピー
-- [ ] Python `hb_mem_common_buf_t`の_fields_順序修正
-- [ ] Python `hb_mem_graphic_buf_t`構造体追加
-- [ ] `hb_mem_free_buf`引数を`int32_t fd`に修正
-- [ ] `hb_mem_import_graph_buf`を使用するよう変更
-- [ ] Python側共有メモリ読み取りを更新
+- [x] `ZeroCopyFrame`に`hb_mem_graphic_buf_t buffer`を追加
+- [x] `camera_pipeline.c`でbuffer全体をコピー
+- [x] Python `hb_mem_common_buf_t`の_fields_順序修正
+- [x] Python `hb_mem_graphic_buf_t`構造体追加
+- [x] `hb_mem_free_buf`引数を`int32_t fd`に修正
+- [x] `hb_mem_import_graph_buf`を使用するよう変更
+- [x] Python側共有メモリ読み取りを更新
+
+---
+
+## 作業ログ: graph_buf優先インポート修正 (2026-01-28)
+
+### 背景
+
+YOLO detectorが起動直後に以下のエラーで失敗:
+
+```
+Zero-copy import failed: hb_mem_import_com_buf failed: -16777214 (share_id=84, size=345600)
+```
+
+### 根本原因
+
+`HbMemGraphicBuffer.__init__()`は、contiguousバッファ（`share_id[1]==0`）の場合に
+`hb_mem_import_com_buf`を使用していた。しかし、VIOが
+`HB_MEM_USAGE_GRAPHIC_CONTIGUOUS_BUF`で確保したバッファは、内部的には
+`hb_mem_graphic_buf_t`として管理されており、`hb_mem_import_com_buf`（`hb_mem_common_buf_t`
+用）ではSDKバリデーションが通らなかった。
+
+### 変更内容 (src/capture/hb_mem_bindings.py)
+
+| # | 変更箇所 | 内容 |
+|---|---------|------|
+| 1 | `__init__()` L479-489 | contiguous/multi-buffer問わず常に`hb_mem_import_graph_buf`を先に試行。失敗時、contiguousなら`hb_mem_import_com_buf`にフォールバック |
+| 2 | `_import_graph_buf()` L552 | fdクリア値を`0`→`-1`に変更。fd=0はstdinであり、SDKがリジェクトする可能性がある |
+| 3 | `_import_contiguous()` L514-516, `_import_graph_buf()` L561-566 | エラーメッセージに`phys_addr`を追加。デバッグ時にC側バッファの物理アドレス有無を即座に判別可能に |
+| 4 | `_import_graph_buf()` L579-581 | contiguousバッファをgraph_bufでインポートした際、`virt_addr[1]==0`なら`virt_addr[0]+size[0]`でUVオフセットを算出 |
+
+### 変更後のインポートフロー
+
+```
+HbMemGraphicBuffer.__init__(raw_buf_data)
+  │
+  ├─ try: _import_graph_buf()  ← 常にまず試行 (SDK推奨パス)
+  │   ├─ 成功 → contiguousの場合はUV virt_addr補正
+  │   └─ RuntimeError
+  │       ├─ is_contiguous=True → _import_contiguous() (フォールバック)
+  │       └─ is_contiguous=False → raise (リカバリ不可)
+  │
+  └─ 結果: self._fd, self._virt_addr, self._size, self._plane_cnt が設定
+```
+
+---
+
+## 未解決リスク・エラーが出る可能性のある箇所
+
+### リスク1: graph_bufもcom_bufも両方失敗するケース
+
+**条件**: C側で`hb_mem_buf_data`に書き込んだ160バイトの中身が不完全な場合
+
+- `phys_addr[0]==0`の場合、SDKは両APIともリジェクトする
+- `camera_pipeline.c`のmemcpy元（VIO `hbn_vnode_image_t.buffer`）が正しく初期化
+  されていることが前提
+
+**確認方法**: エラーメッセージに`phys_addr=0x0`と表示されたら、C側の
+`camera_pipeline.c`で`buffer`フィールドが正しくコピーされているか確認する
+
+### リスク2: fd=-1がSDKに拒否される可能性
+
+**変更**: `_import_graph_buf()`でfdを`-1`にクリアしている
+
+- SDKが`fd >= 0`をバリデーションしている場合、`HB_MEM_ERR_INVALID_FD (-16777213)`
+  で失敗する
+- その場合は`fd=0`に戻す（stdinリスクは低い可能性がある）、
+  または元の`raw_buf_data`のfdをそのまま渡す方法を検討
+
+**確認方法**: エラーコードが`-16777213`の場合はfd関連
+
+### リスク3: contiguousバッファのUV virt_addr補正が不正確
+
+**変更**: `virt_addr[1] = virt_addr[0] + size[0]` で算出
+
+- `stride != width`の場合、Y planeの実メモリサイズは`stride * vstride`であり、
+  `size[0]`（=`width * height`）とは異なる可能性がある
+- SDKが`virt_addr[1]`を正しく設定してくれれば、この補正は不要
+  （`virt_addr[1]!=0`の場合はスキップするガード済み）
+
+**確認方法**: UVプレーンのデータが壊れている（色ずれ・緑一色等）場合は、
+`stride`と`width`の値を確認し、オフセット算出を`stride * vstride`に変更する:
+
+```python
+# stride/vstride情報を取得して正確なオフセットを算出
+stride = struct_mod.unpack_from("<i", raw_buf_data, 28)[0]  # offset=28
+vstride = struct_mod.unpack_from("<i", raw_buf_data, 32)[0]  # offset=32
+y_plane_actual = stride * vstride
+self._virt_addr[1] = self._virt_addr[0] + y_plane_actual
+```
+
+### リスク4: graph_bufインポート後のrelease()でfd[1]が無効
+
+**状況**: contiguousバッファをgraph_bufでインポートした場合
+
+- `fd[0]`のみ有効で`fd[1]==0`または`fd[1]==-1`になる可能性
+- `release()`は`fd > 0`のみ解放するガード済み（L645: `if fd > 0`）
+- ただし、`fd[1]`にゴミ値が入った場合は不正解放のリスクあり
+
+**確認方法**: `Released buffer: fd=[X, Y]`ログでfd値を確認
+
+### リスク5: SDK バージョン差異
+
+**前提**: RDK X5のhb_mem SDKに依存
+
+- `hb_mem_import_graph_buf`の挙動はSDKバージョンにより異なる可能性
+- 特にcontiguousバッファに対するgraph_buf APIの対応はバージョン依存
+
+**確認方法**: `dpkg -l | grep hobot`でSDKバージョンを確認し、
+`/app/multimedia_samples/sample_hbmem/sample_share.c`のパターンと比較
+
+---
+
+## 検証手順
+
+```bash
+# 1. RDK X5にデプロイ後、カメラ+YOLO起動
+./scripts/run_camera_switcher_yolo_streaming.sh
+
+# 2. YOLOログで確認すべき項目
+#    OK: "Imported graph_buf: fd=[X, Y], vaddr=[0x..., 0x...], ..."
+#    NG: "hb_mem_import_graph_buf failed: ..." → リスク1-2を確認
+#    NG: UVデータ化け → リスク3を確認
+
+# 3. プロファイラで定量確認
+uv run scripts/profile_shm.py
+
+# 4. SDKバージョン確認（トラブル時）
+dpkg -l | grep hobot
+cat /etc/sunrise_version 2>/dev/null || cat /etc/hrut_version 2>/dev/null
+```

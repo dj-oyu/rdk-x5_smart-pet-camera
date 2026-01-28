@@ -5,7 +5,7 @@
 複雑なコールバック・シグナル・マルチスレッド構成を、共有メモリベースのシンプルなポーリングループに置き換える。
 
 **最終更新**: 2026-01-28
-**ステータス**: Phase 2 完了、Phase 3 準備中
+**ステータス**: Phase 3 完了、Phase 4 準備中
 
 ---
 
@@ -15,7 +15,7 @@
 |-------|------|------|
 | Phase 1 | ✅ 完了 | CameraControl SHM追加、単体テスト通過 |
 | Phase 2 | ✅ 完了 | camera_daemon側の対応 (SHMベース活性化、per-camera ZeroCopy) |
-| Phase 3 | 🔲 未着手 | switcher_daemon簡素化 |
+| Phase 3 | ✅ 完了 | switcher_daemon簡素化 |
 | Phase 4 | 🔲 未着手 | テスト・検証 |
 
 ---
@@ -336,28 +336,37 @@ bool write_active = pipeline->control_shm &&
 
 **移行戦略**: レガシーSIGUSR1/2は併用維持 (Phase 3で完全削除)
 
-### Phase 3: switcher_daemon簡素化
+### Phase 3: switcher_daemon簡素化 ✅完了
 
 **目標**: 単一スレッドポーリングループに置き換え
 
-```c
-// camera_switcher_daemon.c - 新実装
-typedef struct {
-    pid_t day_pid;
-    pid_t night_pid;
-    CameraMode active_camera;
-    CameraControl *control;
-    ZeroCopyFrameBuffer *shm_day;
-    ZeroCopyFrameBuffer *shm_night;  // ★追加
-    CameraSwitcher switcher;
-    volatile int running;
-} SwitcherContext;
-```
+**実装済み内容**:
 
-**変更ファイル**:
-- `camera_switcher_daemon.c` - 全面書き換え
-- `camera_switcher_runtime.c` - **削除**
-- `camera_switcher_runtime.h` - **削除**
+1. **camera_switcher_daemon.c 全面書き換え**:
+   - `SwitcherContext` 構造体: `CameraControl` + `ZeroCopyFrameBuffer` + `CameraSwitchController`
+   - `switcher_loop()`: 単一スレッドポーリング (250ms DAY / 5000ms NIGHT)
+   - `do_switch()`: `shm_control_set_active()` + `camera_switcher_notify_active_camera()` のみ
+   - `wait_for_zerocopy_shm()`: DAY ZeroCopy SHMのオープン待機
+   - レガシーSIGUSR1/2のcamera_daemonへの送信を完全削除
+   - SIGUSR1/2はswitcher自身の強制切り替え用として維持
+
+2. **camera_switcher_runtime.c / .h 削除**:
+   - `active_thread`, `probe_thread` 削除
+   - `CameraCaptureOps` (4コールバック) 削除
+   - `CameraSwitchRuntimeConfig` 削除
+
+3. **Makefile更新**:
+   - `SWITCHER_DAEMON_SOURCES` から `camera_switcher_runtime.c` を削除
+   - `SWITCHER_RUNTIME_SOURCES`, `SWITCHER_RUNTIME_LIBRARY` ターゲット削除
+   - `switcher-runtime-lib` phonyターゲット削除
+   - `clean` ターゲットからruntime参照を削除
+
+**削除されたコンポーネント** (計 ~285行):
+- `camera_switcher_runtime.c` (209行)
+- `camera_switcher_runtime.h` (76行)
+- 4コールバック関数 (`switch_camera_cb`, `wait_for_new_frame_cb`, `capture_active_frame_cb`, `capture_probe_frame_cb`)
+- `SharedBrightnessData` / `SharedFrameBuffer` 参照
+- レガシーSIGUSR1/2送信
 
 ### Phase 4: テスト・検証
 
@@ -452,10 +461,11 @@ typedef struct {
 - [x] test_shm全9テスト通過、streaming_server Goビルド確認
 - [ ] 実機動作確認 (次回デプロイ時)
 
-### Phase 3
-- [ ] `camera_switcher_daemon.c` 書き換え
-- [ ] `camera_switcher_runtime.*` 削除
-- [ ] 統合テスト
+### Phase 3 ✅完了
+- [x] `camera_switcher_daemon.c` 書き換え (単一スレッドポーリングループ)
+- [x] `camera_switcher_runtime.c` / `.h` 削除
+- [x] Makefile更新 (runtime参照を全削除)
+- [ ] 実機動作確認 (次回デプロイ時)
 
 ### Phase 4
 - [ ] 切り替えテスト (DAY↔NIGHT)
