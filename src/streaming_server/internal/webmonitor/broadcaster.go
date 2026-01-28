@@ -22,9 +22,8 @@ type FrameBroadcaster struct {
 	nextID    int
 	shm       *shmReader
 	monitor   *Monitor
-	stop      chan struct{}
-	stopped   bool
-	skipCount int // Count of frames skipped when no clients
+	stop    chan struct{}
+	stopped bool
 }
 
 // NewFrameBroadcaster creates a broadcaster that generates overlay frames and fans them out.
@@ -84,49 +83,36 @@ func (fb *FrameBroadcaster) Stop() {
 }
 
 func (fb *FrameBroadcaster) run() {
-	// Polling mode at ~15 FPS (reduced from 30 FPS to lower CPU usage)
-	// NOTE: Semaphore-based approach removed to avoid CGo blocking issues
+	// Ticker-based polling at ~30 FPS
+	// Using ticker instead of sleep so encoding time overlaps with next tick,
+	// giving effective FPS = 1/max(33ms, encode) instead of 1/(33ms + encode).
+	ticker := time.NewTicker(33 * time.Millisecond)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-fb.stop:
 			return
-		default:
+		case <-ticker.C:
 		}
 
-		// Check client count before processing
 		fb.mu.Lock()
 		clientCount := len(fb.clients)
 		fb.mu.Unlock()
 
 		if clientCount == 0 {
-			// No clients - sleep longer to reduce CPU usage
-			fb.skipCount++
-			if fb.skipCount%10 == 0 {
-				logger.Debug("FrameBroadcaster", "No clients connected, sleeping (idle for %d cycles)", fb.skipCount)
-			}
-			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-
-		// Reset skip counter when clients are present
-		fb.skipCount = 0
 
 		if fb.shm == nil {
-			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
-		// Poll at ~30 FPS (33ms interval)
-		time.Sleep(33 * time.Millisecond)
-
-		// Generate overlay frame
 		jpegData := fb.generateOverlay()
 		if jpegData == nil {
 			continue
 		}
 
-		// Broadcast to all clients
 		fb.broadcast(jpegData)
 	}
 }
@@ -247,6 +233,10 @@ type DetectionBroadcaster struct {
 	// Rate monitoring
 	broadcastCount  int
 	lastRateLogTime time.Time
+
+	// Empty detection monitoring (observability for 0-detection case)
+	emptyUpdateCount  int
+	lastEmptyLogTime  time.Time
 }
 
 // NewDetectionBroadcaster creates a broadcaster for detection events.
@@ -390,10 +380,21 @@ func (db *DetectionBroadcaster) run() {
 			db.lastEventVersion = det.Version
 			db.monitor.mu.Unlock()
 
-			// Only broadcast if there are actual detections (safety filter)
-			// YOLO detector already filters empty results, but double-check here
 			if len(det.Detections) > 0 {
 				db.processAndBroadcast(det)
+			} else {
+				// Track empty detection updates for observability
+				db.emptyUpdateCount++
+				now := time.Now()
+				if db.lastEmptyLogTime.IsZero() {
+					db.lastEmptyLogTime = now
+				} else if elapsed := now.Sub(db.lastEmptyLogTime); elapsed >= 10*time.Second {
+					logger.Info("DetectionBroadcaster",
+						"Detector alive: %d empty updates in %.0fs (YOLO running, 0 detections)",
+						db.emptyUpdateCount, elapsed.Seconds())
+					db.emptyUpdateCount = 0
+					db.lastEmptyLogTime = now
+				}
 			}
 		} else {
 			db.monitor.mu.Unlock()

@@ -356,6 +356,23 @@ void test_zerocopy_shm_roundtrip(void) {
         assert(producer->frame.hb_mem_buf_data[i] == (uint8_t)((i * 7) & 0xFF));
     }
 
+    // Verify version increments correctly across multiple writes
+    assert(producer->frame.version == 1);  // First write → version 1
+
+    shm_zerocopy_mark_consumed(producer);
+    frame.frame_number = 1000;
+    ret = shm_zerocopy_write(producer, &frame);
+    assert(ret == 0);
+    assert(producer->frame.version == 2);  // Second write → version 2
+
+    shm_zerocopy_mark_consumed(producer);
+    frame.frame_number = 1001;
+    ret = shm_zerocopy_write(producer, &frame);
+    assert(ret == 0);
+    assert(producer->frame.version == 3);  // Third write → version 3
+
+    printf("  version after 3 writes: %u (expected 3)\n", producer->frame.version);
+
     shm_zerocopy_destroy(producer, test_name);
     TEST_PASSED();
 }

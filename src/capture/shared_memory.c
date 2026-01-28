@@ -529,14 +529,19 @@ int shm_zerocopy_write(ZeroCopyFrameBuffer* shm, const ZeroCopyFrame* frame) {
         return -1;
     }
 
+    // Save current version before memcpy overwrites it
+    // (the source frame has version=0 which would reset the counter)
+    uint32_t cur_version = __atomic_load_n(&shm->frame.version, __ATOMIC_ACQUIRE);
+
     // Copy frame metadata (NOT the actual frame data - that's the point of zero-copy)
     memcpy(&shm->frame, frame, sizeof(ZeroCopyFrame));
 
     // Mark as not yet consumed
     __atomic_store_n(&shm->frame.consumed, 0, __ATOMIC_RELEASE);
 
-    // Increment version to signal new frame
-    uint32_t new_version = __atomic_fetch_add(&shm->frame.version, 1, __ATOMIC_SEQ_CST) + 1;
+    // Restore and increment version to signal new frame
+    uint32_t new_version = cur_version + 1;
+    __atomic_store_n(&shm->frame.version, new_version, __ATOMIC_RELEASE);
 
     // Notify consumer
     sem_post(&shm->new_frame_sem);
