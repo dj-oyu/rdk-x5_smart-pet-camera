@@ -392,6 +392,8 @@ class RealDetector:
 | **Phase 2 (H.264)** | **Camera Switcher H.264 Support** | 2025-12-24 | ✅ Done |
 | **Phase 3 (H.264)** | **WebRTC H.264 Streaming** | 2025-12-26 | 🔧 In Progress |
 | Phase 4 | Real Detection Model Integration | TBD | 📋 Planned |
+| **YOLO改善 P0-1** | **BPUプロファイリング + モデル切替** | 2026-01-28 | ✅ Done |
+| YOLO改善 P2 | VSE 高解像度化 | TBD | 📋 Planned |
 | Phase 5 | Behavior Estimation | TBD | 📋 Planned |
 
 ### Phase 1 達成内容（100%完了）
@@ -430,6 +432,14 @@ class RealDetector:
 ---
 
 ## 変更履歴
+
+- 2026-01-28: **YOLO 検出改善 Phase 0-1 完了** ✅
+  - BPU プロファイリングにより yolov13n (45.5ms) がボトルネックと特定
+  - yolo11n (8.9ms, 112FPS) へ切替 — 5.1倍高速化
+  - Python API オーバーヘッドは <1ms で問題なし (C API 移行不要)
+  - BPU シングルコア確定 (マルチスレッド推論の効果は限定的)
+  - 起動スクリプト `--yolo-model v11n` がデフォルト (変更不要)
+  - **詳細**: [yolo_bpu_profiling_report.md](./yolo_bpu_profiling_report.md), [plan_yolo_detection_improvement.md](./plan_yolo_detection_improvement.md)
 
 - 2025-12-26: **Phase 3 (H.264) 実装完了・デバッグ中** 🔧
   - aiortc/av依存関係追加（WebRTC対応）
