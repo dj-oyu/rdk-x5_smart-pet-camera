@@ -410,7 +410,7 @@ class YoloDetectorDaemon:
 
                 zc_frame = active_zc.get_frame()
                 if zc_frame is None:
-                    time.sleep(0.01)
+                    time.sleep(0.001)
                     continue
 
                 try:
