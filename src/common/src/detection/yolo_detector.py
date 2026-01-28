@@ -370,6 +370,218 @@ class YoloDetector:
 
         return detections
 
+    def get_roi_regions(
+        self, width: int, height: int
+    ) -> list[tuple[int, int, int, int]]:
+        """
+        指定サイズの画像に対するROI領域を計算
+
+        Args:
+            width: 入力画像幅
+            height: 入力画像高さ
+
+        Returns:
+            ROI領域のリスト [(x, y, w, h), ...]
+            各ROIは640x640サイズ
+        """
+        roi_size = self.input_w  # 640
+        rois = []
+
+        if width == 1280 and height == 720:
+            # 1280x720: 2 ROIs (横2分割, 縦は80px overlap)
+            # 720 - 640 = 80px → 上下40pxずつパディング相当
+            y_offset = (height - roi_size) // 2  # 40
+            rois = [
+                (0, y_offset, roi_size, roi_size),  # 左
+                (width - roi_size, y_offset, roi_size, roi_size),  # 右
+            ]
+        elif width == 1920 and height == 1080:
+            # 1920x1080: 6 ROIs (3x2グリッド, オーバーラップあり)
+            x_step = (width - roi_size) // 2  # 640
+            y_step = height - roi_size  # 440
+            for row in range(2):
+                for col in range(3):
+                    x = col * x_step
+                    y = row * y_step
+                    rois.append((x, y, roi_size, roi_size))
+        else:
+            # その他: 中央の640x640
+            x = max(0, (width - roi_size) // 2)
+            y = max(0, (height - roi_size) // 2)
+            rois = [(x, y, roi_size, roi_size)]
+
+        return rois
+
+    def _crop_nv12_roi(
+        self,
+        nv12_array: np.ndarray,
+        width: int,
+        height: int,
+        roi_x: int,
+        roi_y: int,
+        roi_w: int,
+        roi_h: int,
+    ) -> np.ndarray:
+        """
+        NV12フレームから指定ROI領域をクロップ
+
+        Args:
+            nv12_array: 入力NV12データ
+            width: 入力画像幅
+            height: 入力画像高さ
+            roi_x, roi_y: ROI左上座標
+            roi_w, roi_h: ROIサイズ
+
+        Returns:
+            クロップされたNV12データ (roi_w x roi_h)
+        """
+        y_size_in = width * height
+        y_size_out = roi_w * roi_h
+        uv_height_in = height // 2
+        uv_height_out = roi_h // 2
+        uv_size_out = roi_w * uv_height_out
+
+        # 出力バッファを確保
+        output = np.empty(y_size_out + uv_size_out, dtype=np.uint8)
+
+        # Y平面をクロップ
+        y_in = nv12_array[:y_size_in].reshape(height, width)
+        y_out = output[:y_size_out].reshape(roi_h, roi_w)
+        y_out[:] = y_in[roi_y : roi_y + roi_h, roi_x : roi_x + roi_w]
+
+        # UV平面をクロップ (UV座標は半分)
+        uv_in = nv12_array[y_size_in:].reshape(uv_height_in, width)
+        uv_out = output[y_size_out:].reshape(uv_height_out, roi_w)
+        roi_y_uv = roi_y // 2
+        roi_h_uv = roi_h // 2
+        uv_out[:] = uv_in[roi_y_uv : roi_y_uv + roi_h_uv, roi_x : roi_x + roi_w]
+
+        return output
+
+    def detect_nv12_roi(
+        self,
+        nv12_data: bytes | memoryview,
+        width: int,
+        height: int,
+        roi_x: int,
+        roi_y: int,
+        roi_w: int = 640,
+        roi_h: int = 640,
+        brightness_avg: float = -1.0,
+    ) -> list[Detection]:
+        """
+        NV12フレームの指定ROI領域から物体検出を実行
+
+        高解像度入力(例: 1280x720)から640x640のROIをクロップして推論。
+        座標は元画像座標系に変換して返す。
+
+        Args:
+            nv12_data: NV12フォーマットのフレームデータ
+            width: フレーム幅
+            height: フレーム高さ
+            roi_x, roi_y: ROI左上座標
+            roi_w, roi_h: ROIサイズ (デフォルト: 640x640)
+            brightness_avg: ISPからの平均輝度 (0-255)
+
+        Returns:
+            検出結果のリスト (座標は元画像座標系)
+        """
+        import time
+
+        start_total = time.perf_counter()
+        self._total_calls += 1
+
+        # 1. ROIクロップ + CLAHE
+        start_prep = time.perf_counter()
+
+        # CLAHE適用判定
+        need_clahe = (
+            brightness_avg >= 0
+            and self.clahe_enabled
+            and brightness_avg < self.clahe_brightness_threshold
+        )
+
+        # NV12データをnumpy配列に変換
+        if need_clahe:
+            nv12_array = np.frombuffer(nv12_data, dtype=np.uint8).copy()
+        else:
+            nv12_array = np.frombuffer(nv12_data, dtype=np.uint8)
+
+        # CLAHE適用（低照度時のみ、クロップ前に適用）
+        if need_clahe:
+            start_clahe = time.perf_counter()
+            nv12_array = self._apply_clahe_nv12(nv12_array, width, height)
+            clahe_time = (time.perf_counter() - start_clahe) * 1000
+            self._brightness_stats["clahe_time_total_ms"] += clahe_time
+            self._brightness_stats["frames_clahe_applied"] += 1
+        else:
+            self._brightness_stats["frames_clahe_skipped"] += 1
+
+        # ROIクロップ
+        if roi_w == self.input_w and roi_h == self.input_h:
+            # ROIサイズが推論サイズと一致
+            cropped = self._crop_nv12_roi(
+                nv12_array, width, height, roi_x, roi_y, roi_w, roi_h
+            )
+            input_tensor = cropped
+            scale = (1.0, 1.0)
+            shift = (0.0, 0.0)
+        else:
+            # ROIサイズが異なる場合はリサイズが必要
+            logger.warning(
+                f"ROI size {roi_w}x{roi_h} differs from model input {self.input_w}x{self.input_h}"
+            )
+            cropped = self._crop_nv12_roi(
+                nv12_array, width, height, roi_x, roi_y, roi_w, roi_h
+            )
+            # NV12→BGR→リサイズ→NV12 (遅いパス)
+            img = self._decode_nv12(cropped.tobytes(), roi_w, roi_h)
+            if img is None:
+                return []
+            input_tensor, scale, shift = self._preprocess_yuv420sp(img)
+
+        end_prep = time.perf_counter()
+        self._last_timing["preprocessing"] = end_prep - start_prep
+
+        # 2. BPU推論
+        start_infer = time.perf_counter()
+        outputs = self._forward(input_tensor)
+        end_infer = time.perf_counter()
+        self._last_timing["inference"] = end_infer - start_infer
+
+        # 3. 後処理（座標はROI内相対座標で取得）
+        start_post = time.perf_counter()
+        detections_roi = self._postprocess(outputs, scale, shift, (roi_h, roi_w))
+        end_post = time.perf_counter()
+        self._last_timing["postprocessing"] = end_post - start_post
+
+        # 4. 座標変換: ROI相対 → 元画像絶対座標
+        detections = []
+        for det in detections_roi:
+            # ROIオフセットを加算
+            new_bbox = BoundingBox(
+                x=det.bbox.x + roi_x,
+                y=det.bbox.y + roi_y,
+                w=det.bbox.w,
+                h=det.bbox.h,
+            )
+            detections.append(
+                Detection(
+                    class_name=det.class_name,
+                    confidence=det.confidence,
+                    bbox=new_bbox,
+                )
+            )
+
+        end_total = time.perf_counter()
+        self._last_timing["total"] = end_total - start_total
+
+        # 統計情報の更新
+        self._total_detections += len(detections)
+        self._total_inference_time += self._last_timing["total"]
+
+        return detections
+
     def detect_nv12(
         self,
         nv12_data: bytes | memoryview,

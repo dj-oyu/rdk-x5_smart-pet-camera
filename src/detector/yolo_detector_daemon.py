@@ -96,6 +96,11 @@ class YoloDetectorDaemon:
         self.scale_x = None
         self.scale_y = None
 
+        # ROI cycling state
+        self.roi_regions: list[tuple[int, int, int, int]] = []  # [(x, y, w, h), ...]
+        self.roi_index: int = 0  # Current ROI index for round-robin
+        self.roi_enabled: bool = True  # Enable ROI mode for high-res input
+
     def setup(self) -> None:
         """セットアップ"""
         logger.info("=== YOLO Detector Daemon (Zero-Copy) ===")
@@ -272,23 +277,54 @@ class YoloDetectorDaemon:
                         f"(YOLO input: {frame_width}x{frame_height}, scale={self.scale_x:.3f}x{self.scale_y:.3f})"
                     )
 
-                # Log first frame info
+                # Initialize ROI regions on first frame
                 if self.stats["frames_processed"] == 0:
                     logger.info(
                         f"YOLO input: {frame_width}x{frame_height}, data_len={len(nv12_data)}"
                     )
-                    if frame_width != 640 or frame_height != 360:
-                        logger.warning(
-                            f"YOLO input is NOT 640x360! Got {frame_width}x{frame_height}"
+
+                    # Get ROI regions for this resolution
+                    self.roi_regions = self.detector.get_roi_regions(
+                        frame_width, frame_height
+                    )
+
+                    if len(self.roi_regions) > 1:
+                        logger.info(
+                            f"ROI mode enabled: {len(self.roi_regions)} regions "
+                            f"(full coverage every {len(self.roi_regions)} frames)"
                         )
+                        for i, (rx, ry, rw, rh) in enumerate(self.roi_regions):
+                            logger.info(f"  ROI {i}: ({rx}, {ry}) - ({rx+rw}, {ry+rh})")
+                    else:
+                        logger.info("ROI mode disabled: single region covers full frame")
+                        self.roi_enabled = False
 
                 # Run YOLO inference
-                detections = self.detector.detect_nv12(
-                    nv12_data=nv12_data,
-                    width=frame_width,
-                    height=frame_height,
-                    brightness_avg=brightness_avg,
-                )
+                if self.roi_enabled and len(self.roi_regions) > 1:
+                    # ROI mode: cycle through regions
+                    roi_x, roi_y, roi_w, roi_h = self.roi_regions[self.roi_index]
+                    detections = self.detector.detect_nv12_roi(
+                        nv12_data=nv12_data,
+                        width=frame_width,
+                        height=frame_height,
+                        roi_x=roi_x,
+                        roi_y=roi_y,
+                        roi_w=roi_w,
+                        roi_h=roi_h,
+                        brightness_avg=brightness_avg,
+                    )
+                    current_roi = self.roi_index
+                    # Advance to next ROI for next frame
+                    self.roi_index = (self.roi_index + 1) % len(self.roi_regions)
+                else:
+                    # Direct mode: full frame detection
+                    detections = self.detector.detect_nv12(
+                        nv12_data=nv12_data,
+                        width=frame_width,
+                        height=frame_height,
+                        brightness_avg=brightness_avg,
+                    )
+                    current_roi = -1
 
                 # Release zero-copy buffer and signal consumed
                 hb_mem_buffer.release()
@@ -337,8 +373,9 @@ class YoloDetectorDaemon:
                     loop_end = time_module.perf_counter()
                     time_loop = (loop_end - loop_start) * 1000
                     classes = [d["class_name"] for d in detection_dicts]
+                    roi_info = f" [ROI {current_roi}]" if current_roi >= 0 else ""
                     logger.debug(
-                        f"Frame #{self.stats['frames_processed']}: "
+                        f"Frame #{self.stats['frames_processed']}{roi_info}: "
                         f"{len(detections)} detections {classes if classes else '(none)'}"
                     )
                     logger.debug(
@@ -350,8 +387,9 @@ class YoloDetectorDaemon:
                     logger.debug(f"  Loop: {time_loop:.1f}ms")
                 elif detections:
                     classes = [d["class_name"] for d in detection_dicts]
+                    roi_info = f" [ROI {current_roi}]" if current_roi >= 0 else ""
                     logger.info(
-                        f"Frame #{self.stats['frames_processed']}: "
+                        f"Frame #{self.stats['frames_processed']}{roi_info}: "
                         f"{len(detections)} detections {classes}"
                     )
 
@@ -397,6 +435,11 @@ def main() -> int:
         choices=["debug", "info", "warn", "error"],
         help="Log level (default: info)",
     )
+    parser.add_argument(
+        "--no-roi",
+        action="store_true",
+        help="Disable ROI mode (process full frame with resize)",
+    )
 
     args = parser.parse_args()
 
@@ -416,6 +459,11 @@ def main() -> int:
         score_threshold=args.score_threshold,
         nms_threshold=args.nms_threshold,
     )
+
+    # Apply CLI options
+    if args.no_roi:
+        daemon.roi_enabled = False
+        logger.info("ROI mode disabled via --no-roi flag")
 
     try:
         daemon.setup()

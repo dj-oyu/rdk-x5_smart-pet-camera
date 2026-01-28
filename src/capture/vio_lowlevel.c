@@ -196,7 +196,7 @@ int vio_create(vio_context_t *ctx, int camera_index,
     ret = hbn_vnode_set_ochn_buf_attr(ctx->isp_handle, 0, &alloc_attr);
     if (ret != 0) goto error_cleanup;
 
-    // Create VSE node (Dual Channel: Ch0=Main output, Ch1=YOLO 640x360)
+    // Create VSE node (Dual Channel: Ch0=Main output, Ch1=YOLO 1280x720)
     vse_attr_t vse_attr = {0};
 
     vse_ichn_attr_t vse_ichn_attr = {
@@ -221,8 +221,8 @@ int vio_create(vio_context_t *ctx, int camera_index,
         .bit_width = 8,
     };
 
-    // Channel 1: YOLO input (640x360 letterbox - maintains 16:9 aspect ratio)
-    // YOLO detector will add 140px padding top/bottom to make 640x640
+    // Channel 1: YOLO input (1280x720 for ROI-based detection)
+    // High resolution input allows 640x640 ROI crops without quality loss
     vse_ochn_attr_t vse_ochn_attr_ch1 = {
         .chn_en = CAM_TRUE,
         .roi = {
@@ -231,8 +231,8 @@ int vio_create(vio_context_t *ctx, int camera_index,
             .w = ctx->sensor_width,
             .h = ctx->sensor_height,
         },
-        .target_w = 640,
-        .target_h = 360,
+        .target_w = 1280,
+        .target_h = 720,
         .fmt = FRM_FMT_NV12,
         .bit_width = 8,
     };
