@@ -50,7 +50,7 @@ class YoloDetectorDaemon:
     def __init__(
         self,
         model_path: str,
-        score_threshold: float = 0.6,
+        score_threshold: float = 0.4,
         nms_threshold: float = 0.7,
     ):
         """
@@ -67,9 +67,15 @@ class YoloDetectorDaemon:
 
         # 共有メモリ
         self.shm_main: RealSharedMemory | None = None  # Main frame for resolution info
-        self.shm_zerocopy_day: ZeroCopySharedMemory | None = None  # DAY camera zero-copy
-        self.shm_zerocopy_night: ZeroCopySharedMemory | None = None  # NIGHT camera zero-copy
-        self.shm_control: CameraControlSharedMemory | None = None  # Camera control (active index)
+        self.shm_zerocopy_day: ZeroCopySharedMemory | None = (
+            None  # DAY camera zero-copy
+        )
+        self.shm_zerocopy_night: ZeroCopySharedMemory | None = (
+            None  # NIGHT camera zero-copy
+        )
+        self.shm_control: CameraControlSharedMemory | None = (
+            None  # Camera control (active index)
+        )
         self.active_camera: int = 0  # Currently active camera (0=DAY, 1=NIGHT)
 
         # YOLODetector
@@ -109,9 +115,13 @@ class YoloDetectorDaemon:
             self.shm_control = CameraControlSharedMemory()
             if self.shm_control.open():
                 self.active_camera = self.shm_control.get_active()
-                logger.info(f"CameraControl SHM opened, active camera: {self.active_camera}")
+                logger.info(
+                    f"CameraControl SHM opened, active camera: {self.active_camera}"
+                )
             else:
-                logger.warning("CameraControl SHM not available, defaulting to DAY camera")
+                logger.warning(
+                    "CameraControl SHM not available, defaulting to DAY camera"
+                )
 
             # Per-camera zero-copy SHMs (Phase 2)
             self.shm_zerocopy_day = ZeroCopySharedMemory(SHM_NAME_ZEROCOPY_DAY)
@@ -199,6 +209,7 @@ class YoloDetectorDaemon:
 
         try:
             import time as time_module
+
             is_debug = logger.isEnabledFor(logging.DEBUG)
 
             while self.running:
@@ -221,7 +232,9 @@ class YoloDetectorDaemon:
                 try:
                     # Validate plane_cnt
                     if zc_frame.plane_cnt != 2:
-                        raise ValueError(f"Expected 2 planes for NV12, got {zc_frame.plane_cnt}")
+                        raise ValueError(
+                            f"Expected 2 planes for NV12, got {zc_frame.plane_cnt}"
+                        )
 
                     # Import VIO buffer via raw hb_mem_graphic_buf_t bytes
                     y_arr, uv_arr, hb_mem_buffer = import_nv12_graph_buf(
@@ -347,6 +360,7 @@ class YoloDetectorDaemon:
         except Exception as e:
             logger.error(f"Error in detection loop: {e}")
             import traceback
+
             traceback.print_exc()
             return 1
 
@@ -409,6 +423,7 @@ def main() -> int:
     except Exception as e:
         logger.error(f"Daemon failed: {e}")
         import traceback
+
         traceback.print_exc()
         return 1
     finally:
