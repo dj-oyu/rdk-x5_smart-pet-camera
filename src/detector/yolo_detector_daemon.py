@@ -101,6 +101,11 @@ class YoloDetectorDaemon:
         self.roi_index: int = 0  # Current ROI index for round-robin
         self.roi_enabled: bool = True  # Enable ROI mode for high-res input
 
+        # Detection result cache for temporal integration
+        self.detection_cache: list[list[dict]] = []  # [roi_0_dets, roi_1_dets, ...]
+        self.cache_frame_number: int = -1  # Frame number when cache started
+        self.cache_timestamp: float = 0.0  # Timestamp when cache started
+
     def setup(self) -> None:
         """セットアップ"""
         logger.info("=== YOLO Detector Daemon (Zero-Copy) ===")
@@ -168,6 +173,54 @@ class YoloDetectorDaemon:
         except Exception as e:
             logger.error(f"Failed to load YOLO model: {e}")
             raise
+
+    def _merge_detections_with_nms(
+        self, all_detections: list[dict], nms_threshold: float = 0.5
+    ) -> list[dict]:
+        """
+        複数ROIからの検出結果を統合し、重複をNMSで除去
+
+        Args:
+            all_detections: 全ROIからの検出結果リスト
+            nms_threshold: NMS IoU閾値
+
+        Returns:
+            統合・重複除去後の検出結果
+        """
+        import cv2
+
+        if not all_detections:
+            return []
+
+        # クラス別にグループ化
+        by_class: dict[str, list[dict]] = {}
+        for det in all_detections:
+            cls = det["class_name"]
+            if cls not in by_class:
+                by_class[cls] = []
+            by_class[cls].append(det)
+
+        merged = []
+        for cls, dets in by_class.items():
+            if len(dets) == 1:
+                merged.extend(dets)
+                continue
+
+            # NMS用にxywh形式で準備
+            boxes = []
+            scores = []
+            for det in dets:
+                b = det["bbox"]
+                boxes.append([b["x"], b["y"], b["w"], b["h"]])
+                scores.append(det["confidence"])
+
+            # OpenCV NMS
+            indices = cv2.dnn.NMSBoxes(boxes, scores, 0.0, nms_threshold)
+
+            for idx in indices:
+                merged.append(dets[idx])
+
+        return merged
 
     def _get_active_zerocopy(self) -> ZeroCopySharedMemory | None:
         """Get the ZeroCopy SHM for the currently active camera."""
@@ -295,6 +348,9 @@ class YoloDetectorDaemon:
                         )
                         for i, (rx, ry, rw, rh) in enumerate(self.roi_regions):
                             logger.info(f"  ROI {i}: ({rx}, {ry}) - ({rx+rw}, {ry+rh})")
+                        # Initialize detection cache
+                        self.detection_cache = [[] for _ in self.roi_regions]
+                        logger.info("Detection cache initialized for temporal integration")
                     else:
                         logger.info("ROI mode disabled: single region covers full frame")
                         self.roi_enabled = False
@@ -302,7 +358,8 @@ class YoloDetectorDaemon:
                 # Run YOLO inference
                 if self.roi_enabled and len(self.roi_regions) > 1:
                     # ROI mode: cycle through regions
-                    roi_x, roi_y, roi_w, roi_h = self.roi_regions[self.roi_index]
+                    current_roi = self.roi_index
+                    roi_x, roi_y, roi_w, roi_h = self.roi_regions[current_roi]
                     detections = self.detector.detect_nv12_roi(
                         nv12_data=nv12_data,
                         width=frame_width,
@@ -313,9 +370,15 @@ class YoloDetectorDaemon:
                         roi_h=roi_h,
                         brightness_avg=brightness_avg,
                     )
-                    current_roi = self.roi_index
+
+                    # Track cache start for first ROI
+                    if current_roi == 0:
+                        self.cache_frame_number = frame_number
+                        self.cache_timestamp = timestamp_sec
+
                     # Advance to next ROI for next frame
                     self.roi_index = (self.roi_index + 1) % len(self.roi_regions)
+                    cycle_complete = (self.roi_index == 0)
                 else:
                     # Direct mode: full frame detection
                     detections = self.detector.detect_nv12(
@@ -325,6 +388,7 @@ class YoloDetectorDaemon:
                         brightness_avg=brightness_avg,
                     )
                     current_roi = -1
+                    cycle_complete = True
 
                 # Release zero-copy buffer and signal consumed
                 hb_mem_buffer.release()
@@ -332,7 +396,7 @@ class YoloDetectorDaemon:
 
                 timing = self.detector.get_last_timing()
 
-                # Scale bbox coordinates from YOLO input (640x360) to output resolution
+                # Scale bbox coordinates from YOLO input to output resolution
                 detection_dicts = [
                     {
                         "class_name": det.class_name.value,
@@ -347,18 +411,53 @@ class YoloDetectorDaemon:
                     for det in detections
                 ]
 
-                # Write detection results (only if detections exist)
-                if detection_dicts:
-                    self.shm_main.write_detection_result(
-                        frame_number=frame_number,
-                        timestamp_sec=timestamp_sec,
-                        detections=detection_dicts,
-                    )
+                # ROI mode: accumulate and merge detections
+                if self.roi_enabled and len(self.roi_regions) > 1:
+                    # Store detections in cache for this ROI
+                    self.detection_cache[current_roi] = detection_dicts
+
+                    if cycle_complete:
+                        # Merge all ROI detections with NMS
+                        all_detections = []
+                        for roi_dets in self.detection_cache:
+                            all_detections.extend(roi_dets)
+
+                        merged_dicts = self._merge_detections_with_nms(
+                            all_detections, nms_threshold=self.nms_threshold
+                        )
+
+                        # Write merged results
+                        if merged_dicts:
+                            self.shm_main.write_detection_result(
+                                frame_number=self.cache_frame_number,
+                                timestamp_sec=self.cache_timestamp,
+                                detections=merged_dicts,
+                            )
+
+                        # Clear cache for next cycle
+                        self.detection_cache = [[] for _ in self.roi_regions]
+
+                        # Use merged results for stats/logging
+                        detection_dicts = merged_dicts
+                else:
+                    # Direct mode: write immediately
+                    if detection_dicts:
+                        self.shm_main.write_detection_result(
+                            frame_number=frame_number,
+                            timestamp_sec=timestamp_sec,
+                            detections=detection_dicts,
+                        )
 
                 # Update stats
                 self.stats["frames_processed"] += 1
-                self.stats["total_detections"] += len(detections)
                 self.stats["avg_inference_time_ms"] = timing["total"] * 1000
+
+                # In ROI mode, count merged detections only at cycle completion
+                if self.roi_enabled and len(self.roi_regions) > 1:
+                    if cycle_complete:
+                        self.stats["total_detections"] += len(detection_dicts)
+                else:
+                    self.stats["total_detections"] += len(detections)
 
                 # Periodic stats log (every 100 frames)
                 if self.stats["frames_processed"] % 100 == 0:
@@ -372,12 +471,17 @@ class YoloDetectorDaemon:
                 if is_debug:
                     loop_end = time_module.perf_counter()
                     time_loop = (loop_end - loop_start) * 1000
-                    classes = [d["class_name"] for d in detection_dicts]
                     roi_info = f" [ROI {current_roi}]" if current_roi >= 0 else ""
+                    raw_classes = [det.class_name.value for det in detections]
                     logger.debug(
                         f"Frame #{self.stats['frames_processed']}{roi_info}: "
-                        f"{len(detections)} detections {classes if classes else '(none)'}"
+                        f"{len(detections)} raw detections {raw_classes if raw_classes else '(none)'}"
                     )
+                    if cycle_complete and self.roi_enabled and detection_dicts:
+                        merged_classes = [d["class_name"] for d in detection_dicts]
+                        logger.debug(
+                            f"  -> Merged: {len(detection_dicts)} detections {merged_classes}"
+                        )
                     logger.debug(
                         f"  YOLO: {timing['total'] * 1000:.1f}ms "
                         f"(prep={timing['preprocessing'] * 1000:.1f}ms, "
@@ -385,13 +489,18 @@ class YoloDetectorDaemon:
                         f"post={timing['postprocessing'] * 1000:.1f}ms)"
                     )
                     logger.debug(f"  Loop: {time_loop:.1f}ms")
-                elif detections:
+                elif cycle_complete and detection_dicts:
                     classes = [d["class_name"] for d in detection_dicts]
-                    roi_info = f" [ROI {current_roi}]" if current_roi >= 0 else ""
-                    logger.info(
-                        f"Frame #{self.stats['frames_processed']}{roi_info}: "
-                        f"{len(detections)} detections {classes}"
-                    )
+                    if self.roi_enabled and len(self.roi_regions) > 1:
+                        logger.info(
+                            f"Frame #{self.stats['frames_processed']} [merged]: "
+                            f"{len(detection_dicts)} detections {classes}"
+                        )
+                    else:
+                        logger.info(
+                            f"Frame #{self.stats['frames_processed']}: "
+                            f"{len(detection_dicts)} detections {classes}"
+                        )
 
         except KeyboardInterrupt:
             logger.info("Interrupted")
