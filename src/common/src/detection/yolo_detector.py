@@ -309,6 +309,13 @@ class YoloDetector:
             "total": 0.0,
         }
 
+        # レターボックス事前確保バッファ (遅延初期化)
+        self._lb_buf: np.ndarray | None = None
+        self._lb_y_view: np.ndarray | None = None    # Y平面のview
+        self._lb_uv_view: np.ndarray | None = None   # UV平面のview
+        self._lb_y_dst: np.ndarray | None = None     # Yデータコピー先のview
+        self._lb_uv_dst: np.ndarray | None = None    # UVデータコピー先のview
+
     def _download_default_model(self) -> None:
         """デフォルトモデル（YOLOv13n）をダウンロード"""
         import urllib.request
@@ -798,6 +805,44 @@ class YoloDetector:
 
         return nv12_array
 
+    def _init_letterbox_buf(
+        self, width: int, height: int, pad_top: int, pad_bottom: int
+    ) -> None:
+        """
+        レターボックスバッファを事前確保し、パディング領域を初期化
+
+        初回呼び出しのみ実行。以後のフレームではバッファを再利用し、
+        データ領域のみmemcpyする。
+        """
+        new_height = height + pad_top + pad_bottom
+        y_size_out = width * new_height
+        uv_height_out = new_height // 2
+        uv_size_out = width * uv_height_out
+        pad_top_uv = pad_top // 2
+
+        # バッファ確保
+        self._lb_buf = np.empty(y_size_out + uv_size_out, dtype=np.uint8)
+
+        # Y平面のview
+        y_out = self._lb_buf[:y_size_out].reshape(new_height, width)
+        y_out[:pad_top, :] = 16               # 上部黒帯 (Y=16)
+        y_out[pad_top + height :, :] = 16     # 下部黒帯
+
+        # UV平面のview
+        uv_out = self._lb_buf[y_size_out:].reshape(uv_height_out, width)
+        uv_out[:pad_top_uv, :] = 128                              # 上部中間値
+        uv_out[pad_top_uv + height // 2 :, :] = 128               # 下部中間値
+
+        # データコピー先のviewを保持 (毎フレームの書き込み対象)
+        self._lb_y_dst = y_out[pad_top : pad_top + height, :]
+        self._lb_uv_dst = uv_out[pad_top_uv : pad_top_uv + height // 2, :]
+
+        logger.info(
+            f"Letterbox buffer initialized: {width}x{height} -> "
+            f"{width}x{new_height} (pad={pad_top}+{pad_bottom}, "
+            f"buf={self._lb_buf.nbytes} bytes, alloc=once)"
+        )
+
     def _letterbox_nv12(
         self,
         nv12_array: np.ndarray,
@@ -809,6 +854,9 @@ class YoloDetector:
         """
         NV12フレームに上下の黒帯（letterbox）を追加
 
+        事前確保バッファを使用し、毎フレームのメモリ確保を回避。
+        パディング領域は初回のみ書き込み、以後はデータ領域のみコピー。
+
         Args:
             nv12_array: 入力NV12データ (width x height)
             width: 入力幅
@@ -819,47 +867,24 @@ class YoloDetector:
         Returns:
             パディング後のNV12データ (width x (height + pad_top + pad_bottom))
         """
-        new_height = height + pad_top + pad_bottom
+        # 遅延初期化 (初回のみ)
+        if self._lb_buf is None:
+            self._init_letterbox_buf(width, height, pad_top, pad_bottom)
+
         y_size_in = width * height
-        y_size_out = width * new_height
-        uv_height_in = height // 2
-        uv_height_out = new_height // 2
-        uv_size_in = width * uv_height_in
-        uv_size_out = width * uv_height_out
+        uv_size_in = width * (height // 2)
 
-        # 出力バッファを確保
-        output = np.empty(y_size_out + uv_size_out, dtype=np.uint8)
-
-        # Y平面: 黒 = 16 (video range) or 0 (full range)
-        # 上部パディング
-        y_out = output[:y_size_out].reshape(new_height, width)
-        y_out[:pad_top, :] = 16  # 黒（Y=16）
-
-        # 元のY平面をコピー
+        # Y平面をコピー先viewに直接書き込み
         y_in = nv12_array[:y_size_in].reshape(height, width)
-        y_out[pad_top : pad_top + height, :] = y_in
+        self._lb_y_dst[:] = y_in
 
-        # 下部パディング
-        y_out[pad_top + height :, :] = 16  # 黒（Y=16）
-
-        # UV平面: 中間値 = 128（無彩色）
-        uv_out = output[y_size_out:].reshape(uv_height_out, width)
-        pad_top_uv = pad_top // 2
-        pad_bottom_uv = pad_bottom // 2
-
-        # 上部パディング（UV）
-        uv_out[:pad_top_uv, :] = 128  # 中間値
-
-        # 元のUV平面をコピー
+        # UV平面をコピー先viewに直接書き込み
         uv_in = nv12_array[y_size_in : y_size_in + uv_size_in].reshape(
-            uv_height_in, width
+            height // 2, width
         )
-        uv_out[pad_top_uv : pad_top_uv + uv_height_in, :] = uv_in
+        self._lb_uv_dst[:] = uv_in
 
-        # 下部パディング（UV）
-        uv_out[pad_top_uv + uv_height_in :, :] = 128  # 中間値
-
-        return output
+        return self._lb_buf
 
     def _preprocess_yuv420sp(
         self, img: np.ndarray
