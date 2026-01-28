@@ -96,13 +96,22 @@ system の yolov8n (`/opt/hobot/`) は local の yolov8n (`models/`) より 20% 
 
 ## 0-5. API パフォーマンス比較 (Python)
 
-### hobot_dnn.pyeasy_dnn (合成 NV12 入力)
+### hobot_dnn.pyeasy_dnn (合成 NV12 入力, ベンチマーク)
 
 | モデル | 平均 | 標準偏差 | 最小 | 最大 |
 |--------|------|---------|------|------|
 | yolov13n | 46.25 ms | 0.12 ms | 46.03 ms | 46.53 ms |
 | yolo11n | 9.50 ms | 0.11 ms | 9.31 ms | 9.75 ms |
 | yolov8n | 8.18 ms | 0.10 ms | 8.01 ms | 8.43 ms |
+
+### 実運用時 (yolo_detector_daemon, zero-copy + letterbox + 後処理込み)
+
+| モデル | 実測平均 | 範囲 | 備考 |
+|--------|---------|------|------|
+| yolo11n | **16-20 ms** | 15-25 ms | zero-copy import + letterbox + postprocess 込み |
+
+ベンチマークの BPU 純推論 (8.9ms) に対し、実運用では約 2倍。
+内訳推定: zero-copy import (~2ms), letterbox (~1ms), 後処理/NMS (~5-10ms)。
 
 ### bpu_infer_lib
 
