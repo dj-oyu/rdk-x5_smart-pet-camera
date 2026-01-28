@@ -478,14 +478,16 @@ class HbMemGraphicBuffer:
 
         is_contiguous = (plane_cnt_in >= 2 and share_ids[1] == 0)
 
-        if is_contiguous:
-            # Contiguous NV12: single buffer, share_id[1]=0
-            # Use hb_mem_import_com_buf with share_id[0] to import the whole buffer
-            self._import_contiguous(lib, share_ids[0], sizes, phys_addrs, plane_cnt_in)
-        else:
-            # Multi-buffer: each plane has its own share_id
-            # Use hb_mem_import_graph_buf with cleaned-up input
+        # Always try hb_mem_import_graph_buf first (recommended by SDK sample_share.c)
+        # Falls back to hb_mem_import_com_buf for contiguous buffers if graph_buf fails
+        try:
             self._import_graph_buf(lib, raw_buf_data, share_ids, plane_cnt_in)
+        except RuntimeError as e:
+            if is_contiguous:
+                logger.warning(f"graph_buf import failed ({e}), falling back to com_buf")
+                self._import_contiguous(lib, share_ids[0], sizes, phys_addrs, plane_cnt_in)
+            else:
+                raise
 
     def _import_contiguous(
         self,
@@ -512,7 +514,7 @@ class HbMemGraphicBuffer:
         if ret != 0:
             raise RuntimeError(
                 f"hb_mem_import_com_buf failed: {ret} "
-                f"(share_id={share_id}, size={total_size})"
+                f"(share_id={share_id}, size={total_size}, phys_addr=0x{phys_addrs[0]:x})"
             )
 
         self._imported = True
@@ -558,9 +560,11 @@ class HbMemGraphicBuffer:
             ctypes.addressof(self._out_buf),
         )
         if ret != 0:
+            phys_info = list(struct_mod.unpack_from("<3Q", raw_buf_data, L["phys_addr"]))
             raise RuntimeError(
                 f"hb_mem_import_graph_buf failed: {ret} "
-                f"(share_id={share_ids[:plane_cnt]}, plane_cnt={plane_cnt})"
+                f"(share_id={share_ids[:plane_cnt]}, plane_cnt={plane_cnt}, "
+                f"phys_addr=[0x{phys_info[0]:x}, 0x{phys_info[1]:x}])"
             )
 
         self._imported = True
@@ -572,6 +576,10 @@ class HbMemGraphicBuffer:
         self._virt_addr = list(struct_mod.unpack_from("<3Q", out_bytes, L["virt_addr"]))
         self._size = list(struct_mod.unpack_from("<3Q", out_bytes, L["size"]))
         self._plane_cnt = struct_mod.unpack_from("<i", out_bytes, L["plane_cnt"])[0]
+
+        # For contiguous buffers (share_id[1]==0), compute UV virt_addr from Y offset
+        if self._plane_cnt >= 2 and self._virt_addr[1] == 0 and self._virt_addr[0] != 0:
+            self._virt_addr[1] = self._virt_addr[0] + self._size[0]
 
         logger.debug(
             f"Imported graph_buf: fd={self._fd[:self._plane_cnt]}, "
@@ -764,6 +772,16 @@ def import_nv12_graph_buf(
 
         y_arr = buf.get_plane_array(0)
         uv_arr = buf.get_plane_array(1)
+
+        # One-time frame data diagnostic (first import only)
+        if not hasattr(import_nv12_graph_buf, '_diag_done'):
+            import_nv12_graph_buf._diag_done = True
+            y_mean = float(np.mean(y_arr))
+            y_std = float(np.std(y_arr))
+            logger.info(
+                f"Frame data diagnostic: Y plane mean={y_mean:.1f}, std={y_std:.1f}, "
+                f"first_bytes={bytes(y_arr[:16]).hex()}"
+            )
 
         # Validate sizes match expected
         if expected_plane_sizes:
