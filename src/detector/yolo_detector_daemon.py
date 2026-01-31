@@ -473,17 +473,27 @@ class YoloDetectorDaemon:
                     time.sleep(0.01)
                     continue
 
+                # Wait for new frame with semaphore (replaces sleep polling)
+                if not active_zc.wait_for_frame(timeout_sec=0.1):
+                    # Timeout - check for camera switch and continue
+                    continue
+
                 zc_frame = active_zc.get_frame()
                 if zc_frame is None:
-                    time.sleep(0.001)
+                    continue
+
+                # Validate plane_cnt (graceful handling instead of exception)
+                if zc_frame.plane_cnt != 2:
+                    if zc_frame.plane_cnt == 0:
+                        logger.debug("Frame not ready yet (plane_cnt=0), skipping")
+                    else:
+                        logger.warning(
+                            f"Unexpected plane_cnt={zc_frame.plane_cnt}, skipping"
+                        )
+                    active_zc.mark_consumed()
                     continue
 
                 try:
-                    # Validate plane_cnt
-                    if zc_frame.plane_cnt != 2:
-                        raise ValueError(
-                            f"Expected 2 planes for NV12, got {zc_frame.plane_cnt}"
-                        )
 
                     # Import VIO buffer via raw hb_mem_graphic_buf_t bytes
                     y_arr, uv_arr, hb_mem_buffer = import_nv12_graph_buf(
