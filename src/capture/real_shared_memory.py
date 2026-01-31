@@ -36,12 +36,18 @@ try:
     # int sem_post(sem_t *sem)
     librt.sem_post.argtypes = [c_void_p]
     librt.sem_post.restype = c_int
+    # Define sem_trywait function signature (non-blocking wait)
+    # int sem_trywait(sem_t *sem)
+    librt.sem_trywait.argtypes = [c_void_p]
+    librt.sem_trywait.restype = c_int
 except OSError:
     # Try libpthread as fallback (sem_post is sometimes there)
     try:
         librt = CDLL("libpthread.so.0")
         librt.sem_post.argtypes = [c_void_p]
         librt.sem_post.restype = c_int
+        librt.sem_trywait.argtypes = [c_void_p]
+        librt.sem_trywait.restype = c_int
     except OSError as e:
         import logging
         logging.warning(f"Failed to load librt/libpthread for semaphore support: {e}")
@@ -79,6 +85,7 @@ class CCameraControl(Structure):
     _fields_ = [
         ("active_camera_index", c_int),   # 0=DAY, 1=NIGHT
         ("version", c_uint32),            # Incremented on each switch
+        ("switch_sem", c_uint8 * 32),     # sem_t (32 bytes on Linux)
     ]
 
 class CTimespec(Structure):
@@ -263,9 +270,10 @@ class ZeroCopyFrame:
 
 class CameraControlSharedMemory:
     """
-    Read-only interface to CameraControl shared memory.
+    Interface to CameraControl shared memory.
 
     Reads the active camera index set by the switcher daemon.
+    Can also detect camera switches via semaphore.
     """
 
     def __init__(self, shm_name: str = SHM_NAME_CONTROL):
@@ -277,12 +285,13 @@ class CameraControlSharedMemory:
         """Open the CameraControl shared memory segment."""
         shm_path = f"/dev/shm{self.shm_name}"
         try:
-            self.fd = os.open(shm_path, os.O_RDONLY)
+            # Open read/write for semaphore operations
+            self.fd = os.open(shm_path, os.O_RDWR)
             self.mmap_obj = mmap.mmap(
                 self.fd,
                 sizeof(CCameraControl),
                 mmap.MAP_SHARED,
-                mmap.PROT_READ,
+                mmap.PROT_READ | mmap.PROT_WRITE,
             )
             return True
         except FileNotFoundError:
@@ -308,6 +317,22 @@ class CameraControlSharedMemory:
         data = self.mmap_obj.read(sizeof(CCameraControl))
         ctrl = CCameraControl.from_buffer_copy(data)
         return ctrl.active_camera_index
+
+    def try_wait_switch(self) -> bool:
+        """
+        Non-blocking check for camera switch.
+
+        Returns True if a camera switch occurred (semaphore was posted).
+        Call this in the detection loop to detect camera changes.
+        """
+        if not self.mmap_obj or librt is None:
+            return False
+
+        # sem_t is at offset 8 (after active_camera_index=4 + version=4)
+        sem_offset = 8
+        sem_buf = (c_uint8 * 32).from_buffer(self.mmap_obj, sem_offset)
+        ret = librt.sem_trywait(addressof(sem_buf))
+        return ret == 0  # 0 = success (semaphore was posted)
 
 
 class ZeroCopySharedMemory:

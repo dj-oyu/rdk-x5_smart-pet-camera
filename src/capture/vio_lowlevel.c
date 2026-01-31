@@ -221,8 +221,11 @@ int vio_create(vio_context_t *ctx, int camera_index,
         .bit_width = 8,
     };
 
-    // Channel 1: YOLO input (640x360, 16:9 aspect ratio preserved)
-    // Hardware scaling from sensor resolution, letterbox to 640x640 in software
+    // Channel 1: YOLO input
+    // - Day camera (index 0): 640x360 (letterbox to 640x640)
+    // - Night camera (index 1): 1280x720 (ROI-based detection with 3 regions)
+    int yolo_width = (camera_index == 1) ? 1280 : 640;
+    int yolo_height = (camera_index == 1) ? 720 : 360;
     vse_ochn_attr_t vse_ochn_attr_ch1 = {
         .chn_en = CAM_TRUE,
         .roi = {
@@ -231,11 +234,12 @@ int vio_create(vio_context_t *ctx, int camera_index,
             .w = ctx->sensor_width,
             .h = ctx->sensor_height,
         },
-        .target_w = 640,
-        .target_h = 360,
+        .target_w = yolo_width,
+        .target_h = yolo_height,
         .fmt = FRM_FMT_NV12,
         .bit_width = 8,
     };
+    LOG_INFO("VIO", "VSE Ch1 (YOLO): %dx%d (camera_index=%d)", yolo_width, yolo_height, camera_index);
 
     // Channel 2: MJPEG/web_monitor input (fixed 640x480)
     vse_ochn_attr_t vse_ochn_attr_ch2 = {
