@@ -522,12 +522,29 @@ class YoloDetectorDaemon:
                     if camera_id == 0:  # Day: 640x360 → 640x480
                         self.scale_x = 1.0
                         self.scale_y = 480.0 / 360.0  # ~1.333
+                        # Disable night ROI mode, use letterbox
+                        self.night_roi_mode = False
+                        self.night_roi_regions = []
+                        self.roi_enabled = False
+                        self.roi_index = 0
+                        self.detection_cache = []
+                        logger.info(
+                            f"Camera switched to {camera_id}, scale=({self.scale_x:.3f}, {self.scale_y:.3f}) "
+                            f"[day camera letterbox mode]"
+                        )
                     else:  # Night: 1280x720 → 640x480
                         self.scale_x = 0.5
                         self.scale_y = 480.0 / 720.0  # ~0.667
-                    logger.info(
-                        f"Camera switched to {camera_id}, scale=({self.scale_x:.3f}, {self.scale_y:.3f})"
-                    )
+                        # Enable night ROI mode with 3 overlapping regions
+                        self.night_roi_mode = True
+                        self.night_roi_regions = self.detector.get_roi_regions_720p()
+                        self.roi_enabled = False
+                        self.roi_index = 0
+                        self.detection_cache = [[] for _ in self.night_roi_regions]
+                        logger.info(
+                            f"Camera switched to {camera_id}, scale=({self.scale_x:.3f}, {self.scale_y:.3f}) "
+                            f"[night ROI mode: {len(self.night_roi_regions)} regions]"
+                        )
 
                 # Initialize scale factors on first frame (before any switch)
                 if self.scale_x is None or self.scale_y is None:
