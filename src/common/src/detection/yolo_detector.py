@@ -424,6 +424,69 @@ class YoloDetector:
 
         return rois
 
+    def get_roi_regions_720p(self) -> list[tuple[int, int, int, int]]:
+        """
+        1280x720入力用の3列ROI領域を計算（50%オーバーラップ）
+
+        夜カメラ専用のROI配置:
+        - 3列の水平ROI (stride=320px, overlap=320px)
+        - 垂直方向は中央配置 (y_offset=40px)
+
+        Returns:
+            ROI領域のリスト [(x, y, w, h), ...]
+            3 ROIs: ROI0(0,40), ROI1(320,40), ROI2(640,40)
+        """
+        roi_size = self.input_w  # 640
+        stride = 320  # 50% overlap
+        y_offset = 40  # (720 - 640) / 2 = 40
+
+        rois = []
+        for i in range(3):
+            x = i * stride
+            rois.append((x, y_offset, roi_size, roi_size))
+
+        return rois
+
+    def detect_nv12_roi_720p(
+        self,
+        nv12_data: bytes | memoryview,
+        roi_index: int,
+        brightness_avg: float = -1.0,
+    ) -> list[Detection]:
+        """
+        1280x720 NV12フレームから指定ROIの物体検出を実行
+
+        夜カメラ用の高速ROI推論パス。
+        ROI座標は事前計算済み（get_roi_regions_720p()）で固定。
+
+        Args:
+            nv12_data: 1280x720 NV12フォーマットのフレームデータ
+            roi_index: ROIインデックス (0, 1, 2)
+            brightness_avg: ISPからの平均輝度 (0-255)
+
+        Returns:
+            検出結果のリスト (座標は1280x720フレーム座標系)
+        """
+        # ROI座標を取得
+        rois = self.get_roi_regions_720p()
+        if roi_index < 0 or roi_index >= len(rois):
+            logger.warning(f"Invalid ROI index: {roi_index}")
+            return []
+
+        roi_x, roi_y, roi_w, roi_h = rois[roi_index]
+
+        # detect_nv12_roiを使用してROI領域を推論
+        return self.detect_nv12_roi(
+            nv12_data=nv12_data,
+            width=1280,
+            height=720,
+            roi_x=roi_x,
+            roi_y=roi_y,
+            roi_w=roi_w,
+            roi_h=roi_h,
+            brightness_avg=brightness_avg,
+        )
+
     def _crop_nv12_roi(
         self,
         nv12_array: np.ndarray,
