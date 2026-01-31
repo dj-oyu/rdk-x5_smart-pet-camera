@@ -319,7 +319,7 @@ func (db *DetectionBroadcaster) run() {
 
 		startupRetries++
 		if startupRetries >= maxStartupRetries {
-			logger.Warn("DetectionBroadcaster", "Timeout waiting for detection daemon, will keep trying...")
+			logger.Warn("DetectionBroadcaster", "Waiting for first detection (detector may be running with 0 detections)...")
 			startupRetries = 0 // Reset and keep trying
 		}
 
