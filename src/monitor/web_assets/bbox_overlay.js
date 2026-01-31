@@ -230,7 +230,9 @@ export class BBoxOverlay {
                     if (detectionFrame > 0 && (frameNumber - detectionFrame) < 30) {
                         frameNumber = detectionFrame;
                     }
-                    timestamp = parsed.latest_detection.timestamp || timestamp;
+                    // Note: Do NOT use latest_detection.timestamp here.
+                    // It contains the time when detection occurred (stale),
+                    // not the current time. Use parsed.timestamp (status event time) instead.
                 }
 
                 // Update base values for interpolation
