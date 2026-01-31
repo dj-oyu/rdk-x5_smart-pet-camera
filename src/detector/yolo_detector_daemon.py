@@ -90,11 +90,10 @@ class YoloDetectorDaemon:
 
         self.running = True
 
-        # 解像度キャッシュ（初回のみ取得）
-        self.target_width = None
-        self.target_height = None
-        self.scale_x = None
-        self.scale_y = None
+        # カメラごとのスケール係数（フレームサイズが異なるため）
+        # Day: 640x360 → 640x480, Night: 1280x720 → 640x480
+        self.scale_x: float | None = None
+        self.scale_y: float | None = None
 
         # ROI cycling state
         self.roi_regions: list[tuple[int, int, int, int]] = []  # [(x, y, w, h), ...]
@@ -505,21 +504,33 @@ class YoloDetectorDaemon:
                 timestamp_sec = zc_frame.timestamp_sec
                 brightness_avg = zc_frame.brightness_avg
 
-                # Cache scale factors (first frame only)
-                if self.scale_x is None or self.scale_y is None:
-                    main_frame = self.shm_main.get_latest_frame()
-                    if main_frame is None:
-                        hb_mem_buffer.release()
-                        active_zc.mark_consumed()
-                        time.sleep(0.01)
-                        continue
-                    self.target_width = main_frame.width
-                    self.target_height = main_frame.height
-                    self.scale_x = self.target_width / float(frame_width)
-                    self.scale_y = self.target_height / float(frame_height)
+                # Check for camera switch via semaphore (non-blocking)
+                if self.shm_control and self.shm_control.try_wait_switch():
+                    camera_id = self.shm_control.get_active()
+                    # Use fixed scale factors based on camera type
+                    # Output is always MJPEG 640x480
+                    if camera_id == 0:  # Day: 640x360 → 640x480
+                        self.scale_x = 1.0
+                        self.scale_y = 480.0 / 360.0  # ~1.333
+                    else:  # Night: 1280x720 → 640x480
+                        self.scale_x = 0.5
+                        self.scale_y = 480.0 / 720.0  # ~0.667
                     logger.info(
-                        f"Output resolution: {self.target_width}x{self.target_height} "
-                        f"(YOLO input: {frame_width}x{frame_height}, scale={self.scale_x:.3f}x{self.scale_y:.3f})"
+                        f"Camera switched to {camera_id}, scale=({self.scale_x:.3f}, {self.scale_y:.3f})"
+                    )
+
+                # Initialize scale factors on first frame (before any switch)
+                if self.scale_x is None or self.scale_y is None:
+                    camera_id = zc_frame.camera_id
+                    # Use fixed scale factors based on camera type
+                    if camera_id == 0:  # Day: 640x360 → 640x480
+                        self.scale_x = 1.0
+                        self.scale_y = 480.0 / 360.0
+                    else:  # Night: 1280x720 → 640x480
+                        self.scale_x = 0.5
+                        self.scale_y = 480.0 / 720.0
+                    logger.info(
+                        f"Initial scale for camera {camera_id}: ({self.scale_x:.3f}, {self.scale_y:.3f})"
                     )
 
                 # Initialize ROI regions on first frame
