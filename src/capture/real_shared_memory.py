@@ -18,11 +18,13 @@ from ctypes import (
     c_float,
     c_char,
     c_size_t,
+    c_long,
     sizeof,
     CDLL,
     POINTER,
     c_void_p,
     addressof,
+    byref,
 )
 from dataclasses import dataclass
 from typing import Optional
@@ -40,6 +42,10 @@ try:
     # int sem_trywait(sem_t *sem)
     librt.sem_trywait.argtypes = [c_void_p]
     librt.sem_trywait.restype = c_int
+    # Define sem_timedwait function signature (blocking wait with timeout)
+    # int sem_timedwait(sem_t *sem, const struct timespec *abs_timeout)
+    librt.sem_timedwait.argtypes = [c_void_p, c_void_p]
+    librt.sem_timedwait.restype = c_int
 except OSError:
     # Try libpthread as fallback (sem_post is sometimes there)
     try:
@@ -48,6 +54,8 @@ except OSError:
         librt.sem_post.restype = c_int
         librt.sem_trywait.argtypes = [c_void_p]
         librt.sem_trywait.restype = c_int
+        librt.sem_timedwait.argtypes = [c_void_p, c_void_p]
+        librt.sem_timedwait.restype = c_int
     except OSError as e:
         import logging
         logging.warning(f"Failed to load librt/libpthread for semaphore support: {e}")
@@ -89,9 +97,10 @@ class CCameraControl(Structure):
     ]
 
 class CTimespec(Structure):
+    """timespec structure for timestamps and sem_timedwait."""
     _fields_ = [
-        ("tv_sec", c_uint64),  # time_t on most systems
-        ("tv_nsec", c_uint64),  # long
+        ("tv_sec", c_long),   # time_t (signed for sem_timedwait compatibility)
+        ("tv_nsec", c_long),  # long
     ]
 
 
@@ -457,6 +466,37 @@ class ZeroCopySharedMemory:
             if ret != 0:
                 import logging
                 logging.warning(f"sem_post failed: {ret}")
+
+    def wait_for_frame(self, timeout_sec: float = 0.1) -> bool:
+        """
+        Wait for a new frame to be available (blocking with timeout).
+
+        Uses sem_timedwait on the new_frame_sem semaphore to efficiently wait
+        for the camera daemon to signal a new frame, avoiding busy polling.
+
+        Args:
+            timeout_sec: Maximum time to wait in seconds (default: 0.1s = 100ms)
+
+        Returns:
+            True if a frame is available, False on timeout
+        """
+        if not self.mmap_obj or librt is None:
+            return False
+
+        import time
+
+        # new_frame_sem is at offset 0 in CZeroCopyFrameBuffer
+        sem_buf = (c_uint8 * 32).from_buffer(self.mmap_obj, 0)
+
+        # Calculate absolute timeout (sem_timedwait requires absolute time)
+        now = time.time()
+        deadline = now + timeout_sec
+        ts = CTimespec()
+        ts.tv_sec = int(deadline)
+        ts.tv_nsec = int((deadline - int(deadline)) * 1e9)
+
+        ret = librt.sem_timedwait(addressof(sem_buf), byref(ts))
+        return ret == 0  # 0 = success, -1 = timeout (ETIMEDOUT)
 
 
 class RealSharedMemory:

@@ -83,12 +83,34 @@ export class BBoxOverlay {
     _setupCanvas() {
         const updateCanvasSize = () => {
             if (this.video.videoWidth > 0 && this.video.videoHeight > 0) {
-                this.canvas.width = this.video.videoWidth;
-                this.canvas.height = this.video.videoHeight;
-                console.log(`[BBox] Canvas sized to ${this.canvas.width}x${this.canvas.height}`);
+                // Only update if dimensions changed
+                if (this.canvas.width !== this.video.videoWidth ||
+                    this.canvas.height !== this.video.videoHeight) {
+                    this.canvas.width = this.video.videoWidth;
+                    this.canvas.height = this.video.videoHeight;
+                    console.log(`[BBox] Canvas sized to ${this.canvas.width}x${this.canvas.height}`);
+                }
             }
         };
+
+        // Multiple events to ensure canvas is sized correctly for WebRTC
         this.video.addEventListener('loadedmetadata', updateCanvasSize);
+        this.video.addEventListener('loadeddata', updateCanvasSize);
+        this.video.addEventListener('canplay', updateCanvasSize);
+        this.video.addEventListener('resize', updateCanvasSize);
+
+        // Poll for dimensions in case events don't fire (WebRTC edge case)
+        this._canvasSizePoller = setInterval(() => {
+            updateCanvasSize();
+            // Stop polling once canvas is properly sized
+            if (this.canvas.width > 0 && this.canvas.height > 0) {
+                clearInterval(this._canvasSizePoller);
+                this._canvasSizePoller = null;
+                console.log('[BBox] Canvas size confirmed, stopped polling');
+            }
+        }, 100);
+
+        // Initial check
         updateCanvasSize();
     }
 
@@ -112,6 +134,10 @@ export class BBoxOverlay {
         if (this.animationId) {
             cancelAnimationFrame(this.animationId);
             this.animationId = null;
+        }
+        if (this._canvasSizePoller) {
+            clearInterval(this._canvasSizePoller);
+            this._canvasSizePoller = null;
         }
         if (this.detectionEventSource) {
             this.detectionEventSource.close();
@@ -256,6 +282,10 @@ export class BBoxOverlay {
      * Update current detections (no smoothing - direct replacement)
      */
     _updateDetections(newDetections) {
+        // Debug: log when detections change
+        if (newDetections.length !== this.currentDetections.length) {
+            console.log(`[BBox] Detections updated: ${newDetections.length} objects, canvas=${this.canvas.width}x${this.canvas.height}`);
+        }
         this.currentDetections = newDetections;
     }
 
