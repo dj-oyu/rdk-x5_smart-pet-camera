@@ -93,7 +93,8 @@ func streamMJPEGFromChannel(w http.ResponseWriter, frameCh <-chan []byte) {
 		}
 
 		// Write frame with error checking - if client disconnected, exit immediately
-		if _, err := w.Write([]byte("--frame\r\nContent-Type: image/jpeg\r\n\r\n")); err != nil {
+		header := fmt.Sprintf("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(jpegData))
+		if _, err := w.Write([]byte(header)); err != nil {
 			// Client disconnected (e.g., switched to WebRTC)
 			logger.Debug("MJPEG", "Client disconnected during write: %v", err)
 			return
@@ -137,7 +138,8 @@ func streamMJPEG(w http.ResponseWriter, interval time.Duration, provider jpegPro
 			}
 		}
 
-		_, _ = w.Write([]byte("--frame\r\nContent-Type: image/jpeg\r\n\r\n"))
+		header := fmt.Sprintf("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(jpegData))
+		_, _ = w.Write([]byte(header))
 		_, _ = w.Write(jpegData)
 		_, _ = w.Write([]byte("\r\n"))
 		flusher.Flush()
