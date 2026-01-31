@@ -177,242 +177,6 @@ class YoloDetectorDaemon:
             logger.error(f"Failed to load YOLO model: {e}")
             raise
 
-    def _merge_boundary_bboxes(
-        self, detections: list[dict], boundary_x: int, margin: int = 50
-    ) -> list[dict]:
-        """
-        ROI境界付近で分断されたbboxを結合
-
-        Args:
-            detections: 検出結果リスト
-            boundary_x: ROI境界のx座標 (スケール後)
-            margin: 境界からの許容マージン (px)
-
-        Returns:
-            結合後の検出結果
-        """
-        if len(detections) < 2:
-            return detections
-
-        # クラス別にグループ化
-        by_class: dict[str, list[dict]] = {}
-        for det in detections:
-            cls = det["class_name"]
-            if cls not in by_class:
-                by_class[cls] = []
-            by_class[cls].append(det)
-
-        result = []
-        for cls, dets in by_class.items():
-            if len(dets) == 1:
-                result.extend(dets)
-                continue
-
-            # 境界付近のbboxをペアで結合
-            merged_indices = set()
-            merged_dets = []
-
-            for i, det1 in enumerate(dets):
-                if i in merged_indices:
-                    continue
-
-                b1 = det1["bbox"]
-                b1_right = b1["x"] + b1["w"]
-                b1_top = b1["y"]
-                b1_bottom = b1["y"] + b1["h"]
-
-                best_merge = None
-                best_j = -1
-
-                for j, det2 in enumerate(dets):
-                    if j <= i or j in merged_indices:
-                        continue
-
-                    b2 = det2["bbox"]
-                    b2_left = b2["x"]
-                    b2_top = b2["y"]
-                    b2_bottom = b2["y"] + b2["h"]
-
-                    # 境界付近で水平に隣接しているか確認
-                    # det1が左側、det2が右側
-                    near_boundary = (
-                        abs(b1_right - boundary_x) < margin
-                        and abs(b2_left - boundary_x) < margin
-                    )
-
-                    # Y方向でオーバーラップしているか
-                    y_overlap = not (b1_bottom < b2_top or b2_bottom < b1_top)
-
-                    # 水平方向で近接しているか (gap < margin)
-                    x_gap = b2_left - b1_right
-                    horizontally_close = -margin < x_gap < margin
-
-                    if near_boundary and y_overlap and horizontally_close:
-                        # 結合候補として記録
-                        if best_merge is None or det2["confidence"] > best_merge["confidence"]:
-                            best_merge = det2
-                            best_j = j
-
-                if best_merge is not None:
-                    # 2つのbboxを結合
-                    b2 = best_merge["bbox"]
-                    new_x = min(b1["x"], b2["x"])
-                    new_y = min(b1["y"], b2["y"])
-                    new_right = max(b1["x"] + b1["w"], b2["x"] + b2["w"])
-                    new_bottom = max(b1["y"] + b1["h"], b2["y"] + b2["h"])
-
-                    merged_det = {
-                        "class_name": cls,
-                        "confidence": max(det1["confidence"], best_merge["confidence"]),
-                        "bbox": {
-                            "x": new_x,
-                            "y": new_y,
-                            "w": new_right - new_x,
-                            "h": new_bottom - new_y,
-                        },
-                    }
-                    merged_dets.append(merged_det)
-                    merged_indices.add(i)
-                    merged_indices.add(best_j)
-
-                    logger.debug(
-                        f"  Boundary merge [{cls}]: "
-                        f"({b1['x']},{b1['y']},{b1['w']},{b1['h']}) + "
-                        f"({b2['x']},{b2['y']},{b2['w']},{b2['h']}) -> "
-                        f"({new_x},{new_y},{new_right-new_x},{new_bottom-new_y})"
-                    )
-
-            # マージされなかったものを追加
-            for i, det in enumerate(dets):
-                if i not in merged_indices:
-                    merged_dets.append(det)
-
-            result.extend(merged_dets)
-
-        return result
-
-    def _merge_night_roi_detections(
-        self, all_detections: list[dict], nms_threshold: float = 0.4
-    ) -> list[dict]:
-        """
-        夜カメラ3列ROIからの検出結果を統合（オーバーラップ領域のNMS）
-
-        Args:
-            all_detections: 全ROIからの検出結果リスト（スケール後座標）
-            nms_threshold: NMS IoU閾値（0.4推奨 - オーバーラップ領域用）
-
-        Returns:
-            統合・重複除去後の検出結果
-        """
-        import cv2
-
-        if not all_detections:
-            return []
-
-        # Step 1: 2つの境界でマージ (x=320, x=640のスケール後座標)
-        # 夜カメラ1280x720 → 出力1920x1080の場合: scale_x = 1.5
-        boundary1_x = int(320 * (self.scale_x or 1.0))  # ROI0/ROI1境界
-        boundary2_x = int(640 * (self.scale_x or 1.0))  # ROI1/ROI2境界
-
-        all_detections = self._merge_boundary_bboxes(all_detections, boundary1_x, margin=50)
-        all_detections = self._merge_boundary_bboxes(all_detections, boundary2_x, margin=50)
-
-        # Step 2: クラス別NMSで重複除去
-        by_class: dict[str, list[dict]] = {}
-        for det in all_detections:
-            cls = det["class_name"]
-            if cls not in by_class:
-                by_class[cls] = []
-            by_class[cls].append(det)
-
-        merged = []
-        for cls, dets in by_class.items():
-            if len(dets) == 1:
-                merged.extend(dets)
-                continue
-
-            # NMS用にxywh形式で準備
-            boxes = []
-            scores = []
-            for det in dets:
-                b = det["bbox"]
-                boxes.append([b["x"], b["y"], b["w"], b["h"]])
-                scores.append(det["confidence"])
-
-            # OpenCV NMS
-            indices = cv2.dnn.NMSBoxes(boxes, scores, 0.0, nms_threshold)
-
-            if len(indices) < len(dets):
-                logger.debug(
-                    f"  Night ROI NMS [{cls}]: {len(dets)} -> {len(indices)} "
-                    f"(removed {len(dets) - len(indices)}, IoU threshold={nms_threshold})"
-                )
-
-            for idx in indices:
-                merged.append(dets[idx])
-
-        return merged
-
-    def _merge_detections_with_nms(
-        self, all_detections: list[dict], nms_threshold: float = 0.5
-    ) -> list[dict]:
-        """
-        複数ROIからの検出結果を統合し、重複をNMSで除去
-
-        Args:
-            all_detections: 全ROIからの検出結果リスト
-            nms_threshold: NMS IoU閾値
-
-        Returns:
-            統合・重複除去後の検出結果
-        """
-        import cv2
-
-        if not all_detections:
-            return []
-
-        # Step 1: ROI境界付近のbboxを結合
-        # boundary_x はスケール後の座標 (640 * scale_x)
-        boundary_x = int(640 * (self.scale_x or 0.5))
-        all_detections = self._merge_boundary_bboxes(all_detections, boundary_x)
-
-        # クラス別にグループ化
-        by_class: dict[str, list[dict]] = {}
-        for det in all_detections:
-            cls = det["class_name"]
-            if cls not in by_class:
-                by_class[cls] = []
-            by_class[cls].append(det)
-
-        merged = []
-        for cls, dets in by_class.items():
-            if len(dets) == 1:
-                merged.extend(dets)
-                continue
-
-            # NMS用にxywh形式で準備
-            boxes = []
-            scores = []
-            for det in dets:
-                b = det["bbox"]
-                boxes.append([b["x"], b["y"], b["w"], b["h"]])
-                scores.append(det["confidence"])
-
-            # OpenCV NMS
-            indices = cv2.dnn.NMSBoxes(boxes, scores, 0.0, nms_threshold)
-
-            # Debug log if detections were removed
-            if len(indices) < len(dets):
-                logger.debug(
-                    f"  NMS [{cls}]: {len(dets)} -> {len(indices)} "
-                    f"(removed {len(dets) - len(indices)}, IoU threshold={nms_threshold})"
-                )
-
-            for idx in indices:
-                merged.append(dets[idx])
-
-        return merged
-
     def _get_active_zerocopy(self) -> ZeroCopySharedMemory | None:
         """Get the ZeroCopy SHM for the currently active camera."""
         if self.shm_control:
@@ -659,16 +423,16 @@ class YoloDetectorDaemon:
 
                 timing = self.detector.get_last_timing()
 
-                # Scale bbox coordinates from YOLO input to output resolution
+                # Keep bbox coordinates in frame space (scaling moved to final output)
                 detection_dicts = [
                     {
                         "class_name": det.class_name.value,
                         "confidence": det.confidence,
                         "bbox": {
-                            "x": int(det.bbox.x * self.scale_x),
-                            "y": int(det.bbox.y * self.scale_y),
-                            "w": int(det.bbox.w * self.scale_x),
-                            "h": int(det.bbox.h * self.scale_y),
+                            "x": det.bbox.x,
+                            "y": det.bbox.y,
+                            "w": det.bbox.w,
+                            "h": det.bbox.h,
                         },
                     }
                     for det in detections
@@ -690,26 +454,37 @@ class YoloDetectorDaemon:
 
                         if is_debug and all_detections:
                             logger.debug(
-                                f"  Night camera: {len(all_detections)} detections before merge"
+                                f"  Night camera: {len(all_detections)} detections"
                             )
 
-                        # Use specialized merge for night camera (handles 2 boundaries)
-                        merged_dicts = self._merge_night_roi_detections(
-                            all_detections, nms_threshold=0.4
-                        )
+                        # No merge needed - overlapping ROIs rarely produce duplicates
+                        merged_dicts = all_detections
 
-                        if is_debug and all_detections:
-                            logger.debug(
-                                f"  Night camera: {len(merged_dicts)} detections after merge"
-                            )
+                        # Apply scaling after merge (single rounding at final output)
+                        scaled_dicts = [
+                            {
+                                "class_name": d["class_name"],
+                                "confidence": d["confidence"],
+                                "bbox": {
+                                    "x": int(d["bbox"]["x"] * self.scale_x),
+                                    "y": int(d["bbox"]["y"] * self.scale_y),
+                                    "w": int(d["bbox"]["w"] * self.scale_x),
+                                    "h": int(d["bbox"]["h"] * self.scale_y),
+                                },
+                            }
+                            for d in merged_dicts
+                        ]
 
-                        # Write merged results
-                        if merged_dicts:
+                        # Write scaled results
+                        if scaled_dicts:
                             self.shm_main.write_detection_result(
                                 frame_number=self.cache_frame_number,
                                 timestamp_sec=self.cache_timestamp,
-                                detections=merged_dicts,
+                                detections=scaled_dicts,
                             )
+
+                        # Use scaled results for stats/logging
+                        merged_dicts = scaled_dicts
 
                         # Clear cache for next cycle
                         self.detection_cache = [[] for _ in self.night_roi_regions]
@@ -734,39 +509,62 @@ class YoloDetectorDaemon:
 
                         if is_debug and all_detections:
                             logger.debug(
-                                f"  Before merge: {len(all_detections)} detections"
+                                f"  Day ROI: {len(all_detections)} detections"
                             )
 
-                        merged_dicts = self._merge_detections_with_nms(
-                            all_detections, nms_threshold=self.nms_threshold
-                        )
+                        # No merge needed - overlapping ROIs rarely produce duplicates
+                        merged_dicts = all_detections
 
-                        if is_debug and all_detections:
-                            logger.debug(
-                                f"  After merge: {len(merged_dicts)} detections"
-                            )
+                        # Apply scaling after merge (single rounding at final output)
+                        scaled_dicts = [
+                            {
+                                "class_name": d["class_name"],
+                                "confidence": d["confidence"],
+                                "bbox": {
+                                    "x": int(d["bbox"]["x"] * self.scale_x),
+                                    "y": int(d["bbox"]["y"] * self.scale_y),
+                                    "w": int(d["bbox"]["w"] * self.scale_x),
+                                    "h": int(d["bbox"]["h"] * self.scale_y),
+                                },
+                            }
+                            for d in merged_dicts
+                        ]
 
-                        # Write merged results
-                        if merged_dicts:
+                        # Write scaled results
+                        if scaled_dicts:
                             self.shm_main.write_detection_result(
                                 frame_number=self.cache_frame_number,
                                 timestamp_sec=self.cache_timestamp,
-                                detections=merged_dicts,
+                                detections=scaled_dicts,
                             )
 
                         # Clear cache for next cycle
                         self.detection_cache = [[] for _ in self.roi_regions]
 
-                        # Use merged results for stats/logging
-                        detection_dicts = merged_dicts
+                        # Use scaled results for stats/logging
+                        detection_dicts = scaled_dicts
                 else:
-                    # Direct mode: write immediately
-                    if detection_dicts:
+                    # Direct mode: apply scaling and write immediately
+                    scaled_dicts = [
+                        {
+                            "class_name": d["class_name"],
+                            "confidence": d["confidence"],
+                            "bbox": {
+                                "x": int(d["bbox"]["x"] * self.scale_x),
+                                "y": int(d["bbox"]["y"] * self.scale_y),
+                                "w": int(d["bbox"]["w"] * self.scale_x),
+                                "h": int(d["bbox"]["h"] * self.scale_y),
+                            },
+                        }
+                        for d in detection_dicts
+                    ]
+                    if scaled_dicts:
                         self.shm_main.write_detection_result(
                             frame_number=frame_number,
                             timestamp_sec=timestamp_sec,
-                            detections=detection_dicts,
+                            detections=scaled_dicts,
                         )
+                    detection_dicts = scaled_dicts
 
                 # Update stats
                 self.stats["frames_processed"] += 1
