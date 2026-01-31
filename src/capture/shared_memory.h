@@ -59,6 +59,7 @@ typedef enum {
 typedef struct {
     volatile int active_camera_index;  // 0=DAY, 1=NIGHT
     volatile uint32_t version;         // Incremented on each switch
+    sem_t switch_sem;                  // Posted on camera switch (for consumer notification)
 } CameraControl;
 
 /**
