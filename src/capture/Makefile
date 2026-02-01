@@ -17,8 +17,10 @@ POC_VSE_DUAL_SOURCES := camera_poc_vse_dual.c shared_memory.c logger.c
 ISP_LOWLIGHT_SOURCES := test_isp_lowlight.c logger.c
 HB_MEM_IMPORT_SOURCES := test_hb_mem_import.c shared_memory.c logger.c
 HAL_SOURCES := vio_lowlevel.c encoder_lowlevel.c logger.c
+JPEG_ENCODER_SOURCES := jpeg_encoder.c logger.c
 
 DAEMON_OBJECTS := $(DAEMON_SOURCES:.c=.o)
+JPEG_ENCODER_OBJECTS := $(JPEG_ENCODER_SOURCES:.c=.o)
 SHM_TEST_OBJECTS := $(SHM_TEST_SOURCES:.c=.o)
 FPS_READER_OBJECTS := $(FPS_READER_SOURCES:.c=.o)
 SWITCHER_DEMO_OBJECTS := $(SWITCHER_DEMO_SOURCES:.c=.o)
@@ -37,6 +39,7 @@ POC_LOWLEVEL_BINARY := $(BUILD_DIR)/camera_poc_lowlevel
 POC_VSE_DUAL_BINARY := $(BUILD_DIR)/camera_poc_vse_dual
 ISP_LOWLIGHT_BINARY := $(BUILD_DIR)/test_isp_lowlight
 HB_MEM_IMPORT_BINARY := $(BUILD_DIR)/test_hb_mem_import
+JPEG_ENCODER_LIB := $(BUILD_DIR)/libjpeg_encoder.a
 
 LDLIBS_COMMON := -lrt
 LDLIBS_DAEMON := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lmultimedia -lm
@@ -49,9 +52,9 @@ LDLIBS_HB_MEM_IMPORT := $(LDLIBS_COMMON) -lpthread -lhbmem
 
 DAEMON_ARGS ?= -C 0 -P 1
 
-.PHONY: all clean test switcher-demo switcher-daemon switcher-daemon-build run run-daemon cleanup kill-processes help poc-lowlevel poc-vse-dual isp-lowlight test-hb-mem-import
+.PHONY: all clean test switcher-demo switcher-daemon switcher-daemon-build run run-daemon cleanup kill-processes help poc-lowlevel poc-vse-dual isp-lowlight test-hb-mem-import jpeg-encoder-lib
 
-all: $(DAEMON_BINARY) $(SHM_TEST_BINARY) $(SWITCHER_DAEMON_BINARY)
+all: $(DAEMON_BINARY) $(SHM_TEST_BINARY) $(SWITCHER_DAEMON_BINARY) $(JPEG_ENCODER_LIB)
 
 poc-lowlevel: $(POC_LOWLEVEL_BINARY)
 	@echo "[PoC] Low-level API PoC ready at $(POC_LOWLEVEL_BINARY)"
@@ -95,6 +98,14 @@ $(ISP_LOWLIGHT_BINARY): $(ISP_LOWLIGHT_OBJECTS) | $(BUILD_DIR)
 
 $(HB_MEM_IMPORT_BINARY): $(HB_MEM_IMPORT_OBJECTS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_HB_MEM_IMPORT)
+
+# Static library for JPEG encoder (used by Go streaming server via CGO)
+$(JPEG_ENCODER_LIB): $(JPEG_ENCODER_OBJECTS) | $(BUILD_DIR)
+	ar rcs $@ $^
+	@echo "[Build] JPEG encoder library ready at $@"
+
+jpeg-encoder-lib: $(JPEG_ENCODER_LIB)
+	@echo "[Build] JPEG encoder library: $(JPEG_ENCODER_LIB)"
 
 # Compile camera_switcher_daemon.c with absolute path to camera_daemon
 camera_switcher_daemon.o: camera_switcher_daemon.c
@@ -152,7 +163,7 @@ kill-processes:
 clean:
 	@echo "[Clean] Removing built binaries and objects"
 	@rm -f *.o
-	@rm -f $(DAEMON_BINARY) $(SHM_TEST_BINARY) $(SWITCHER_DEMO_BINARY) $(SWITCHER_DAEMON_BINARY) $(POC_LOWLEVEL_BINARY) $(ISP_LOWLIGHT_BINARY) $(HB_MEM_IMPORT_BINARY)
+	@rm -f $(DAEMON_BINARY) $(SHM_TEST_BINARY) $(SWITCHER_DEMO_BINARY) $(SWITCHER_DAEMON_BINARY) $(POC_LOWLEVEL_BINARY) $(ISP_LOWLIGHT_BINARY) $(HB_MEM_IMPORT_BINARY) $(JPEG_ENCODER_LIB)
 
 help:
 	@echo "Camera daemon build targets"

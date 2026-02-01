@@ -2,7 +2,7 @@ package webmonitor
 
 /*
 #cgo CFLAGS: -I../../../capture
-#cgo LDFLAGS: -lrt -lpthread -lturbojpeg
+#cgo LDFLAGS: -L../../../../build -ljpeg_encoder -lrt -lpthread -lturbojpeg -lmultimedia -L/usr/hobot/lib
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,7 +14,88 @@ package webmonitor
 #include <string.h>
 #include <semaphore.h>
 #include <errno.h>
+#include <pthread.h>
 #include <turbojpeg.h>
+#include "jpeg_encoder.h"
+
+// Global hardware JPEG encoder context (singleton for MJPEG streaming)
+static jpeg_encoder_context_t g_hw_jpeg_encoder;
+static int g_hw_jpeg_encoder_initialized = 0;
+static pthread_mutex_t g_hw_jpeg_encoder_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Initialize hardware JPEG encoder (call once at startup)
+static int hw_jpeg_encoder_init(int width, int height, int quality) {
+    pthread_mutex_lock(&g_hw_jpeg_encoder_mutex);
+    if (g_hw_jpeg_encoder_initialized) {
+        pthread_mutex_unlock(&g_hw_jpeg_encoder_mutex);
+        return 0;  // Already initialized
+    }
+
+    int ret = jpeg_encoder_create(&g_hw_jpeg_encoder, width, height, quality);
+    if (ret == 0) {
+        g_hw_jpeg_encoder_initialized = 1;
+    }
+    pthread_mutex_unlock(&g_hw_jpeg_encoder_mutex);
+    return ret;
+}
+
+// Cleanup hardware JPEG encoder
+static void hw_jpeg_encoder_cleanup(void) {
+    pthread_mutex_lock(&g_hw_jpeg_encoder_mutex);
+    if (g_hw_jpeg_encoder_initialized) {
+        jpeg_encoder_destroy(&g_hw_jpeg_encoder);
+        g_hw_jpeg_encoder_initialized = 0;
+    }
+    pthread_mutex_unlock(&g_hw_jpeg_encoder_mutex);
+}
+
+// Encode NV12 to JPEG using hardware encoder
+// Returns 0 on success, -1 on failure
+// On success, jpeg_out is allocated and must be freed by caller
+static int hw_jpeg_encode(const uint8_t* nv12_data, int width, int height,
+                          uint8_t** jpeg_out, size_t* jpeg_size) {
+    if (!g_hw_jpeg_encoder_initialized) {
+        // Try to initialize on first use
+        if (hw_jpeg_encoder_init(width, height, 85) != 0) {
+            return -1;
+        }
+    }
+
+    // Check if dimensions match
+    if (g_hw_jpeg_encoder.width != width || g_hw_jpeg_encoder.height != height) {
+        // Reinitialize with new dimensions
+        hw_jpeg_encoder_cleanup();
+        if (hw_jpeg_encoder_init(width, height, 85) != 0) {
+            return -1;
+        }
+    }
+
+    // Allocate output buffer (max size = raw frame size)
+    size_t max_jpeg_size = width * height;  // Reasonable max for JPEG
+    uint8_t* out_buf = (uint8_t*)malloc(max_jpeg_size);
+    if (!out_buf) {
+        return -1;
+    }
+
+    // NV12 layout: Y plane followed by UV plane
+    const uint8_t* y_plane = nv12_data;
+    const uint8_t* uv_plane = nv12_data + (width * height);
+
+    pthread_mutex_lock(&g_hw_jpeg_encoder_mutex);
+    int ret = jpeg_encoder_encode_frame(&g_hw_jpeg_encoder,
+                                        y_plane, uv_plane,
+                                        out_buf, jpeg_size,
+                                        max_jpeg_size, 100);  // 100ms timeout
+    pthread_mutex_unlock(&g_hw_jpeg_encoder_mutex);
+
+    if (ret != 0) {
+        free(out_buf);
+        return -1;
+    }
+
+    *jpeg_out = out_buf;
+    return 0;
+}
 
 #define RING_BUFFER_SIZE 30
 #define MAX_DETECTIONS 10
@@ -858,8 +939,48 @@ func (r *shmReader) LatestJPEG() ([]byte, bool) {
 	return nil, false
 }
 
-// nv12ToJPEG converts NV12 format to JPEG
+// nv12ToJPEG converts NV12 format to JPEG using hardware encoder with software fallback
 func nv12ToJPEG(nv12Data []byte, width, height int) ([]byte, error) {
+	// Try hardware encoder first (fast path: ~5ms vs ~55ms for software)
+	jpegData, err := nv12ToJPEGHardware(nv12Data, width, height)
+	if err == nil {
+		return jpegData, nil
+	}
+
+	// Fallback to software encoding if hardware fails
+	return nv12ToJPEGSoftware(nv12Data, width, height)
+}
+
+// nv12ToJPEGHardware converts NV12 to JPEG using D-Robotics hardware encoder
+func nv12ToJPEGHardware(nv12Data []byte, width, height int) ([]byte, error) {
+	if len(nv12Data) < width*height*3/2 {
+		return nil, fmt.Errorf("invalid NV12 data size")
+	}
+
+	var jpegPtr *C.uint8_t
+	var jpegSize C.size_t
+
+	ret := C.hw_jpeg_encode(
+		(*C.uint8_t)(unsafe.Pointer(&nv12Data[0])),
+		C.int(width),
+		C.int(height),
+		&jpegPtr,
+		&jpegSize,
+	)
+
+	if ret != 0 {
+		return nil, fmt.Errorf("hardware JPEG encode failed: %d", ret)
+	}
+
+	// Copy data to Go-managed memory and free C allocation
+	jpegData := C.GoBytes(unsafe.Pointer(jpegPtr), C.int(jpegSize))
+	C.free(unsafe.Pointer(jpegPtr))
+
+	return jpegData, nil
+}
+
+// nv12ToJPEGSoftware converts NV12 to JPEG using software encoding (fallback)
+func nv12ToJPEGSoftware(nv12Data []byte, width, height int) ([]byte, error) {
 	// Convert NV12 to RGBA in C
 	img := nv12ToRGBAImg(nv12Data, width, height)
 
@@ -967,4 +1088,10 @@ func drawTextWithBackgroundNV12(nv12Data []byte, width, height, x, y int, text s
 
 	// Draw text on top
 	drawTextOnNV12(nv12Data, width, height, x, y, text, textColor, scale)
+}
+
+// CleanupHardwareJPEGEncoder releases hardware JPEG encoder resources
+// Should be called during application shutdown
+func CleanupHardwareJPEGEncoder() {
+	C.hw_jpeg_encoder_cleanup()
 }
