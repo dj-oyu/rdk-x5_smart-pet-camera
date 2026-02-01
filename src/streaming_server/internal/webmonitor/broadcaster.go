@@ -17,11 +17,11 @@ var jstTimezone = time.FixedZone("JST", 9*3600)
 
 // FrameBroadcaster manages fanout of JPEG frames to multiple clients.
 type FrameBroadcaster struct {
-	mu        sync.Mutex
-	clients   map[int]chan []byte
-	nextID    int
-	shm       *shmReader
-	monitor   *Monitor
+	mu      sync.Mutex
+	clients map[int]chan []byte
+	nextID  int
+	shm     *shmReader
+	monitor *Monitor
 	stop    chan struct{}
 	stopped bool
 }
@@ -84,8 +84,6 @@ func (fb *FrameBroadcaster) Stop() {
 
 func (fb *FrameBroadcaster) run() {
 	// Ticker-based polling at ~30 FPS
-	// Using ticker instead of sleep so encoding time overlaps with next tick,
-	// giving effective FPS = 1/max(33ms, encode) instead of 1/(33ms + encode).
 	ticker := time.NewTicker(33 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -104,11 +102,11 @@ func (fb *FrameBroadcaster) run() {
 			continue
 		}
 
-		if fb.shm == nil {
-			continue
+		var jpegData []byte
+		if fb.shm != nil {
+			jpegData = fb.generateOverlay()
 		}
 
-		jpegData := fb.generateOverlay()
 		if jpegData == nil {
 			continue
 		}
@@ -143,45 +141,36 @@ func (fb *FrameBroadcaster) generateOverlay() []byte {
 
 	// Handle different frame formats
 	switch frame.Format {
-	case 1: // NV12 - TRUE ZERO-COPY: draw directly on shared memory (MJPEG dedicated, destructive OK)
+	case 1: // NV12 - draw overlay on shared memory, then encode
 		// Draw stats text with background (white text on black background)
-		// Use cached JST timezone to avoid allocation per frame
 		timeStr := frame.Timestamp.In(jstTimezone).Format("2006/01/02 15:04:05")
 		stats := fmt.Sprintf("Frame: %d  Time: %s", frame.FrameNumber, timeStr)
 		drawTextWithBackgroundNV12(frame.Data, frame.Width, frame.Height,
-			10, 10, stats, 255, 16, 2) // White text (Y=255), Black bg (Y=16)
+			10, 10, stats, 255, 16, 2)
 
 		// Draw bounding boxes and labels
 		for _, det := range detections {
-			// Bounding box (bright green: Y=200, U=44, V=21)
 			drawRectColorNV12(frame.Data, frame.Width, frame.Height,
 				det.BBox.X, det.BBox.Y, det.BBox.W, det.BBox.H,
-				200, 44, 21, 3) // Bright green YUV values
+				200, 44, 21, 3)
 
-			// Label above bounding box (bright green text on black background)
 			label := fmt.Sprintf("%.2f", det.Confidence)
 			labelY := det.BBox.Y - 20
 			labelX := det.BBox.X
-
-			// Ensure label stays within frame bounds
 			if labelY < 5 {
-				labelY = det.BBox.Y + det.BBox.H + 5 // Move below bbox
+				labelY = det.BBox.Y + det.BBox.H + 5
 			}
-			// Clamp to prevent going off bottom
 			if labelY > frame.Height-20 {
 				labelY = frame.Height - 20
 			}
-			// Clamp X to prevent negative padding in C function
 			if labelX < 4 {
 				labelX = 4
 			}
-
-			// Note: Text is Y-plane only, so we use bright Y value (200) for visibility
 			drawTextWithBackgroundNV12(frame.Data, frame.Width, frame.Height,
-				labelX, labelY, label, 200, 16, 2) // Bright text, Black bg
+				labelX, labelY, label, 200, 16, 2)
 		}
 
-		// Convert NV12 (with overlay) to JPEG
+		// Convert NV12 to JPEG
 		jpegData, err := nv12ToJPEG(frame.Data, frame.Width, frame.Height)
 		if err != nil {
 			return nil
