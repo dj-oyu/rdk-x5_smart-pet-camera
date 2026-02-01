@@ -42,6 +42,7 @@ func NewServer(cfg Config) *Server {
 	}
 
 	monitor := NewMonitor(cfg.TargetFPS, shm)
+
 	broadcaster := NewFrameBroadcaster(shm, monitor)
 	broadcaster.Start()
 
