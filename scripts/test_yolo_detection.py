@@ -41,6 +41,11 @@ YOLO_MODELS = {
         "filename": "yolov13n_detect_bayese_640x640_nv12.bin",
         "description": "YOLO13 nano - 最新版",
     },
+    "v26n": {
+        "url": None,  # ローカルモデルのみ
+        "filename": "yolo26n_det_bpu_bayese_640x640_nv12.bin",
+        "description": "YOLO26 nano - エッジ最適化 (2026年最新)",
+    },
 }
 
 
@@ -276,14 +281,33 @@ def test_multiple_images(
         test_single_image(detector, img_path, perf_logger, frame_idx=idx)
 
 
-def download_model(model_key: str, models_dir: Path) -> Path:
-    """モデルをダウンロード"""
+def download_model(model_key: str, models_dir: Path, local_models_dir: Optional[Path] = None) -> Path:
+    """モデルをダウンロードまたはローカルから取得"""
     model_info = YOLO_MODELS[model_key]
     model_path = models_dir / model_info["filename"]
 
     if model_path.exists():
         print(f"Model already exists: {model_path}")
         return model_path
+
+    # ローカルモデルディレクトリをチェック
+    if local_models_dir:
+        local_path = local_models_dir / model_info["filename"]
+        if local_path.exists():
+            print(f"Using local model: {local_path}")
+            return local_path
+
+    # URLがない場合はローカルモデルが必要
+    if model_info["url"] is None:
+        # smart-pet-cameraのmodelsディレクトリをチェック
+        project_models = Path("/app/smart-pet-camera/models") / model_info["filename"]
+        if project_models.exists():
+            print(f"Using project model: {project_models}")
+            return project_models
+        raise FileNotFoundError(
+            f"Model {model_key} requires local file: {model_info['filename']}\n"
+            f"Please copy it to {models_dir} or /app/smart-pet-camera/models/"
+        )
 
     print(f"Downloading {model_key}: {model_info['description']}")
     print(f"URL: {model_info['url']}")

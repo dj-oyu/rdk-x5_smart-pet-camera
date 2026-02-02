@@ -204,6 +204,7 @@ class YoloDetector:
     def __init__(
         self,
         model_path: str,
+        model_type: str = "auto",
         score_threshold: float = 0.25,
         nms_threshold: float = 0.7,
         reg: int = 16,
@@ -219,9 +220,13 @@ class YoloDetector:
 
         Args:
             model_path: BPU量子化済み.binモデルのパス
+            model_type: モデルタイプ ("auto", "legacy", "yolo26")
+                - "auto": モデルファイル名から自動検出
+                - "legacy": v8/v11/v13等の従来モデル (cls→bbox, DFL形式)
+                - "yolo26": YOLO26 (bbox→cls, direct xyxy形式)
             score_threshold: 信頼度閾値
             nms_threshold: NMS IoU閾値
-            reg: DFL reg layer数
+            reg: DFL reg layer数 (YOLO26では使用しない)
             strides: ストライド値
             input_size: 入力画像サイズ (height, width)
             auto_download: モデルが存在しない場合に自動ダウンロード
@@ -235,6 +240,13 @@ class YoloDetector:
         self.reg = reg
         self.strides = strides
         self.input_size = input_size
+
+        # モデルタイプの自動検出
+        if model_type == "auto":
+            self.model_type = "yolo26" if "yolo26" in model_path.lower() else "legacy"
+        else:
+            self.model_type = model_type
+        logger.info(f"Model type: {self.model_type}")
 
         # CLAHE前処理設定 (ISP補正の代替)
         # 実測brightness_avgは最大80程度のため、閾値を低めに設定
@@ -286,6 +298,10 @@ class YoloDetector:
             self.grids.append(grid)
             logger.debug(f"Grid {stride}: shape={grid.shape}")
 
+        # YOLO26用グリッドの事前計算
+        if self.model_type == "yolo26":
+            self._init_yolo26_grids()
+
         # 統計情報
         self._total_detections = 0
         self._total_calls = 0
@@ -329,6 +345,24 @@ class YoloDetector:
         logger.info(f"Downloading model from {url}...")
         urllib.request.urlretrieve(url, self.model_path)
         logger.info(f"Model downloaded to {self.model_path}")
+
+    def _init_yolo26_grids(self) -> None:
+        """YOLO26用のAnchor-Freeグリッドを事前計算
+
+        YOLO26は従来モデルと異なり、直接座標(xyxy)を出力する。
+        グリッドは各ストライドごとに (grid_h * grid_w, 2) の形式で保持。
+        座標は (x, y) の順序で、各セルの中心 (+0.5) にオフセット。
+        """
+        self.grids_yolo26: dict[int, np.ndarray] = {}
+        for stride in self.strides:
+            grid_h = self.input_h // stride
+            grid_w = self.input_w // stride
+            # np.indices は (y, x) 順で返すので [::-1] で (x, y) に反転
+            grid = np.stack(np.indices((grid_h, grid_w))[::-1], axis=-1)
+            self.grids_yolo26[stride] = grid.reshape(-1, 2).astype(np.float32) + 0.5
+            logger.debug(
+                f"YOLO26 grid stride={stride}: shape={self.grids_yolo26[stride].shape}"
+            )
 
     def detect(self, frame_data: bytes) -> list[Detection]:
         """
@@ -466,7 +500,19 @@ class YoloDetector:
 
         Returns:
             検出結果のリスト (座標は1280x720フレーム座標系)
+
+        Raises:
+            ValueError: フレームサイズが1280x720 NV12と一致しない場合
         """
+        # Validate frame size (defense-in-depth)
+        expected_size = 1280 * 720 * 3 // 2  # 1,382,400 bytes for NV12
+        actual_size = len(nv12_data)
+        if actual_size != expected_size:
+            raise ValueError(
+                f"Frame size mismatch for 720p ROI: "
+                f"expected {expected_size} bytes, got {actual_size}"
+            )
+
         # ROI座標を取得
         rois = self.get_roi_regions_720p()
         if roi_index < 0 or roi_index >= len(rois):
@@ -1029,7 +1075,35 @@ class YoloDetector:
         original_shape: tuple[int, int],
     ) -> list[Detection]:
         """
-        後処理: NMS、座標変換、クラスマッピング
+        後処理: モデルタイプに応じて分岐
+
+        Args:
+            outputs: BPU推論結果
+            scale: (y_scale, x_scale)
+            shift: (y_shift, x_shift)
+            original_shape: 元画像のサイズ (height, width)
+
+        Returns:
+            検出結果のリスト
+        """
+        if self.model_type == "yolo26":
+            return self._postprocess_yolo26(outputs, scale, shift, original_shape)
+        else:
+            return self._postprocess_legacy(outputs, scale, shift, original_shape)
+
+    def _postprocess_legacy(
+        self,
+        outputs: list[np.ndarray],
+        scale: tuple[float, float],
+        shift: tuple[float, float],
+        original_shape: tuple[int, int],
+    ) -> list[Detection]:
+        """
+        従来モデル (v8/v11/v13) 用の後処理
+
+        出力形式: [cls_0, bbox_0, cls_1, bbox_1, cls_2, bbox_2]
+        - cls: (N, 80) - class logits
+        - bbox: (N, 64) - DFL形式 (16*4)
 
         Args:
             outputs: BPU推論結果
@@ -1181,6 +1255,155 @@ class YoloDetector:
                 )
 
         logger.debug(f"Final detections: {len(detections)}")
+        if nms_stats:
+            logger.debug(f"NMS stats (class_id: before->after): {nms_stats}")
+
+        return detections
+
+    def _postprocess_yolo26(
+        self,
+        outputs: list[np.ndarray],
+        scale: tuple[float, float],
+        shift: tuple[float, float],
+        original_shape: tuple[int, int],
+    ) -> list[Detection]:
+        """
+        YOLO26専用後処理 (Anchor-Free, Direct XYXY)
+
+        出力形式: [bbox_0, cls_0, bbox_1, cls_1, bbox_2, cls_2]
+        - bbox: (H*W, 4) - グリッド相対座標 (直接xyxy)
+        - cls: (H*W, 80) - logit scores
+
+        従来モデルとの違い:
+        1. 出力順序: bbox→cls (従来は cls→bbox)
+        2. bbox形式: 直接座標 (従来は DFL 64ch)
+        3. デコード: (grid ± box) * stride
+
+        Args:
+            outputs: BPU推論結果
+            scale: (y_scale, x_scale)
+            shift: (y_shift, x_shift)
+            original_shape: 元画像のサイズ (height, width)
+
+        Returns:
+            検出結果のリスト
+        """
+        y_scale, x_scale = scale
+        y_shift, x_shift = shift
+        orig_h, orig_w = original_shape
+
+        num_classes = 80  # COCO
+
+        logger.debug(f"YOLO26 post-processing: {len(outputs)} outputs")
+        for i, out in enumerate(outputs):
+            logger.debug(f"  output[{i}]: shape={out.shape}, dtype={out.dtype}")
+
+        dets: list[np.ndarray] = []
+
+        # 3スケール処理 (stride 8, 16, 32)
+        for i, stride in enumerate(self.strides):
+            bbox_idx = i * 2      # 0, 2, 4
+            cls_idx = i * 2 + 1   # 1, 3, 5
+
+            bbox_data = outputs[bbox_idx].reshape(-1, 4)
+            cls_data = outputs[cls_idx].reshape(-1, num_classes)
+
+            # スコアフィルタリング (logitのまま比較)
+            max_scores = np.max(cls_data, axis=1)
+            mask = max_scores >= self.conf_thres_raw
+
+            num_candidates = np.sum(mask)
+            logger.debug(
+                f"  stride={stride}: {num_candidates}/{len(max_scores)} candidates"
+            )
+
+            if not np.any(mask):
+                continue
+
+            # マスク適用
+            grid = self.grids_yolo26[stride][mask]
+            v_box = bbox_data[mask]
+            v_score = 1 / (1 + np.exp(-max_scores[mask]))  # sigmoid
+            v_id = np.argmax(cls_data[mask], axis=1)
+
+            # YOLO26デコード: (grid ± box) * stride
+            # bbox format: [left, top, right, bottom] (grid相対)
+            xyxy = np.hstack([
+                (grid - v_box[:, :2]),
+                (grid + v_box[:, 2:])
+            ]) * stride
+
+            # [x1, y1, x2, y2, score, class_id] の形式で格納
+            dets.append(np.hstack([xyxy, v_score[:, None], v_id[:, None]]))
+
+        if not dets:
+            logger.debug("No candidates passed threshold")
+            return []
+
+        # 全スケールを結合
+        all_dets = np.concatenate(dets, axis=0)
+        logger.debug(f"Total candidates before NMS: {len(all_dets)}")
+
+        # クラス別NMS
+        detections: list[Detection] = []
+        nms_stats: dict[int, tuple[int, int]] = {}
+
+        unique_classes = np.unique(all_dets[:, 5].astype(int))
+
+        for class_id in unique_classes:
+            # マッピング対象外のクラスはスキップ
+            detection_class = self._map_coco_to_detection_class(class_id)
+            if detection_class is None:
+                continue
+
+            cls_mask = all_dets[:, 5].astype(int) == class_id
+            cls_dets = all_dets[cls_mask]
+
+            # xyxy → xywh (NMS用)
+            xywh = cls_dets[:, :4].copy()
+            xywh[:, 2:] -= xywh[:, :2]  # w = x2 - x1, h = y2 - y1
+
+            indices = cv2.dnn.NMSBoxes(
+                xywh.tolist(),
+                cls_dets[:, 4].tolist(),
+                self.score_threshold,
+                self.nms_threshold
+            )
+
+            num_before_nms = len(cls_dets)
+            num_after_nms = len(indices) if len(indices) > 0 else 0
+
+            if num_after_nms > 0:
+                nms_stats[class_id] = (num_before_nms, num_after_nms)
+                logger.debug(
+                    f"  class_id={class_id} ({COCO_CLASS_NAMES[class_id]}): "
+                    f"{num_before_nms} -> {num_after_nms} after NMS"
+                )
+
+            if len(indices) == 0:
+                continue
+
+            for idx in indices.flatten():
+                d = cls_dets[idx]
+                # 座標変換: letterbox → 元画像
+                x1 = int((d[0] - x_shift) / x_scale)
+                y1 = int((d[1] - y_shift) / y_scale)
+                x2 = int((d[2] - x_shift) / x_scale)
+                y2 = int((d[3] - y_shift) / y_scale)
+
+                # クリッピング
+                x1 = max(0, min(x1, orig_w))
+                x2 = max(0, min(x2, orig_w))
+                y1 = max(0, min(y1, orig_h))
+                y2 = max(0, min(y2, orig_h))
+
+                detections.append(Detection(
+                    class_name=detection_class,
+                    confidence=float(d[4]),
+                    bbox=BoundingBox(x=x1, y=y1, w=x2 - x1, h=y2 - y1),
+                ))
+
+        logger.debug(f"YOLO26 final detections: {len(detections)}")
         if nms_stats:
             logger.debug(f"NMS stats (class_id: before->after): {nms_stats}")
 
