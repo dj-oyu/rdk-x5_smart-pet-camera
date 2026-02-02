@@ -303,21 +303,243 @@ def test_yolo26_detection_count():
 
 ---
 
-## References
+## Code Modification Plan
 
-- [rdk_model_zoo/yolo26_det.py](/app/github/rdk_model_zoo/samples/vision/yolo26/runtime/python/yolo26_det.py)
-- [Benchmark Report](./yolo_benchmark_report_20260202.md)
-- [YOLO26 Conversion Guide](/app/github/rdk_model_zoo/samples/vision/yolo26/conversion/X86_CONVERSION_GUIDE.md)
+### 修正対象ファイル
+
+**`src/common/src/detection/yolo_detector.py`**
+
+### Step 1: コンストラクタ修正
+
+```python
+# 追加するパラメータ
+def __init__(
+    self,
+    model_path: str,
+    model_type: str = "auto",  # 追加: "auto", "legacy", "yolo26"
+    score_threshold: float = 0.25,
+    nms_threshold: float = 0.7,
+    reg: int = 16,  # YOLO26では使用しない
+    strides: list[int] = [8, 16, 32],
+    ...
+):
+    # モデルタイプの自動検出を追加 (L230付近)
+    if model_type == "auto":
+        self.model_type = "yolo26" if "yolo26" in model_path.lower() else "legacy"
+    else:
+        self.model_type = model_type
+
+    # YOLO26用グリッド初期化 (既存のself.gridsと互換)
+    if self.model_type == "yolo26":
+        self._init_yolo26_grids()
+```
+
+### Step 2: YOLO26用グリッド初期化メソッド追加
+
+```python
+def _init_yolo26_grids(self) -> None:
+    """YOLO26用のAnchor-Freeグリッドを事前計算
+
+    従来のself.gridsとは形式が異なる:
+    - 従来: list of (grid_h * grid_w, 2) for each stride
+    - YOLO26: dict {stride: (grid_h * grid_w, 2)}
+    """
+    self.grids_yolo26 = {}
+    for stride in self.strides:
+        grid_h = self.input_h // stride
+        grid_w = self.input_w // stride
+        # (y, x) -> (x, y) の順序でスタック
+        grid = np.stack(np.indices((grid_h, grid_w))[::-1], axis=-1)
+        self.grids_yolo26[stride] = grid.reshape(-1, 2).astype(np.float32) + 0.5
+```
+
+### Step 3: 後処理の分岐追加
+
+```python
+def _postprocess(
+    self,
+    outputs: list[np.ndarray],
+    scale: tuple[float, float],
+    shift: tuple[float, float],
+    original_shape: tuple[int, int],
+) -> list[Detection]:
+    """後処理: モデルタイプに応じて分岐"""
+    if self.model_type == "yolo26":
+        return self._postprocess_yolo26(outputs, scale, shift, original_shape)
+    else:
+        return self._postprocess_legacy(outputs, scale, shift, original_shape)
+```
+
+### Step 4: 既存後処理をリネーム
+
+```python
+# 現在の _postprocess() を _postprocess_legacy() にリネーム
+def _postprocess_legacy(
+    self,
+    outputs: list[np.ndarray],
+    scale: tuple[float, float],
+    shift: tuple[float, float],
+    original_shape: tuple[int, int],
+) -> list[Detection]:
+    """従来モデル (v8/v11/v13) 用の後処理"""
+    # 既存コードをそのまま移動
+    ...
+```
+
+### Step 5: YOLO26用後処理を新規追加
+
+```python
+def _postprocess_yolo26(
+    self,
+    outputs: list[np.ndarray],
+    scale: tuple[float, float],
+    shift: tuple[float, float],
+    original_shape: tuple[int, int],
+) -> list[Detection]:
+    """YOLO26専用後処理 (Anchor-Free, Direct XYXY)
+
+    出力形式: [bbox0, cls0, bbox1, cls1, bbox2, cls2]
+    - bbox: (H*W, 4) - グリッド相対座標
+    - cls: (H*W, 80) - logit scores
+    """
+    y_scale, x_scale = scale
+    y_shift, x_shift = shift
+    orig_h, orig_w = original_shape
+
+    dets = []
+
+    # 3スケール処理 (stride 8, 16, 32)
+    for i, stride in enumerate(self.strides):
+        bbox_idx = i * 2      # 0, 2, 4
+        cls_idx = i * 2 + 1   # 1, 3, 5
+
+        bbox_data = outputs[bbox_idx].reshape(-1, 4)
+        cls_data = outputs[cls_idx].reshape(-1, 80)
+
+        # スコアフィルタリング (logitのまま比較)
+        max_scores = np.max(cls_data, axis=1)
+        mask = max_scores >= self.conf_thres_raw
+
+        if not np.any(mask):
+            continue
+
+        # マスク適用
+        grid = self.grids_yolo26[stride][mask]
+        v_box = bbox_data[mask]
+        v_score = 1 / (1 + np.exp(-max_scores[mask]))  # sigmoid
+        v_id = np.argmax(cls_data[mask], axis=1)
+
+        # YOLO26デコード: (grid ± box) * stride
+        xyxy = np.hstack([
+            (grid - v_box[:, :2]),
+            (grid + v_box[:, 2:])
+        ]) * stride
+
+        dets.extend(np.hstack([xyxy, v_score[:, None], v_id[:, None]]))
+
+    # NMS処理 (既存の _apply_nms と同様のロジック)
+    return self._apply_nms_yolo26(dets, scale, shift, original_shape)
+
+
+def _apply_nms_yolo26(
+    self,
+    dets: list,
+    scale: tuple[float, float],
+    shift: tuple[float, float],
+    original_shape: tuple[int, int],
+) -> list[Detection]:
+    """YOLO26用NMS処理"""
+    if not dets:
+        return []
+
+    y_scale, x_scale = scale
+    y_shift, x_shift = shift
+    orig_h, orig_w = original_shape
+
+    dets = np.array(dets)
+    final_res = []
+
+    # クラスごとにNMS
+    for class_id in np.unique(dets[:, 5]):
+        cls_dets = dets[dets[:, 5] == class_id]
+
+        # xyxy -> xywh (NMS用)
+        xywh = cls_dets[:, :4].copy()
+        xywh[:, 2:] -= xywh[:, :2]  # w = x2 - x1, h = y2 - y1
+
+        indices = cv2.dnn.NMSBoxes(
+            xywh.tolist(),
+            cls_dets[:, 4].tolist(),
+            self.score_threshold,
+            self.nms_threshold
+        )
+
+        if len(indices) == 0:
+            continue
+
+        # DetectionClassへのマッピング
+        detection_class = self._map_coco_to_detection_class(int(class_id))
+        if detection_class is None:
+            continue
+
+        for idx in indices.flatten():
+            d = cls_dets[idx]
+            # 座標変換: letterbox -> 元画像
+            x1 = int((d[0] - x_shift) / x_scale)
+            y1 = int((d[1] - y_shift) / y_scale)
+            x2 = int((d[2] - x_shift) / x_scale)
+            y2 = int((d[3] - y_shift) / y_scale)
+
+            # クリッピング
+            x1 = max(0, min(x1, orig_w))
+            x2 = max(0, min(x2, orig_w))
+            y1 = max(0, min(y1, orig_h))
+            y2 = max(0, min(y2, orig_h))
+
+            final_res.append(Detection(
+                class_name=detection_class,
+                confidence=float(d[4]),
+                bbox=BoundingBox(x=x1, y=y1, w=x2-x1, h=y2-y1),
+            ))
+
+    return final_res
+```
 
 ---
 
-## Appendix: File Changes
+## Reference Source Files
+
+### D-Robotics rdk_model_zoo (Apache 2.0 License)
+
+YOLO26の後処理実装は以下のファイルを参照:
+
+| File | URL | Description |
+|------|-----|-------------|
+| `yolo26_det.py` | [GitHub](https://github.com/D-Robotics/rdk_model_zoo/blob/main/samples/vision/yolo26/runtime/python/yolo26_det.py) | Detection後処理の参照実装 |
+
+**主要メソッド:**
+- `YOLO26Detect.post_process()` (L164-238): NMS含む後処理
+- `YOLO26Detect.__init__()` (L95-102): グリッド事前計算
+
+**ライセンス:** Apache License 2.0 - 商用利用・改変・再配布可能
+
+---
+
+## References
+
+- [D-Robotics/rdk_model_zoo](https://github.com/D-Robotics/rdk_model_zoo) - 公式モデルZoo (Apache 2.0)
+- [Benchmark Report](./yolo_benchmark_report_20260202.md)
+- [YOLO26 Conversion Guide](https://github.com/D-Robotics/rdk_model_zoo/blob/main/samples/vision/yolo26/conversion/X86_CONVERSION_GUIDE.md)
+
+---
+
+## Appendix: File Changes Summary
 
 ### Files to Modify
 
 | File | Changes |
 |------|---------|
-| `src/common/src/detection/yolo_detector.py` | YOLO26後処理追加、model_type パラメータ |
+| `src/common/src/detection/yolo_detector.py` | +`model_type`パラメータ, +`_postprocess_yolo26()`, +`_init_yolo26_grids()` |
 | `scripts/test_yolo_detection.py` | YOLO26モデル定義（完了済み） |
 
 ### Files to Create
@@ -325,6 +547,14 @@ def test_yolo26_detection_count():
 | File | Purpose |
 |------|---------|
 | `tests/test_yolo26_detector.py` | YOLO26専用テスト |
+
+### Estimated Lines Changed
+
+| Operation | Lines |
+|-----------|-------|
+| 新規追加 | ~120 |
+| 既存リネーム | ~5 |
+| 合計 | ~125 |
 
 ### Configuration Changes
 
