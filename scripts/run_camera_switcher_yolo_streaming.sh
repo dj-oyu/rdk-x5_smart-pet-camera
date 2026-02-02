@@ -39,7 +39,7 @@ METRICS_PORT="${METRICS_PORT:-9090}"
 PPROF_PORT="${PPROF_PORT:-6060}"
 
 # YOLO設定
-YOLO_MODEL="${YOLO_MODEL:-v11n}"
+YOLO_MODEL="${YOLO_MODEL:-v26n}"
 YOLO_SCORE_THRESHOLD="${YOLO_SCORE_THRESHOLD:-0.6}"
 YOLO_NMS_THRESHOLD="${YOLO_NMS_THRESHOLD:-0.7}"
 
@@ -78,7 +78,7 @@ Options:
   --metrics-port P    Prometheusメトリクスポート (default: 9090)
   --pprof-port P      pprofプロファイリングポート (default: 6060)
   --max-clients N     最大WebRTCクライアント数 (default: 10)
-  --yolo-model M    YOLOモデル (v8n/v11n/v13n, default: v11n)
+  --yolo-model M    YOLOモデル (v8n/v11n/v13n/v26n, default: v26n)
   --score-thres T   検出スコア閾値 (default: 0.6)
   --nms-thres T     NMS IoU閾値 (default: 0.7)
   --log-level L     ログレベル (debug/info/warn/error, default: info)
@@ -97,7 +97,7 @@ Options:
   STREAMING_MAX_CLIENTS  最大WebRTCクライアント数
   STREAMING_SHM          共有メモリ名 (default: /pet_camera_stream)
   RECORDING_PATH         録画ファイル保存先 (default: ./recordings)
-  YOLO_MODEL             YOLOモデル (v8n/v11n/v13n)
+  YOLO_MODEL             YOLOモデル (v8n/v11n/v13n/v26n)
   YOLO_SCORE_THRESHOLD   検出スコア閾値
   YOLO_NMS_THRESHOLD     NMS IoU閾値
   LOG_LEVEL              ログレベル (debug/info/warn/error)
@@ -223,6 +223,7 @@ fi
 
 # YOLOモデルパスの設定
 YOLO_MODELS_DIR="/tmp/yolo_models"
+PROJECT_MODELS_DIR="${REPO_ROOT}/models"
 case "${YOLO_MODEL}" in
   v8n)
     MODEL_FILE="yolov8n_detect_bayese_640x640_nv12.bin"
@@ -233,14 +234,43 @@ case "${YOLO_MODEL}" in
   v13n)
     MODEL_FILE="yolov13n_detect_bayese_640x640_nv12.bin"
     ;;
+  v26n)
+    MODEL_FILE="yolo26n_det_bpu_bayese_640x640_nv12.bin"
+    ;;
   *)
     echo "[error] Unknown YOLO model: ${YOLO_MODEL}" >&2
-    echo "        Supported: v8n, v11n, v13n" >&2
+    echo "        Supported: v8n, v11n, v13n, v26n" >&2
     exit 1
     ;;
 esac
 
-YOLO_MODEL_PATH="${YOLO_MODELS_DIR}/${MODEL_FILE}"
+# モデルファイルのパス解決 (project/models/ を優先)
+resolve_model_path() {
+  local model_file="$1"
+  if [[ -f "${PROJECT_MODELS_DIR}/${model_file}" ]]; then
+    echo "${PROJECT_MODELS_DIR}/${model_file}"
+  elif [[ -f "${YOLO_MODELS_DIR}/${model_file}" ]]; then
+    echo "${YOLO_MODELS_DIR}/${model_file}"
+  else
+    echo ""
+  fi
+}
+
+YOLO_MODEL_PATH="$(resolve_model_path "${MODEL_FILE}")"
+
+# フォールバック: v26n が見つからなければ v11n を試す
+if [[ -z "${YOLO_MODEL_PATH}" && "${YOLO_MODEL}" == "v26n" ]]; then
+  echo "[warn] v26n model not found, falling back to v11n..."
+  YOLO_MODEL="v11n"
+  MODEL_FILE="yolo11n_detect_bayese_640x640_nv12.bin"
+  YOLO_MODEL_PATH="$(resolve_model_path "${MODEL_FILE}")"
+fi
+
+if [[ -z "${YOLO_MODEL_PATH}" ]]; then
+  echo "[error] Model file not found: ${MODEL_FILE}" >&2
+  echo "        Searched: ${PROJECT_MODELS_DIR}/, ${YOLO_MODELS_DIR}/" >&2
+  exit 1
+fi
 
 PIDS=()
 

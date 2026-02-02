@@ -367,6 +367,18 @@ class YoloDetectorDaemon:
 
                 # Run YOLO inference
                 if self.night_roi_mode and len(self.night_roi_regions) > 0:
+                    # Validate frame size for night ROI mode (expects 1280x720)
+                    if frame_width != 1280 or frame_height != 720:
+                        logger.warning(
+                            f"Frame size mismatch in night ROI mode: "
+                            f"expected 1280x720, got {frame_width}x{frame_height}. "
+                            f"Skipping detection (camera transition)"
+                        )
+                        if hb_mem_buffer:
+                            hb_mem_buffer.release()
+                        active_zc.mark_consumed()
+                        continue
+
                     # Night camera ROI mode: cycle through 3 overlapping regions
                     current_roi = self.roi_index
                     detections = self.detector.detect_nv12_roi_720p(
