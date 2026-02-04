@@ -25,6 +25,7 @@ window.addEventListener('DOMContentLoaded', () => {
     const statusBadge = document.getElementById('status-badge');
     const lastUpdatedEl = document.getElementById('last-updated');
     const targetFpsEl = document.getElementById('target-fps');
+    const recordingsListEl = document.getElementById('recordings-list');
 
     let activeView = 'history';
     let lastHistory = [];
@@ -446,6 +447,158 @@ window.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    // Recordings Modal
+    let recordingsModalOpen = false;
+    const recordingsModal = document.getElementById('recordings-modal');
+    const fabRecordings = document.getElementById('fab-recordings');
+    const modalClose = document.getElementById('modal-close');
+
+    function openRecordingsModal() {
+        recordingsModalOpen = true;
+        recordingsModal.style.display = 'flex';
+        fetchRecordings();
+    }
+
+    function closeRecordingsModal() {
+        recordingsModalOpen = false;
+        recordingsModal.style.display = 'none';
+    }
+
+    fabRecordings?.addEventListener('click', openRecordingsModal);
+    modalClose?.addEventListener('click', closeRecordingsModal);
+
+    // Close modal when clicking overlay background
+    recordingsModal?.addEventListener('click', (event) => {
+        if (event.target === recordingsModal) {
+            closeRecordingsModal();
+        }
+    });
+
+    // Close modal with Escape key
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && recordingsModalOpen) {
+            closeRecordingsModal();
+        }
+    });
+
+    // Recordings functionality
+    async function fetchRecordings() {
+        try {
+            const res = await fetch('/api/recordings');
+            if (!res.ok) {
+                throw new Error('Failed to fetch recordings');
+            }
+            const data = await res.json();
+            renderRecordings(data.recordings || []);
+        } catch (error) {
+            console.error('[Recordings] Fetch error:', error);
+            recordingsListEl.innerHTML = '<p class="muted">録画一覧の取得に失敗しました</p>';
+        }
+    }
+
+    function parseRecordingDate(filename) {
+        // recording_20260204_143052.mp4 -> Date
+        const match = filename.match(/recording_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+        if (!match) return null;
+        return new Date(match[1], match[2] - 1, match[3], match[4], match[5], match[6]);
+    }
+
+    function formatRecordingDate(date) {
+        if (!date) return '--';
+        const y = date.getFullYear();
+        const m = String(date.getMonth() + 1).padStart(2, '0');
+        const d = String(date.getDate()).padStart(2, '0');
+        const h = String(date.getHours()).padStart(2, '0');
+        const min = String(date.getMinutes()).padStart(2, '0');
+        const s = String(date.getSeconds()).padStart(2, '0');
+        return `${y}/${m}/${d} ${h}:${min}:${s}`;
+    }
+
+    function formatFileSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+    }
+
+    function renderRecordings(recordings) {
+        if (!recordings || recordings.length === 0) {
+            recordingsListEl.innerHTML = `
+                <div class="recordings-empty">
+                    <div class="recordings-empty-icon">📹</div>
+                    <p class="muted">録画がありません</p>
+                </div>
+            `;
+            return;
+        }
+
+        // Calculate total size
+        const totalBytes = recordings.reduce((sum, rec) => sum + rec.size_bytes, 0);
+
+        recordingsListEl.innerHTML = `
+            <div class="recordings-header">
+                <span class="recordings-summary">${recordings.length}件 / ${formatFileSize(totalBytes)}</span>
+                <button class="recordings-refresh" onclick="window.fetchRecordings()">更新</button>
+            </div>
+            ${recordings.map(rec => {
+                const date = parseRecordingDate(rec.name);
+                const dateStr = formatRecordingDate(date);
+                const sizeStr = formatFileSize(rec.size_bytes);
+                const isH264 = rec.name.endsWith('.h264');
+                return `
+                    <div class="recording-card" data-name="${rec.name}">
+                        <div class="recording-info">
+                            <div class="recording-date">${dateStr}${isH264 ? ' <span style="color:#f0c040;font-size:11px;">(変換中)</span>' : ''}</div>
+                            <div class="recording-size">${sizeStr}</div>
+                        </div>
+                        <div class="recording-actions">
+                            <button class="btn-download" onclick="window.downloadRecording('${rec.name}')" title="ダウンロード">
+                                ⬇
+                            </button>
+                            <button class="btn-delete" onclick="window.deleteRecording('${rec.name}')" title="削除">
+                                🗑
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('')}
+        `;
+    }
+
+    function downloadRecording(filename) {
+        const url = `/api/recordings/${encodeURIComponent(filename)}`;
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    }
+
+    async function deleteRecording(filename) {
+        if (!confirm(`「${filename}」を削除しますか？`)) return;
+
+        try {
+            const res = await fetch(`/api/recordings/${encodeURIComponent(filename)}`, {
+                method: 'DELETE'
+            });
+
+            if (res.ok) {
+                fetchRecordings(); // Refresh list
+            } else {
+                const data = await res.json();
+                alert('削除に失敗しました: ' + (data.error || 'Unknown error'));
+            }
+        } catch (error) {
+            console.error('[Recordings] Delete error:', error);
+            alert('削除に失敗しました');
+        }
+    }
+
+    // Expose for inline onclick handlers
+    window.fetchRecordings = fetchRecordings;
+    window.downloadRecording = downloadRecording;
+    window.deleteRecording = deleteRecording;
+
     viewToggle.addEventListener('click', (event) => {
         const target = event.target.closest('button[data-view]');
         if (!target) return;
@@ -602,41 +755,17 @@ window.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Recording functionality using MediaRecorder API
+    // Recording functionality using Server-side API
     const RecordingManager = {
-        mediaRecorder: null,
-        recordedChunks: [],
         isRecording: false,
         startTime: null,
         timerInterval: null,
-
-        // Find the best supported MIME type
-        getSupportedMimeType() {
-            const mimeTypes = [
-                'video/webm;codecs=h264',
-                'video/mp4;codecs=avc1',
-                'video/webm;codecs=vp9',
-                'video/webm;codecs=vp8',
-                'video/webm'
-            ];
-            for (const mimeType of mimeTypes) {
-                if (MediaRecorder.isTypeSupported(mimeType)) {
-                    console.log('[Recording] Using MIME type:', mimeType);
-                    return mimeType;
-                }
-            }
-            console.warn('[Recording] No supported MIME type found');
-            return null;
-        },
-
-        // Get file extension based on MIME type
-        getFileExtension(mimeType) {
-            if (mimeType.includes('mp4')) return 'mp4';
-            return 'webm';
-        },
+        heartbeatInterval: null,
+        currentFilename: null,
+        statusPollInterval: null,
 
         // Update UI elements
-        updateUI() {
+        updateUI(statusText = null) {
             const recordBtn = document.getElementById('record-btn');
             const recordStatus = document.getElementById('record-status');
 
@@ -644,13 +773,17 @@ window.addEventListener('DOMContentLoaded', () => {
                 recordBtn?.classList.add('recording');
                 if (recordStatus) {
                     recordStatus.classList.add('recording');
-                    this.updateTimer();
+                    if (statusText) {
+                        recordStatus.textContent = statusText;
+                    } else {
+                        this.updateTimer();
+                    }
                 }
             } else {
                 recordBtn?.classList.remove('recording');
                 if (recordStatus) {
                     recordStatus.classList.remove('recording');
-                    recordStatus.textContent = '';
+                    recordStatus.textContent = statusText || '';
                 }
             }
         },
@@ -666,75 +799,54 @@ window.addEventListener('DOMContentLoaded', () => {
             recordStatus.textContent = `REC ${minutes}:${seconds}`;
         },
 
-        // Start recording
-        start() {
-            const video = document.getElementById('webrtc-video');
-            if (!video || !video.srcObject) {
-                alert('WebRTCストリームが接続されていません。\nWebRTCモードで接続してから録画してください。');
-                return false;
-            }
-
-            const mimeType = this.getSupportedMimeType();
-            if (!mimeType) {
-                alert('このブラウザは録画機能に対応していません。');
-                return false;
-            }
-
+        // Start recording via server API
+        async start() {
             try {
-                // Use the video's MediaStream directly
-                const stream = video.srcObject;
+                this.updateUI('Starting...');
 
-                this.mediaRecorder = new MediaRecorder(stream, {
-                    mimeType: mimeType,
-                    videoBitsPerSecond: 2000000
-                });
+                const res = await fetch('/api/recording/start', { method: 'POST' });
+                const data = await res.json();
 
-                this.recordedChunks = [];
+                if (!res.ok) {
+                    throw new Error(data.error || 'Failed to start recording');
+                }
 
-                this.mediaRecorder.ondataavailable = (event) => {
-                    if (event.data.size > 0) {
-                        this.recordedChunks.push(event.data);
-                    }
-                };
-
-                this.mediaRecorder.onstop = () => {
-                    this.download(mimeType);
-                };
-
-                this.mediaRecorder.onerror = (event) => {
-                    console.error('[Recording] Error:', event.error);
-                    alert('録画中にエラーが発生しました。');
-                    this.isRecording = false;
-                    this.updateUI();
-                };
-
-                // Start recording (collect data every second)
-                this.mediaRecorder.start(1000);
                 this.isRecording = true;
                 this.startTime = Date.now();
+                this.currentFilename = data.file;
 
                 // Start timer update
                 this.timerInterval = setInterval(() => this.updateTimer(), 1000);
 
+                // Start heartbeat (every 1 second, timeout is 3 seconds)
+                this.heartbeatInterval = setInterval(() => this.sendHeartbeat(), 1000);
+
                 this.updateUI();
-                console.log('[Recording] Started');
+                console.log('[Recording] Started:', this.currentFilename);
                 return true;
 
             } catch (error) {
                 console.error('[Recording] Failed to start:', error);
                 alert('録画の開始に失敗しました: ' + error.message);
+                this.updateUI();
                 return false;
             }
         },
 
-        // Stop recording
-        stop() {
-            if (!this.mediaRecorder || this.mediaRecorder.state === 'inactive') {
-                return;
-            }
+        // Stop recording via server API
+        async stop() {
+            if (!this.isRecording) return;
 
             try {
-                this.mediaRecorder.stop();
+                this.updateUI('Stopping...');
+
+                const res = await fetch('/api/recording/stop', { method: 'POST' });
+                const data = await res.json();
+
+                if (!res.ok) {
+                    throw new Error(data.error || 'Failed to stop recording');
+                }
+
                 this.isRecording = false;
 
                 if (this.timerInterval) {
@@ -742,55 +854,112 @@ window.addEventListener('DOMContentLoaded', () => {
                     this.timerInterval = null;
                 }
 
-                this.updateUI();
-                console.log('[Recording] Stopped');
+                if (this.heartbeatInterval) {
+                    clearInterval(this.heartbeatInterval);
+                    this.heartbeatInterval = null;
+                }
+
+                console.log('[Recording] Stopped:', data.file);
+
+                // Refresh recordings list if modal is open
+                if (recordingsModalOpen) {
+                    fetchRecordings();
+                }
+
+                // Show converting status and wait for MP4
+                this.updateUI('Converting...');
+                await this.waitForMP4AndDownload(data.file);
 
             } catch (error) {
                 console.error('[Recording] Failed to stop:', error);
+                alert('録画の停止に失敗しました: ' + error.message);
+            } finally {
+                this.updateUI();
             }
         },
 
-        // Download recorded video
-        download(mimeType) {
-            if (this.recordedChunks.length === 0) {
-                console.warn('[Recording] No data to download');
-                return;
+        // Wait for MP4 conversion and auto-download
+        async waitForMP4AndDownload(h264Filename) {
+            const mp4Filename = h264Filename.replace('.h264', '.mp4');
+            const maxWaitMs = 60000; // 60 seconds max
+            const pollIntervalMs = 1000;
+            const startTime = Date.now();
+
+            console.log('[Recording] Waiting for MP4 conversion:', mp4Filename);
+
+            while (Date.now() - startTime < maxWaitMs) {
+                try {
+                    const res = await fetch('/api/recordings');
+                    if (res.ok) {
+                        const data = await res.json();
+                        const mp4File = data.recordings?.find(r => r.name === mp4Filename);
+                        if (mp4File) {
+                            console.log('[Recording] MP4 ready, downloading:', mp4Filename);
+                            // Refresh recordings list if modal is open
+                            if (recordingsModalOpen) {
+                                fetchRecordings();
+                            }
+                            this.download(mp4Filename);
+                            return;
+                        }
+                    }
+                } catch (error) {
+                    console.warn('[Recording] Poll error:', error);
+                }
+
+                await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
             }
 
-            const blob = new Blob(this.recordedChunks, { type: mimeType });
-            const url = URL.createObjectURL(blob);
-            const extension = this.getFileExtension(mimeType);
+            // Timeout - offer H.264 download instead
+            console.warn('[Recording] MP4 conversion timeout, offering H.264 download');
+            if (confirm('MP4変換がタイムアウトしました。H.264ファイルをダウンロードしますか？')) {
+                this.download(h264Filename);
+            }
+        },
 
-            // Generate filename with timestamp
-            const now = new Date();
-            const timestamp = now.getFullYear() +
-                String(now.getMonth() + 1).padStart(2, '0') +
-                String(now.getDate()).padStart(2, '0') + '_' +
-                String(now.getHours()).padStart(2, '0') +
-                String(now.getMinutes()).padStart(2, '0') +
-                String(now.getSeconds()).padStart(2, '0');
-            const filename = `pet_camera_${timestamp}.${extension}`;
-
-            // Trigger download
+        // Download recording from server
+        download(filename) {
+            const url = `/api/recordings/${encodeURIComponent(filename)}`;
             const a = document.createElement('a');
             a.href = url;
             a.download = filename;
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
+            console.log('[Recording] Downloaded:', filename);
+        },
 
-            // Cleanup
-            setTimeout(() => URL.revokeObjectURL(url), 100);
+        // Send heartbeat to prevent auto-stop
+        async sendHeartbeat() {
+            if (!this.isRecording) return;
 
-            console.log('[Recording] Downloaded:', filename, 'Size:', (blob.size / 1024 / 1024).toFixed(2), 'MB');
+            try {
+                const res = await fetch('/api/recording/heartbeat', { method: 'POST' });
+                if (!res.ok) {
+                    // Recording was auto-stopped on server side
+                    console.warn('[Recording] Heartbeat failed, recording may have stopped');
+                    this.isRecording = false;
+                    if (this.timerInterval) {
+                        clearInterval(this.timerInterval);
+                        this.timerInterval = null;
+                    }
+                    if (this.heartbeatInterval) {
+                        clearInterval(this.heartbeatInterval);
+                        this.heartbeatInterval = null;
+                    }
+                    this.updateUI('Auto-stopped');
+                }
+            } catch (error) {
+                console.warn('[Recording] Heartbeat error:', error);
+            }
         },
 
         // Toggle recording
-        toggle() {
+        async toggle() {
             if (this.isRecording) {
-                this.stop();
+                await this.stop();
             } else {
-                this.start();
+                await this.start();
             }
         }
     };
