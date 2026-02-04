@@ -50,6 +50,27 @@ a { color: inherit; }
     gap: 16px;
     flex-wrap: wrap;
 }
+.viewer-count {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.04));
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--text-main);
+    margin-left: auto;
+}
+.viewer-icon {
+    font-size: 16px;
+    opacity: 0.9;
+}
+#viewer-count {
+    min-width: 20px;
+    text-align: center;
+}
 .title {
     font-size: 28px;
     font-weight: 700;
