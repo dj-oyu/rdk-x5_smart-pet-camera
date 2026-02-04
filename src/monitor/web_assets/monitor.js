@@ -602,41 +602,16 @@ window.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Recording functionality using MediaRecorder API
+    // Recording functionality using Server-side API
     const RecordingManager = {
-        mediaRecorder: null,
-        recordedChunks: [],
         isRecording: false,
         startTime: null,
         timerInterval: null,
-
-        // Find the best supported MIME type
-        getSupportedMimeType() {
-            const mimeTypes = [
-                'video/webm;codecs=h264',
-                'video/mp4;codecs=avc1',
-                'video/webm;codecs=vp9',
-                'video/webm;codecs=vp8',
-                'video/webm'
-            ];
-            for (const mimeType of mimeTypes) {
-                if (MediaRecorder.isTypeSupported(mimeType)) {
-                    console.log('[Recording] Using MIME type:', mimeType);
-                    return mimeType;
-                }
-            }
-            console.warn('[Recording] No supported MIME type found');
-            return null;
-        },
-
-        // Get file extension based on MIME type
-        getFileExtension(mimeType) {
-            if (mimeType.includes('mp4')) return 'mp4';
-            return 'webm';
-        },
+        currentFilename: null,
+        statusPollInterval: null,
 
         // Update UI elements
-        updateUI() {
+        updateUI(statusText = null) {
             const recordBtn = document.getElementById('record-btn');
             const recordStatus = document.getElementById('record-status');
 
@@ -644,13 +619,17 @@ window.addEventListener('DOMContentLoaded', () => {
                 recordBtn?.classList.add('recording');
                 if (recordStatus) {
                     recordStatus.classList.add('recording');
-                    this.updateTimer();
+                    if (statusText) {
+                        recordStatus.textContent = statusText;
+                    } else {
+                        this.updateTimer();
+                    }
                 }
             } else {
                 recordBtn?.classList.remove('recording');
                 if (recordStatus) {
                     recordStatus.classList.remove('recording');
-                    recordStatus.textContent = '';
+                    recordStatus.textContent = statusText || '';
                 }
             }
         },
@@ -666,75 +645,51 @@ window.addEventListener('DOMContentLoaded', () => {
             recordStatus.textContent = `REC ${minutes}:${seconds}`;
         },
 
-        // Start recording
-        start() {
-            const video = document.getElementById('webrtc-video');
-            if (!video || !video.srcObject) {
-                alert('WebRTCストリームが接続されていません。\nWebRTCモードで接続してから録画してください。');
-                return false;
-            }
-
-            const mimeType = this.getSupportedMimeType();
-            if (!mimeType) {
-                alert('このブラウザは録画機能に対応していません。');
-                return false;
-            }
-
+        // Start recording via server API
+        async start() {
             try {
-                // Use the video's MediaStream directly
-                const stream = video.srcObject;
+                this.updateUI('Starting...');
 
-                this.mediaRecorder = new MediaRecorder(stream, {
-                    mimeType: mimeType,
-                    videoBitsPerSecond: 2000000
-                });
+                const res = await fetch('/api/recording/start', { method: 'POST' });
+                const data = await res.json();
 
-                this.recordedChunks = [];
+                if (!res.ok) {
+                    throw new Error(data.error || 'Failed to start recording');
+                }
 
-                this.mediaRecorder.ondataavailable = (event) => {
-                    if (event.data.size > 0) {
-                        this.recordedChunks.push(event.data);
-                    }
-                };
-
-                this.mediaRecorder.onstop = () => {
-                    this.download(mimeType);
-                };
-
-                this.mediaRecorder.onerror = (event) => {
-                    console.error('[Recording] Error:', event.error);
-                    alert('録画中にエラーが発生しました。');
-                    this.isRecording = false;
-                    this.updateUI();
-                };
-
-                // Start recording (collect data every second)
-                this.mediaRecorder.start(1000);
                 this.isRecording = true;
                 this.startTime = Date.now();
+                this.currentFilename = data.file;
 
                 // Start timer update
                 this.timerInterval = setInterval(() => this.updateTimer(), 1000);
 
                 this.updateUI();
-                console.log('[Recording] Started');
+                console.log('[Recording] Started:', this.currentFilename);
                 return true;
 
             } catch (error) {
                 console.error('[Recording] Failed to start:', error);
                 alert('録画の開始に失敗しました: ' + error.message);
+                this.updateUI();
                 return false;
             }
         },
 
-        // Stop recording
-        stop() {
-            if (!this.mediaRecorder || this.mediaRecorder.state === 'inactive') {
-                return;
-            }
+        // Stop recording via server API
+        async stop() {
+            if (!this.isRecording) return;
 
             try {
-                this.mediaRecorder.stop();
+                this.updateUI('Stopping...');
+
+                const res = await fetch('/api/recording/stop', { method: 'POST' });
+                const data = await res.json();
+
+                if (!res.ok) {
+                    throw new Error(data.error || 'Failed to stop recording');
+                }
+
                 this.isRecording = false;
 
                 if (this.timerInterval) {
@@ -742,55 +697,73 @@ window.addEventListener('DOMContentLoaded', () => {
                     this.timerInterval = null;
                 }
 
-                this.updateUI();
-                console.log('[Recording] Stopped');
+                console.log('[Recording] Stopped:', data.file);
+
+                // Show converting status and wait for MP4
+                this.updateUI('Converting...');
+                await this.waitForMP4AndDownload(data.file);
 
             } catch (error) {
                 console.error('[Recording] Failed to stop:', error);
+                alert('録画の停止に失敗しました: ' + error.message);
+            } finally {
+                this.updateUI();
             }
         },
 
-        // Download recorded video
-        download(mimeType) {
-            if (this.recordedChunks.length === 0) {
-                console.warn('[Recording] No data to download');
-                return;
+        // Wait for MP4 conversion and auto-download
+        async waitForMP4AndDownload(h264Filename) {
+            const mp4Filename = h264Filename.replace('.h264', '.mp4');
+            const maxWaitMs = 60000; // 60 seconds max
+            const pollIntervalMs = 1000;
+            const startTime = Date.now();
+
+            console.log('[Recording] Waiting for MP4 conversion:', mp4Filename);
+
+            while (Date.now() - startTime < maxWaitMs) {
+                try {
+                    const res = await fetch('/api/recordings');
+                    if (res.ok) {
+                        const data = await res.json();
+                        const mp4File = data.recordings?.find(r => r.name === mp4Filename);
+                        if (mp4File) {
+                            console.log('[Recording] MP4 ready, downloading:', mp4Filename);
+                            this.download(mp4Filename);
+                            return;
+                        }
+                    }
+                } catch (error) {
+                    console.warn('[Recording] Poll error:', error);
+                }
+
+                await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
             }
 
-            const blob = new Blob(this.recordedChunks, { type: mimeType });
-            const url = URL.createObjectURL(blob);
-            const extension = this.getFileExtension(mimeType);
+            // Timeout - offer H.264 download instead
+            console.warn('[Recording] MP4 conversion timeout, offering H.264 download');
+            if (confirm('MP4変換がタイムアウトしました。H.264ファイルをダウンロードしますか？')) {
+                this.download(h264Filename);
+            }
+        },
 
-            // Generate filename with timestamp
-            const now = new Date();
-            const timestamp = now.getFullYear() +
-                String(now.getMonth() + 1).padStart(2, '0') +
-                String(now.getDate()).padStart(2, '0') + '_' +
-                String(now.getHours()).padStart(2, '0') +
-                String(now.getMinutes()).padStart(2, '0') +
-                String(now.getSeconds()).padStart(2, '0');
-            const filename = `pet_camera_${timestamp}.${extension}`;
-
-            // Trigger download
+        // Download recording from server
+        download(filename) {
+            const url = `/api/recordings/${encodeURIComponent(filename)}`;
             const a = document.createElement('a');
             a.href = url;
             a.download = filename;
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
-
-            // Cleanup
-            setTimeout(() => URL.revokeObjectURL(url), 100);
-
-            console.log('[Recording] Downloaded:', filename, 'Size:', (blob.size / 1024 / 1024).toFixed(2), 'MB');
+            console.log('[Recording] Downloaded:', filename);
         },
 
         // Toggle recording
-        toggle() {
+        async toggle() {
             if (this.isRecording) {
-                this.stop();
+                await this.stop();
             } else {
-                this.start();
+                await this.start();
             }
         }
     };
