@@ -12,6 +12,8 @@ import signal
 import logging
 from pathlib import Path
 
+import cv2
+
 # プロジェクトルートをパスに追加
 DETECTOR_DIR = Path(__file__).parent
 PROJECT_ROOT = DETECTOR_DIR.parent.parent
@@ -42,6 +44,46 @@ logging.basicConfig(
 )
 logger = logging.getLogger("YOLODetectorDaemon")
 yolo_logger = logging.getLogger("detection.yolo_detector")
+
+
+def apply_cross_roi_nms(
+    detections: list[dict], iou_threshold: float = 0.5  # type: ignore[type-arg]
+) -> list[dict]:  # type: ignore[type-arg]
+    """
+    Cross-ROI NMS: cv2.dnn.NMSBoxesを使用して異なるROI間の重複検出を除去
+
+    Args:
+        detections: 検出結果リスト [{class_name, confidence, bbox: {x,y,w,h}}, ...]
+        iou_threshold: IoU閾値（これ以上重なっていれば重複とみなす）
+
+    Returns:
+        重複除去後の検出結果リスト
+    """
+    if len(detections) <= 1:
+        return detections
+
+    # クラス別にグループ化
+    by_class: dict[str, list[dict]] = {}  # type: ignore[type-arg]
+    for det in detections:
+        cls = str(det["class_name"])
+        if cls not in by_class:
+            by_class[cls] = []
+        by_class[cls].append(det)
+
+    result: list[dict] = []  # type: ignore[type-arg]
+    for dets in by_class.values():
+        # cv2.dnn.NMSBoxes用にデータを準備
+        bboxes = [[d["bbox"]["x"], d["bbox"]["y"], d["bbox"]["w"], d["bbox"]["h"]] for d in dets]
+        scores = [float(d["confidence"]) for d in dets]
+
+        # NMS適用 (score_threshold=0でフィルタリングなし、iou_thresholdで重複除去)
+        indices = cv2.dnn.NMSBoxes(bboxes, scores, score_threshold=0.0, nms_threshold=iou_threshold)
+
+        # 残ったインデックスの検出を追加
+        for idx in indices:
+            result.append(dets[idx])
+
+    return result
 
 
 class YoloDetectorDaemon:
@@ -466,11 +508,16 @@ class YoloDetectorDaemon:
 
                         if is_debug and all_detections:
                             logger.debug(
-                                f"  Night camera: {len(all_detections)} detections"
+                                f"  Night camera: {len(all_detections)} detections before NMS"
                             )
 
-                        # No merge needed - overlapping ROIs rarely produce duplicates
-                        merged_dicts = all_detections
+                        # Cross-ROI NMS: 重複検出を除去
+                        merged_dicts = apply_cross_roi_nms(all_detections, iou_threshold=0.5)
+
+                        if is_debug and len(merged_dicts) != len(all_detections):
+                            logger.debug(
+                                f"  Night camera: {len(all_detections)} -> {len(merged_dicts)} after NMS"
+                            )
 
                         # Apply scaling after merge (single rounding at final output)
                         scaled_dicts = [
@@ -666,8 +713,8 @@ def main() -> int:
     parser.add_argument(
         "--score-threshold",
         type=float,
-        default=0.6,
-        help="Detection score threshold (default: 0.6)",
+        default=0.4,
+        help="Detection score threshold (default: 0.4)",
     )
     parser.add_argument(
         "--nms-threshold",
