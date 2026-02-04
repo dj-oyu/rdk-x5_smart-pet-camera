@@ -153,16 +153,14 @@ class YoloDetectorDaemon:
 
     def setup(self) -> None:
         """セットアップ"""
-        logger.info("=== YOLO Detector Daemon (Zero-Copy) ===")
-        logger.info(f"Model: {self.model_path}")
-        logger.info(f"Score threshold: {self.score_threshold}")
-        logger.info(f"NMS threshold: {self.nms_threshold}")
-        logger.info("")
+        logger.debug("=== YOLO Detector Daemon (Zero-Copy) ===")
+        logger.debug(f"Model: {self.model_path}")
+        logger.debug(f"Score threshold: {self.score_threshold}, NMS threshold: {self.nms_threshold}")
 
         # Initialize hb_mem module (required)
         if not hb_mem_init():
             raise RuntimeError("hb_mem module initialization failed")
-        logger.info("hb_mem module initialized")
+        logger.debug("hb_mem module initialized")
 
         # 共有メモリを開く
         try:
@@ -170,13 +168,9 @@ class YoloDetectorDaemon:
             self.shm_control = CameraControlSharedMemory()
             if self.shm_control.open():
                 self.active_camera = self.shm_control.get_active()
-                logger.info(
-                    f"CameraControl SHM opened, active camera: {self.active_camera}"
-                )
+                logger.debug(f"CameraControl SHM opened, active camera: {self.active_camera}")
             else:
-                logger.warning(
-                    "CameraControl SHM not available, defaulting to DAY camera"
-                )
+                logger.debug("CameraControl SHM not available, defaulting to DAY camera")
 
             # Per-camera zero-copy SHMs (Phase 2)
             self.shm_zerocopy_day = ZeroCopySharedMemory(SHM_NAME_ZEROCOPY_DAY)
@@ -191,15 +185,15 @@ class YoloDetectorDaemon:
                 )
 
             if day_ok:
-                logger.info(f"Connected to DAY zero-copy: {SHM_NAME_ZEROCOPY_DAY}")
+                logger.debug(f"Connected to DAY zero-copy: {SHM_NAME_ZEROCOPY_DAY}")
             if night_ok:
-                logger.info(f"Connected to NIGHT zero-copy: {SHM_NAME_ZEROCOPY_NIGHT}")
+                logger.debug(f"Connected to NIGHT zero-copy: {SHM_NAME_ZEROCOPY_NIGHT}")
 
             # メイン解像度参照用 (bbox座標スケーリングに使用)
             self.shm_main = RealSharedMemory(frame_shm_name=SHM_NAME_ACTIVE_FRAME)
             self.shm_main.open()
             self.shm_main.open_detection_write()
-            logger.info(f"Connected to main shared memory: {SHM_NAME_ACTIVE_FRAME}")
+            logger.debug(f"Connected to main shared memory: {SHM_NAME_ACTIVE_FRAME}")
         except Exception as e:
             logger.error(f"Failed to open shared memory: {e}")
             logger.error("Make sure camera daemon is running")
@@ -207,14 +201,13 @@ class YoloDetectorDaemon:
 
         # YOLODetectorを初期化
         try:
-            logger.info("Loading YOLO model...")
             self.detector = YoloDetector(
                 model_path=self.model_path,
                 score_threshold=self.score_threshold,
                 nms_threshold=self.nms_threshold,
                 auto_download=True,
             )
-            logger.info("YOLO model loaded successfully")
+            logger.info(f"YOLO model loaded: {Path(self.model_path).name}")
         except Exception as e:
             logger.error(f"Failed to load YOLO model: {e}")
             raise
@@ -240,16 +233,15 @@ class YoloDetectorDaemon:
             self.shm_control.close()
         if self.shm_main:
             self.shm_main.close()
-        logger.info(f"Total frames processed: {self.stats['frames_processed']}")
-        logger.info(f"Total detections: {self.stats['total_detections']}")
         if self.stats["frames_processed"] > 0:
             avg_dets = self.stats["total_detections"] / self.stats["frames_processed"]
-            logger.info(f"Average detections/frame: {avg_dets:.2f}")
-        logger.info("Detector daemon stopped")
+            logger.info(
+                f"Stopped: {self.stats['frames_processed']}f, "
+                f"{self.stats['total_detections']}det ({avg_dets:.2f}/f)"
+            )
 
     def signal_handler(self, signum, frame) -> None:
         """シグナルハンドラ"""
-        logger.info("Shutting down...")
         self.running = False
 
     def run(self) -> int:
@@ -259,8 +251,7 @@ class YoloDetectorDaemon:
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
 
-        logger.info("Starting detection loop (Press Ctrl+C to stop)")
-        logger.info("")
+        logger.debug("Starting detection loop")
 
         try:
             import time as time_module
@@ -334,10 +325,7 @@ class YoloDetectorDaemon:
                         self.roi_enabled = False
                         self.roi_index = 0
                         self.detection_cache = []
-                        logger.info(
-                            f"Camera switched to {camera_id}, scale=({self.scale_x:.3f}, {self.scale_y:.3f}) "
-                            f"[day camera letterbox mode]"
-                        )
+                        logger.debug(f"Camera switched to {camera_id} [day camera letterbox mode]")
                     else:  # Night: 1280x720 → 640x480
                         self.scale_x = 0.5
                         self.scale_y = 480.0 / 720.0  # ~0.667
@@ -347,10 +335,7 @@ class YoloDetectorDaemon:
                         self.roi_enabled = False
                         self.roi_index = 0
                         self.detection_cache = [[] for _ in self.night_roi_regions]
-                        logger.info(
-                            f"Camera switched to {camera_id}, scale=({self.scale_x:.3f}, {self.scale_y:.3f}) "
-                            f"[night ROI mode: {len(self.night_roi_regions)} regions]"
-                        )
+                        logger.debug(f"Camera switched to {camera_id} [night ROI mode: {len(self.night_roi_regions)} regions]")
 
                 # Initialize scale factors on first frame (before any switch)
                 if self.scale_x is None or self.scale_y is None:
@@ -362,30 +347,20 @@ class YoloDetectorDaemon:
                     else:  # Night: 1280x720 → 640x480
                         self.scale_x = 0.5
                         self.scale_y = 480.0 / 720.0
-                    logger.info(
-                        f"Initial scale for camera {camera_id}: ({self.scale_x:.3f}, {self.scale_y:.3f})"
-                    )
+                    logger.debug(f"Initial scale for camera {camera_id}: ({self.scale_x:.3f}, {self.scale_y:.3f})")
 
                 # Initialize ROI regions on first frame
                 if self.stats["frames_processed"] == 0:
-                    logger.info(
-                        f"YOLO input: {frame_width}x{frame_height}, data_len={len(nv12_data)}, camera_id={zc_frame.camera_id}"
-                    )
+                    logger.debug(f"YOLO input: {frame_width}x{frame_height}, camera_id={zc_frame.camera_id}")
 
                     # Night camera (camera_id=1) with 1280x720: enable ROI mode
                     if zc_frame.camera_id == 1 and frame_width == 1280 and frame_height == 720:
                         self.night_roi_mode = True
                         self.night_roi_regions = self.detector.get_roi_regions_720p()
-                        logger.info(
-                            f"Night camera ROI mode enabled: {len(self.night_roi_regions)} regions "
-                            f"(50% overlap, stride=320px)"
-                        )
-                        for i, (rx, ry, rw, rh) in enumerate(self.night_roi_regions):
-                            logger.info(f"  ROI {i}: ({rx}, {ry}) - ({rx+rw}, {ry+rh})")
+                        logger.debug(f"Night camera ROI mode: {len(self.night_roi_regions)} regions")
                         # Initialize detection cache for 3 ROIs
                         self.detection_cache = [[] for _ in self.night_roi_regions]
                         self.roi_index = 0
-                        logger.info("Detection cache initialized for night camera ROI")
                     else:
                         # Day camera or other resolutions: use original logic
                         self.night_roi_mode = False
@@ -394,17 +369,11 @@ class YoloDetectorDaemon:
                         )
 
                         if len(self.roi_regions) > 1:
-                            logger.info(
-                                f"ROI mode enabled: {len(self.roi_regions)} regions "
-                                f"(full coverage every {len(self.roi_regions)} frames)"
-                            )
-                            for i, (rx, ry, rw, rh) in enumerate(self.roi_regions):
-                                logger.info(f"  ROI {i}: ({rx}, {ry}) - ({rx+rw}, {ry+rh})")
+                            logger.debug(f"Day ROI mode: {len(self.roi_regions)} regions")
                             # Initialize detection cache
                             self.detection_cache = [[] for _ in self.roi_regions]
-                            logger.info("Detection cache initialized for temporal integration")
                         else:
-                            logger.info("ROI mode disabled: single region covers full frame")
+                            logger.debug("ROI mode disabled: single region")
                             self.roi_enabled = False
 
                 # Run YOLO inference
@@ -639,56 +608,21 @@ class YoloDetectorDaemon:
                 else:
                     self.stats["total_detections"] += len(detections)
 
-                # Periodic stats log (every 100 frames)
-                if self.stats["frames_processed"] % 100 == 0:
+                # Periodic stats log (every 300 frames)
+                if self.stats["frames_processed"] % 300 == 0:
                     logger.info(
-                        f"Stats: {self.stats['frames_processed']} frames, "
-                        f"{self.stats['total_detections']} total detections, "
-                        f"avg inference: {self.stats['avg_inference_time_ms']:.1f}ms"
+                        f"[{self.stats['frames_processed']}f] "
+                        f"det={self.stats['total_detections']} "
+                        f"inf={self.stats['avg_inference_time_ms']:.0f}ms"
                     )
 
-                # Debug logging
-                if is_debug:
-                    loop_end = time_module.perf_counter()
-                    time_loop = (loop_end - loop_start) * 1000
-                    roi_info = f" [ROI {current_roi}]" if current_roi >= 0 else ""
-                    raw_classes = [det.class_name.value for det in detections]
-                    logger.debug(
-                        f"Frame #{self.stats['frames_processed']}{roi_info}: "
-                        f"{len(detections)} raw detections {raw_classes if raw_classes else '(none)'}"
-                    )
-                    if cycle_complete and (self.night_roi_mode or self.roi_enabled) and detection_dicts:
-                        merged_classes = [d["class_name"] for d in detection_dicts]
-                        logger.debug(
-                            f"  -> Merged: {len(detection_dicts)} detections {merged_classes}"
-                        )
-                    logger.debug(
-                        f"  YOLO: {timing['total'] * 1000:.1f}ms "
-                        f"(prep={timing['preprocessing'] * 1000:.1f}ms, "
-                        f"infer={timing['inference'] * 1000:.1f}ms, "
-                        f"post={timing['postprocessing'] * 1000:.1f}ms)"
-                    )
-                    logger.debug(f"  Loop: {time_loop:.1f}ms")
-                elif cycle_complete and detection_dicts:
-                    classes = [d["class_name"] for d in detection_dicts]
-                    if self.night_roi_mode:
-                        logger.info(
-                            f"Frame #{self.stats['frames_processed']} [night-roi]: "
-                            f"{len(detection_dicts)} detections {classes}"
-                        )
-                    elif self.roi_enabled and len(self.roi_regions) > 1:
-                        logger.info(
-                            f"Frame #{self.stats['frames_processed']} [merged]: "
-                            f"{len(detection_dicts)} detections {classes}"
-                        )
-                    else:
-                        logger.info(
-                            f"Frame #{self.stats['frames_processed']}: "
-                            f"{len(detection_dicts)} detections {classes}"
-                        )
+                # Debug logging (per-frame details)
+                if is_debug and cycle_complete and detection_dicts:
+                    classes = ",".join(d["class_name"] for d in detection_dicts)
+                    logger.debug(f"#{self.stats['frames_processed']}: {classes}")
 
         except KeyboardInterrupt:
-            logger.info("Interrupted")
+            pass  # Normal shutdown
         except Exception as e:
             logger.error(f"Error in detection loop: {e}")
             import traceback
