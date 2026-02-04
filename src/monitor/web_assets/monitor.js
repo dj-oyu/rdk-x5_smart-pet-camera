@@ -520,6 +520,47 @@ window.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    const viewerCountEl = document.getElementById('viewer-count');
+
+    function updateViewerCount(data) {
+        if (!viewerCountEl) return;
+        const viewers = (data.webrtc || 0) + (data.mjpeg || 0);
+        viewerCountEl.textContent = viewers;
+    }
+
+    function startConnectionStream() {
+        const stream = new EventSource('/api/connections/stream');
+        stream.addEventListener('connections', (event) => {
+            if (!event.data) return;
+            try {
+                const data = JSON.parse(event.data);
+                updateViewerCount(data);
+            } catch (error) {
+                console.error('[Connections] Parse error:', error);
+            }
+        });
+        stream.addEventListener('error', () => {
+            stream.close();
+            console.warn('[Connections] SSE error, falling back to polling');
+            fetchConnections();
+            setInterval(fetchConnections, 2000);
+        });
+
+        // Fetch initial count
+        fetchConnections();
+    }
+
+    async function fetchConnections() {
+        try {
+            const res = await fetch('/api/connections');
+            if (!res.ok) return;
+            const data = await res.json();
+            updateViewerCount(data);
+        } catch (error) {
+            console.warn('[Connections] Fetch error:', error);
+        }
+    }
+
     // Performance metrics tracking
     let performanceStats = {
         eventsReceived: 0,
@@ -764,6 +805,7 @@ window.addEventListener('DOMContentLoaded', () => {
     window.RecordingManager = RecordingManager;
 
     startStatusStream();
+    startConnectionStream();
     applyView('history');
 
     window.addEventListener('resize', () => {

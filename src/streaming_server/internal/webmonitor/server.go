@@ -13,13 +13,14 @@ import (
 
 // Server serves the Go-based web monitor endpoints.
 type Server struct {
-	cfg                  Config
-	monitor              *Monitor
-	recorder             *RecorderState
-	webrtc               *http.Client
-	broadcaster          *FrameBroadcaster
-	detectionBroadcaster *DetectionBroadcaster
-	statusBroadcaster    *StatusBroadcaster
+	cfg                    Config
+	monitor                *Monitor
+	recorder               *RecorderState
+	webrtc                 *http.Client
+	broadcaster            *FrameBroadcaster
+	detectionBroadcaster   *DetectionBroadcaster
+	statusBroadcaster      *StatusBroadcaster
+	connectionBroadcaster  *ConnectionBroadcaster
 }
 
 // NewServer returns a configured monitor server.
@@ -43,23 +44,35 @@ func NewServer(cfg Config) *Server {
 
 	monitor := NewMonitor(cfg.TargetFPS, shm)
 
-	broadcaster := NewFrameBroadcaster(shm, monitor)
+	// Build WebRTC client count URL
+	webrtcCountURL := strings.TrimRight(cfg.WebRTCBaseURL, "/") + "/api/clients/count"
+
+	// Create ConnectionBroadcaster first to get the onChange channel
+	connectionBroadcaster, onChange := NewConnectionBroadcaster(webrtcCountURL)
+
+	// Create other broadcasters with the onChange channel for notifications
+	broadcaster := NewFrameBroadcaster(shm, monitor, onChange)
 	broadcaster.Start()
 
-	detectionBroadcaster := NewDetectionBroadcaster(shm, monitor)
+	detectionBroadcaster := NewDetectionBroadcaster(shm, monitor, onChange)
 	detectionBroadcaster.Start()
 
-	statusBroadcaster := NewStatusBroadcaster(shm, monitor, cfg.StatusInterval)
+	statusBroadcaster := NewStatusBroadcaster(shm, monitor, cfg.StatusInterval, onChange)
 	statusBroadcaster.Start()
 
+	// Wire up ConnectionBroadcaster with references to other broadcasters
+	connectionBroadcaster.SetBroadcasters(broadcaster, detectionBroadcaster, statusBroadcaster)
+	connectionBroadcaster.Start()
+
 	return &Server{
-		cfg:                  cfg,
-		monitor:              monitor,
-		recorder:             NewRecorderState(cfg.RecordingOutputPath),
-		webrtc:               &http.Client{Timeout: 5 * time.Second},
-		broadcaster:          broadcaster,
-		detectionBroadcaster: detectionBroadcaster,
-		statusBroadcaster:    statusBroadcaster,
+		cfg:                   cfg,
+		monitor:               monitor,
+		recorder:              NewRecorderState(cfg.RecordingOutputPath),
+		webrtc:                &http.Client{Timeout: 5 * time.Second},
+		broadcaster:           broadcaster,
+		detectionBroadcaster:  detectionBroadcaster,
+		statusBroadcaster:     statusBroadcaster,
+		connectionBroadcaster: connectionBroadcaster,
 	}
 }
 
@@ -74,6 +87,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/status/stream", s.handleStatusStream)
 	mux.HandleFunc("/api/detections/stream", s.handleDetectionsStream)
+	mux.HandleFunc("/api/connections", s.handleConnections)
+	mux.HandleFunc("/api/connections/stream", s.handleConnectionsStream)
 	mux.HandleFunc("/api/camera_status", s.handleCameraStatus)
 	mux.HandleFunc("/api/debug/switch-camera", s.handleCameraSwitch)
 	mux.HandleFunc("/api/recording/start", s.handleRecordingStart)
@@ -277,6 +292,18 @@ func (s *Server) handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(respBody)
+}
+
+func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
+	counts := s.connectionBroadcaster.GetCounts()
+	writeJSON(w, counts)
+}
+
+func (s *Server) handleConnectionsStream(w http.ResponseWriter, r *http.Request) {
+	id, eventCh := s.connectionBroadcaster.Subscribe()
+	defer s.connectionBroadcaster.Unsubscribe(id)
+
+	streamConnectionEventsFromChannel(w, eventCh)
 }
 
 func writeJSON(w http.ResponseWriter, payload any) {

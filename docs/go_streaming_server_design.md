@@ -1679,6 +1679,92 @@ WebRTCのSDP offerを受け取り、answerを返す。
 
 ---
 
+### 4. 接続数取得
+
+#### GET /api/connections
+
+現在のストリーム接続数を取得する。
+
+**Request**: なし
+
+**Response**:
+```json
+{
+    "webrtc": 2,
+    "mjpeg": 1,
+    "detection_sse": 1,
+    "status_sse": 2,
+    "total": 6,
+    "timestamp": 1738665600
+}
+```
+
+| フィールド | 説明 |
+|-----------|------|
+| `webrtc` | WebRTC接続数 |
+| `mjpeg` | MJPEGストリーム接続数 |
+| `detection_sse` | 検出イベントSSE接続数 |
+| `status_sse` | ステータスSSE接続数 |
+| `total` | 合計接続数 |
+| `timestamp` | Unix timestamp |
+
+**Status Codes**:
+- `200 OK`: 常に成功
+
+---
+
+#### GET /api/connections/stream
+
+接続数の変化をSSE (Server-Sent Events) でリアルタイム配信する。
+接続数が変化した時のみイベントが送信される（イベント駆動方式）。
+
+**Request**: なし
+
+**Response**: `text/event-stream`
+
+```
+event: connections
+data: {"webrtc":2,"mjpeg":1,"detection_sse":1,"status_sse":2,"total":6,"timestamp":1738665600}
+
+event: connections
+data: {"webrtc":3,"mjpeg":1,"detection_sse":1,"status_sse":2,"total":7,"timestamp":1738665605}
+```
+
+**イベント形式**:
+- `event`: イベント名 (`connections`)
+- `data`: JSON形式の接続数データ
+
+**特徴**:
+- ポーリングではなくイベント駆動（Subscribe/Unsubscribe時に通知）
+- WebRTC接続数のみ2秒間隔でポーリング（別サーバーのため）
+- 30秒間隔でkeepaliveコメントを送信
+
+**Status Codes**:
+- `200 OK`: SSEストリーム開始
+
+---
+
+### 5. WebRTCクライアント数 (WebRTCサーバー)
+
+#### GET /api/clients/count
+
+WebRTCサーバーの現在の接続クライアント数を取得する。
+（WebRTCサーバー :8081 で提供）
+
+**Request**: なし
+
+**Response**:
+```json
+{
+    "count": 3
+}
+```
+
+**Status Codes**:
+- `200 OK`: 常に成功
+
+---
+
 ## パフォーマンス目標
 
 ### リソース使用量
