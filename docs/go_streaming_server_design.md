@@ -1661,7 +1661,98 @@ WebRTCのSDP offerを受け取り、answerを返す。
 
 ---
 
-### 3. ヘルスチェック
+#### POST /api/recording/heartbeat
+
+録画中のハートビートを送信する。3秒以内にハートビートがない場合、録画は自動停止される。
+
+**Request**: なし (空のPOST)
+
+**Response (成功)**:
+```json
+{
+    "ok": true
+}
+```
+
+**Response (録画中でない)**:
+```json
+{
+    "ok": false
+}
+```
+
+**Status Codes**:
+- `200 OK`: 常に成功
+
+---
+
+### 3. 録画一覧管理
+
+#### GET /api/recordings
+
+保存された録画ファイルの一覧を取得する。
+
+**Request**: なし
+
+**Response**:
+```json
+{
+    "recordings": [
+        {
+            "name": "recording_20260204_143052.mp4",
+            "size_bytes": 47185920,
+            "created_at": "2026-02-04T14:30:52+09:00"
+        },
+        {
+            "name": "recording_20260204_150823.mp4",
+            "size_bytes": 128450560,
+            "created_at": "2026-02-04T15:08:23+09:00"
+        }
+    ]
+}
+```
+
+**Status Codes**:
+- `200 OK`: 常に成功
+
+---
+
+#### GET /api/recordings/{filename}
+
+録画ファイルをダウンロードする。
+
+**Request**: なし
+
+**Response**: バイナリファイル (Content-Type: video/mp4 または application/octet-stream)
+
+**Status Codes**:
+- `200 OK`: ダウンロード成功
+- `404 Not Found`: ファイルが存在しない
+- `400 Bad Request`: 不正なファイル名
+
+---
+
+#### DELETE /api/recordings/{filename}
+
+録画ファイルを削除する。
+
+**Request**: なし
+
+**Response**:
+```json
+{
+    "deleted": "recording_20260204_143052.mp4"
+}
+```
+
+**Status Codes**:
+- `200 OK`: 削除成功
+- `404 Not Found`: ファイルが存在しない
+- `400 Bad Request`: 不正なファイル名
+
+---
+
+### 4. ヘルスチェック
 
 #### GET /health
 
