@@ -65,8 +65,7 @@ class H264StreamTrack(MediaStreamTrack):
         # Codec context for H.264 decoding (if needed)
         self.codec: Optional[av.CodecContext] = None
 
-        print(f"[H264Track] Initialized (fps={fps}, shm={self.shm.frame_shm_name})")
-        logger.info(f"H264StreamTrack initialized (fps={fps})")
+        logger.debug(f"H264StreamTrack initialized (fps={fps})")
 
     async def recv(self) -> VideoFrame:
         """
@@ -206,4 +205,4 @@ class H264StreamTrack(MediaStreamTrack):
         if self._owns_shm and self.shm:
             self.shm.close()
 
-        logger.info("H264StreamTrack stopped")
+        logger.debug("H264StreamTrack stopped")

@@ -246,7 +246,7 @@ class YoloDetector:
             self.model_type = "yolo26" if "yolo26" in model_path.lower() else "legacy"
         else:
             self.model_type = model_type
-        logger.info(f"Model type: {self.model_type}")
+        logger.debug(f"Model type: {self.model_type}")
 
         # CLAHE前処理設定 (ISP補正の代替)
         # 実測brightness_avgは最大80程度のため、閾値を低めに設定
@@ -264,7 +264,7 @@ class YoloDetector:
         # BPUモデルのロード
         try:
             self.quantize_model = dnn.load(self.model_path)
-            logger.info(f"Loaded YOLO model: {self.model_path}")
+            logger.debug(f"Loaded YOLO model: {self.model_path}")
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
             raise
@@ -273,7 +273,7 @@ class YoloDetector:
         self.input_h, self.input_w = (
             self.quantize_model[0].inputs[0].properties.shape[2:4]
         )
-        logger.info(f"Model input size: {self.input_h}x{self.input_w}")
+        logger.debug(f"Model input size: {self.input_h}x{self.input_w}")
 
         # DFL期待値計算用の重み（静的生成）
         self.weights_static = np.array([i for i in range(reg)]).astype(np.float32)[
@@ -342,9 +342,9 @@ class YoloDetector:
         model_dir = Path(self.model_path).parent
         model_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Downloading model from {url}...")
+        logger.info(f"Downloading YOLO model from {url}...")
         urllib.request.urlretrieve(url, self.model_path)
-        logger.info(f"Model downloaded to {self.model_path}")
+        logger.info(f"Model downloaded: {self.model_path}")
 
     def _init_yolo26_grids(self) -> None:
         """YOLO26用のAnchor-Freeグリッドを事前計算
@@ -946,11 +946,7 @@ class YoloDetector:
         self._lb_y_dst = y_out[pad_top : pad_top + height, :]
         self._lb_uv_dst = uv_out[pad_top_uv : pad_top_uv + height // 2, :]
 
-        logger.info(
-            f"Letterbox buffer initialized: {width}x{height} -> "
-            f"{width}x{new_height} (pad={pad_top}+{pad_bottom}, "
-            f"buf={self._lb_buf.nbytes} bytes, alloc=once)"
-        )
+        logger.debug(f"Letterbox buffer initialized: {width}x{height} -> {width}x{new_height}")
 
     def _letterbox_nv12(
         self,

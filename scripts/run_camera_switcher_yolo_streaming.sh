@@ -302,80 +302,57 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [[ "${SKIP_BUILD}" -ne 1 ]]; then
-  echo "[build] cleaning up stale processes and shared memory..."
-  make -C "${CAPTURE_DIR}" cleanup
+  echo "[build] Cleaning up..."
+  make -C "${CAPTURE_DIR}" cleanup >/dev/null 2>&1
 
-  echo "[build] building camera_daemon_drobotics and shared memory libs..."
-  make -C "${CAPTURE_DIR}"
+  echo "[build] Building C daemons..."
+  make -C "${CAPTURE_DIR}" >/dev/null
+  make -C "${CAPTURE_DIR}" switcher-daemon-build >/dev/null
 
-  echo "[build] building camera_switcher_daemon..."
-  make -C "${CAPTURE_DIR}" switcher-daemon-build
-
-  echo "[build] building web assets (esbuild)..."
-  make -C "${REPO_ROOT}" web
+  echo "[build] Building web assets..."
+  make -C "${REPO_ROOT}" web >/dev/null 2>&1
 
   if [[ "${RUN_STREAMING}" -eq 1 ]]; then
-    echo "[build] building Go streaming server..."
-    (
-      cd "${STREAMING_DIR}"
-      go build -o "${BUILD_DIR}/streaming-server" ./cmd/server
-    )
-    echo "[build] Go streaming server built: ${BUILD_DIR}/streaming-server"
+    echo "[build] Building Go servers..."
+    (cd "${STREAMING_DIR}" && go build -o "${BUILD_DIR}/streaming-server" ./cmd/server) >/dev/null
   fi
 
   if [[ "${RUN_MONITOR}" -eq 1 ]]; then
-    echo "[build] building Go web monitor..."
-    (
-      cd "${STREAMING_DIR}"
-      go build -o "${BUILD_DIR}/web_monitor" ./cmd/web_monitor
-    )
-    echo "[build] Go web monitor built: ${BUILD_DIR}/web_monitor"
+    (cd "${STREAMING_DIR}" && go build -o "${BUILD_DIR}/web_monitor" ./cmd/web_monitor) >/dev/null
   fi
+  echo "[build] Done"
 else
-  echo "[info] skipping build (using existing build artifacts)"
+  echo "[info] Skipping build"
 fi
 
 # 録画ディレクトリ作成
 if [[ "${RUN_STREAMING}" -eq 1 ]]; then
   mkdir -p "${RECORDING_PATH}"
-  echo "[info] recording path: ${RECORDING_PATH}"
 fi
 
-echo "[start] launching camera_switcher_daemon..."
-echo "[log] camera_switcher_daemon log: /tmp/camera_switcher_daemon.log"
+echo "[start] Launching camera_switcher_daemon..."
 (
   cd "${REPO_ROOT}"
   "${BUILD_DIR}/camera_switcher_daemon" 2>&1 | tee -a /tmp/camera_switcher.log
 ) &
 PIDS+=("$!")
 
-echo "[wait] waiting for shared memory to appear..."
+echo "[wait] Waiting for shared memory..."
 if ! wait_for_shm "pet_camera_active_frame" 10; then
-  echo "[error] shared memory /dev/shm/pet_camera_active_frame not found after 10s" >&2
-  echo "        camera_daemon_drobotics may have failed to start." >&2
+  echo "[error] SHM not found. camera_daemon may have failed." >&2
   exit 1
 fi
 
 if [[ "${RUN_MONITOR}" -eq 1 ]]; then
-  echo "[wait] waiting for MJPEG shared memory..."
-  if ! wait_for_shm "pet_camera_mjpeg_frame" 10; then
-    echo "[warn] shared memory /dev/shm/pet_camera_mjpeg_frame not found" >&2
-    echo "       web monitor may fail to start" >&2
-  fi
+  wait_for_shm "pet_camera_mjpeg_frame" 10 || echo "[warn] MJPEG SHM not found" >&2
 fi
 
 if [[ "${RUN_STREAMING}" -eq 1 ]]; then
-  echo "[wait] waiting for H.264 stream shared memory..."
-  if ! wait_for_shm "pet_camera_stream" 10; then
-    echo "[warn] shared memory /dev/shm/pet_camera_stream not found" >&2
-    echo "       streaming server may fail to start" >&2
-  fi
+  wait_for_shm "pet_camera_stream" 10 || echo "[warn] H.264 SHM not found" >&2
 fi
 
 if [[ "${RUN_DETECTOR}" -eq 1 ]]; then
-  echo "[start] launching YOLO detector (model=${YOLO_MODEL}, score_thres=${YOLO_SCORE_THRESHOLD})..."
-  echo "        model_path: ${YOLO_MODEL_PATH}"
-  echo "[log] YOLO detector log: /tmp/yolo_detector.log"
+  echo "[start] Launching YOLO detector (${YOLO_MODEL})..."
   (
     cd "${REPO_ROOT}"
     "${UV_BIN}" run src/detector/yolo_detector_daemon.py \
@@ -398,11 +375,7 @@ if [[ "${RUN_MONITOR}" -eq 1 ]]; then
   if [[ -n "${HTTP_ONLY_PORT}" ]]; then
     HTTP_ONLY_ARGS="-http-only ${MONITOR_HOST}:${HTTP_ONLY_PORT}"
   fi
-  echo "[start] launching Go web monitor on ${PROTOCOL}://${MONITOR_HOST}:${MONITOR_PORT}..."
-  if [[ -n "${HTTP_ONLY_PORT}" ]]; then
-    echo "[start] HTTP-only MJPEG endpoint on http://${MONITOR_HOST}:${HTTP_ONLY_PORT}/stream"
-  fi
-  echo "[log] web_monitor log: /tmp/web_monitor.log"
+  echo "[start] Launching web monitor (${PROTOCOL}://${MONITOR_HOST}:${MONITOR_PORT})..."
   (
     cd "${REPO_ROOT}"
     # shellcheck disable=SC2086
@@ -421,8 +394,7 @@ if [[ "${RUN_MONITOR}" -eq 1 ]]; then
 fi
 
 if [[ "${RUN_STREAMING}" -eq 1 ]]; then
-  echo "[start] launching Go streaming server on ${STREAMING_HOST}:${STREAMING_PORT}..."
-  echo "[log] streaming-server log: /tmp/streaming_server.log"
+  echo "[start] Launching streaming server (:${STREAMING_PORT})..."
   (
     cd "${REPO_ROOT}"
     "${BUILD_DIR}/streaming-server" \
@@ -438,40 +410,17 @@ if [[ "${RUN_STREAMING}" -eq 1 ]]; then
 fi
 
 echo ""
-echo "=============================================="
-echo "Camera Switcher Stack with YOLO + Streaming"
-echo "=============================================="
-echo "YOLO Model:       ${YOLO_MODEL} (${MODEL_FILE})"
-echo "Score Threshold:  ${YOLO_SCORE_THRESHOLD}"
-echo "NMS Threshold:    ${YOLO_NMS_THRESHOLD}"
-echo "Log Level:        ${LOG_LEVEL}"
-echo ""
-echo "Web Monitor:      http://${MONITOR_HOST}:${MONITOR_PORT}/"
+echo "========================================"
+echo "Smart Pet Camera Stack Running"
+echo "========================================"
+echo "Web Monitor: http://${MONITOR_HOST}:${MONITOR_PORT}/"
 if [[ "${RUN_STREAMING}" -eq 1 ]]; then
-  echo "Streaming Server: http://${STREAMING_HOST}:${STREAMING_PORT}/"
-  echo "  - WebRTC Offer: http://${STREAMING_HOST}:${STREAMING_PORT}/offer"
-  echo "  - Recording:    http://${STREAMING_HOST}:${STREAMING_PORT}/start|stop|status"
-  echo "  - Health:       http://${STREAMING_HOST}:${STREAMING_PORT}/health"
-  echo "Prometheus:       http://localhost:${METRICS_PORT}/metrics"
-  echo "pprof:            http://localhost:${PPROF_PORT}/debug/pprof/"
-  echo "Recording Path:   ${RECORDING_PATH}"
-  echo "Max Clients:      ${STREAMING_MAX_CLIENTS}"
+  echo "WebRTC:      http://${STREAMING_HOST}:${STREAMING_PORT}/offer"
 fi
-echo ""
-echo "Log Files:"
-echo "  - Camera Switcher: /tmp/camera_switcher_daemon.log"
-if [[ "${RUN_DETECTOR}" -eq 1 ]]; then
-  echo "  - YOLO Detector:   /tmp/yolo_detector.log"
-fi
-if [[ "${RUN_MONITOR}" -eq 1 ]]; then
-  echo "  - Web Monitor:     /tmp/web_monitor.log"
-fi
-if [[ "${RUN_STREAMING}" -eq 1 ]]; then
-  echo "  - Streaming:       /tmp/streaming_server.log"
-fi
-echo ""
-echo "Press Ctrl+C to stop (all processes will be cleaned up)."
-echo "=============================================="
+echo "YOLO:        ${YOLO_MODEL} (score=${YOLO_SCORE_THRESHOLD})"
+echo "Logs:        /tmp/{camera_switcher,yolo_detector,web_monitor,streaming_server}.log"
+echo "Press Ctrl+C to stop"
+echo "========================================"
 
 if [[ "${#PIDS[@]}" -gt 0 ]]; then
   wait -n "${PIDS[@]}"
