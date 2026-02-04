@@ -58,7 +58,8 @@ func blankJPEG() ([]byte, error) {
 type jpegProvider func() ([]byte, bool)
 
 // streamMJPEGFromChannel streams MJPEG from a channel (fanout pattern).
-func streamMJPEGFromChannel(w http.ResponseWriter, frameCh <-chan []byte) {
+func streamMJPEGFromChannel(w http.ResponseWriter, r *http.Request, frameCh <-chan []byte) {
+	ctx := r.Context()
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
@@ -77,6 +78,9 @@ func streamMJPEGFromChannel(w http.ResponseWriter, frameCh <-chan []byte) {
 	for {
 		var jpegData []byte
 		select {
+		case <-ctx.Done():
+			logger.Debug("MJPEG", "Client context cancelled")
+			return
 		case data, ok := <-frameCh:
 			if !ok {
 				// Channel closed, client should disconnect
@@ -150,7 +154,8 @@ func streamMJPEG(w http.ResponseWriter, interval time.Duration, provider jpegPro
 
 // streamDetectionEventsFromChannel streams pre-serialized detection events to SSE client.
 // Data is already serialized in both formats by the broadcaster.
-func streamDetectionEventsFromChannel(w http.ResponseWriter, eventCh <-chan *SerializedEvent, useProtobuf bool) {
+func streamDetectionEventsFromChannel(w http.ResponseWriter, r *http.Request, eventCh <-chan *SerializedEvent, useProtobuf bool) {
+	ctx := r.Context()
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
@@ -170,6 +175,9 @@ func streamDetectionEventsFromChannel(w http.ResponseWriter, eventCh <-chan *Ser
 
 	for {
 		select {
+		case <-ctx.Done():
+			logger.Debug("SSE", "Detection stream client context cancelled")
+			return
 		case event, ok := <-eventCh:
 			if !ok {
 				// Channel closed, client should disconnect
@@ -206,7 +214,8 @@ func streamDetectionEventsFromChannel(w http.ResponseWriter, eventCh <-chan *Ser
 
 // streamStatusEventsFromChannel streams pre-serialized status events to SSE client.
 // Data is already serialized in both formats by the broadcaster.
-func streamStatusEventsFromChannel(w http.ResponseWriter, eventCh <-chan *SerializedEvent, useProtobuf bool) {
+func streamStatusEventsFromChannel(w http.ResponseWriter, r *http.Request, eventCh <-chan *SerializedEvent, useProtobuf bool) {
+	ctx := r.Context()
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
@@ -226,6 +235,9 @@ func streamStatusEventsFromChannel(w http.ResponseWriter, eventCh <-chan *Serial
 
 	for {
 		select {
+		case <-ctx.Done():
+			logger.Debug("SSE", "Status stream client context cancelled")
+			return
 		case event, ok := <-eventCh:
 			if !ok {
 				// Channel closed, client should disconnect
@@ -261,7 +273,8 @@ func streamStatusEventsFromChannel(w http.ResponseWriter, eventCh <-chan *Serial
 }
 
 // streamConnectionEventsFromChannel streams connection count events to SSE client.
-func streamConnectionEventsFromChannel(w http.ResponseWriter, eventCh <-chan []byte) {
+func streamConnectionEventsFromChannel(w http.ResponseWriter, r *http.Request, eventCh <-chan []byte) {
+	ctx := r.Context()
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
@@ -274,6 +287,9 @@ func streamConnectionEventsFromChannel(w http.ResponseWriter, eventCh <-chan []b
 
 	for {
 		select {
+		case <-ctx.Done():
+			logger.Debug("SSE", "Connection stream client context cancelled")
+			return
 		case data, ok := <-eventCh:
 			if !ok {
 				return
