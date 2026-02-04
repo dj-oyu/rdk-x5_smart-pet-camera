@@ -70,10 +70,17 @@ func NewServer(cfg Config) *Server {
 		h264ShmName = "/pet_camera_stream"
 	}
 
+	recorder := NewH264Recorder(cfg.RecordingOutputPath, h264ShmName)
+
+	// Wire up detection callback for recording thumbnail
+	detectionBroadcaster.SetOnDetection(func() {
+		recorder.NotifyDetection()
+	})
+
 	return &Server{
 		cfg:                   cfg,
 		monitor:               monitor,
-		recorder:              NewH264Recorder(cfg.RecordingOutputPath, h264ShmName),
+		recorder:              recorder,
 		webrtc:                &http.Client{Timeout: 5 * time.Second},
 		broadcaster:           broadcaster,
 		detectionBroadcaster:  detectionBroadcaster,
@@ -276,21 +283,30 @@ func (s *Server) handleRecordingsList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRecordingDownload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodDelete {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Extract filename from path: /api/recordings/{filename}
+	// Extract path parts: /api/recordings/{filename} or /api/recordings/{filename}/thumbnail
 	path := r.URL.Path
 	prefix := "/api/recordings/"
 	if !strings.HasPrefix(path, prefix) {
 		http.Error(w, "Invalid path", http.StatusBadRequest)
 		return
 	}
-	filename := strings.TrimPrefix(path, prefix)
-	if filename == "" {
+	pathRest := strings.TrimPrefix(path, prefix)
+	if pathRest == "" {
 		http.Error(w, "Filename required", http.StatusBadRequest)
+		return
+	}
+
+	// Check if this is a thumbnail regeneration request
+	pathParts := strings.Split(pathRest, "/")
+	if len(pathParts) == 2 && pathParts[1] == "thumbnail" {
+		s.handleThumbnailRegenerate(w, r, pathParts[0])
+		return
+	}
+
+	filename := pathParts[0]
+
+	if r.Method != http.MethodGet && r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -310,15 +326,45 @@ func (s *Server) handleRecordingDownload(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Set download headers
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	// Set download headers based on file type
 	if strings.HasSuffix(filename, ".mp4") {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
 		w.Header().Set("Content-Type", "video/mp4")
 	} else if strings.HasSuffix(filename, ".h264") {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
 		w.Header().Set("Content-Type", "video/h264")
+	} else if strings.HasSuffix(filename, ".jpg") {
+		w.Header().Set("Content-Type", "image/jpeg")
+		// No Content-Disposition = display in browser
 	}
 
 	http.ServeFile(w, r, filePath)
+}
+
+func (s *Server) handleThumbnailRegenerate(w http.ResponseWriter, r *http.Request, filename string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Timestamp float64 `json:"timestamp"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONWithStatus(w, map[string]any{"error": "invalid request body"}, http.StatusBadRequest)
+		return
+	}
+
+	if err := s.recorder.RegenerateThumbnail(filename, req.Timestamp); err != nil {
+		writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]any{
+		"success":   true,
+		"filename":  filename,
+		"timestamp": req.Timestamp,
+	})
 }
 
 func (s *Server) handleRecordingStatus(w http.ResponseWriter, r *http.Request) {

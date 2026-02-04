@@ -243,6 +243,7 @@ type DetectionBroadcaster struct {
 	stopped          bool
 	lastEventVersion int // Track last sent version to avoid duplicates
 	onChange         chan<- struct{}
+	onDetection      func() // Callback when detection with objects occurs
 
 	// Rate monitoring
 	broadcastCount  int
@@ -262,6 +263,14 @@ func NewDetectionBroadcaster(shm *shmReader, monitor *Monitor, onChange chan<- s
 		stop:     make(chan struct{}),
 		onChange: onChange,
 	}
+}
+
+// SetOnDetection sets a callback that is called when a detection with objects occurs.
+// This is used to notify the recorder of the first detection for thumbnail generation.
+func (db *DetectionBroadcaster) SetOnDetection(callback func()) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.onDetection = callback
 }
 
 // Subscribe adds a new client and returns a channel for receiving detection events.
@@ -424,6 +433,14 @@ func (db *DetectionBroadcaster) run() {
 
 // processAndBroadcast pre-serializes detection result to both formats and broadcasts
 func (db *DetectionBroadcaster) processAndBroadcast(det *DetectionResult) {
+	// Notify callback (used for recording thumbnail timestamp)
+	db.mu.Lock()
+	callback := db.onDetection
+	db.mu.Unlock()
+	if callback != nil {
+		callback()
+	}
+
 	// Rate monitoring: log every 5 seconds
 	db.broadcastCount++
 	now := time.Now()
