@@ -37,6 +37,7 @@ type H264Recorder struct {
 	file                 *os.File
 	filename             string
 	startTime            time.Time
+	lastDuration         time.Duration // duration of last recording (preserved after stop)
 	frameCount           uint64
 	bytesWritten         uint64
 	lastHeartbeat        time.Time
@@ -122,6 +123,9 @@ func (r *H264Recorder) Stop() (string, error) {
 		r.mu.Unlock()
 		return "", fmt.Errorf("not recording")
 	}
+
+	// Save duration before stopping
+	r.lastDuration = time.Since(r.startTime)
 
 	// Signal stop
 	close(r.stopCh)
@@ -397,6 +401,7 @@ func (r *H264Recorder) autoStop(reason string) {
 		r.mu.Unlock()
 		return
 	}
+	r.lastDuration = time.Since(r.startTime)
 	r.stopReason = reason
 	r.recording = false
 	filename := r.filename
@@ -473,6 +478,8 @@ func (r *H264Recorder) Status() map[string]any {
 	var duration time.Duration
 	if r.recording {
 		duration = time.Since(r.startTime)
+	} else {
+		duration = r.lastDuration
 	}
 
 	var filename any
