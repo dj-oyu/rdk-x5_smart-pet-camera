@@ -276,6 +276,13 @@ func (r *H264Recorder) convertToMP4(h264Filename string) {
 	}
 
 	logger.Info("H264Recorder", "MP4 conversion complete: %s", mp4Filename)
+
+	// Delete H.264 file after successful conversion
+	if err := os.Remove(h264Path); err != nil {
+		logger.Warn("H264Recorder", "Failed to delete H.264 file: %v", err)
+	} else {
+		logger.Info("H264Recorder", "Deleted H.264 file: %s", h264Filename)
+	}
 }
 
 // autoStop stops recording due to timeout (called from recordLoop)
