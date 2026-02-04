@@ -15,7 +15,7 @@ import (
 type Server struct {
 	cfg                    Config
 	monitor                *Monitor
-	recorder               *RecorderState
+	recorder               *H264Recorder
 	webrtc                 *http.Client
 	broadcaster            *FrameBroadcaster
 	detectionBroadcaster   *DetectionBroadcaster
@@ -64,10 +64,16 @@ func NewServer(cfg Config) *Server {
 	connectionBroadcaster.SetBroadcasters(broadcaster, detectionBroadcaster, statusBroadcaster)
 	connectionBroadcaster.Start()
 
+	// Initialize H.264 recorder with SHM name
+	h264ShmName := cfg.H264ShmName
+	if h264ShmName == "" {
+		h264ShmName = "/pet_camera_stream"
+	}
+
 	return &Server{
 		cfg:                   cfg,
 		monitor:               monitor,
-		recorder:              NewRecorderState(cfg.RecordingOutputPath),
+		recorder:              NewH264Recorder(cfg.RecordingOutputPath, h264ShmName),
 		webrtc:                &http.Client{Timeout: 5 * time.Second},
 		broadcaster:           broadcaster,
 		detectionBroadcaster:  detectionBroadcaster,
@@ -94,6 +100,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/recording/start", s.handleRecordingStart)
 	mux.HandleFunc("/api/recording/stop", s.handleRecordingStop)
 	mux.HandleFunc("/api/recording/status", s.handleRecordingStatus)
+	mux.HandleFunc("/api/recordings", s.handleRecordingsList)
+	mux.HandleFunc("/api/recordings/", s.handleRecordingDownload)
 	mux.HandleFunc("/api/webrtc/offer", s.handleWebRTCOffer)
 
 	return mux
@@ -201,7 +209,7 @@ func (s *Server) handleRecordingStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filename, err := s.recorder.Start("")
+	filename, err := s.recorder.Start()
 	if err != nil {
 		writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusBadRequest)
 		return
@@ -234,6 +242,67 @@ func (s *Server) handleRecordingStop(w http.ResponseWriter, r *http.Request) {
 		"stopped_at": float64(time.Now().Unix()),
 	}
 	writeJSON(w, payload)
+}
+
+func (s *Server) handleRecordingsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	recordings, err := s.recorder.ListRecordings()
+	if err != nil {
+		writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]any{"recordings": recordings})
+}
+
+func (s *Server) handleRecordingDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract filename from path: /api/recordings/{filename}
+	path := r.URL.Path
+	prefix := "/api/recordings/"
+	if !strings.HasPrefix(path, prefix) {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	filename := strings.TrimPrefix(path, prefix)
+	if filename == "" {
+		http.Error(w, "Filename required", http.StatusBadRequest)
+		return
+	}
+
+	if r.Method == http.MethodDelete {
+		if err := s.recorder.DeleteRecording(filename); err != nil {
+			writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusNotFound)
+			return
+		}
+		writeJSON(w, map[string]any{"deleted": true, "filename": filename})
+		return
+	}
+
+	// GET - download file
+	filePath, err := s.recorder.GetRecordingPath(filename)
+	if err != nil {
+		writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusNotFound)
+		return
+	}
+
+	// Set download headers
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	if strings.HasSuffix(filename, ".mp4") {
+		w.Header().Set("Content-Type", "video/mp4")
+	} else if strings.HasSuffix(filename, ".h264") {
+		w.Header().Set("Content-Type", "video/h264")
+	}
+
+	http.ServeFile(w, r, filePath)
 }
 
 func (s *Server) handleRecordingStatus(w http.ResponseWriter, r *http.Request) {
