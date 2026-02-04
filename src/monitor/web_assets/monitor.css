@@ -465,7 +465,7 @@ a { color: inherit; }
 }
 
 .record-status {
-    display: inline-flex;
+    display: none;
     align-items: center;
     gap: 6px;
     padding: 6px 12px;
@@ -478,6 +478,7 @@ a { color: inherit; }
 }
 
 .record-status.recording {
+    display: inline-flex;
     background: linear-gradient(135deg, rgba(255, 92, 92, 0.18), rgba(255, 52, 52, 0.22));
     color: #ffb3b3;
     border-color: rgba(255, 92, 92, 0.3);
