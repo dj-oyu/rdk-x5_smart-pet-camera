@@ -246,7 +246,7 @@ class YoloDetector:
             self.model_type = "yolo26" if "yolo26" in model_path.lower() else "legacy"
         else:
             self.model_type = model_type
-        logger.info(f"Model type: {self.model_type}")
+        logger.debug(f"Model type: {self.model_type}")
 
         # CLAHE前処理設定 (ISP補正の代替)
         # 実測brightness_avgは最大80程度のため、閾値を低めに設定
@@ -264,7 +264,7 @@ class YoloDetector:
         # BPUモデルのロード
         try:
             self.quantize_model = dnn.load(self.model_path)
-            logger.info(f"Loaded YOLO model: {self.model_path}")
+            logger.debug(f"Loaded YOLO model: {self.model_path}")
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
             raise
@@ -273,7 +273,7 @@ class YoloDetector:
         self.input_h, self.input_w = (
             self.quantize_model[0].inputs[0].properties.shape[2:4]
         )
-        logger.info(f"Model input size: {self.input_h}x{self.input_w}")
+        logger.debug(f"Model input size: {self.input_h}x{self.input_w}")
 
         # DFL期待値計算用の重み（静的生成）
         self.weights_static = np.array([i for i in range(reg)]).astype(np.float32)[
@@ -327,6 +327,10 @@ class YoloDetector:
 
         # レターボックス事前確保バッファ (遅延初期化)
         self._lb_buf: np.ndarray | None = None
+
+        # Debug logging: only log detailed info once
+        self._postprocess_debug_logged = False
+        self._nv12_path_debug_logged = False
         self._lb_y_view: np.ndarray | None = None    # Y平面のview
         self._lb_uv_view: np.ndarray | None = None   # UV平面のview
         self._lb_y_dst: np.ndarray | None = None     # Yデータコピー先のview
@@ -342,9 +346,9 @@ class YoloDetector:
         model_dir = Path(self.model_path).parent
         model_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Downloading model from {url}...")
+        logger.info(f"Downloading YOLO model from {url}...")
         urllib.request.urlretrieve(url, self.model_path)
-        logger.info(f"Model downloaded to {self.model_path}")
+        logger.info(f"Model downloaded: {self.model_path}")
 
     def _init_yolo26_grids(self) -> None:
         """YOLO26用のAnchor-Freeグリッドを事前計算
@@ -759,9 +763,6 @@ class YoloDetector:
                 self._brightness_stats["clahe_time_total_ms"] += clahe_time
                 self._brightness_stats["frames_clahe_applied"] += 1
                 clahe_applied = True
-                logger.debug(
-                    f"CLAHE applied: brightness={brightness_avg:.1f}, time={clahe_time:.2f}ms"
-                )
             else:
                 self._brightness_stats["frames_clahe_skipped"] += 1
         else:
@@ -793,7 +794,8 @@ class YoloDetector:
             scale = (1.0, 1.0)
             shift = (0.0, 0.0)
             original_shape = (height, width)
-            logger.debug(f"NV12 direct path: {width}x{height} (CLAHE={clahe_applied})")
+            if not self._nv12_path_debug_logged:
+                logger.debug(f"NV12 direct path: {width}x{height}")
         elif width == self.input_w and height < self.input_h:
             # Letterbox: 幅は同じだが高さが小さい場合（例: 640x360 → 640x640）
             # NV12形式で上下に黒帯を追加
@@ -807,14 +809,16 @@ class YoloDetector:
             scale = (1.0, 1.0)  # スケールは既にVSEで適用済み
             shift = (float(pad_top), 0.0)  # Y方向のシフト（bbox座標補正用）
             original_shape = (height, width)
-            logger.debug(
-                f"NV12 letterbox path: {width}x{height} → {self.input_w}x{self.input_h} (pad_top={pad_top})"
-            )
+            if not self._nv12_path_debug_logged:
+                logger.debug(
+                    f"NV12 letterbox path: {width}x{height} -> {self.input_w}x{self.input_h} (pad_top={pad_top})"
+                )
         else:
             # サイズが異なる場合：NV12→BGR→前処理
-            logger.debug(
-                f"NV12 resize path: {width}x{height} → {self.input_w}x{self.input_h}"
-            )
+            if not self._nv12_path_debug_logged:
+                logger.debug(
+                    f"NV12 resize path: {width}x{height} -> {self.input_w}x{self.input_h}"
+                )
             img = self._decode_nv12(nv12_array.tobytes(), width, height)
             if img is None:
                 logger.warning("Failed to decode NV12 frame")
@@ -824,6 +828,10 @@ class YoloDetector:
 
         end_prep = time.perf_counter()
         self._last_timing["preprocessing"] = end_prep - start_prep
+
+        # Mark NV12 path as logged (first call only)
+        if not self._nv12_path_debug_logged:
+            self._nv12_path_debug_logged = True
 
         # 2. BPU推論
         start_infer = time.perf_counter()
@@ -946,11 +954,7 @@ class YoloDetector:
         self._lb_y_dst = y_out[pad_top : pad_top + height, :]
         self._lb_uv_dst = uv_out[pad_top_uv : pad_top_uv + height // 2, :]
 
-        logger.info(
-            f"Letterbox buffer initialized: {width}x{height} -> "
-            f"{width}x{new_height} (pad={pad_top}+{pad_bottom}, "
-            f"buf={self._lb_buf.nbytes} bytes, alloc=once)"
-        )
+        logger.debug(f"Letterbox buffer initialized: {width}x{height} -> {width}x{new_height}")
 
     def _letterbox_nv12(
         self,
@@ -1123,9 +1127,11 @@ class YoloDetector:
         # cls: [N, 80], bbox: [N, 64 (16 x 4)]
         num_classes = 80  # COCO
 
-        logger.debug(f"Post-processing: {len(outputs)} outputs")
-        for i, out in enumerate(outputs):
-            logger.debug(f"  output[{i}]: shape={out.shape}, dtype={out.dtype}")
+        # Log output shapes only once (first call)
+        if not self._postprocess_debug_logged:
+            logger.debug(f"Post-processing: {len(outputs)} outputs")
+            for i, out in enumerate(outputs):
+                logger.debug(f"  output[{i}]: shape={out.shape}, dtype={out.dtype}")
 
         clses = [
             outputs[0].reshape(-1, num_classes),
@@ -1148,10 +1154,12 @@ class YoloDetector:
             max_scores = np.max(cls, axis=1)
             bbox_selected = np.flatnonzero(max_scores >= self.conf_thres_raw)
 
-            logger.debug(
-                f"  stride={stride}: {len(bbox_selected)}/{len(max_scores)} candidates "
-                f"(threshold={self.conf_thres_raw:.2f}, score_thres={self.score_threshold:.2f})"
-            )
+            # Log stride info only once (first call)
+            if not self._postprocess_debug_logged:
+                logger.debug(
+                    f"  stride={stride}: {len(bbox_selected)}/{len(max_scores)} candidates "
+                    f"(threshold={self.conf_thres_raw:.2f}, score_thres={self.score_threshold:.2f})"
+                )
             total_candidates += len(bbox_selected)
 
             if len(bbox_selected) == 0:
@@ -1175,17 +1183,12 @@ class YoloDetector:
             dbboxes_list.append(np.hstack([x1y1, x2y2]) * stride)
 
         if not dbboxes_list:
-            logger.debug(
-                f"No candidates passed threshold (total_candidates={total_candidates})"
-            )
             return []
 
         # 全スケールを結合
         dbboxes = np.concatenate(dbboxes_list, axis=0)
         scores = np.concatenate(scores_list, axis=0)
         ids = np.concatenate(ids_list, axis=0)
-
-        logger.debug(f"Total candidates before NMS: {len(dbboxes)}")
 
         # xywh形式に変換（NMS用）
         hw = dbboxes[:, 2:4] - dbboxes[:, 0:2]
@@ -1223,11 +1226,6 @@ class YoloDetector:
             if len(indices) == 0:
                 continue
 
-            logger.debug(
-                f"  class_id={class_id} ({COCO_CLASS_NAMES[class_id]}): "
-                f"{num_before_nms} -> {num_after_nms} after NMS -> mapped to {detection_class.value}"
-            )
-
             for indic in indices:
                 x1, y1, x2, y2 = dbboxes[id_indices, :][indic]
 
@@ -1254,9 +1252,9 @@ class YoloDetector:
                     )
                 )
 
-        logger.debug(f"Final detections: {len(detections)}")
-        if nms_stats:
-            logger.debug(f"NMS stats (class_id: before->after): {nms_stats}")
+        # Mark as logged after first call
+        if not self._postprocess_debug_logged:
+            self._postprocess_debug_logged = True
 
         return detections
 
@@ -1294,9 +1292,11 @@ class YoloDetector:
 
         num_classes = 80  # COCO
 
-        logger.debug(f"YOLO26 post-processing: {len(outputs)} outputs")
-        for i, out in enumerate(outputs):
-            logger.debug(f"  output[{i}]: shape={out.shape}, dtype={out.dtype}")
+        # Log output shapes only once (first call)
+        if not self._postprocess_debug_logged:
+            logger.debug(f"YOLO26 post-processing: {len(outputs)} outputs")
+            for i, out in enumerate(outputs):
+                logger.debug(f"  output[{i}]: shape={out.shape}, dtype={out.dtype}")
 
         dets: list[np.ndarray] = []
 
@@ -1313,9 +1313,11 @@ class YoloDetector:
             mask = max_scores >= self.conf_thres_raw
 
             num_candidates = np.sum(mask)
-            logger.debug(
-                f"  stride={stride}: {num_candidates}/{len(max_scores)} candidates"
-            )
+            # Log stride info only once (first call)
+            if not self._postprocess_debug_logged:
+                logger.debug(
+                    f"  stride={stride}: {num_candidates}/{len(max_scores)} candidates"
+                )
 
             if not np.any(mask):
                 continue
@@ -1337,12 +1339,10 @@ class YoloDetector:
             dets.append(np.hstack([xyxy, v_score[:, None], v_id[:, None]]))
 
         if not dets:
-            logger.debug("No candidates passed threshold")
             return []
 
         # 全スケールを結合
         all_dets = np.concatenate(dets, axis=0)
-        logger.debug(f"Total candidates before NMS: {len(all_dets)}")
 
         # クラス別NMS
         detections: list[Detection] = []
@@ -1375,10 +1375,6 @@ class YoloDetector:
 
             if num_after_nms > 0:
                 nms_stats[class_id] = (num_before_nms, num_after_nms)
-                logger.debug(
-                    f"  class_id={class_id} ({COCO_CLASS_NAMES[class_id]}): "
-                    f"{num_before_nms} -> {num_after_nms} after NMS"
-                )
 
             if len(indices) == 0:
                 continue
@@ -1403,9 +1399,9 @@ class YoloDetector:
                     bbox=BoundingBox(x=x1, y=y1, w=x2 - x1, h=y2 - y1),
                 ))
 
-        logger.debug(f"YOLO26 final detections: {len(detections)}")
-        if nms_stats:
-            logger.debug(f"NMS stats (class_id: before->after): {nms_stats}")
+        # Mark as logged after first call
+        if not self._postprocess_debug_logged:
+            self._postprocess_debug_logged = True
 
         return detections
 
