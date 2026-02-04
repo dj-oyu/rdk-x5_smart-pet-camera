@@ -15,7 +15,7 @@ import (
 
 const (
 	// HeartbeatTimeout is the maximum time without heartbeat before auto-stop
-	HeartbeatTimeout = 60 * time.Second
+	HeartbeatTimeout = 3 * time.Second
 	// MaxRecordingDuration is the maximum recording duration
 	MaxRecordingDuration = 30 * time.Minute
 )

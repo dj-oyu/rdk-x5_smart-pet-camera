@@ -665,8 +665,8 @@ window.addEventListener('DOMContentLoaded', () => {
                 // Start timer update
                 this.timerInterval = setInterval(() => this.updateTimer(), 1000);
 
-                // Start heartbeat (every 10 seconds)
-                this.heartbeatInterval = setInterval(() => this.sendHeartbeat(), 10000);
+                // Start heartbeat (every 1 second, timeout is 3 seconds)
+                this.heartbeatInterval = setInterval(() => this.sendHeartbeat(), 1000);
 
                 this.updateUI();
                 console.log('[Recording] Started:', this.currentFilename);
