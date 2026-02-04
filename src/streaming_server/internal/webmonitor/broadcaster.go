@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -17,53 +18,59 @@ var jstTimezone = time.FixedZone("JST", 9*3600)
 
 // FrameBroadcaster manages fanout of JPEG frames to multiple clients.
 type FrameBroadcaster struct {
-	mu      sync.Mutex
-	clients map[int]chan []byte
-	nextID  int
-	shm     *shmReader
-	monitor *Monitor
-	stop    chan struct{}
-	stopped bool
+	mu       sync.Mutex
+	clients  map[int]chan []byte
+	nextID   int
+	shm      *shmReader
+	monitor  *Monitor
+	stop     chan struct{}
+	stopped  bool
+	onChange chan<- struct{} // Notifies connection count changes
 }
 
 // NewFrameBroadcaster creates a broadcaster that generates overlay frames and fans them out.
-func NewFrameBroadcaster(shm *shmReader, monitor *Monitor) *FrameBroadcaster {
+func NewFrameBroadcaster(shm *shmReader, monitor *Monitor, onChange chan<- struct{}) *FrameBroadcaster {
 	return &FrameBroadcaster{
-		clients: make(map[int]chan []byte),
-		shm:     shm,
-		monitor: monitor,
-		stop:    make(chan struct{}),
+		clients:  make(map[int]chan []byte),
+		shm:      shm,
+		monitor:  monitor,
+		stop:     make(chan struct{}),
+		onChange: onChange,
 	}
 }
 
 // Subscribe adds a new client and returns a channel for receiving frames.
 func (fb *FrameBroadcaster) Subscribe() (int, <-chan []byte) {
 	fb.mu.Lock()
-	defer fb.mu.Unlock()
-
 	id := fb.nextID
 	fb.nextID++
 	ch := make(chan []byte, 2) // Buffer 2 frames to avoid blocking
 	fb.clients[id] = ch
-
 	logger.Debug("FrameBroadcaster", "Client #%d subscribed (total clients: %d)", id, len(fb.clients))
+	fb.mu.Unlock()
+
+	fb.notifyChange()
 	return id, ch
 }
 
 // Unsubscribe removes a client.
 func (fb *FrameBroadcaster) Unsubscribe(id int) {
 	fb.mu.Lock()
-	defer fb.mu.Unlock()
-
+	removed := false
 	if ch, ok := fb.clients[id]; ok {
 		close(ch)
 		delete(fb.clients, id)
+		removed = true
 		logger.Debug("FrameBroadcaster", "Client #%d unsubscribed (remaining clients: %d)", id, len(fb.clients))
 
-		// Alert when no clients remain (frame generation will be skipped)
 		if len(fb.clients) == 0 {
 			logger.Info("FrameBroadcaster", "No clients remaining - frame generation will be skipped")
 		}
+	}
+	fb.mu.Unlock()
+
+	if removed {
+		fb.notifyChange()
 	}
 }
 
@@ -200,6 +207,23 @@ func (fb *FrameBroadcaster) broadcast(data []byte) {
 	}
 }
 
+// GetClientCount returns the number of connected MJPEG clients.
+func (fb *FrameBroadcaster) GetClientCount() int {
+	fb.mu.Lock()
+	defer fb.mu.Unlock()
+	return len(fb.clients)
+}
+
+func (fb *FrameBroadcaster) notifyChange() {
+	if fb.onChange != nil {
+		select {
+		case fb.onChange <- struct{}{}:
+		default:
+			// Non-blocking: if channel is full, skip notification
+		}
+	}
+}
+
 // SerializedEvent holds pre-serialized data in both formats.
 // This avoids redundant serialization when broadcasting to multiple clients.
 type SerializedEvent struct {
@@ -218,49 +242,56 @@ type DetectionBroadcaster struct {
 	stop             chan struct{}
 	stopped          bool
 	lastEventVersion int // Track last sent version to avoid duplicates
+	onChange         chan<- struct{}
 
 	// Rate monitoring
 	broadcastCount  int
 	lastRateLogTime time.Time
 
 	// Empty detection monitoring (observability for 0-detection case)
-	emptyUpdateCount  int
-	lastEmptyLogTime  time.Time
+	emptyUpdateCount int
+	lastEmptyLogTime time.Time
 }
 
 // NewDetectionBroadcaster creates a broadcaster for detection events.
-func NewDetectionBroadcaster(shm *shmReader, monitor *Monitor) *DetectionBroadcaster {
+func NewDetectionBroadcaster(shm *shmReader, monitor *Monitor, onChange chan<- struct{}) *DetectionBroadcaster {
 	return &DetectionBroadcaster{
-		clients: make(map[int]chan *SerializedEvent),
-		shm:     shm,
-		monitor: monitor,
-		stop:    make(chan struct{}),
+		clients:  make(map[int]chan *SerializedEvent),
+		shm:      shm,
+		monitor:  monitor,
+		stop:     make(chan struct{}),
+		onChange: onChange,
 	}
 }
 
 // Subscribe adds a new client and returns a channel for receiving detection events.
 func (db *DetectionBroadcaster) Subscribe() (int, <-chan *SerializedEvent) {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	id := db.nextID
 	db.nextID++
 	ch := make(chan *SerializedEvent, 2) // Buffer 2 events to avoid blocking
 	db.clients[id] = ch
-
 	logger.Debug("DetectionBroadcaster", "Client #%d subscribed (total clients: %d)", id, len(db.clients))
+	db.mu.Unlock()
+
+	db.notifyChange()
 	return id, ch
 }
 
 // Unsubscribe removes a client.
 func (db *DetectionBroadcaster) Unsubscribe(id int) {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
+	removed := false
 	if ch, ok := db.clients[id]; ok {
 		close(ch)
 		delete(db.clients, id)
+		removed = true
 		logger.Debug("DetectionBroadcaster", "Client #%d unsubscribed (remaining clients: %d)", id, len(db.clients))
+	}
+	db.mu.Unlock()
+
+	if removed {
+		db.notifyChange()
 	}
 }
 
@@ -493,6 +524,22 @@ func (db *DetectionBroadcaster) broadcast(event *SerializedEvent) {
 	}
 }
 
+// GetClientCount returns the number of connected detection SSE clients.
+func (db *DetectionBroadcaster) GetClientCount() int {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	return len(db.clients)
+}
+
+func (db *DetectionBroadcaster) notifyChange() {
+	if db.onChange != nil {
+		select {
+		case db.onChange <- struct{}{}:
+		default:
+		}
+	}
+}
+
 // StatusBroadcaster manages fanout of status events to multiple SSE clients.
 // Pre-serializes both JSON and Protobuf formats for efficiency.
 type StatusBroadcaster struct {
@@ -504,42 +551,49 @@ type StatusBroadcaster struct {
 	stop     chan struct{}
 	stopped  bool
 	interval time.Duration
+	onChange chan<- struct{}
 }
 
 // NewStatusBroadcaster creates a broadcaster for status events.
-func NewStatusBroadcaster(shm *shmReader, monitor *Monitor, interval time.Duration) *StatusBroadcaster {
+func NewStatusBroadcaster(shm *shmReader, monitor *Monitor, interval time.Duration, onChange chan<- struct{}) *StatusBroadcaster {
 	return &StatusBroadcaster{
 		clients:  make(map[int]chan *SerializedEvent),
 		shm:      shm,
 		monitor:  monitor,
 		stop:     make(chan struct{}),
 		interval: interval,
+		onChange: onChange,
 	}
 }
 
 // Subscribe adds a new client and returns a channel for receiving status events.
 func (sb *StatusBroadcaster) Subscribe() (int, <-chan *SerializedEvent) {
 	sb.mu.Lock()
-	defer sb.mu.Unlock()
-
 	id := sb.nextID
 	sb.nextID++
 	ch := make(chan *SerializedEvent, 2) // Buffer 2 events to avoid blocking
 	sb.clients[id] = ch
-
 	logger.Debug("StatusBroadcaster", "Client #%d subscribed (total clients: %d)", id, len(sb.clients))
+	sb.mu.Unlock()
+
+	sb.notifyChange()
 	return id, ch
 }
 
 // Unsubscribe removes a client.
 func (sb *StatusBroadcaster) Unsubscribe(id int) {
 	sb.mu.Lock()
-	defer sb.mu.Unlock()
-
+	removed := false
 	if ch, ok := sb.clients[id]; ok {
 		close(ch)
 		delete(sb.clients, id)
+		removed = true
 		logger.Debug("StatusBroadcaster", "Client #%d unsubscribed (remaining clients: %d)", id, len(sb.clients))
+	}
+	sb.mu.Unlock()
+
+	if removed {
+		sb.notifyChange()
 	}
 }
 
@@ -797,4 +851,239 @@ func (sb *StatusBroadcaster) broadcast(event *SerializedEvent) {
 			_ = id
 		}
 	}
+}
+
+// GetClientCount returns the number of connected status SSE clients.
+func (sb *StatusBroadcaster) GetClientCount() int {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return len(sb.clients)
+}
+
+func (sb *StatusBroadcaster) notifyChange() {
+	if sb.onChange != nil {
+		select {
+		case sb.onChange <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// ConnectionCounts holds the current connection counts for all stream types.
+type ConnectionCounts struct {
+	WebRTC       int   `json:"webrtc"`
+	MJPEG        int   `json:"mjpeg"`
+	DetectionSSE int   `json:"detection_sse"`
+	StatusSSE    int   `json:"status_sse"`
+	Total        int   `json:"total"`
+	Timestamp    int64 `json:"timestamp"`
+}
+
+// ConnectionBroadcaster manages fanout of connection count events to multiple SSE clients.
+// Uses event-driven notifications from other broadcasters instead of polling.
+type ConnectionBroadcaster struct {
+	mu      sync.Mutex
+	clients map[int]chan []byte
+	nextID  int
+	stop    chan struct{}
+	stopped bool
+
+	// Channel to receive change notifications from other broadcasters
+	onChange chan struct{}
+
+	// References to other broadcasters for counting
+	frameBroadcaster     *FrameBroadcaster
+	detectionBroadcaster *DetectionBroadcaster
+	statusBroadcaster    *StatusBroadcaster
+
+	// WebRTC client count fetcher (HTTP call to WebRTC server)
+	webrtcCountURL string
+
+	// Cache last WebRTC count (fetched on demand)
+	lastWebRTCCount int
+}
+
+// NewConnectionBroadcaster creates a broadcaster for connection count events.
+// Returns the broadcaster and a notification channel that other broadcasters should send to.
+func NewConnectionBroadcaster(
+	webrtcCountURL string,
+) (*ConnectionBroadcaster, chan<- struct{}) {
+	onChange := make(chan struct{}, 16) // Buffered to avoid blocking senders
+	return &ConnectionBroadcaster{
+		clients:        make(map[int]chan []byte),
+		stop:           make(chan struct{}),
+		onChange:       onChange,
+		webrtcCountURL: webrtcCountURL,
+	}, onChange
+}
+
+// SetBroadcasters sets references to other broadcasters (called after all are created).
+func (cb *ConnectionBroadcaster) SetBroadcasters(
+	frameBroadcaster *FrameBroadcaster,
+	detectionBroadcaster *DetectionBroadcaster,
+	statusBroadcaster *StatusBroadcaster,
+) {
+	cb.frameBroadcaster = frameBroadcaster
+	cb.detectionBroadcaster = detectionBroadcaster
+	cb.statusBroadcaster = statusBroadcaster
+}
+
+// Subscribe adds a new client and returns a channel for receiving connection count events.
+func (cb *ConnectionBroadcaster) Subscribe() (int, <-chan []byte) {
+	cb.mu.Lock()
+	id := cb.nextID
+	cb.nextID++
+	ch := make(chan []byte, 2)
+	cb.clients[id] = ch
+	logger.Debug("ConnectionBroadcaster", "Client #%d subscribed (total clients: %d)", id, len(cb.clients))
+	cb.mu.Unlock()
+
+	// Trigger immediate update for the new subscriber
+	select {
+	case cb.onChange <- struct{}{}:
+	default:
+	}
+
+	return id, ch
+}
+
+// Unsubscribe removes a client.
+func (cb *ConnectionBroadcaster) Unsubscribe(id int) {
+	cb.mu.Lock()
+	if ch, ok := cb.clients[id]; ok {
+		close(ch)
+		delete(cb.clients, id)
+		logger.Debug("ConnectionBroadcaster", "Client #%d unsubscribed (remaining clients: %d)", id, len(cb.clients))
+	}
+	cb.mu.Unlock()
+}
+
+// Start begins the connection count event loop.
+func (cb *ConnectionBroadcaster) Start() {
+	go cb.run()
+}
+
+// Stop halts the broadcaster.
+func (cb *ConnectionBroadcaster) Stop() {
+	cb.mu.Lock()
+	if !cb.stopped {
+		close(cb.stop)
+		cb.stopped = true
+	}
+	cb.mu.Unlock()
+}
+
+// GetClientCount returns the number of connected connection SSE clients.
+func (cb *ConnectionBroadcaster) GetClientCount() int {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	return len(cb.clients)
+}
+
+// GetCounts returns the current connection counts.
+func (cb *ConnectionBroadcaster) GetCounts() ConnectionCounts {
+	counts := ConnectionCounts{
+		MJPEG:        cb.frameBroadcaster.GetClientCount(),
+		DetectionSSE: cb.detectionBroadcaster.GetClientCount(),
+		StatusSSE:    cb.statusBroadcaster.GetClientCount(),
+		WebRTC:       cb.lastWebRTCCount,
+		Timestamp:    time.Now().Unix(),
+	}
+	counts.Total = counts.WebRTC + counts.MJPEG + counts.DetectionSSE + counts.StatusSSE
+	return counts
+}
+
+func (cb *ConnectionBroadcaster) fetchWebRTCCount() int {
+	if cb.webrtcCountURL == "" {
+		return 0
+	}
+
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Get(cb.webrtcCountURL)
+	if err != nil {
+		logger.Debug("ConnectionBroadcaster", "Failed to fetch WebRTC count: %v", err)
+		return cb.lastWebRTCCount // Return cached value on error
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return cb.lastWebRTCCount
+	}
+
+	var result struct {
+		Count int `json:"count"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return cb.lastWebRTCCount
+	}
+	cb.lastWebRTCCount = result.Count
+	return result.Count
+}
+
+func (cb *ConnectionBroadcaster) run() {
+	logger.Info("ConnectionBroadcaster", "Starting connection count broadcaster (event-driven)...")
+
+	// Periodic WebRTC count refresh (since WebRTC server is separate)
+	webrtcTicker := time.NewTicker(2 * time.Second)
+	defer webrtcTicker.Stop()
+
+	for {
+		select {
+		case <-cb.stop:
+			return
+
+		case <-cb.onChange:
+			// Drain any additional pending notifications (coalesce rapid changes)
+			for len(cb.onChange) > 0 {
+				<-cb.onChange
+			}
+			cb.broadcastCounts()
+
+		case <-webrtcTicker.C:
+			// Periodically check WebRTC count (separate server)
+			cb.mu.Lock()
+			clientCount := len(cb.clients)
+			cb.mu.Unlock()
+
+			if clientCount == 0 {
+				continue
+			}
+
+			oldCount := cb.lastWebRTCCount
+			newCount := cb.fetchWebRTCCount()
+			if newCount != oldCount {
+				cb.broadcastCounts()
+			}
+		}
+	}
+}
+
+func (cb *ConnectionBroadcaster) broadcastCounts() {
+	cb.mu.Lock()
+	clientCount := len(cb.clients)
+	cb.mu.Unlock()
+
+	if clientCount == 0 {
+		return
+	}
+
+	// Refresh WebRTC count before broadcasting (since it's from separate server)
+	cb.fetchWebRTCCount()
+
+	counts := cb.GetCounts()
+	jsonData, err := json.Marshal(counts)
+	if err != nil {
+		logger.Error("ConnectionBroadcaster", "JSON marshal error: %v", err)
+		return
+	}
+
+	cb.mu.Lock()
+	for id, ch := range cb.clients {
+		select {
+		case ch <- jsonData:
+		default:
+			_ = id
+		}
+	}
+	cb.mu.Unlock()
 }

@@ -355,7 +355,7 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 	// CORS middleware
 	corsMiddleware := func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "http://localhost:8080")
+			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
@@ -375,6 +375,9 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/start", corsMiddleware(s.handleStartRecording))
 	mux.HandleFunc("/stop", corsMiddleware(s.handleStopRecording))
 	mux.HandleFunc("/status", corsMiddleware(s.handleStatus))
+
+	// Client count API
+	mux.HandleFunc("/api/clients/count", corsMiddleware(s.handleClientCount))
 
 	// Health check
 	mux.HandleFunc("/health", s.handleHealth)
@@ -457,6 +460,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"webrtc_clients": s.webrtc.GetClientCount(),
 		"recording":      s.recorder.IsRecording(),
 		"has_headers":    s.processor.HasHeaders(),
+	})
+}
+
+// handleClientCount returns the current WebRTC client count
+func (s *Server) handleClientCount(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"count": s.webrtc.GetClientCount(),
 	})
 }
 

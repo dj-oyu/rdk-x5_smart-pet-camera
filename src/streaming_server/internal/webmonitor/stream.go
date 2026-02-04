@@ -260,3 +260,38 @@ func streamStatusEventsFromChannel(w http.ResponseWriter, eventCh <-chan *Serial
 	}
 }
 
+// streamConnectionEventsFromChannel streams connection count events to SSE client.
+func streamConnectionEventsFromChannel(w http.ResponseWriter, eventCh <-chan []byte) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	for {
+		select {
+		case data, ok := <-eventCh:
+			if !ok {
+				return
+			}
+
+			if _, err := fmt.Fprintf(w, "event: connections\ndata: %s\n\n", data); err != nil {
+				logger.Debug("SSE", "Client disconnected during connection event write: %v", err)
+				return
+			}
+			flusher.Flush()
+
+		case <-time.After(30 * time.Second):
+			if _, err := fmt.Fprintf(w, ": keepalive\n\n"); err != nil {
+				logger.Debug("SSE", "Client disconnected during keepalive: %v", err)
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
