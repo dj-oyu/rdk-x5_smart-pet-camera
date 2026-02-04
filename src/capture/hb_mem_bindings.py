@@ -123,7 +123,7 @@ def _load_libhbmem() -> Optional[ctypes.CDLL]:
     for lib_name in lib_names:
         try:
             _libhbmem = ctypes.CDLL(lib_name)
-            logger.info(f"Loaded hb_mem library: {lib_name}")
+            logger.debug(f"Loaded hb_mem library: {lib_name}")
 
             # Set up function signatures
             _setup_function_signatures(_libhbmem)
@@ -199,7 +199,7 @@ def init_module() -> bool:
         return False
 
     _module_initialized = True
-    logger.info("hb_mem module initialized")
+    logger.debug("hb_mem module initialized")
     return True
 
 
@@ -219,7 +219,7 @@ def close_module() -> None:
         lib.hb_mem_module_close()
 
     _module_initialized = False
-    logger.info("hb_mem module closed")
+    logger.debug("hb_mem module closed")
 
 
 # ============================================================================
@@ -778,10 +778,7 @@ def import_nv12_graph_buf(
             import_nv12_graph_buf._diag_done = True
             y_mean = float(np.mean(y_arr))
             y_std = float(np.std(y_arr))
-            logger.info(
-                f"Frame data diagnostic: Y plane mean={y_mean:.1f}, std={y_std:.1f}, "
-                f"first_bytes={bytes(y_arr[:16]).hex()}"
-            )
+            logger.debug(f"Frame data diagnostic: Y plane mean={y_mean:.1f}, std={y_std:.1f}")
 
         # Validate sizes match expected
         if expected_plane_sizes:

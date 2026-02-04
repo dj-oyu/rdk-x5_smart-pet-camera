@@ -76,8 +76,7 @@ static int spawn_daemon(CameraMode camera) {
     perror("execl");
     _exit(1);
   }
-  LOG_INFO("SwitcherDaemon", "Spawned %s (PID=%d) camera=%d (30fps constant)",
-           CAPTURE_BIN, pid, (int)camera);
+  LOG_DEBUG("SwitcherDaemon", "Spawned camera %d (PID=%d)", (int)camera, pid);
   return pid;
 }
 
@@ -97,17 +96,12 @@ static ZeroCopyFrameBuffer *wait_for_zerocopy_shm(const char *name,
   while (retries < max_retries && !shm) {
     shm = shm_zerocopy_open(name);
     if (!shm) {
-      if (retries == 0) {
-        LOG_INFO("SwitcherDaemon", "Waiting for %s to be created...", name);
-      }
       usleep(100000); // 100ms
       retries++;
     }
   }
 
-  if (shm) {
-    LOG_INFO("SwitcherDaemon", "Opened %s", name);
-  } else {
+  if (!shm) {
     LOG_ERROR("SwitcherDaemon", "Timeout waiting for %s", name);
   }
 
@@ -124,14 +118,12 @@ static void do_switch(SwitcherContext *ctx, CameraMode target,
   camera_switcher_notify_active_camera(&ctx->switcher, target, reason);
   ctx->active_camera = target;
 
-  LOG_INFO("SwitcherDaemon", "Switched to %s camera (%s)",
+  LOG_INFO("SwitcherDaemon", "Switch: %s (%s)",
            target == CAMERA_MODE_DAY ? "DAY" : "NIGHT", reason);
 }
 
 static int switcher_loop(SwitcherContext *ctx) {
-  LOG_INFO("SwitcherDaemon",
-           "Switcher loop started (poll: %dms DAY / %dms NIGHT)",
-           POLL_INTERVAL_DAY_MS, POLL_INTERVAL_NIGHT_MS);
+  LOG_DEBUG("SwitcherDaemon", "Switcher loop started");
 
   while (!g_stop) {
     // Handle force-switch signals (SIGUSR1=DAY, SIGUSR2=NIGHT)
@@ -165,7 +157,6 @@ static int switcher_loop(SwitcherContext *ctx) {
     usleep(interval_ms * 1000);
   }
 
-  LOG_INFO("SwitcherDaemon", "Switcher loop stopped");
   return 0;
 }
 
@@ -186,8 +177,6 @@ int main(void) {
     LOG_ERROR("SwitcherDaemon", "Failed to create detection shared memory");
     return 1;
   }
-  LOG_INFO("SwitcherDaemon",
-           "Detection shared memory initialized with semaphore");
 
   // Create CameraControl SHM (before spawning daemons so they can open it)
   CameraControl *control_shm = shm_control_create();
@@ -196,8 +185,6 @@ int main(void) {
     shm_detection_destroy(detection_shm);
     return 1;
   }
-  LOG_INFO("SwitcherDaemon", "CameraControl shared memory created: %s",
-           SHM_NAME_CONTROL);
 
   // Initialize switcher config
   CameraSwitchConfig cfg = {
@@ -222,8 +209,6 @@ int main(void) {
   int use_single_camera = (single_camera_mode && atoi(single_camera_mode) == 1);
 
   if (use_single_camera) {
-    LOG_INFO("SwitcherDaemon",
-             "SINGLE_CAMERA_MODE: using camera 0 for both DAY/NIGHT");
     ctx.day_pid = spawn_daemon(0);
     if (ctx.day_pid <= 0) {
       LOG_ERROR("SwitcherDaemon", "Failed to start day camera daemon");
@@ -232,11 +217,8 @@ int main(void) {
       return 1;
     }
     ctx.night_pid = -1;
-    LOG_INFO("SwitcherDaemon", "Single camera started (DAY mode only)");
+    LOG_INFO("SwitcherDaemon", "Started: single camera mode");
   } else {
-    LOG_INFO("SwitcherDaemon",
-             "DUAL_CAMERA_MODE: starting both cameras at 30fps");
-
     ctx.day_pid = spawn_daemon(CAMERA_MODE_DAY);
     if (ctx.day_pid <= 0) {
       LOG_ERROR("SwitcherDaemon", "Failed to start day camera daemon");
@@ -254,11 +236,10 @@ int main(void) {
       return 1;
     }
 
-    LOG_INFO("SwitcherDaemon", "Both cameras started at 30fps");
+    LOG_INFO("SwitcherDaemon", "Started: dual camera mode");
   }
 
   // Wait for camera daemons to initialize
-  LOG_INFO("SwitcherDaemon", "Waiting for camera daemons to initialize...");
   sleep(2);
 
   // Open DAY camera ZeroCopy SHM for brightness reading
@@ -276,15 +257,11 @@ int main(void) {
   // Set initial active camera
   shm_control_set_active(control_shm, (int)CAMERA_MODE_DAY);
   camera_switcher_notify_active_camera(&ctx.switcher, CAMERA_MODE_DAY, "init");
-  LOG_INFO("SwitcherDaemon", "Initial camera: DAY");
 
   // Run main polling loop
-  LOG_INFO("SwitcherDaemon",
-           "Running. Press Ctrl+C to stop. SIGUSR1=DAY, SIGUSR2=NIGHT");
   switcher_loop(&ctx);
 
   // Shutdown
-  LOG_INFO("SwitcherDaemon", "Stopping...");
   kill_daemon(ctx.day_pid);
   kill_daemon(ctx.night_pid);
 
@@ -295,13 +272,12 @@ int main(void) {
 
   if (control_shm) {
     shm_control_destroy(control_shm);
-    LOG_INFO("SwitcherDaemon", "CameraControl shared memory destroyed");
   }
 
   if (detection_shm) {
     shm_detection_destroy(detection_shm);
-    LOG_INFO("SwitcherDaemon", "Detection shared memory destroyed");
   }
 
+  LOG_INFO("SwitcherDaemon", "Stopped");
   return 0;
 }

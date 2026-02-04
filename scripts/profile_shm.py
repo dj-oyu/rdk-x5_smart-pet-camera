@@ -140,18 +140,11 @@ async def profile_shm(shm_name: str, duration: float, monitor_url: Optional[str]
     saved_iframe_count = 0
     if save_iframes and output_dir:
         output_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Saving I-frames to: {output_dir}", file=sys.stderr)
-
-    if test_switching:
-        print(f"[Info] Camera switching test mode enabled", file=sys.stderr)
-        print(f"[Info] To trigger switches: adjust lighting (turn lights on/off)", file=sys.stderr)
-        print(f"[Info] Expected: Camera 0 (DAY) in bright light, Camera 1 (NIGHT) in darkness", file=sys.stderr)
 
     # Record initial write_index for accurate FPS calculation
     initial_write_index = shm.get_write_index()
 
-    print(f"Sampling {shm_name} for {duration} seconds...", file=sys.stderr)
-    print(f"Initial write_index: {initial_write_index}", file=sys.stderr)
+    print(f"Sampling {shm_name} for {duration}s...", file=sys.stderr)
 
     last_frame_obj = None
 
@@ -182,8 +175,6 @@ async def profile_shm(shm_name: str, duration: float, monitor_url: Optional[str]
                         "frame_gap": gap
                     }
                     switch_events.append(switch_event)
-                    gap_str = f", gap={gap}" if gap > 0 else ""
-                    print(f"[Switch] Camera {last_camera_id} → {frame.camera_id} at frame #{frame.frame_number} (t={switch_event['time_offset_sec']}s{gap_str})", file=sys.stderr)
                 last_camera_id = frame.camera_id
 
             # Record metadata
@@ -207,9 +198,8 @@ async def profile_shm(shm_name: str, duration: float, monitor_url: Optional[str]
                             filepath = output_dir / filename
                             cv2.imwrite(str(filepath), bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
                             saved_iframe_count += 1
-                            print(f"[{saved_iframe_count}] Saved: {filename}", file=sys.stderr)
-                        except Exception as e:
-                            print(f"[Error] Failed to save frame #{frame.frame_number}: {e}", file=sys.stderr)
+                        except Exception:
+                            pass  # Silently ignore save errors
 
                 elif frame.format == 2: # RGB
                     rgb_data = np.frombuffer(frame.data, dtype=np.uint8).reshape((frame.height, frame.width, 3))
@@ -343,9 +333,6 @@ async def profile_shm(shm_name: str, duration: float, monitor_url: Optional[str]
                         status = "WARNING"
                     result["camera_switching"]["max_frame_gap_during_switch"] = max_gap
                     result["status"] = status
-                print(f"[Summary] Detected {len(switch_events)} camera switch(es) during {duration}s test", file=sys.stderr)
-            else:
-                print(f"[Summary] No camera switches detected (staying on camera {camera_ids[0] if camera_ids else 'unknown'})", file=sys.stderr)
         else:
             result["camera_switching"] = {
                 "enabled": True,
