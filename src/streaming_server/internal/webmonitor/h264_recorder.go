@@ -13,6 +13,13 @@ import (
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/shm"
 )
 
+const (
+	// HeartbeatTimeout is the maximum time without heartbeat before auto-stop
+	HeartbeatTimeout = 60 * time.Second
+	// MaxRecordingDuration is the maximum recording duration
+	MaxRecordingDuration = 30 * time.Minute
+)
+
 // H264Recorder manages H.264 recording from shared memory
 type H264Recorder struct {
 	mu sync.RWMutex
@@ -30,6 +37,8 @@ type H264Recorder struct {
 	startTime     time.Time
 	frameCount    uint64
 	bytesWritten  uint64
+	lastHeartbeat time.Time
+	stopReason    string
 
 	// Control
 	stopCh chan struct{}
@@ -85,6 +94,8 @@ func (r *H264Recorder) Start() (string, error) {
 	r.startTime = time.Now()
 	r.frameCount = 0
 	r.bytesWritten = 0
+	r.lastHeartbeat = time.Now()
+	r.stopReason = ""
 	r.stopCh = make(chan struct{})
 
 	// Start recording goroutine
@@ -163,6 +174,23 @@ func (r *H264Recorder) recordLoop() {
 				r.mu.RUnlock()
 				return
 			}
+
+			// Check for heartbeat timeout
+			if time.Since(r.lastHeartbeat) > HeartbeatTimeout {
+				r.mu.RUnlock()
+				logger.Warn("H264Recorder", "Heartbeat timeout, auto-stopping recording")
+				r.autoStop("heartbeat timeout")
+				return
+			}
+
+			// Check for max duration
+			if time.Since(r.startTime) > MaxRecordingDuration {
+				r.mu.RUnlock()
+				logger.Warn("H264Recorder", "Max duration reached, auto-stopping recording")
+				r.autoStop("max duration reached")
+				return
+			}
+
 			reader := r.shmReader
 			processor := r.h264Processor
 			r.mu.RUnlock()
@@ -250,6 +278,50 @@ func (r *H264Recorder) convertToMP4(h264Filename string) {
 	logger.Info("H264Recorder", "MP4 conversion complete: %s", mp4Filename)
 }
 
+// autoStop stops recording due to timeout (called from recordLoop)
+func (r *H264Recorder) autoStop(reason string) {
+	r.mu.Lock()
+	if !r.recording {
+		r.mu.Unlock()
+		return
+	}
+	r.stopReason = reason
+	r.recording = false
+	filename := r.filename
+	r.mu.Unlock()
+
+	// Close file
+	r.mu.Lock()
+	if r.file != nil {
+		r.file.Sync()
+		r.file.Close()
+		r.file = nil
+	}
+	if r.shmReader != nil {
+		r.shmReader.Close()
+		r.shmReader = nil
+	}
+	r.mu.Unlock()
+
+	logger.Info("H264Recorder", "Auto-stopped recording: %s (reason=%s)", filename, reason)
+
+	// Start MP4 conversion in background
+	go r.convertToMP4(filename)
+}
+
+// Heartbeat updates the last heartbeat time to prevent auto-stop
+func (r *H264Recorder) Heartbeat() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if !r.recording {
+		return false
+	}
+
+	r.lastHeartbeat = time.Now()
+	return true
+}
+
 // IsRecording returns true if currently recording
 func (r *H264Recorder) IsRecording() bool {
 	r.mu.RLock()
@@ -278,6 +350,7 @@ func (r *H264Recorder) Status() map[string]any {
 		"frame_count":   r.frameCount,
 		"bytes_written": r.bytesWritten,
 		"duration_ms":   duration.Milliseconds(),
+		"stop_reason":   r.stopReason,
 	}
 }
 

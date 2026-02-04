@@ -607,6 +607,7 @@ window.addEventListener('DOMContentLoaded', () => {
         isRecording: false,
         startTime: null,
         timerInterval: null,
+        heartbeatInterval: null,
         currentFilename: null,
         statusPollInterval: null,
 
@@ -664,6 +665,9 @@ window.addEventListener('DOMContentLoaded', () => {
                 // Start timer update
                 this.timerInterval = setInterval(() => this.updateTimer(), 1000);
 
+                // Start heartbeat (every 10 seconds)
+                this.heartbeatInterval = setInterval(() => this.sendHeartbeat(), 10000);
+
                 this.updateUI();
                 console.log('[Recording] Started:', this.currentFilename);
                 return true;
@@ -695,6 +699,11 @@ window.addEventListener('DOMContentLoaded', () => {
                 if (this.timerInterval) {
                     clearInterval(this.timerInterval);
                     this.timerInterval = null;
+                }
+
+                if (this.heartbeatInterval) {
+                    clearInterval(this.heartbeatInterval);
+                    this.heartbeatInterval = null;
                 }
 
                 console.log('[Recording] Stopped:', data.file);
@@ -756,6 +765,31 @@ window.addEventListener('DOMContentLoaded', () => {
             a.click();
             document.body.removeChild(a);
             console.log('[Recording] Downloaded:', filename);
+        },
+
+        // Send heartbeat to prevent auto-stop
+        async sendHeartbeat() {
+            if (!this.isRecording) return;
+
+            try {
+                const res = await fetch('/api/recording/heartbeat', { method: 'POST' });
+                if (!res.ok) {
+                    // Recording was auto-stopped on server side
+                    console.warn('[Recording] Heartbeat failed, recording may have stopped');
+                    this.isRecording = false;
+                    if (this.timerInterval) {
+                        clearInterval(this.timerInterval);
+                        this.timerInterval = null;
+                    }
+                    if (this.heartbeatInterval) {
+                        clearInterval(this.heartbeatInterval);
+                        this.heartbeatInterval = null;
+                    }
+                    this.updateUI('Auto-stopped');
+                }
+            } catch (error) {
+                console.warn('[Recording] Heartbeat error:', error);
+            }
         },
 
         // Toggle recording

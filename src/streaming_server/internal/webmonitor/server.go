@@ -100,6 +100,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/recording/start", s.handleRecordingStart)
 	mux.HandleFunc("/api/recording/stop", s.handleRecordingStop)
 	mux.HandleFunc("/api/recording/status", s.handleRecordingStatus)
+	mux.HandleFunc("/api/recording/heartbeat", s.handleRecordingHeartbeat)
 	mux.HandleFunc("/api/recordings", s.handleRecordingsList)
 	mux.HandleFunc("/api/recordings/", s.handleRecordingDownload)
 	mux.HandleFunc("/api/webrtc/offer", s.handleWebRTCOffer)
@@ -242,6 +243,21 @@ func (s *Server) handleRecordingStop(w http.ResponseWriter, r *http.Request) {
 		"stopped_at": float64(time.Now().Unix()),
 	}
 	writeJSON(w, payload)
+}
+
+func (s *Server) handleRecordingHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ok := s.recorder.Heartbeat()
+	if !ok {
+		writeJSONWithStatus(w, map[string]any{"error": "not recording"}, http.StatusBadRequest)
+		return
+	}
+
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (s *Server) handleRecordingsList(w http.ResponseWriter, r *http.Request) {
