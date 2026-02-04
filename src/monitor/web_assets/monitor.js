@@ -474,12 +474,48 @@ window.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Close modal with Escape key
-    document.addEventListener('keydown', (event) => {
-        if (event.key === 'Escape' && recordingsModalOpen) {
-            closeRecordingsModal();
+    // Thumbnail Preview Modal
+    let thumbnailPreviewOpen = false;
+    const thumbnailPreviewModal = document.getElementById('thumbnail-preview-modal');
+    const thumbnailPreviewImg = document.getElementById('thumbnail-preview-img');
+    const thumbnailPreviewInfo = document.getElementById('thumbnail-preview-info');
+    const thumbnailPreviewClose = document.getElementById('thumbnail-preview-close');
+
+    function openThumbnailPreview(thumbUrl, recordingName) {
+        thumbnailPreviewOpen = true;
+        thumbnailPreviewImg.src = thumbUrl;
+        const date = parseRecordingDate(recordingName);
+        thumbnailPreviewInfo.textContent = formatRecordingDate(date);
+        thumbnailPreviewModal.style.display = 'flex';
+    }
+
+    function closeThumbnailPreview() {
+        thumbnailPreviewOpen = false;
+        thumbnailPreviewModal.style.display = 'none';
+        thumbnailPreviewImg.src = '';
+    }
+
+    thumbnailPreviewClose?.addEventListener('click', closeThumbnailPreview);
+
+    thumbnailPreviewModal?.addEventListener('click', (event) => {
+        if (event.target === thumbnailPreviewModal) {
+            closeThumbnailPreview();
         }
     });
+
+    // Close modal with Escape key
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            if (thumbnailPreviewOpen) {
+                closeThumbnailPreview();
+            } else if (recordingsModalOpen) {
+                closeRecordingsModal();
+            }
+        }
+    });
+
+    // Expose for inline onclick handlers
+    window.openThumbnailPreview = openThumbnailPreview;
 
     // Recordings functionality
     async function fetchRecordings() {
@@ -544,8 +580,18 @@ window.addEventListener('DOMContentLoaded', () => {
                 const dateStr = formatRecordingDate(date);
                 const sizeStr = formatFileSize(rec.size_bytes);
                 const isH264 = rec.name.endsWith('.h264');
+                const thumbUrl = rec.thumbnail
+                    ? `/api/recordings/${encodeURIComponent(rec.thumbnail)}`
+                    : null;
                 return `
                     <div class="recording-card" data-name="${rec.name}">
+                        <div class="recording-thumb-container${thumbUrl ? ' clickable' : ''}"
+                             ${thumbUrl ? `onclick="window.openThumbnailPreview('${thumbUrl}', '${rec.name}')"` : ''}>
+                            ${thumbUrl
+                                ? `<img class="recording-thumb" src="${thumbUrl}" alt="" loading="lazy">`
+                                : `<div class="recording-thumb-placeholder">📹</div>`
+                            }
+                        </div>
                         <div class="recording-info">
                             <div class="recording-date">${dateStr}${isH264 ? ' <span style="color:#f0c040;font-size:11px;">(変換中)</span>' : ''}</div>
                             <div class="recording-size">${sizeStr}</div>
@@ -758,6 +804,7 @@ window.addEventListener('DOMContentLoaded', () => {
     // Recording functionality using Server-side API
     const RecordingManager = {
         isRecording: false,
+        isConverting: false,
         startTime: null,
         timerInterval: null,
         heartbeatInterval: null,
@@ -768,6 +815,24 @@ window.addEventListener('DOMContentLoaded', () => {
         updateUI(statusText = null) {
             const recordBtn = document.getElementById('record-btn');
             const recordStatus = document.getElementById('record-status');
+
+            // Handle converting state (disabled button)
+            if (this.isConverting) {
+                recordBtn?.classList.add('converting');
+                recordBtn?.classList.remove('recording');
+                if (recordBtn) recordBtn.disabled = true;
+                if (recordStatus) {
+                    recordStatus.classList.add('converting');
+                    recordStatus.classList.remove('recording');
+                    recordStatus.textContent = statusText || '処理中...';
+                }
+                return;
+            }
+
+            // Remove converting state
+            recordBtn?.classList.remove('converting');
+            if (recordBtn) recordBtn.disabled = false;
+            recordStatus?.classList.remove('converting');
 
             if (this.isRecording) {
                 recordBtn?.classList.add('recording');
@@ -790,6 +855,9 @@ window.addEventListener('DOMContentLoaded', () => {
 
         // Update recording timer display
         updateTimer() {
+            // Don't update if not recording or converting
+            if (!this.isRecording || this.isConverting) return;
+
             const recordStatus = document.getElementById('record-status');
             if (!recordStatus || !this.startTime) return;
 
@@ -847,8 +915,7 @@ window.addEventListener('DOMContentLoaded', () => {
                     throw new Error(data.error || 'Failed to stop recording');
                 }
 
-                this.isRecording = false;
-
+                // Clear intervals first to prevent race conditions
                 if (this.timerInterval) {
                     clearInterval(this.timerInterval);
                     this.timerInterval = null;
@@ -859,47 +926,62 @@ window.addEventListener('DOMContentLoaded', () => {
                     this.heartbeatInterval = null;
                 }
 
+                this.isRecording = false;
+                this.isConverting = true;
+
                 console.log('[Recording] Stopped:', data.file);
+
+                // Show converting status
+                this.updateUI('変換中...');
 
                 // Refresh recordings list if modal is open
                 if (recordingsModalOpen) {
                     fetchRecordings();
                 }
-
-                // Show converting status and wait for MP4
-                this.updateUI('Converting...');
-                await this.waitForMP4AndDownload(data.file);
+                await this.waitForConversionAndDownload(data.file);
 
             } catch (error) {
                 console.error('[Recording] Failed to stop:', error);
                 alert('録画の停止に失敗しました: ' + error.message);
             } finally {
+                this.isConverting = false;
                 this.updateUI();
             }
         },
 
-        // Wait for MP4 conversion and auto-download
-        async waitForMP4AndDownload(h264Filename) {
+        // Wait for conversion to complete and auto-download
+        async waitForConversionAndDownload(h264Filename) {
             const mp4Filename = h264Filename.replace('.h264', '.mp4');
-            const maxWaitMs = 60000; // 60 seconds max
-            const pollIntervalMs = 1000;
+            const maxWaitMs = 120000; // 120 seconds max
+            const pollIntervalMs = 500;
             const startTime = Date.now();
 
-            console.log('[Recording] Waiting for MP4 conversion:', mp4Filename);
+            console.log('[Recording] Waiting for conversion:', mp4Filename);
 
             while (Date.now() - startTime < maxWaitMs) {
                 try {
-                    const res = await fetch('/api/recordings');
-                    if (res.ok) {
-                        const data = await res.json();
-                        const mp4File = data.recordings?.find(r => r.name === mp4Filename);
-                        if (mp4File) {
-                            console.log('[Recording] MP4 ready, downloading:', mp4Filename);
-                            // Refresh recordings list if modal is open
-                            if (recordingsModalOpen) {
-                                fetchRecordings();
+                    // Check recording status to see if conversion is complete
+                    const statusRes = await fetch('/api/recording/status');
+                    if (statusRes.ok) {
+                        const status = await statusRes.json();
+                        if (!status.converting) {
+                            // Conversion complete - check for MP4 file
+                            const listRes = await fetch('/api/recordings');
+                            if (listRes.ok) {
+                                const data = await listRes.json();
+                                const mp4File = data.recordings?.find(r => r.name === mp4Filename);
+                                if (mp4File) {
+                                    console.log('[Recording] Conversion complete, downloading:', mp4Filename);
+                                    // Refresh recordings list if modal is open
+                                    if (recordingsModalOpen) {
+                                        fetchRecordings();
+                                    }
+                                    this.download(mp4Filename);
+                                    return;
+                                }
                             }
-                            this.download(mp4Filename);
+                            // Conversion done but no MP4 - something went wrong
+                            console.warn('[Recording] Conversion finished but MP4 not found');
                             return;
                         }
                     }
@@ -911,7 +993,7 @@ window.addEventListener('DOMContentLoaded', () => {
             }
 
             // Timeout - offer H.264 download instead
-            console.warn('[Recording] MP4 conversion timeout, offering H.264 download');
+            console.warn('[Recording] Conversion timeout, offering H.264 download');
             if (confirm('MP4変換がタイムアウトしました。H.264ファイルをダウンロードしますか？')) {
                 this.download(h264Filename);
             }
