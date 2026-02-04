@@ -24,6 +24,12 @@ async function initWebRTC() {
     try {
         console.log('[App] Initializing WebRTC...');
 
+        // Clean up any existing client first
+        if (webrtcClient) {
+            webrtcClient.stop();
+            webrtcClient = null;
+        }
+
         // Create WebRTC client (use same origin as current page)
         webrtcClient = new WebRTCVideoClient(video);
 
@@ -95,11 +101,20 @@ async function switchToWebRTC() {
     console.log('[App] Switching to WebRTC...');
     currentMode = 'webrtc';
 
-    // Stop MJPEG stream (clear src closes browser HTTP connection -> Go Unsubscribe)
+    // Stop MJPEG stream - remove img from DOM to force browser to abort HTTP connection
     const streamImg = document.getElementById('stream');
-    if (streamImg.src) {
+    let mjpegWasActive = false;
+    if (streamImg && streamImg.src && streamImg.src.includes('/stream')) {
+        mjpegWasActive = true;
+        const parent = streamImg.parentNode;
+        const nextSibling = streamImg.nextSibling;
+        // Remove from DOM to force connection close
+        parent.removeChild(streamImg);
+        // Clear src and re-add to DOM
         streamImg.src = '';
-        console.log('[MJPEG] Stopped stream (browser closed HTTP connection)');
+        streamImg.removeAttribute('src');
+        parent.insertBefore(streamImg, nextSibling);
+        console.log('[MJPEG] Stopped stream (removed img from DOM to close HTTP connection)');
     }
 
     // Show WebRTC, hide MJPEG
@@ -109,6 +124,11 @@ async function switchToWebRTC() {
     // Update UI
     btnWebrtc.classList.add('active');
     btnMjpeg.classList.remove('active');
+
+    // Wait briefly for MJPEG connection to close before starting WebRTC
+    if (mjpegWasActive) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
 
     // Initialize WebRTC if not already running
     if (!webrtcClient || !webrtcClient.isConnected()) {
