@@ -12,10 +12,10 @@ SQLite等のDBは使用せず、ファイルシステムベースの素朴な実
 2. **ダウンロード** - 各録画のダウンロードボタン
 3. **削除** - 各録画の削除ボタン（確認ダイアログ付き）
 
-### オプション機能（将来）
-- サムネイル表示
-- 動画プレビュー再生
-- ストレージ使用量表示
+### Phase 2: サムネイル機能
+- **サムネイル表示** - 検出フレームをサムネイルとして表示
+- 動画プレビュー再生（将来）
+- ストレージ使用量表示（将来）
 
 ## データ構造
 
@@ -23,9 +23,12 @@ SQLite等のDBは使用せず、ファイルシステムベースの素朴な実
 
 ```
 recordings/
-├── recording_20260204_143052.mp4   # ファイル名から日時を解析
+├── recording_20260204_143052.mp4        # 動画ファイル
+├── recording_20260204_143052.jpg        # サムネイル（検出フレーム）
+├── recording_20260204_143052.jsonl      # 検出ログ（オプション）
 ├── recording_20260204_150823.mp4
-└── recording_20260205_091245.mp4
+├── recording_20260204_150823.jpg
+└── ...
 ```
 
 **ファイル名フォーマット**: `recording_YYYYMMDD_HHMMSS.mp4`
@@ -56,21 +59,18 @@ GET /api/recordings
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌────────────────────────────────────────────────────────┐ │
-│  │ 📹 2026/02/04 14:30:52                                 │ │
-│  │    45.0 MB                          [⬇ Download] [🗑]  │ │
+│  │ ┌──────┐  2026/02/04 14:30:52                          │ │
+│  │ │ thumb│  45.0 MB                   [⬇ Download] [🗑]  │ │
+│  │ └──────┘                                               │ │
 │  └────────────────────────────────────────────────────────┘ │
 │                                                              │
 │  ┌────────────────────────────────────────────────────────┐ │
-│  │ 📹 2026/02/04 15:08:23                                 │ │
-│  │    128.5 MB                         [⬇ Download] [🗑]  │ │
+│  │ ┌──────┐  2026/02/04 15:08:23                          │ │
+│  │ │ thumb│  128.5 MB                  [⬇ Download] [🗑]  │ │
+│  │ └──────┘                                               │ │
 │  └────────────────────────────────────────────────────────┘ │
 │                                                              │
-│  ┌────────────────────────────────────────────────────────┐ │
-│  │ 📹 2026/02/05 09:12:45                                 │ │
-│  │    32.1 MB                          [⬇ Download] [🗑]  │ │
-│  └────────────────────────────────────────────────────────┘ │
-│                                                              │
-│  合計: 3件 / 205.6 MB                                       │
+│  合計: 2件 / 173.5 MB                                       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -98,18 +98,30 @@ GET /api/recordings
 - [x] `/api/recordings/{name}` DELETE - 削除（実装済み）
 
 **フロントエンド**
-- [ ] 録画一覧コンポーネント（HTML/CSS）
-- [ ] 一覧取得・表示（JavaScript）
-- [ ] ダウンロードボタン
-- [ ] 削除ボタン（確認ダイアログ）
-- [ ] ビュートグル追加（History/Ranking/Timeline/Recordings）
+- [x] 録画一覧コンポーネント（HTML/CSS）
+- [x] 一覧取得・表示（JavaScript）
+- [x] ダウンロードボタン
+- [x] 削除ボタン（確認ダイアログ）
+- [x] ビュートグル追加（History/Ranking/Timeline/Recordings）
 
-### Phase 2: UX改善
+### Phase 2: サムネイル機能
 
-- [ ] 自動更新（録画停止後に一覧を更新）
+**サーバー側**
+- [ ] 録画中に検出情報を記録（最初の検出時刻を保存）
+- [ ] MP4変換時にサムネイル生成（ffmpeg）
+- [ ] `/api/recordings` に `thumbnail` フィールド追加
+- [ ] サムネイル配信エンドポイント
+
+**フロントエンド**
+- [ ] サムネイル表示UI
+- [ ] サムネイルがない場合のフォールバック表示
+
+### Phase 3: UX改善
+
+- [x] 自動更新（録画停止後に一覧を更新）
 - [ ] 削除時のアニメーション
-- [ ] 空状態の表示（「録画がありません」）
-- [ ] ストレージ使用量表示
+- [x] 空状態の表示（「録画がありません」）
+- [x] ストレージ使用量表示（合計サイズ）
 
 ## 実装詳細
 
@@ -277,3 +289,150 @@ async function deleteRecording(filename) {
 - [ ] 削除が動作する（確認ダイアログあり）
 - [ ] 空の状態が適切に表示される
 - [ ] モバイル表示で崩れない
+
+---
+
+## サムネイル機能詳細（Phase 2）
+
+### 概要
+
+録画のサムネイルを「検出があったフレーム」から生成する。
+検出がない場合は動画の3秒後のフレームをフォールバックとして使用。
+
+### 実装方式
+
+```
+録画開始
+    ↓
+録画中: 検出イベントを監視
+    ↓
+最初の検出時刻を記録（first_detection_sec）
+    ↓
+録画停止
+    ↓
+MP4変換 + サムネイル生成
+    ↓
+ffmpeg -ss {first_detection_sec} -i video.mp4 -vframes 1 -q:v 2 thumbnail.jpg
+```
+
+### 検出時刻の記録
+
+**H264Recorderに追加するフィールド:**
+
+```go
+type H264Recorder struct {
+    // ... existing fields ...
+
+    // サムネイル用: 最初の検出時刻（録画開始からの秒数）
+    firstDetectionSec float64
+    hasDetection      bool
+}
+```
+
+**検出イベントの監視:**
+
+録画中にDetection SHMをポーリングし、最初の検出があった時刻を記録。
+
+```go
+func (r *H264Recorder) checkDetection() {
+    if r.hasDetection {
+        return // 既に検出済み
+    }
+
+    // Detection SHMから最新の検出を取得
+    detection := r.detectionReader.Latest()
+    if detection != nil && detection.NumDetections > 0 {
+        r.firstDetectionSec = time.Since(r.startTime).Seconds()
+        r.hasDetection = true
+        logger.Info("H264Recorder", "First detection at %.1f sec", r.firstDetectionSec)
+    }
+}
+```
+
+### サムネイル生成（ffmpeg）
+
+```go
+func (r *H264Recorder) generateThumbnail(mp4Path, thumbPath string) error {
+    // 検出時刻、またはフォールバックとして3秒
+    seekSec := 3.0
+    if r.hasDetection && r.firstDetectionSec > 0 {
+        seekSec = r.firstDetectionSec
+    }
+
+    cmd := exec.Command("nice", "-n", "19",
+        "ffmpeg", "-y",
+        "-ss", fmt.Sprintf("%.1f", seekSec),
+        "-i", mp4Path,
+        "-vframes", "1",
+        "-vf", "scale=160:-1",  // 幅160px、高さは比率維持
+        "-q:v", "2",
+        thumbPath,
+    )
+
+    return cmd.Run()
+}
+```
+
+### API拡張
+
+**レスポンス例:**
+
+```json
+GET /api/recordings
+
+{
+  "recordings": [
+    {
+      "name": "recording_20260204_143052.mp4",
+      "size_bytes": 47185920,
+      "created_at": "2026-02-04T14:30:52+09:00",
+      "thumbnail": "recording_20260204_143052.jpg"
+    }
+  ]
+}
+```
+
+**サムネイル配信:**
+
+```
+GET /api/recordings/recording_20260204_143052.jpg
+→ Content-Type: image/jpeg
+```
+
+### フロントエンド
+
+```javascript
+function renderRecordings(recordings) {
+    recordingsListEl.innerHTML = recordings.map(rec => {
+        const thumbUrl = rec.thumbnail
+            ? `/api/recordings/${rec.thumbnail}`
+            : '/assets/no-thumbnail.svg';  // フォールバック
+
+        return `
+            <div class="recording-card">
+                <img class="recording-thumb" src="${thumbUrl}" alt="">
+                <div class="recording-info">
+                    <div class="recording-date">${formatDate(rec.created_at)}</div>
+                    <div class="recording-size">${formatSize(rec.size_bytes)}</div>
+                </div>
+                <div class="recording-actions">
+                    <button onclick="downloadRecording('${rec.name}')">⬇</button>
+                    <button onclick="deleteRecording('${rec.name}')">🗑</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+```
+
+### CSS
+
+```css
+.recording-thumb {
+    width: 80px;
+    height: 45px;
+    object-fit: cover;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.3);
+}
+```
