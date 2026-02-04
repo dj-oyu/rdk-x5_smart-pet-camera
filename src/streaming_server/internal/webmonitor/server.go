@@ -108,7 +108,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	id, frameCh := s.broadcaster.Subscribe()
 	defer s.broadcaster.Unsubscribe(id)
-	streamMJPEGFromChannel(w, frameCh)
+	streamMJPEGFromChannel(w, r, frameCh)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -146,7 +146,7 @@ func (s *Server) handleStatusStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Stream events from channel with appropriate format
-	streamStatusEventsFromChannel(w, eventCh, useProtobuf)
+	streamStatusEventsFromChannel(w, r, eventCh, useProtobuf)
 }
 
 func (s *Server) handleDetectionsStream(w http.ResponseWriter, r *http.Request) {
@@ -172,7 +172,7 @@ func (s *Server) handleDetectionsStream(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Stream events from channel with appropriate format
-	streamDetectionEventsFromChannel(w, eventCh, useProtobuf)
+	streamDetectionEventsFromChannel(w, r, eventCh, useProtobuf)
 }
 
 func (s *Server) handleCameraStatus(w http.ResponseWriter, r *http.Request) {
@@ -303,7 +303,7 @@ func (s *Server) handleConnectionsStream(w http.ResponseWriter, r *http.Request)
 	id, eventCh := s.connectionBroadcaster.Subscribe()
 	defer s.connectionBroadcaster.Unsubscribe(id)
 
-	streamConnectionEventsFromChannel(w, eventCh)
+	streamConnectionEventsFromChannel(w, r, eventCh)
 }
 
 func writeJSON(w http.ResponseWriter, payload any) {
