@@ -21,7 +21,30 @@ package webmonitor
 // Global hardware JPEG encoder context (singleton for MJPEG streaming)
 static jpeg_encoder_context_t g_hw_jpeg_encoder;
 static int g_hw_jpeg_encoder_initialized = 0;
+static int g_hw_jpeg_quality = 65;  // Configurable JPEG quality
 static pthread_mutex_t g_hw_jpeg_encoder_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Set JPEG quality (called from Go)
+static void set_jpeg_quality(int quality) {
+    if (quality < 1) quality = 1;
+    if (quality > 100) quality = 100;
+
+    pthread_mutex_lock(&g_hw_jpeg_encoder_mutex);
+    if (g_hw_jpeg_quality != quality) {
+        g_hw_jpeg_quality = quality;
+        // Force re-initialization with new quality on next encode
+        if (g_hw_jpeg_encoder_initialized) {
+            jpeg_encoder_destroy(&g_hw_jpeg_encoder);
+            g_hw_jpeg_encoder_initialized = 0;
+        }
+    }
+    pthread_mutex_unlock(&g_hw_jpeg_encoder_mutex);
+}
+
+// Get current JPEG quality
+static int get_jpeg_quality(void) {
+    return g_hw_jpeg_quality;
+}
 
 // Initialize hardware JPEG encoder (call once at startup)
 static int hw_jpeg_encoder_init(int width, int height, int quality) {
@@ -55,8 +78,8 @@ static void hw_jpeg_encoder_cleanup(void) {
 static int hw_jpeg_encode(const uint8_t* nv12_data, int width, int height,
                           uint8_t** jpeg_out, size_t* jpeg_size) {
     if (!g_hw_jpeg_encoder_initialized) {
-        // Try to initialize on first use
-        if (hw_jpeg_encoder_init(width, height, 85) != 0) {
+        // Try to initialize on first use with configured quality
+        if (hw_jpeg_encoder_init(width, height, g_hw_jpeg_quality) != 0) {
             return -1;
         }
     }
@@ -65,7 +88,7 @@ static int hw_jpeg_encode(const uint8_t* nv12_data, int width, int height,
     if (g_hw_jpeg_encoder.width != width || g_hw_jpeg_encoder.height != height) {
         // Reinitialize with new dimensions
         hw_jpeg_encoder_cleanup();
-        if (hw_jpeg_encoder_init(width, height, 85) != 0) {
+        if (hw_jpeg_encoder_init(width, height, g_hw_jpeg_quality) != 0) {
             return -1;
         }
     }
@@ -689,6 +712,28 @@ const (
 	maxFrameSize = 1920 * 1080 * 3 / 2
 )
 
+// Package-level JPEG quality setting (thread-safe via CGO mutex)
+var jpegQuality = 65
+
+// SetJPEGQuality sets the JPEG encoding quality (1-100)
+// Lower values = smaller file size = lower bandwidth
+// Recommended: 60-70 for bandwidth-constrained environments
+func SetJPEGQuality(quality int) {
+	if quality < 1 {
+		quality = 1
+	} else if quality > 100 {
+		quality = 100
+	}
+	jpegQuality = quality
+	// Also update C-side quality for hardware encoder
+	C.set_jpeg_quality(C.int(quality))
+}
+
+// GetJPEGQuality returns the current JPEG quality setting
+func GetJPEGQuality() int {
+	return jpegQuality
+}
+
 type frameSnapshot struct {
 	FrameNumber       uint64
 	Timestamp         time.Time
@@ -984,9 +1029,9 @@ func nv12ToJPEGSoftware(nv12Data []byte, width, height int) ([]byte, error) {
 	// Convert NV12 to RGBA in C
 	img := nv12ToRGBAImg(nv12Data, width, height)
 
-	// Encode to JPEG
+	// Encode to JPEG with configurable quality
 	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85}); err != nil {
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: jpegQuality}); err != nil {
 		return nil, err
 	}
 

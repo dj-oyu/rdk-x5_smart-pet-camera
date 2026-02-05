@@ -25,6 +25,7 @@ func main() {
 	flag.StringVar(&cfg.DetectionShmName, "detection-shm", cfg.DetectionShmName, "Detection shared memory name")
 	flag.StringVar(&cfg.WebRTCBaseURL, "webrtc-base", cfg.WebRTCBaseURL, "WebRTC Go server base URL")
 	flag.IntVar(&cfg.TargetFPS, "fps", cfg.TargetFPS, "Target FPS for stats")
+	flag.IntVar(&cfg.JPEGQuality, "jpeg-quality", cfg.JPEGQuality, "JPEG encoding quality 1-100 (lower = smaller bandwidth)")
 	flag.StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error, silent)")
 	flag.BoolVar(&logColor, "log-color", true, "Enable colored log output")
 	flag.StringVar(&cfg.TLSCertFile, "tls-cert", "", "TLS certificate file (enables HTTPS)")
@@ -37,6 +38,10 @@ func main() {
 		log.Fatalf("Invalid log level: %v", err)
 	}
 	logger.Init(level, os.Stderr, logColor)
+
+	// Set JPEG quality for bandwidth control
+	webmonitor.SetJPEGQuality(cfg.JPEGQuality)
+	logger.Info("Main", "JPEG quality: %d", cfg.JPEGQuality)
 
 	server := webmonitor.NewServer(cfg)
 

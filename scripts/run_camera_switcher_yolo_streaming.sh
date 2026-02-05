@@ -53,6 +53,9 @@ TLS_KEY="${TLS_KEY:-}"
 # HTTP専用ポート (MJPEG用、M5Stack等のマイコン向け)
 HTTP_ONLY_PORT="${HTTP_ONLY_PORT:-8082}"
 
+# MJPEG品質設定 (帯域制御用、1-100、低いほど帯域削減)
+JPEG_QUALITY="${JPEG_QUALITY:-65}"
+
 # Streaming設定
 STREAMING_MAX_CLIENTS="${STREAMING_MAX_CLIENTS:-10}"
 STREAMING_SHM="${STREAMING_SHM:-/pet_camera_stream}"
@@ -82,6 +85,7 @@ Options:
   --score-thres T   検出スコア閾値 (default: 0.6)
   --nms-thres T     NMS IoU閾値 (default: 0.7)
   --log-level L     ログレベル (debug/info/warn/error, default: info)
+  --jpeg-quality Q  MJPEG品質 1-100 (低いほど帯域削減, default: 65)
   --tls-cert FILE   TLS証明書ファイル (HTTPSを有効化)
   --tls-key FILE    TLS秘密鍵ファイル
   -h, --help        このヘルプを表示
@@ -101,6 +105,7 @@ Options:
   YOLO_SCORE_THRESHOLD   検出スコア閾値
   YOLO_NMS_THRESHOLD     NMS IoU閾値
   LOG_LEVEL              ログレベル (debug/info/warn/error)
+  JPEG_QUALITY           MJPEG品質 1-100 (低いほど帯域削減)
   TLS_CERT               TLS証明書ファイルパス
   TLS_KEY                TLS秘密鍵ファイルパス
 
@@ -183,6 +188,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --log-level)
       LOG_LEVEL="${2:?--log-level requires value}"
+      shift
+      ;;
+    --jpeg-quality)
+      JPEG_QUALITY="${2:?--jpeg-quality requires value}"
       shift
       ;;
     --tls-cert)
@@ -381,7 +390,7 @@ if [[ "${RUN_MONITOR}" -eq 1 ]]; then
   if [[ -n "${HTTP_ONLY_PORT}" ]]; then
     HTTP_ONLY_ARGS="-http-only ${MONITOR_HOST}:${HTTP_ONLY_PORT}"
   fi
-  echo "[start] Launching web monitor (${PROTOCOL}://${MONITOR_HOST}:${MONITOR_PORT})..."
+  echo "[start] Launching web monitor (${PROTOCOL}://${MONITOR_HOST}:${MONITOR_PORT}, JPEG quality=${JPEG_QUALITY})..."
   (
     cd "${REPO_ROOT}"
     # shellcheck disable=SC2086
@@ -393,6 +402,7 @@ if [[ "${RUN_MONITOR}" -eq 1 ]]; then
       -detection-shm "/pet_camera_detections" \
       -webrtc-base "http://localhost:${STREAMING_PORT}" \
       -fps 30 \
+      -jpeg-quality "${JPEG_QUALITY}" \
       -log-level "${LOG_LEVEL}" \
       ${TLS_ARGS} ${HTTP_ONLY_ARGS} 2>&1 | tee /tmp/web_monitor.log
   ) &
