@@ -28,7 +28,8 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
     }
   }, []);
 
-  // MJPEG via fetch + AbortController: explicit connection lifecycle
+  // MJPEG via fetch + ReadableStream: abort() kills TCP connection immediately
+  // (img.src approach leaks connections on mobile browsers)
   const startMJPEG = useCallback(() => {
     stopMJPEG();
     const ac = new AbortController();
@@ -36,15 +37,56 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
     const img = mjpegRef.current;
     if (!img) return;
 
-    // Fallback: just set src directly (multipart/x-mixed-replace is browser-native)
-    // But wrap in AbortController-aware fetch to detect abort
-    img.src = '/stream?t=' + Date.now();
+    const BOUNDARY = '--frame\r\n';
+    const HEADER_END = '\r\n\r\n';
 
-    // Listen for abort to clear img src and close HTTP connection
-    ac.signal.addEventListener('abort', () => {
-      img.src = '';
-      img.removeAttribute('src');
-    });
+    fetch('/stream?t=' + Date.now(), { signal: ac.signal })
+      .then(res => {
+        if (!res.ok || !res.body) return;
+        const reader = res.body.getReader();
+        let pending = '';
+
+        const pump = (): Promise<void> => reader.read().then(({ done, value }) => {
+          if (done || ac.signal.aborted) return;
+          pending += new TextDecoder().decode(value, { stream: true });
+
+          // Extract JPEG frames from multipart/x-mixed-replace
+          let bIdx: number;
+          while ((bIdx = pending.indexOf(BOUNDARY)) !== -1) {
+            const afterBoundary = bIdx + BOUNDARY.length;
+            const hEnd = pending.indexOf(HEADER_END, afterBoundary);
+            if (hEnd === -1) break; // incomplete header
+            const dataStart = hEnd + HEADER_END.length;
+
+            // Parse Content-Length from headers
+            const headers = pending.slice(afterBoundary, hEnd);
+            const clMatch = headers.match(/Content-Length:\s*(\d+)/i);
+            if (!clMatch) { pending = pending.slice(afterBoundary); continue; }
+            const contentLength = parseInt(clMatch[1], 10);
+
+            // Check if full JPEG body is available (binary length != string length)
+            // Use binary view for accurate byte counting
+            const bodyStr = pending.slice(dataStart);
+            const bodyBytes = new TextEncoder().encode(bodyStr);
+            if (bodyBytes.length < contentLength) break; // wait for more data
+
+            // Extract exact JPEG bytes
+            const jpeg = bodyBytes.slice(0, contentLength);
+            const blob = new Blob([jpeg], { type: 'image/jpeg' });
+            const url = URL.createObjectURL(blob);
+            const prev = img.src;
+            img.src = url;
+            if (prev) URL.revokeObjectURL(prev);
+
+            // Advance past this frame (convert consumed bytes back to string length)
+            const consumed = new TextDecoder().decode(bodyBytes.slice(0, contentLength));
+            pending = pending.slice(dataStart + consumed.length);
+          }
+          return pump();
+        });
+        return pump();
+      })
+      .catch(() => { /* aborted or network error - expected */ });
   }, [stopMJPEG]);
 
   const onWebRTCError = useCallback(() => {
