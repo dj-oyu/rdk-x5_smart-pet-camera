@@ -41,9 +41,7 @@ function App() {
   });
 
   useEffect(() => {
-    sse.startDetectionStream();
-    sse.startStatusStream();
-    sse.startConnectionStream();
+    sse.start();
     return () => sse.stop();
   }, []);
 
