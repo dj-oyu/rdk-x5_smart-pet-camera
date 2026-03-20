@@ -143,7 +143,7 @@ curl http://localhost:8080/stream --output stream.mjpeg
   -webrtc-url http://localhost:8081 \
   -target-fps 30 \
   -status-interval 2s \
-  -assets-dir ../monitor/web_assets \
+  -assets-dir ../web \
   -build-assets-dir ../../build/web \
   -recording-output ./recordings
 ```
@@ -155,7 +155,7 @@ curl http://localhost:8080/stream --output stream.mjpeg
 - `-webrtc-url`: WebRTC server base URL (default: `http://localhost:8081`)
 - `-target-fps`: Target FPS for monitoring (default: `30`)
 - `-status-interval`: Status stream interval (default: `2s`)
-- `-assets-dir`: Web assets directory (default: `../monitor/web_assets`)
+- `-assets-dir`: Web assets directory (default: `../web`)
 - `-build-assets-dir`: Built assets directory (default: `../../build/web`)
 - `-recording-output`: Recording output directory (default: `./recordings`)
 
