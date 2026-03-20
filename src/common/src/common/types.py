@@ -69,6 +69,7 @@ class DetectionClass(Enum):
     TOASTER = "toaster"
     SINK = "sink"
     REFRIGERATOR = "refrigerator"
+    MOTION = "motion"  # Night camera motion detection (not YOLO)
 
 
 class BehaviorType(Enum):
@@ -260,7 +261,7 @@ class BehaviorEvent:
 
 # 定数定義
 MAX_DETECTIONS = 10  # 1フレームあたりの最大検出数
-RING_BUFFER_SIZE = 30  # リングバッファサイズ（フレーム数）
+RING_BUFFER_SIZE = 6  # Must match shm_constants.h
 DEFAULT_FRAME_WIDTH = 1280
 DEFAULT_FRAME_HEIGHT = 720
 DEFAULT_FPS = 30

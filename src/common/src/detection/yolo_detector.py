@@ -212,7 +212,7 @@ class YoloDetector:
         input_size: tuple[int, int] = (640, 640),
         auto_download: bool = True,
         clahe_enabled: bool = True,
-        clahe_brightness_threshold: float = 60.0,
+        clahe_brightness_threshold: float = 80.0,
         clahe_clip_limit: float = 3.0,
     ) -> None:
         """
@@ -249,7 +249,7 @@ class YoloDetector:
         logger.debug(f"Model type: {self.model_type}")
 
         # CLAHE前処理設定 (ISP補正の代替)
-        # 実測brightness_avgは最大80程度のため、閾値を低めに設定
+        # 実測brightness_avgは最大80程度。IR LED環境(brightness ~60-75)でもCLAHE適用するため閾値80
         self.clahe_enabled = clahe_enabled
         self.clahe_brightness_threshold = clahe_brightness_threshold
         self.clahe = cv2.createCLAHE(clipLimit=clahe_clip_limit, tileGridSize=(8, 8))
@@ -620,10 +620,9 @@ class YoloDetector:
         start_prep = time.perf_counter()
 
         # CLAHE適用判定
-        need_clahe = (
-            brightness_avg >= 0
-            and self.clahe_enabled
-            and brightness_avg < self.clahe_brightness_threshold
+        # brightness_avg=0.0 (夜カメラ等) や -1 (未設定) でも常に適用
+        need_clahe = self.clahe_enabled and (
+            brightness_avg < 0 or brightness_avg < self.clahe_brightness_threshold
         )
 
         # NV12データをnumpy配列に変換
@@ -738,10 +737,9 @@ class YoloDetector:
         start_prep = time.perf_counter()
 
         # CLAHE適用判定（コピー要否を先に決定）
-        need_clahe = (
-            brightness_avg >= 0
-            and self.clahe_enabled
-            and brightness_avg < self.clahe_brightness_threshold
+        # brightness_avg=0.0 (夜カメラ等) や -1 (未設定) でも常に適用
+        need_clahe = self.clahe_enabled and (
+            brightness_avg < 0 or brightness_avg < self.clahe_brightness_threshold
         )
 
         # NV12データをnumpy配列に変換
@@ -896,10 +894,11 @@ class YoloDetector:
         self, nv12_array: np.ndarray, width: int, height: int
     ) -> np.ndarray:
         """
-        NV12のY平面にCLAHEを適用
+        NV12のY平面にCLAHE適用 + UV平面を128固定(無彩色化)
 
         CLAHEは局所的なコントラスト改善を行い、低照度画像の視認性を向上させる。
-        UV平面は変更しない（色情報は保持）。
+        IR カメラの紫色かぶり(UV異常値)を除去するため、UV平面を128に固定して
+        擬似グレースケール化する。
 
         Args:
             nv12_array: NV12データ (Y + UV)
@@ -919,6 +918,9 @@ class YoloDetector:
 
         # 結果を元の配列に書き戻す
         nv12_array[:y_size] = y_enhanced.flatten()
+
+        # UV平面を128(無彩色)に固定 — IRカメラの紫色かぶりを除去
+        nv12_array[y_size:] = 128
 
         return nv12_array
 
