@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/logger"
 )
 
 type mjpegStreamEntry struct {
