@@ -556,13 +556,11 @@ window.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function startStatusStream() {
-        // Use protobuf format for efficiency
+    function startStatusStream(retryCount = 0) {
         const stream = new EventSource('/api/status/stream?format=protobuf');
         stream.addEventListener('message', (event) => {
             if (!event.data) return;
             try {
-                // Decode protobuf (base64 -> bytes -> struct)
                 const bytes = base64ToBytes(event.data);
                 const data = decodeStatusEvent(bytes);
                 updateStatus(data);
@@ -573,9 +571,15 @@ window.addEventListener('DOMContentLoaded', () => {
         });
         stream.addEventListener('error', () => {
             stream.close();
-            console.warn('[Status] SSE error, falling back to JSON polling');
-            fetchStatus();
-            setInterval(fetchStatus, 1500);
+            if (retryCount < 3) {
+                const delay = 1000 * Math.pow(2, retryCount);
+                console.warn(`[Status] SSE error, reconnecting in ${delay}ms (attempt ${retryCount + 1}/3)`);
+                setTimeout(() => startStatusStream(retryCount + 1), delay);
+            } else {
+                console.warn('[Status] SSE failed 3 times, falling back to JSON polling');
+                fetchStatus();
+                setInterval(fetchStatus, 2000);
+            }
         });
     }
 
@@ -587,7 +591,7 @@ window.addEventListener('DOMContentLoaded', () => {
         viewerCountEl.textContent = viewers;
     }
 
-    function startConnectionStream() {
+    function startConnectionStream(retryCount = 0) {
         const stream = new EventSource('/api/connections/stream');
         stream.addEventListener('connections', (event) => {
             if (!event.data) return;
@@ -600,12 +604,17 @@ window.addEventListener('DOMContentLoaded', () => {
         });
         stream.addEventListener('error', () => {
             stream.close();
-            console.warn('[Connections] SSE error, falling back to polling');
-            fetchConnections();
-            setInterval(fetchConnections, 2000);
+            if (retryCount < 3) {
+                const delay = 1000 * Math.pow(2, retryCount);
+                console.warn(`[Connections] SSE error, reconnecting in ${delay}ms (attempt ${retryCount + 1}/3)`);
+                setTimeout(() => startConnectionStream(retryCount + 1), delay);
+            } else {
+                console.warn('[Connections] SSE failed 3 times, falling back to polling');
+                fetchConnections();
+                setInterval(fetchConnections, 3000);
+            }
         });
 
-        // Fetch initial count
         fetchConnections();
     }
 

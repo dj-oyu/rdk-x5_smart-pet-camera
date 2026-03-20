@@ -21,8 +21,8 @@
  * Frame data for encoder queue
  */
 typedef struct {
-  uint8_t *y_data;           // Y plane data (owned by queue)
-  uint8_t *uv_data;          // UV plane data (owned by queue)
+  uint8_t *y_data;           // Y plane data (points to pre-allocated pool)
+  uint8_t *uv_data;          // UV plane data (points to pre-allocated pool)
   size_t y_size;             // Y plane size
   size_t uv_size;            // UV plane size
   uint64_t frame_number;     // Frame number
@@ -53,6 +53,16 @@ typedef struct {
   encoder_frame_t queue[ENCODER_QUEUE_SIZE];
   volatile uint32_t write_index; // Producer writes here
   volatile uint32_t read_index;  // Consumer reads here
+
+  // Pre-allocated frame buffer pool (avoids malloc/free per frame)
+  uint8_t *pool_y[ENCODER_QUEUE_SIZE];
+  uint8_t *pool_uv[ENCODER_QUEUE_SIZE];
+  size_t pool_y_capacity;  // Allocated size per Y slot
+  size_t pool_uv_capacity; // Allocated size per UV slot
+
+  // Condition variable for event-driven wakeup (replaces usleep polling)
+  pthread_mutex_t queue_mutex;
+  pthread_cond_t queue_cond;
 
   // Statistics
   volatile uint64_t frames_encoded;
@@ -106,7 +116,7 @@ int encoder_thread_start(encoder_thread_t *ctx);
  *   0 on success, -1 if queue is full (frame dropped)
  *
  * Note:
- *   - This function copies the frame data
+ *   - This function copies the frame data into pre-allocated pool buffers
  *   - Non-blocking (returns immediately if queue is full)
  */
 int encoder_thread_push_frame(encoder_thread_t *ctx,

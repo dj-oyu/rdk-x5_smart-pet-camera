@@ -546,6 +546,7 @@ func (s *Server) handleComicServe(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		http.ServeFile(w, r, filePath)
 	case http.MethodDelete:
 		if err := os.Remove(filePath); err != nil {

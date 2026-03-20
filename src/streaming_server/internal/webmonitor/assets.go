@@ -20,6 +20,16 @@ func newAssetHandler(buildDir, assetsDir string) *assetHandler {
 
 func (h *assetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	filename := filepath.Base(r.URL.Path)
+
+	// Cache static assets to reduce SD card IO on reload
+	ext := filepath.Ext(filename)
+	switch ext {
+	case ".js", ".css", ".woff2", ".woff", ".ttf":
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+	case ".png", ".jpg", ".svg", ".ico":
+		w.Header().Set("Cache-Control", "public, max-age=604800")
+	}
+
 	buildPath := filepath.Join(h.buildDir, filename)
 	if fileExists(buildPath) {
 		http.ServeFile(w, r, buildPath)
