@@ -86,7 +86,7 @@ func noCatDetection(version int) *DetectionResult {
 	}
 }
 
-func TestHasCat(t *testing.T) {
+func TestHasPet(t *testing.T) {
 	tests := []struct {
 		name string
 		det  *DetectionResult
@@ -96,6 +96,11 @@ func TestHasCat(t *testing.T) {
 		{"no detections", &DetectionResult{}, false},
 		{"cat present", catDetection(1), true},
 		{"no cat", noCatDetection(1), false},
+		{"dog present", &DetectionResult{
+			Detections: []Detection{
+				{ClassName: "dog", Confidence: 0.85},
+			},
+		}, true},
 		{"cat among others", &DetectionResult{
 			Detections: []Detection{
 				{ClassName: "person", Confidence: 0.8},
@@ -106,27 +111,27 @@ func TestHasCat(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := hasCat(tt.det); got != tt.want {
-				t.Errorf("hasCat() = %v, want %v", got, tt.want)
+			if got := hasPet(tt.det); got != tt.want {
+				t.Errorf("hasPet() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestCatBBox(t *testing.T) {
+func TestPetBBox(t *testing.T) {
 	det := &DetectionResult{
 		Detections: []Detection{
 			{ClassName: "cat", Confidence: 0.5, BBox: BoundingBox{X: 10, Y: 10, W: 50, H: 50}},
-			{ClassName: "cat", Confidence: 0.9, BBox: BoundingBox{X: 100, Y: 100, W: 200, H: 150}},
+			{ClassName: "dog", Confidence: 0.9, BBox: BoundingBox{X: 100, Y: 100, W: 200, H: 150}},
 		},
 	}
 
-	bbox := catBBox(det)
+	bbox := petBBox(det)
 	if bbox == nil {
 		t.Fatal("expected non-nil bbox")
 	}
 	if bbox.X != 100 || bbox.Y != 100 {
-		t.Errorf("expected highest-confidence cat bbox, got %+v", bbox)
+		t.Errorf("expected highest-confidence pet bbox, got %+v", bbox)
 	}
 }
 
@@ -282,11 +287,10 @@ func TestCropToDetection(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 640, 480))
 	bbox := &BoundingBox{X: 200, Y: 150, W: 100, H: 80}
 
-	cropped := cropToDetection(img, bbox)
+	cropped := cropToDetection(img, bbox, 1.5)
 	bounds := cropped.Bounds()
 
 	// Expanded by 1.5x: 150x120, centered on (250, 190)
-	// Expected: x0=175, y0=130, x1=325, y1=250
 	expectedW := 150
 	expectedH := 120
 	if bounds.Dx() != expectedW || bounds.Dy() != expectedH {
@@ -299,7 +303,7 @@ func TestCropToDetection_ClampsToBounds(t *testing.T) {
 	// BBox near edge
 	bbox := &BoundingBox{X: 0, Y: 0, W: 100, H: 80}
 
-	cropped := cropToDetection(img, bbox)
+	cropped := cropToDetection(img, bbox, 1.5)
 	bounds := cropped.Bounds()
 
 	// Should not extend beyond image bounds

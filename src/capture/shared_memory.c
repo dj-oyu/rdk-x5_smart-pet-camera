@@ -122,7 +122,7 @@ static void* shm_create_or_open(const char* name, size_t size, bool create) {
 SharedFrameBuffer* shm_frame_buffer_create(void) {
     bool created_new = false;
     SharedFrameBuffer* shm = (SharedFrameBuffer*)shm_create_or_open_ex(
-        SHM_NAME_FRAMES,
+        SHM_NAME_STREAM,
         sizeof(SharedFrameBuffer),
         true,
         &created_new
@@ -135,14 +135,14 @@ SharedFrameBuffer* shm_frame_buffer_create(void) {
             if (sem_init(&shm->new_frame_sem, 1, 0) != 0) {
                 LOG_ERROR("SharedMemory", "sem_init failed: %s", strerror(errno));
                 munmap(shm, sizeof(SharedFrameBuffer));
-                shm_unlink(SHM_NAME_FRAMES);
+                shm_unlink(SHM_NAME_STREAM);
                 return NULL;
             }
             LOG_INFO("SharedMemory", "Shared memory created: %s (size=%zu bytes)",
-                     SHM_NAME_FRAMES, sizeof(SharedFrameBuffer));
+                     SHM_NAME_STREAM, sizeof(SharedFrameBuffer));
         } else {
             LOG_INFO("SharedMemory", "Shared memory opened (already exists): %s",
-                     SHM_NAME_FRAMES);
+                     SHM_NAME_STREAM);
         }
     }
 
@@ -151,13 +151,13 @@ SharedFrameBuffer* shm_frame_buffer_create(void) {
 
 SharedFrameBuffer* shm_frame_buffer_open(void) {
     SharedFrameBuffer* shm = (SharedFrameBuffer*)shm_create_or_open(
-        SHM_NAME_FRAMES,
+        SHM_NAME_STREAM,
         sizeof(SharedFrameBuffer),
         false  // open existing
     );
 
     if (shm) {
-        LOG_INFO("SharedMemory", "Shared memory opened: %s", SHM_NAME_FRAMES);
+        LOG_INFO("SharedMemory", "Shared memory opened: %s", SHM_NAME_STREAM);
     }
 
     return shm;
@@ -175,8 +175,8 @@ void shm_frame_buffer_destroy(SharedFrameBuffer* shm) {
         sem_destroy(&shm->new_frame_sem);
 
         munmap(shm, sizeof(SharedFrameBuffer));
-        shm_unlink(SHM_NAME_FRAMES);
-        LOG_INFO("SharedMemory", "Shared memory destroyed: %s", SHM_NAME_FRAMES);
+        shm_unlink(SHM_NAME_STREAM);
+        LOG_INFO("SharedMemory", "Shared memory destroyed: %s", SHM_NAME_STREAM);
     }
 }
 
