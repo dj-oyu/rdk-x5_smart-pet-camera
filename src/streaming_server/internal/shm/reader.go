@@ -40,7 +40,7 @@ typedef struct {
     uint8_t correction_applied; // 1 if ISP low-light correction is active
     uint8_t _reserved[2];       // Padding for alignment
     uint8_t data[MAX_FRAME_SIZE];
-} Frame;
+} Frame __attribute__((aligned(64)));
 
 // SharedFrameBuffer structure matching shared_memory.h
 typedef struct {
