@@ -647,6 +647,13 @@ class YoloDetector:
             cropped = self._crop_nv12_roi(
                 nv12_array, width, height, roi_x, roi_y, roi_w, roi_h
             )
+            # IRノイズ除去 (CLAHE適用時=低照度/夜間のみ、crop後の640x640に適用)
+            if need_clahe:
+                crop_y_size = roi_w * roi_h
+                y_crop = cropped[:crop_y_size].reshape(roi_h, roi_w)
+                y_crop = cv2.medianBlur(y_crop, 5)
+                cropped = cropped.copy()
+                cropped[:crop_y_size] = y_crop.flatten()
             input_tensor = cropped
             scale = (1.0, 1.0)
             shift = (0.0, 0.0)
