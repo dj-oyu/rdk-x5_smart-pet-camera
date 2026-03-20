@@ -315,6 +315,8 @@ if [[ "${SKIP_BUILD}" -ne 1 ]]; then
   # 既存プロセスの停止のみ（ビルド成果物は保持して差分ビルド）
   echo "[build] Stopping existing processes..."
   make -C "${CAPTURE_DIR}" kill-processes >/dev/null 2>&1
+  # Clean stale SHM to avoid layout mismatch after struct changes
+  rm -f /dev/shm/pet_camera_* 2>/dev/null
 
   echo "[build] Building C daemons (incremental)..."
   mkdir -p "${BUILD_DIR}"
@@ -340,8 +342,9 @@ if [[ "${SKIP_BUILD}" -ne 1 ]]; then
   echo "[build] Done"
 else
   echo "[info] Skipping build"
-  # --skip-build でもプロセス停止は必要
+  # --skip-build でもプロセス停止とSHMクリーンアップは必要
   make -C "${CAPTURE_DIR}" kill-processes >/dev/null 2>&1
+  rm -f /dev/shm/pet_camera_* 2>/dev/null
 fi
 
 # 録画ディレクトリ作成
