@@ -10,9 +10,8 @@ DEBUG_FLAGS = -g -DDEBUG -O0
 SRC_DIR = src/capture
 BUILD_DIR = build
 BIN_DIR = bin
-WEB_SRC_DIR = src/monitor/web_assets
+WEB_SRC_DIR = src/web
 WEB_BUILD_DIR = $(BUILD_DIR)/web
-ESBUILD_LOCAL = ./node_modules/.bin/esbuild
 
 # Source files
 SOURCES = $(wildcard $(SRC_DIR)/*.c)
@@ -41,15 +40,13 @@ $(TARGET): $(OBJECTS) | $(BIN_DIR)
 	$(CC) $(OBJECTS) $(LDFLAGS) -o $@
 	@echo "Build complete: $(TARGET)"
 
-# Build web assets (optional)
+# Build web assets (Preact + Bun)
 web:
 	@mkdir -p $(WEB_BUILD_DIR)
-	@ESBUILD=""; \
-	if command -v esbuild >/dev/null 2>&1; then ESBUILD="esbuild"; \
-	elif [ -x "$(ESBUILD_LOCAL)" ]; then ESBUILD="$(ESBUILD_LOCAL)"; \
-	else echo "esbuild not found. Skipping web assets build."; exit 0; fi; \
-	$$ESBUILD $(WEB_SRC_DIR)/monitor.js --bundle --outfile=$(WEB_BUILD_DIR)/monitor.js --minify --log-level=warning; \
-	$$ESBUILD $(WEB_SRC_DIR)/monitor.css --outfile=$(WEB_BUILD_DIR)/monitor.css --minify --log-level=warning
+	@if command -v bun >/dev/null 2>&1; then \
+		cd $(WEB_SRC_DIR) && bun build src/app.tsx --outdir ../../$(WEB_BUILD_DIR) --minify --entry-naming '[name].[ext]' && \
+		cp src/styles/monitor.css ../../$(WEB_BUILD_DIR)/monitor.css; \
+	else echo "bun not found. Skipping web assets build."; fi
 
 # Debug build
 debug: CFLAGS += $(DEBUG_FLAGS)

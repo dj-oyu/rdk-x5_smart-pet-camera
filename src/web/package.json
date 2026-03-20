@@ -1,0 +1,14 @@
+{
+  "name": "smart-pet-camera-web",
+  "private": true,
+  "scripts": {
+    "build": "bun build src/app.tsx --outdir ../../build/web --minify --entry-naming '[name].[ext]' && cp src/styles/monitor.css ../../build/web/monitor.css",
+    "dev": "bun build src/app.tsx --outdir ../../build/web --watch"
+  },
+  "dependencies": {
+    "preact": "^10.25.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

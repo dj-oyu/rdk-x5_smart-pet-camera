@@ -28,7 +28,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		Addr:                ":8080",
-		AssetsDir:           filepath.Clean("../monitor/web_assets"),
+		AssetsDir:           filepath.Clean("../web"),
 		BuildAssetsDir:      filepath.Clean("../../build/web"),
 		FrameShmName:        "/pet_camera_mjpeg_frame",
 		H264ShmName:         "/pet_camera_stream",

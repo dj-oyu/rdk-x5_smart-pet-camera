@@ -1,10 +1,7 @@
 {
-  "name": "smart-pet-camera-web",
+  "name": "smart-pet-camera",
   "private": true,
   "scripts": {
-    "build:web": "esbuild src/monitor/web_assets/monitor.js --bundle --outfile=build/web/monitor.js --minify && esbuild src/monitor/web_assets/monitor.css --outfile=build/web/monitor.css --minify"
-  },
-  "devDependencies": {
-    "esbuild": "^0.27.2"
+    "build:web": "cd src/web && bun run build"
   }
 }

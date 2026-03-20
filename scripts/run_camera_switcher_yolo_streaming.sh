@@ -406,7 +406,7 @@ if [[ "${RUN_MONITOR}" -eq 1 ]]; then
     # shellcheck disable=SC2086
     "${BUILD_DIR}/web_monitor" \
       -http "${MONITOR_HOST}:${MONITOR_PORT}" \
-      -assets "${REPO_ROOT}/src/monitor/web_assets" \
+      -assets "${REPO_ROOT}/src/web" \
       -assets-build "${BUILD_DIR}/web" \
       -frame-shm "/pet_camera_mjpeg_frame" \
       -detection-shm "/pet_camera_detections" \

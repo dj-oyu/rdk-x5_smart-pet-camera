@@ -1,0 +1,6 @@
+[install]
+peer = false
+
+[build]
+jsx = "react-jsx"
+jsxImportSource = "preact"
