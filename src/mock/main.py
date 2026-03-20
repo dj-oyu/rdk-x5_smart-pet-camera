@@ -5,7 +5,7 @@
 - MockCamera: フレーム生成
 - MockDetector: ランダムBBox生成
 - MockSharedMemory: プロセス間通信
-- WebMonitor: ブラウザ表示
+- Web UI は Go サーバー (streaming_server) が提供
 """
 
 import argparse
@@ -24,10 +24,6 @@ from shared_memory import MockSharedMemory
 from camera import MockCamera
 from detector import MockDetector
 from camera_switcher import CameraSwitchController
-
-# モニターモジュールをインポート
-sys.path.insert(0, str(Path(__file__).parent.parent / "monitor"))
-from web_monitor import WebMonitor, create_app
 
 
 # グローバル変数
@@ -188,18 +184,6 @@ def main() -> None:
         help="Detection probability (default: 0.3)"
     )
     parser.add_argument(
-        "--port",
-        type=int,
-        default=8080,
-        help="Web server port (default: 8080)"
-    )
-    parser.add_argument(
-        "--host",
-        type=str,
-        default="0.0.0.0",
-        help="Web server host (default: 0.0.0.0)"
-    )
-    parser.add_argument(
         "--day-to-night-threshold",
         type=float,
         default=40.0,
@@ -257,7 +241,6 @@ def main() -> None:
         print(f"Source path: {args.source_path}")
     print(f"Camera FPS: {args.fps}")
     print(f"Detection probability: {args.detection_prob}")
-    print(f"Web server: http://{args.host}:{args.port}")
     print("=" * 60)
     print()
 
@@ -288,11 +271,6 @@ def main() -> None:
     detector = MockDetector(detection_probability=args.detection_prob)
     print(f"✓ Detector initialized: {detector}")
 
-    # Webモニター作成
-    monitor = WebMonitor(shm, fps=args.fps)
-    monitor.start()
-    print("✓ Web monitor started")
-
     # カメラ切り替えコントローラ
     switch_controller = CameraSwitchController(
         shared_memory=shm,
@@ -309,10 +287,6 @@ def main() -> None:
     switch_controller.start()
     print("✓ Camera switch controller started")
 
-    # Flaskアプリ作成
-    app = create_app(shm, monitor, switch_controller=switch_controller)
-    print("✓ Flask app created")
-
     # スレッド起動
     detection_thread = threading.Thread(
         target=detection_thread_func,
@@ -325,21 +299,21 @@ def main() -> None:
 
     print()
     print("=" * 60)
-    print(f"🚀 System running! Open http://localhost:{args.port} in your browser")
+    print("Mock system running (Web UI served by Go streaming server)")
     print("Press Ctrl+C to stop")
     print("=" * 60)
     print()
 
     try:
-        # Flaskサーバー起動（ブロッキング）
-        app.run(host=args.host, port=args.port, threaded=True, debug=False)
+        # メインスレッドはシグナル待機
+        while running:
+            time.sleep(1)
     except KeyboardInterrupt:
         pass
     finally:
         # クリーンアップ
         print("\nCleaning up...")
         running = False
-        monitor.stop()
         switch_controller.stop()
         print("✓ Resources released")
         print("Goodbye!")
