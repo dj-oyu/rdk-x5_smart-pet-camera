@@ -21,11 +21,7 @@ const COLORS: Record<string, string> = {
 
 const STALE_THRESHOLD_MS = 1500;
 
-interface Props {
-  videoRef: preact.RefObject<HTMLVideoElement | null>;
-}
-
-export function BBoxOverlay({ videoRef }: Props) {
+export function useBBoxOverlay(videoRef: preact.RefObject<HTMLVideoElement | null>) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const detectionsRef = useRef<Detection[]>([]);
   const lastEventTimeRef = useRef(0);
@@ -76,7 +72,6 @@ export function BBoxOverlay({ videoRef }: Props) {
 
       const now = performance.now();
 
-      // Stale detection cleanup
       if (lastEventTimeRef.current > 0 && now - lastEventTimeRef.current > STALE_THRESHOLD_MS) {
         if (detectionsRef.current.length > 0) {
           detectionsRef.current = [];
@@ -86,7 +81,6 @@ export function BBoxOverlay({ videoRef }: Props) {
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // Draw bboxes
       for (const det of detectionsRef.current) {
         const color = COLORS[det.class_name] || '#FFFFFF';
         const scaleX = canvas.width / 640;
@@ -113,7 +107,6 @@ export function BBoxOverlay({ videoRef }: Props) {
         ctx.fillText(label, x + 4, labelY + 13);
       }
 
-      // Draw stats overlay
       const fi = frameInfoRef.current;
       let frameNum = fi.baseFrameNumber;
       let timestamp = fi.timestamp;
@@ -158,7 +151,6 @@ export function BBoxOverlay({ videoRef }: Props) {
     };
   }, [videoRef, setupCanvas]);
 
-  // Methods exposed via ref-like pattern — called from parent
   const handleDetection = useCallback((event: DetectionEvent) => {
     lastEventTimeRef.current = performance.now();
     detectionsRef.current = event.detections || [];

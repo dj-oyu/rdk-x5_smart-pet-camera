@@ -43,17 +43,12 @@ function formatDate(date: Date | null): string {
   return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
-interface Props {
-  onOpenThumbnail: (url: string, name: string) => void;
-}
-
-export function Sidebar({ onOpenThumbnail }: Props) {
+export function useSidebar(onOpenThumbnail: (url: string, name: string) => void) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pointsRef = useRef<TrajectoryPoint[]>([]);
   const lastKeyRef = useRef<string>('');
   const [legendEntries, setLegendEntries] = useState<[string, number][]>([]);
 
-  // Comics state
   const [comics, setComics] = useState<string[]>([]);
   const [comicsTotal, setComicsTotal] = useState(0);
   const comicsOffsetRef = useRef(0);
@@ -82,12 +77,8 @@ export function Sidebar({ onOpenThumbnail }: Props) {
       return;
     }
 
-    let maxX = 0,
-      maxY = 0;
-    points.forEach((p) => {
-      maxX = Math.max(maxX, p.rawX);
-      maxY = Math.max(maxY, p.rawY);
-    });
+    let maxX = 0, maxY = 0;
+    points.forEach((p) => { maxX = Math.max(maxX, p.rawX); maxY = Math.max(maxY, p.rawY); });
     const frameW = maxX || 1;
     const frameH = maxY || 1;
 
@@ -135,8 +126,7 @@ export function Sidebar({ onOpenThumbnail }: Props) {
       const cy = best.bbox.y + best.bbox.h / 2;
 
       pointsRef.current.push({
-        x: cx,
-        y: cy,
+        x: cx, y: cy,
         rawX: best.bbox.x + best.bbox.w,
         rawY: best.bbox.y + best.bbox.h,
         className: best.class_name,
@@ -146,30 +136,21 @@ export function Sidebar({ onOpenThumbnail }: Props) {
         pointsRef.current = pointsRef.current.slice(-24);
       }
 
-      // Update legend
       const counts: Record<string, number> = {};
-      pointsRef.current.forEach((p) => {
-        counts[p.className] = (counts[p.className] || 0) + 1;
-      });
-      setLegendEntries(
-        Object.entries(counts)
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 5),
-      );
+      pointsRef.current.forEach((p) => { counts[p.className] = (counts[p.className] || 0) + 1; });
+      setLegendEntries(Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 5));
 
       drawTrajectory();
     },
     [drawTrajectory],
   );
 
-  // Resize handler
   useEffect(() => {
     const handler = () => drawTrajectory();
     window.addEventListener('resize', handler);
     return () => window.removeEventListener('resize', handler);
   }, [drawTrajectory]);
 
-  // Comics loading
   const fetchComicsPage = async (offset: number, limit: number) => {
     const res = await fetch(`/api/comics?limit=${limit}&offset=${offset}`);
     if (!res.ok) throw new Error('Failed to fetch comics');
@@ -204,30 +185,26 @@ export function Sidebar({ onOpenThumbnail }: Props) {
     }
   }, [comicsTotal]);
 
-  // Initialize comics + auto-refresh
   useEffect(() => {
     loadInitialComics();
     const id = setInterval(loadInitialComics, 30000);
     return () => clearInterval(id);
   }, [loadInitialComics]);
 
-  // IntersectionObserver for infinite scroll
   useEffect(() => {
     const sentinel = sentinelRef.current;
     const gallery = galleryRef.current;
     if (!sentinel || !gallery || comicsOffsetRef.current >= comicsTotal) return;
 
     const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting) loadMore();
-      },
+      (entries) => { if (entries[0].isIntersecting) loadMore(); },
       { root: gallery, rootMargin: '0px 200px 0px 0px' },
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
   }, [comics.length, comicsTotal, loadMore]);
 
-  const deleteComic = async (filename: string) => {
+  const deleteComic = useCallback(async (filename: string) => {
     if (!confirm(`Delete "${filename}"?`)) return;
     try {
       const res = await fetch(`/api/comics/${encodeURIComponent(filename)}`, { method: 'DELETE' });
@@ -240,12 +217,12 @@ export function Sidebar({ onOpenThumbnail }: Props) {
         alert('Delete failed: ' + (data.error || 'Unknown error'));
       }
     } catch { alert('Delete failed'); }
-  };
+  }, []);
 
   return { canvasRef, legendEntries, comics, comicsTotal, galleryRef, sentinelRef, updateTrajectory, deleteComic, onOpenThumbnail };
 }
 
-export function SidebarView(props: ReturnType<typeof Sidebar>) {
+export function SidebarView(props: ReturnType<typeof useSidebar>) {
   return (
     <div class="sidebar">
       <div class="trajectory-card">
@@ -258,10 +235,7 @@ export function SidebarView(props: ReturnType<typeof Sidebar>) {
               const color = TRAJECTORY_COLORS[name] || [110, 231, 255];
               return (
                 <span class="legend-item" key={name}>
-                  <span
-                    class="legend-swatch"
-                    style={{ background: `rgba(${color[0]}, ${color[1]}, ${color[2]}, 0.9)` }}
-                  />
+                  <span class="legend-swatch" style={{ background: `rgba(${color[0]}, ${color[1]}, ${color[2]}, 0.9)` }} />
                   <span>{name}</span>
                 </span>
               );
@@ -287,24 +261,10 @@ export function SidebarView(props: ReturnType<typeof Sidebar>) {
                 const imgUrl = `/api/comics/${encodeURIComponent(filename)}`;
                 return (
                   <div class="comic-card" key={filename} data-filename={filename}>
-                    <img
-                      src={imgUrl}
-                      alt={filename}
-                      loading="lazy"
-                      onClick={() => props.onOpenThumbnail(imgUrl, filename)}
-                    />
+                    <img src={imgUrl} alt={filename} loading="lazy" onClick={() => props.onOpenThumbnail(imgUrl, filename)} />
                     <div class="comic-card-footer">
                       <span class="comic-card-date">{formatDate(date)}</span>
-                      <button
-                        class="btn-delete comic-card-delete"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          props.deleteComic(filename);
-                        }}
-                        title="Delete"
-                      >
-                        &times;
-                      </button>
+                      <button class="btn-delete comic-card-delete" onClick={(e) => { e.stopPropagation(); props.deleteComic(filename); }} title="Delete">&times;</button>
                     </div>
                   </div>
                 );
