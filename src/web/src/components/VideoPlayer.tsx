@@ -18,18 +18,25 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
 
   const { canvasRef, handleDetection, handleStatus } = useBBoxOverlay(videoRef);
 
+  // Stop MJPEG: abort fetch (ReadableStream mode) or detach img from DOM (fallback mode)
   const stopMJPEG = useCallback(() => {
     mjpegAcRef.current?.abort();
     mjpegAcRef.current = null;
     const img = mjpegRef.current;
     if (img) {
+      // DOM detach forces browser to close the underlying TCP connection
+      // (img.src='' alone is unreliable on iOS Safari)
+      const parent = img.parentNode;
+      const next = img.nextSibling;
+      if (parent) parent.removeChild(img);
       if (img.src) URL.revokeObjectURL(img.src);
+      img.src = '';
       img.removeAttribute('src');
+      if (parent) parent.insertBefore(img, next);
     }
   }, []);
 
-  // MJPEG via fetch + ReadableStream: abort() kills TCP connection immediately
-  // (img.src approach leaks connections on mobile browsers)
+  // MJPEG start: try fetch+ReadableStream, fallback to img.src for iOS Safari
   const startMJPEG = useCallback(() => {
     stopMJPEG();
     const ac = new AbortController();
@@ -37,68 +44,65 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
     const img = mjpegRef.current;
     if (!img) return;
 
-    // Byte patterns for multipart boundary parsing
-    const BOUNDARY = new TextEncoder().encode('--frame\r\n');
-    const CRLFCRLF = new TextEncoder().encode('\r\n\r\n');
-    const CRLF = new TextEncoder().encode('\r\n');
+    const url = '/stream?t=' + Date.now();
 
-    const findBytes = (haystack: Uint8Array, needle: Uint8Array, from = 0): number => {
-      outer: for (let i = from; i <= haystack.length - needle.length; i++) {
-        for (let j = 0; j < needle.length; j++) {
-          if (haystack[i + j] !== needle[j]) continue outer;
-        }
-        return i;
-      }
-      return -1;
-    };
-
-    fetch('/stream?t=' + Date.now(), { signal: ac.signal })
+    // Try fetch + ReadableStream (works on Chrome/Firefox, reliable abort)
+    fetch(url, { signal: ac.signal })
       .then(res => {
-        if (!res.ok || !res.body) return;
+        if (!res.ok) return;
+        // If ReadableStream not available (iOS Safari), fall back to img.src
+        if (!res.body) {
+          img.src = url;
+          return;
+        }
         const reader = res.body.getReader();
         let buf = new Uint8Array(0);
 
+        const BOUNDARY = new TextEncoder().encode('--frame\r\n');
+        const CRLFCRLF = new TextEncoder().encode('\r\n\r\n');
+
+        const findBytes = (haystack: Uint8Array, needle: Uint8Array, from = 0): number => {
+          for (let i = from; i <= haystack.length - needle.length; i++) {
+            let match = true;
+            for (let j = 0; j < needle.length; j++) {
+              if (haystack[i + j] !== needle[j]) { match = false; break; }
+            }
+            if (match) return i;
+          }
+          return -1;
+        };
+
         const pump = (): Promise<void> => reader.read().then(({ done, value }) => {
           if (done || ac.signal.aborted) return;
-
-          // Append chunk
           const tmp = new Uint8Array(buf.length + value.length);
           tmp.set(buf);
           tmp.set(value, buf.length);
           buf = tmp;
 
-          // Extract JPEG frames from multipart/x-mixed-replace (all binary)
           let consumed = 0;
           while (true) {
             const bIdx = findBytes(buf, BOUNDARY, consumed);
             if (bIdx === -1) break;
-            const afterBoundary = bIdx + BOUNDARY.length;
-            const hEnd = findBytes(buf, CRLFCRLF, afterBoundary);
+            const afterB = bIdx + BOUNDARY.length;
+            const hEnd = findBytes(buf, CRLFCRLF, afterB);
             if (hEnd === -1) break;
             const dataStart = hEnd + CRLFCRLF.length;
 
-            // Parse Content-Length from ASCII headers
-            const headerStr = new TextDecoder().decode(buf.slice(afterBoundary, hEnd));
+            const headerStr = new TextDecoder().decode(buf.slice(afterB, hEnd));
             const clMatch = headerStr.match(/Content-Length:\s*(\d+)/i);
-            if (!clMatch) { consumed = afterBoundary; continue; }
+            if (!clMatch) { consumed = afterB; continue; }
             const contentLength = parseInt(clMatch[1], 10);
+            if (buf.length < dataStart + contentLength) break;
 
-            if (buf.length < dataStart + contentLength) break; // incomplete body
-
-            // Extract JPEG bytes and display
             const jpeg = buf.slice(dataStart, dataStart + contentLength);
             const blob = new Blob([jpeg], { type: 'image/jpeg' });
-            const url = URL.createObjectURL(blob);
+            const objUrl = URL.createObjectURL(blob);
             const prev = img.src;
-            img.src = url;
+            img.src = objUrl;
             if (prev) URL.revokeObjectURL(prev);
 
-            // Skip trailing CRLF after body
             let next = dataStart + contentLength;
-            if (next + CRLF.length <= buf.length &&
-                buf[next] === 13 && buf[next + 1] === 10) {
-              next += CRLF.length;
-            }
+            if (next + 2 <= buf.length && buf[next] === 13 && buf[next + 1] === 10) next += 2;
             consumed = next;
           }
           if (consumed > 0) buf = buf.slice(consumed);
@@ -106,7 +110,7 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
         });
         return pump();
       })
-      .catch(() => { /* aborted or network error - expected */ });
+      .catch(() => { /* aborted or network error */ });
   }, [stopMJPEG]);
 
   const onWebRTCError = useCallback(() => {
