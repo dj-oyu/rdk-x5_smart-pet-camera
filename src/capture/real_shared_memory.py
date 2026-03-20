@@ -147,6 +147,7 @@ class CSharedFrameBuffer(Structure):
         ("frame_interval_ms", c_uint32),
         ("_pad_interval", c_uint8 * 60),         # Cache line isolation padding
         ("new_frame_sem", c_uint8 * 32),  # sem_t semaphore (32 bytes on Linux)
+        ("_pad_sem", c_uint8 * 32),       # Alignment padding for Frame aligned(64)
         ("frames", CFrame * RING_BUFFER_SIZE),
     ]
 
