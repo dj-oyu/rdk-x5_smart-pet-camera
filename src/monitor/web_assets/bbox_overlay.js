@@ -15,6 +15,7 @@ const COLORS = {
     'bird': '#FF9600',       // 青寄り
     'food_bowl': '#00A5FF',  // オレンジ
     'water_bowl': '#0078FF', // 青
+    'motion': '#FF00FF',     // マゼンタ (夜間動体検出)
     'dish': '#FF0000',       // 赤
     'person': '#FFFF00',     // シアン
     'book': '#00FFFF',       // 黄色

@@ -16,6 +16,7 @@ POC_LOWLEVEL_SOURCES := camera_poc_lowlevel.c shared_memory.c logger.c
 POC_VSE_DUAL_SOURCES := camera_poc_vse_dual.c shared_memory.c logger.c
 ISP_LOWLIGHT_SOURCES := test_isp_lowlight.c logger.c
 HB_MEM_IMPORT_SOURCES := test_hb_mem_import.c shared_memory.c logger.c
+HB_MEM_DMA_SOURCES := test_hb_mem_dma.c logger.c
 HAL_SOURCES := vio_lowlevel.c encoder_lowlevel.c logger.c
 JPEG_ENCODER_SOURCES := jpeg_encoder.c logger.c
 
@@ -29,6 +30,7 @@ POC_LOWLEVEL_OBJECTS := $(POC_LOWLEVEL_SOURCES:.c=.o)
 POC_VSE_DUAL_OBJECTS := $(POC_VSE_DUAL_SOURCES:.c=.o)
 ISP_LOWLIGHT_OBJECTS := $(ISP_LOWLIGHT_SOURCES:.c=.o)
 HB_MEM_IMPORT_OBJECTS := $(HB_MEM_IMPORT_SOURCES:.c=.o)
+HB_MEM_DMA_OBJECTS := $(HB_MEM_DMA_SOURCES:.c=.o)
 
 DAEMON_BINARY := $(BUILD_DIR)/camera_daemon_drobotics
 SHM_TEST_BINARY := $(BUILD_DIR)/test_shm
@@ -39,6 +41,7 @@ POC_LOWLEVEL_BINARY := $(BUILD_DIR)/camera_poc_lowlevel
 POC_VSE_DUAL_BINARY := $(BUILD_DIR)/camera_poc_vse_dual
 ISP_LOWLIGHT_BINARY := $(BUILD_DIR)/test_isp_lowlight
 HB_MEM_IMPORT_BINARY := $(BUILD_DIR)/test_hb_mem_import
+HB_MEM_DMA_BINARY := $(BUILD_DIR)/test_hb_mem_dma
 JPEG_ENCODER_LIB := $(BUILD_DIR)/libjpeg_encoder.a
 
 LDLIBS_COMMON := -lrt
@@ -52,7 +55,7 @@ LDLIBS_HB_MEM_IMPORT := $(LDLIBS_COMMON) -lpthread -lhbmem
 
 DAEMON_ARGS ?= -C 0 -P 1
 
-.PHONY: all clean test switcher-demo switcher-daemon switcher-daemon-build run run-daemon cleanup kill-processes help poc-lowlevel poc-vse-dual isp-lowlight test-hb-mem-import jpeg-encoder-lib
+.PHONY: all clean test switcher-demo switcher-daemon switcher-daemon-build run run-daemon cleanup kill-processes help poc-lowlevel poc-vse-dual isp-lowlight test-hb-mem-import test-hb-mem-dma jpeg-encoder-lib
 
 all: $(DAEMON_BINARY) $(SHM_TEST_BINARY) $(SWITCHER_DAEMON_BINARY) $(JPEG_ENCODER_LIB)
 
@@ -68,6 +71,10 @@ isp-lowlight: $(ISP_LOWLIGHT_BINARY)
 test-hb-mem-import: $(HB_MEM_IMPORT_BINARY)
 	@echo "[Test] hb_mem import API test ready at $(HB_MEM_IMPORT_BINARY)"
 	@echo "[Test] Run with camera daemon active: $(HB_MEM_IMPORT_BINARY)"
+
+test-hb-mem-dma: $(HB_MEM_DMA_BINARY)
+	@echo "[Test] hb_mem DMA benchmark ready at $(HB_MEM_DMA_BINARY)"
+	@echo "[Test] Run: $(HB_MEM_DMA_BINARY)"
 
 $(BUILD_DIR):
 	@mkdir -p $@
@@ -97,6 +104,9 @@ $(ISP_LOWLIGHT_BINARY): $(ISP_LOWLIGHT_OBJECTS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_ISP_LOWLIGHT)
 
 $(HB_MEM_IMPORT_BINARY): $(HB_MEM_IMPORT_OBJECTS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_HB_MEM_IMPORT)
+
+$(HB_MEM_DMA_BINARY): $(HB_MEM_DMA_OBJECTS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_HB_MEM_IMPORT)
 
 # Static library for JPEG encoder (used by Go streaming server via CGO)
@@ -163,7 +173,7 @@ kill-processes:
 clean:
 	@echo "[Clean] Removing built binaries and objects"
 	@rm -f *.o
-	@rm -f $(DAEMON_BINARY) $(SHM_TEST_BINARY) $(SWITCHER_DEMO_BINARY) $(SWITCHER_DAEMON_BINARY) $(POC_LOWLEVEL_BINARY) $(ISP_LOWLIGHT_BINARY) $(HB_MEM_IMPORT_BINARY) $(JPEG_ENCODER_LIB)
+	@rm -f $(DAEMON_BINARY) $(SHM_TEST_BINARY) $(SWITCHER_DEMO_BINARY) $(SWITCHER_DAEMON_BINARY) $(POC_LOWLEVEL_BINARY) $(ISP_LOWLIGHT_BINARY) $(HB_MEM_IMPORT_BINARY) $(HB_MEM_DMA_BINARY) $(JPEG_ENCODER_LIB)
 
 help:
 	@echo "Camera daemon build targets"

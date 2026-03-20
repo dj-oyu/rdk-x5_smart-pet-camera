@@ -143,8 +143,11 @@ class CFrame(Structure):
 class CSharedFrameBuffer(Structure):
     _fields_ = [
         ("write_index", c_uint32),
-        ("frame_interval_ms", c_uint32),  # Matches C SharedFrameBuffer
+        ("_pad_wridx", c_uint8 * 60),           # Cache line isolation padding
+        ("frame_interval_ms", c_uint32),
+        ("_pad_interval", c_uint8 * 60),         # Cache line isolation padding
         ("new_frame_sem", c_uint8 * 32),  # sem_t semaphore (32 bytes on Linux)
+        ("_pad_sem", c_uint8 * 32),       # Alignment padding for Frame aligned(64)
         ("frames", CFrame * RING_BUFFER_SIZE),
     ]
 
@@ -613,10 +616,8 @@ class RealSharedMemory:
         # Calculate latest frame index
         latest_idx = (write_index - 1) % RING_BUFFER_SIZE
 
-        # Calculate offset to the frame
-        # Offset = sizeof(write_index) + sizeof(frame_interval_ms) + sizeof(new_frame_sem) + sizeof(Frame) * latest_idx
-        # new_frame_sem is 32 bytes (sem_t on Linux)
-        frame_offset = sizeof(c_uint32) * 2 + 32 + sizeof(CFrame) * latest_idx
+        # Calculate offset to the frame using CSharedFrameBuffer field offsets
+        frame_offset = CSharedFrameBuffer.frames.offset + sizeof(CFrame) * latest_idx
 
         # Read the frame
         self.frame_mmap.seek(frame_offset)

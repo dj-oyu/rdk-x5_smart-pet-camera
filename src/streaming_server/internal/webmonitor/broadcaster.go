@@ -44,7 +44,7 @@ func (fb *FrameBroadcaster) Subscribe() (int, <-chan []byte) {
 	fb.mu.Lock()
 	id := fb.nextID
 	fb.nextID++
-	ch := make(chan []byte, 2) // Buffer 2 frames to avoid blocking
+	ch := make(chan []byte, 4) // Buffer 4 frames to absorb network jitter
 	fb.clients[id] = ch
 	logger.Debug("FrameBroadcaster", "Client #%d subscribed (total clients: %d)", id, len(fb.clients))
 	fb.mu.Unlock()
@@ -106,6 +106,8 @@ func (fb *FrameBroadcaster) run() {
 		fb.mu.Unlock()
 
 		if clientCount == 0 {
+			// No clients — save CPU by sleeping instead of polling SHM
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
@@ -278,7 +280,7 @@ func (db *DetectionBroadcaster) Subscribe() (int, <-chan *SerializedEvent) {
 	db.mu.Lock()
 	id := db.nextID
 	db.nextID++
-	ch := make(chan *SerializedEvent, 2) // Buffer 2 events to avoid blocking
+	ch := make(chan *SerializedEvent, 4) // Buffer 4 events to absorb network jitter
 	db.clients[id] = ch
 	logger.Debug("DetectionBroadcaster", "Client #%d subscribed (total clients: %d)", id, len(db.clients))
 	db.mu.Unlock()
@@ -588,7 +590,7 @@ func (sb *StatusBroadcaster) Subscribe() (int, <-chan *SerializedEvent) {
 	sb.mu.Lock()
 	id := sb.nextID
 	sb.nextID++
-	ch := make(chan *SerializedEvent, 2) // Buffer 2 events to avoid blocking
+	ch := make(chan *SerializedEvent, 4) // Buffer 4 events to absorb network jitter
 	sb.clients[id] = ch
 	logger.Debug("StatusBroadcaster", "Client #%d subscribed (total clients: %d)", id, len(sb.clients))
 	sb.mu.Unlock()
@@ -645,6 +647,8 @@ func (sb *StatusBroadcaster) run() {
 			sb.mu.Unlock()
 
 			if clientCount == 0 {
+				// No clients — save CPU by sleeping instead of generating status
+				time.Sleep(500 * time.Millisecond)
 				continue
 			}
 

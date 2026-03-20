@@ -139,11 +139,13 @@ typedef struct {
     uint8_t correction_applied; // 1 if ISP low-light correction is active
     uint8_t _reserved[2];       // Padding for alignment
     uint8_t data[MAX_FRAME_SIZE];
-} Frame;
+} Frame __attribute__((aligned(64)));
 
 typedef struct {
     volatile uint32_t write_index;
+    char _pad_wridx[60];          // Cache line isolation padding
     volatile uint32_t frame_interval_ms;
+    char _pad_interval[60];       // Cache line isolation padding
     sem_t new_frame_sem;  // Semaphore for new frame notifications
     Frame frames[RING_BUFFER_SIZE];
 } SharedFrameBuffer;
