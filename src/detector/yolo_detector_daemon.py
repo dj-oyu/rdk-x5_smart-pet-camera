@@ -409,34 +409,38 @@ class YoloDetectorDaemon:
                 # Run detection
                 if self.night_roi_mode:
                     # Night camera: motion detection + YOLO hybrid
-                    # Motion detection on denoised Y plane
                     y_size = frame_width * frame_height
+
+                    # Motion detection on downscaled Y (640x360 = 1/4 pixels)
                     y_plane = np.frombuffer(nv12_data[:y_size], dtype=np.uint8).reshape(
                         frame_height, frame_width
                     )
-                    y_denoised = cv2.medianBlur(y_plane, 5)
+                    motion_h, motion_w = frame_height // 2, frame_width // 2
+                    y_small = cv2.resize(y_plane, (motion_w, motion_h), interpolation=cv2.INTER_AREA)
+                    y_small_denoised = cv2.medianBlur(y_small, 3)
 
                     motion_dicts = []
                     if self.prev_y_plane is not None and self.motion_cooldown <= 0:
-                        diff = cv2.absdiff(y_denoised, self.prev_y_plane)
+                        diff = cv2.absdiff(y_small_denoised, self.prev_y_plane)
                         _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
-                        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+                        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
                         thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
                         thresh = cv2.dilate(thresh, kernel, iterations=2)
                         contours, _ = cv2.findContours(
                             thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
                         )
-                        min_area = frame_width * frame_height * 0.005  # 0.5% of frame
+                        min_area = motion_w * motion_h * 0.005  # 0.5% of frame
                         for cnt in contours:
                             area = cv2.contourArea(cnt)
                             if area < min_area:
                                 continue
                             x, y, w, h = cv2.boundingRect(cnt)
-                            confidence = min(1.0, area / (frame_width * frame_height * 0.05))
+                            confidence = min(1.0, area / (motion_w * motion_h * 0.05))
+                            # Scale bbox back to full frame coordinates
                             motion_dicts.append({
                                 "class_name": "motion",
                                 "confidence": float(confidence),
-                                "bbox": {"x": x, "y": y, "w": w, "h": h},
+                                "bbox": {"x": x * 2, "y": y * 2, "w": w * 2, "h": h * 2},
                             })
                         if motion_dicts:
                             self.motion_cooldown = 5
@@ -447,16 +451,12 @@ class YoloDetectorDaemon:
 
                     if self.motion_cooldown > 0:
                         self.motion_cooldown -= 1
-                    self.prev_y_plane = y_denoised
+                    self.prev_y_plane = y_small_denoised
 
-                    # Build denoised NV12 for YOLO (denoised Y + original UV)
-                    uv_data = np.frombuffer(nv12_data[y_size:], dtype=np.uint8)
-                    nv12_denoised = np.concatenate([y_denoised.ravel(), uv_data])
-
-                    # YOLO ROI detection (nv12_denoised has medianBlur'd Y plane)
+                    # YOLO ROI detection (CLAHE handles denoise on crop)
                     current_roi = self.roi_index
                     detections = self.detector.detect_nv12_roi_720p(
-                        nv12_data=nv12_denoised,
+                        nv12_data=nv12_data,
                         roi_index=current_roi,
                         brightness_avg=brightness_avg,
                     )
