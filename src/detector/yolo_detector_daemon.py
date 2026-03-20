@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 # プロジェクトルートをパスに追加
 DETECTOR_DIR = Path(__file__).parent
@@ -24,10 +25,9 @@ sys.path.insert(0, str(CAPTURE_DIR))
 sys.path.insert(0, str(COMMON_SRC))
 
 from real_shared_memory import (
-    RealSharedMemory,
+    DetectionWriter,
     ZeroCopySharedMemory,
     CameraControlSharedMemory,
-    SHM_NAME_ACTIVE_FRAME,
     SHM_NAME_ZEROCOPY_DAY,
     SHM_NAME_ZEROCOPY_NIGHT,
 )
@@ -108,7 +108,7 @@ class YoloDetectorDaemon:
         self.nms_threshold = nms_threshold
 
         # 共有メモリ
-        self.shm_main: RealSharedMemory | None = None  # Main frame for resolution info
+        self.detection_writer: DetectionWriter | None = None  # Detection result writer
         self.shm_zerocopy_day: ZeroCopySharedMemory | None = (
             None  # DAY camera zero-copy
         )
@@ -151,6 +151,31 @@ class YoloDetectorDaemon:
         self.cache_frame_number: int = -1  # Frame number when cache started
         self.cache_timestamp: float = 0.0  # Timestamp when cache started
 
+        # Night motion detection state
+        self.prev_y_plane: np.ndarray | None = None  # Previous Y plane for frame diff
+        self.motion_cooldown: int = 0  # Frames to skip after motion detected
+
+        # Night YOLO false positive filter (IR images cause frequent misdetections)
+        self.night_fp_classes = {"toilet", "sink", "suitcase", "chair"}
+
+        # Night frame collection for future fine-tuning
+        self.night_collect_dir = PROJECT_ROOT / "data" / "night_collect"
+        self.night_collect_count: int = 0
+        self.night_collect_max: int = 500  # Max frames to collect per session
+        self.night_collect_interval: int = 150  # Collect every N frames during motion
+
+    def _save_night_frame(self, nv12_data, width: int, height: int, frame_number: int) -> None:
+        """Save NV12 frame for future fine-tuning data collection."""
+        try:
+            self.night_collect_dir.mkdir(parents=True, exist_ok=True)
+            path = self.night_collect_dir / f"night_{frame_number:08d}_{width}x{height}.nv12"
+            with open(path, "wb") as f:
+                f.write(bytes(nv12_data))
+            self.night_collect_count += 1
+            logger.debug(f"Saved night frame: {path.name} ({self.night_collect_count}/{self.night_collect_max})")
+        except Exception as e:
+            logger.warning(f"Failed to save night frame: {e}")
+
     def setup(self) -> None:
         """セットアップ"""
         logger.debug("=== YOLO Detector Daemon (Zero-Copy) ===")
@@ -189,11 +214,10 @@ class YoloDetectorDaemon:
             if night_ok:
                 logger.debug(f"Connected to NIGHT zero-copy: {SHM_NAME_ZEROCOPY_NIGHT}")
 
-            # メイン解像度参照用 (bbox座標スケーリングに使用)
-            self.shm_main = RealSharedMemory(frame_shm_name=SHM_NAME_ACTIVE_FRAME)
-            self.shm_main.open()
-            self.shm_main.open_detection_write()
-            logger.debug(f"Connected to main shared memory: {SHM_NAME_ACTIVE_FRAME}")
+            # Detection result writer (independent of frame SHM)
+            self.detection_writer = DetectionWriter()
+            self.detection_writer.open()
+            logger.debug("Detection writer opened")
         except Exception as e:
             logger.error(f"Failed to open shared memory: {e}")
             logger.error("Make sure camera daemon is running")
@@ -231,8 +255,8 @@ class YoloDetectorDaemon:
             self.shm_zerocopy_night.close()
         if self.shm_control:
             self.shm_control.close()
-        if self.shm_main:
-            self.shm_main.close()
+        if self.detection_writer:
+            self.detection_writer.close()
         if self.stats["frames_processed"] > 0:
             avg_dets = self.stats["total_detections"] / self.stats["frames_processed"]
             logger.info(
@@ -325,6 +349,8 @@ class YoloDetectorDaemon:
                         self.roi_enabled = False
                         self.roi_index = 0
                         self.detection_cache = []
+                        # Restore original score_threshold for day camera
+                        self.detector.score_threshold = self.score_threshold
                         logger.debug(f"Camera switched to {camera_id} [day camera letterbox mode]")
                     else:  # Night: 1280x720 → 640x480
                         self.scale_x = 0.5
@@ -335,7 +361,9 @@ class YoloDetectorDaemon:
                         self.roi_enabled = False
                         self.roi_index = 0
                         self.detection_cache = [[] for _ in self.night_roi_regions]
-                        logger.debug(f"Camera switched to {camera_id} [night ROI mode: {len(self.night_roi_regions)} regions]")
+                        # Lower score_threshold for night camera (darker images = lower confidence)
+                        self.detector.score_threshold = max(0.25, self.score_threshold - 0.15)
+                        logger.debug(f"Camera switched to {camera_id} [night ROI mode: {len(self.night_roi_regions)} regions, score_th={self.detector.score_threshold:.2f}]")
 
                 # Initialize scale factors on first frame (before any switch)
                 if self.scale_x is None or self.scale_y is None:
@@ -347,7 +375,9 @@ class YoloDetectorDaemon:
                     else:  # Night: 1280x720 → 640x480
                         self.scale_x = 0.5
                         self.scale_y = 480.0 / 720.0
-                    logger.debug(f"Initial scale for camera {camera_id}: ({self.scale_x:.3f}, {self.scale_y:.3f})")
+                        # Lower score_threshold for night camera
+                        self.detector.score_threshold = max(0.25, self.score_threshold - 0.15)
+                    logger.debug(f"Initial scale for camera {camera_id}: ({self.scale_x:.3f}, {self.scale_y:.3f}), score_th={self.detector.score_threshold}")
 
                 # Initialize ROI regions on first frame
                 if self.stats["frames_processed"] == 0:
@@ -376,36 +406,150 @@ class YoloDetectorDaemon:
                             logger.debug("ROI mode disabled: single region")
                             self.roi_enabled = False
 
-                # Run YOLO inference
-                if self.night_roi_mode and len(self.night_roi_regions) > 0:
-                    # Validate frame size for night ROI mode (expects 1280x720)
-                    if frame_width != 1280 or frame_height != 720:
-                        logger.warning(
-                            f"Frame size mismatch in night ROI mode: "
-                            f"expected 1280x720, got {frame_width}x{frame_height}. "
-                            f"Skipping detection (camera transition)"
-                        )
-                        if hb_mem_buffer:
-                            hb_mem_buffer.release()
-                        active_zc.mark_consumed()
-                        continue
+                # Run detection
+                if self.night_roi_mode:
+                    # Night camera: motion detection + YOLO hybrid
+                    # Motion detection on denoised Y plane
+                    y_size = frame_width * frame_height
+                    y_plane = np.frombuffer(nv12_data[:y_size], dtype=np.uint8).reshape(
+                        frame_height, frame_width
+                    )
+                    y_denoised = cv2.medianBlur(y_plane, 5)
 
-                    # Night camera ROI mode: cycle through 3 overlapping regions
+                    motion_dicts = []
+                    if self.prev_y_plane is not None and self.motion_cooldown <= 0:
+                        diff = cv2.absdiff(y_denoised, self.prev_y_plane)
+                        _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+                        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+                        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+                        thresh = cv2.dilate(thresh, kernel, iterations=2)
+                        contours, _ = cv2.findContours(
+                            thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                        )
+                        min_area = frame_width * frame_height * 0.005  # 0.5% of frame
+                        for cnt in contours:
+                            area = cv2.contourArea(cnt)
+                            if area < min_area:
+                                continue
+                            x, y, w, h = cv2.boundingRect(cnt)
+                            confidence = min(1.0, area / (frame_width * frame_height * 0.05))
+                            motion_dicts.append({
+                                "class_name": "motion",
+                                "confidence": float(confidence),
+                                "bbox": {"x": x, "y": y, "w": w, "h": h},
+                            })
+                        if motion_dicts:
+                            self.motion_cooldown = 5
+                            # Collect frames for future fine-tuning
+                            if (self.night_collect_count < self.night_collect_max
+                                    and self.stats["frames_processed"] % self.night_collect_interval == 0):
+                                self._save_night_frame(nv12_data, frame_width, frame_height, frame_number)
+
+                    if self.motion_cooldown > 0:
+                        self.motion_cooldown -= 1
+                    self.prev_y_plane = y_denoised
+
+                    # YOLO ROI detection (cycle through ROIs as before)
                     current_roi = self.roi_index
                     detections = self.detector.detect_nv12_roi_720p(
                         nv12_data=nv12_data,
                         roi_index=current_roi,
                         brightness_avg=brightness_avg,
                     )
-
-                    # Track cache start for first ROI
                     if current_roi == 0:
                         self.cache_frame_number = frame_number
                         self.cache_timestamp = timestamp_sec
-
-                    # Advance to next ROI for next frame
                     self.roi_index = (self.roi_index + 1) % len(self.night_roi_regions)
                     cycle_complete = (self.roi_index == 0)
+
+                    # Release buffer
+                    hb_mem_buffer.release()
+                    active_zc.mark_consumed()
+
+                    # Convert YOLO detections to dicts
+                    yolo_dicts = [
+                        {
+                            "class_name": det.class_name.value,
+                            "confidence": det.confidence,
+                            "bbox": {
+                                "x": det.bbox.x, "y": det.bbox.y,
+                                "w": det.bbox.w, "h": det.bbox.h,
+                            },
+                        }
+                        for det in detections
+                    ]
+
+                    # Accumulate YOLO ROI results
+                    self.detection_cache[current_roi] = yolo_dicts
+
+                    if cycle_complete:
+                        # Merge YOLO ROI detections
+                        all_yolo = []
+                        for roi_dets in self.detection_cache:
+                            all_yolo.extend(roi_dets)
+                        merged_yolo = apply_cross_roi_nms(all_yolo, iou_threshold=0.5)
+
+                        # Filter night YOLO false positives (IR-caused misdetections)
+                        merged_yolo = [
+                            d for d in merged_yolo
+                            if d["class_name"] not in self.night_fp_classes
+                        ]
+
+                        # Combine: motion + YOLO results
+                        all_dicts = motion_dicts + merged_yolo
+
+                        # Scale to output coordinates
+                        scaled_dicts = [
+                            {
+                                "class_name": d["class_name"],
+                                "confidence": d["confidence"],
+                                "bbox": {
+                                    "x": int(d["bbox"]["x"] * self.scale_x),
+                                    "y": int(d["bbox"]["y"] * self.scale_y),
+                                    "w": int(d["bbox"]["w"] * self.scale_x),
+                                    "h": int(d["bbox"]["h"] * self.scale_y),
+                                },
+                            }
+                            for d in all_dicts
+                        ]
+
+                        if scaled_dicts:
+                            self.detection_writer.write_detection_result(
+                                frame_number=self.cache_frame_number,
+                                timestamp_sec=self.cache_timestamp,
+                                detections=scaled_dicts,
+                            )
+
+                        self.detection_cache = [[] for _ in self.night_roi_regions]
+                        detection_dicts = scaled_dicts
+                    else:
+                        detection_dicts = []
+
+                    # Stats
+                    self.stats["frames_processed"] += 1
+                    timing = self.detector.get_last_timing()
+                    self.stats["avg_inference_time_ms"] = timing["total"] * 1000
+                    if cycle_complete:
+                        self.stats["total_detections"] += len(detection_dicts)
+
+                    # Periodic stats log
+                    if self.stats["frames_processed"] % 300 == 0:
+                        mot = sum(1 for d in detection_dicts if d.get("class_name") == "motion")
+                        yolo = len(detection_dicts) - mot
+                        logger.info(
+                            f"[{self.stats['frames_processed']}f] "
+                            f"det={self.stats['total_detections']}(mot={mot},yolo={yolo}) "
+                            f"inf={self.stats['avg_inference_time_ms']:.0f}ms "
+                            f"cam={self.active_camera} "
+                            f"bright={brightness_avg:.1f}"
+                        )
+
+                    if is_debug and cycle_complete and detection_dicts:
+                        classes = ",".join(d["class_name"] for d in detection_dicts)
+                        logger.debug(f"#{self.stats['frames_processed']}: {classes}")
+
+                    continue
+
                 elif self.roi_enabled and len(self.roi_regions) > 1:
                     # Day camera ROI mode: cycle through regions
                     current_roi = self.roi_index
@@ -505,7 +649,7 @@ class YoloDetectorDaemon:
 
                         # Write scaled results
                         if scaled_dicts:
-                            self.shm_main.write_detection_result(
+                            self.detection_writer.write_detection_result(
                                 frame_number=self.cache_frame_number,
                                 timestamp_sec=self.cache_timestamp,
                                 detections=scaled_dicts,
@@ -560,7 +704,7 @@ class YoloDetectorDaemon:
 
                         # Write scaled results
                         if scaled_dicts:
-                            self.shm_main.write_detection_result(
+                            self.detection_writer.write_detection_result(
                                 frame_number=self.cache_frame_number,
                                 timestamp_sec=self.cache_timestamp,
                                 detections=scaled_dicts,
@@ -587,7 +731,7 @@ class YoloDetectorDaemon:
                         for d in detection_dicts
                     ]
                     if scaled_dicts:
-                        self.shm_main.write_detection_result(
+                        self.detection_writer.write_detection_result(
                             frame_number=frame_number,
                             timestamp_sec=timestamp_sec,
                             detections=scaled_dicts,
@@ -610,10 +754,17 @@ class YoloDetectorDaemon:
 
                 # Periodic stats log (every 300 frames)
                 if self.stats["frames_processed"] % 300 == 0:
+                    clahe_status = "yes" if (
+                        self.detector.clahe_enabled
+                        and (brightness_avg < 0 or brightness_avg < self.detector.clahe_brightness_threshold)
+                    ) else "no"
                     logger.info(
                         f"[{self.stats['frames_processed']}f] "
                         f"det={self.stats['total_detections']} "
-                        f"inf={self.stats['avg_inference_time_ms']:.0f}ms"
+                        f"inf={self.stats['avg_inference_time_ms']:.0f}ms "
+                        f"cam={self.active_camera} "
+                        f"bright={brightness_avg:.1f} "
+                        f"clahe={clahe_status}"
                     )
 
                 # Debug logging (per-frame details)
