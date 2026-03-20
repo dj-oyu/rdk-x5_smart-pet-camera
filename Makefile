@@ -40,12 +40,10 @@ $(TARGET): $(OBJECTS) | $(BIN_DIR)
 	$(CC) $(OBJECTS) $(LDFLAGS) -o $@
 	@echo "Build complete: $(TARGET)"
 
-# Build web assets (Preact + Bun)
+# Build web assets (Preact + Bun, content-hashed filenames)
 web:
-	@mkdir -p $(WEB_BUILD_DIR)
 	@if command -v bun >/dev/null 2>&1; then \
-		cd $(WEB_SRC_DIR) && bun build src/app.tsx --outdir ../../$(WEB_BUILD_DIR) --minify --entry-naming '[name].[ext]' && \
-		cp src/styles/monitor.css ../../$(WEB_BUILD_DIR)/monitor.css; \
+		$(WEB_SRC_DIR)/build.sh; \
 	else echo "bun not found. Skipping web assets build."; fi
 
 # Debug build
