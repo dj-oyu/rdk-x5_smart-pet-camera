@@ -252,7 +252,7 @@ export function SidebarView(props: ReturnType<typeof useSidebar>) {
         </div>
         <div class="comic-gallery" ref={props.galleryRef}>
           {props.comics.length === 0 ? (
-            <p class="muted">まだコミックがありません。ねこの検出を待っています。</p>
+            <p class="muted">まだ写真がありません。ねこの検出を待っています。</p>
           ) : (
             <>
               {props.comics.map((filename) => {
