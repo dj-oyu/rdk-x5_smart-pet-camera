@@ -1,9 +1,9 @@
 import { render } from 'preact';
 import { useState, useEffect, useCallback } from 'preact/hooks';
-import { VideoPlayer } from './components/VideoPlayer';
+import { useVideoPlayer } from './components/VideoPlayer';
 import { VideoControls } from './components/VideoControls';
 import { RecordingsModal } from './components/RecordingsModal';
-import { Sidebar, SidebarView } from './components/Sidebar';
+import { useSidebar, SidebarView } from './components/Sidebar';
 import { useSSE } from './hooks/useSSE';
 import { useRecording } from './hooks/useRecording';
 import type { StatusEvent } from './lib/protobuf';
@@ -18,7 +18,7 @@ function App() {
     setThumbnailPreview({ url, name });
   }, []);
 
-  const sidebar = Sidebar({ onOpenThumbnail: openThumbnail });
+  const sidebar = useSidebar(openThumbnail);
 
   const onStatus = useCallback(
     (data: StatusEvent) => {
@@ -32,7 +32,7 @@ function App() {
     [sidebar.updateTrajectory],
   );
 
-  const videoPlayer = VideoPlayer({ onStatus });
+  const videoPlayer = useVideoPlayer({ onStatus });
 
   const sse = useSSE({
     onDetection: videoPlayer.handleDetection,
@@ -49,7 +49,6 @@ function App() {
 
   const { state: recordingState, toggle: toggleRecording } = useRecording();
 
-  // Escape key for modals
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -61,7 +60,6 @@ function App() {
     return () => document.removeEventListener('keydown', handler);
   }, [thumbnailPreview, recordingsOpen]);
 
-  // Parse recording date for thumbnail preview info
   const parseDateFromName = (name: string) => {
     const match = name.match(/(?:recording|comic)_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
     if (!match) return '';
@@ -150,20 +148,9 @@ function App() {
             }}
           >
             <div class="thumbnail-preview-content">
-              <button
-                class="thumbnail-preview-close"
-                onClick={() => setThumbnailPreview(null)}
-              >
-                &times;
-              </button>
-              <img
-                class="thumbnail-preview-img"
-                src={thumbnailPreview.url}
-                alt="Thumbnail"
-              />
-              <div class="thumbnail-preview-info">
-                {parseDateFromName(thumbnailPreview.name)}
-              </div>
+              <button class="thumbnail-preview-close" onClick={() => setThumbnailPreview(null)}>&times;</button>
+              <img class="thumbnail-preview-img" src={thumbnailPreview.url} alt="Thumbnail" />
+              <div class="thumbnail-preview-info">{parseDateFromName(thumbnailPreview.name)}</div>
             </div>
           </div>
         )}
