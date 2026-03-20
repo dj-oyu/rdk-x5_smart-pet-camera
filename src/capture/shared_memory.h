@@ -113,7 +113,7 @@ typedef struct {
     uint8_t _reserved[2];       // Padding for alignment
 
     uint8_t data[MAX_FRAME_SIZE]; // Frame data
-} Frame;
+} Frame __attribute__((aligned(64)));
 
 /**
  * Shared frame buffer - ring buffer for camera frames
@@ -126,7 +126,9 @@ typedef struct {
  */
 typedef struct {
     volatile uint32_t write_index; // Atomic write pointer (wraps at RING_BUFFER_SIZE)
+    char _pad_wridx[60];          // Isolate write_index to its own 64B cache line
     volatile uint32_t frame_interval_ms; // Dynamic frame interval control (0 = 30fps, 500 = ~2fps)
+    char _pad_interval[60];       // Isolate frame_interval_ms to its own cache line
     sem_t new_frame_sem; // Semaphore for new frame notification (posted on each write)
     Frame frames[RING_BUFFER_SIZE]; // Ring buffer of frames
 } SharedFrameBuffer;

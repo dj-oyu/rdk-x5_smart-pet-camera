@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/logger"
@@ -96,19 +97,17 @@ func streamMJPEGFromChannel(w http.ResponseWriter, r *http.Request, frameCh <-ch
 			jpegData = blank
 		}
 
-		// Write frame with error checking - if client disconnected, exit immediately
-		header := fmt.Sprintf("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(jpegData))
-		if _, err := w.Write([]byte(header)); err != nil {
-			// Client disconnected (e.g., switched to WebRTC)
-			logger.Debug("MJPEG", "Client disconnected during write: %v", err)
-			return
-		}
-		if _, err := w.Write(jpegData); err != nil {
-			logger.Debug("MJPEG", "Client disconnected during frame write: %v", err)
-			return
-		}
-		if _, err := w.Write([]byte("\r\n")); err != nil {
-			logger.Debug("MJPEG", "Client disconnected during delimiter write: %v", err)
+		// Write frame in single syscall for TCP efficiency
+		header := strconv.AppendInt(
+			append([]byte("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "), make([]byte, 0, 10)...),
+			int64(len(jpegData)), 10)
+		header = append(header, "\r\n\r\n"...)
+		buf := make([]byte, 0, len(header)+len(jpegData)+2)
+		buf = append(buf, header...)
+		buf = append(buf, jpegData...)
+		buf = append(buf, "\r\n"...)
+		if _, err := w.Write(buf); err != nil {
+			logger.Debug("MJPEG", "Client disconnected: %v", err)
 			return
 		}
 		flusher.Flush()

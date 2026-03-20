@@ -312,14 +312,71 @@ func renderComicGrid(images []image.Image, panels []capturedPanel) *image.RGBA {
 	return canvas
 }
 
-// scaleImage scales src into dst rectangle on the canvas using nearest-neighbor.
+// scaleImage scales src into dst rectangle using nearest-neighbor with direct Pix access.
 func scaleImage(dst *image.RGBA, dstRect image.Rectangle, src image.Image) {
-	srcBounds := src.Bounds()
 	dw := dstRect.Dx()
 	dh := dstRect.Dy()
+	srcBounds := src.Bounds()
 	sw := srcBounds.Dx()
 	sh := srcBounds.Dy()
 
+	// Fast path: direct Pix manipulation for RGBA sources (avoids interface dispatch per pixel)
+	if srcRGBA, ok := src.(*image.RGBA); ok {
+		for dy := 0; dy < dh; dy++ {
+			sy := srcBounds.Min.Y + dy*sh/dh
+			dstOff := (dstRect.Min.Y+dy-dst.Rect.Min.Y)*dst.Stride + (dstRect.Min.X-dst.Rect.Min.X)*4
+			srcRow := (sy-srcRGBA.Rect.Min.Y)*srcRGBA.Stride - srcRGBA.Rect.Min.X*4
+			for dx := 0; dx < dw; dx++ {
+				sx := srcBounds.Min.X + dx*sw/dw
+				srcOff := srcRow + sx*4
+				copy(dst.Pix[dstOff:dstOff+4], srcRGBA.Pix[srcOff:srcOff+4])
+				dstOff += 4
+			}
+		}
+		return
+	}
+
+	// Fast path: YCbCr sources (jpeg.Decode returns this)
+	if srcYCbCr, ok := src.(*image.YCbCr); ok {
+		for dy := 0; dy < dh; dy++ {
+			sy := srcBounds.Min.Y + dy*sh/dh
+			dstOff := (dstRect.Min.Y+dy-dst.Rect.Min.Y)*dst.Stride + (dstRect.Min.X-dst.Rect.Min.X)*4
+			for dx := 0; dx < dw; dx++ {
+				sx := srcBounds.Min.X + dx*sw/dw
+				yi := srcYCbCr.YOffset(sx, sy)
+				ci := srcYCbCr.COffset(sx, sy)
+				yy := int32(srcYCbCr.Y[yi])
+				cb := int32(srcYCbCr.Cb[ci]) - 128
+				cr := int32(srcYCbCr.Cr[ci]) - 128
+				r := yy + 91881*cr/65536
+				g := yy - 22554*cb/65536 - 46802*cr/65536
+				b := yy + 116130*cb/65536
+				if r < 0 {
+					r = 0
+				} else if r > 255 {
+					r = 255
+				}
+				if g < 0 {
+					g = 0
+				} else if g > 255 {
+					g = 255
+				}
+				if b < 0 {
+					b = 0
+				} else if b > 255 {
+					b = 255
+				}
+				dst.Pix[dstOff] = uint8(r)
+				dst.Pix[dstOff+1] = uint8(g)
+				dst.Pix[dstOff+2] = uint8(b)
+				dst.Pix[dstOff+3] = 255
+				dstOff += 4
+			}
+		}
+		return
+	}
+
+	// Generic fallback
 	for dy := 0; dy < dh; dy++ {
 		sy := srcBounds.Min.Y + dy*sh/dh
 		for dx := 0; dx < dw; dx++ {
