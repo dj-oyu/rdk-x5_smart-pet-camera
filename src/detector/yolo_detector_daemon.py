@@ -159,7 +159,7 @@ class YoloDetectorDaemon:
         self.night_fp_classes = {"toilet", "sink", "suitcase", "chair"}
 
         # Night frame collection for future fine-tuning
-        self.night_collect_dir = PROJECT_ROOT / "data" / "night_collect"
+        self.night_collect_dir = Path("/tmp/night_collect")
         self.night_collect_count: int = 0
         self.night_collect_max: int = 500  # Max frames to collect per session
         self.night_collect_interval: int = 150  # Collect every N frames during motion
