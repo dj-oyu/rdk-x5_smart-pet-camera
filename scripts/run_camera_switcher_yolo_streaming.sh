@@ -224,7 +224,7 @@ require_cmd() {
 
 require_cmd make
 require_cmd "${UV_BIN}"
-require_cmd npm
+require_cmd bun
 
 # Go Streaming Server使用時はgoコマンドが必要
 if [[ "${RUN_STREAMING}" -eq 1 ]]; then
@@ -326,12 +326,8 @@ if [[ "${SKIP_BUILD}" -ne 1 ]]; then
   make -C "${CAPTURE_DIR}" >/dev/null
   make -C "${CAPTURE_DIR}" switcher-daemon-build >/dev/null
 
-  echo "[build] Building web assets..."
-  # node_modules/esbuildのネイティブバイナリが無ければnpm install
-  if [[ ! -x "${REPO_ROOT}/node_modules/esbuild/bin/esbuild" ]]; then
-    echo "[build] Installing npm dependencies..."
-    (cd "${REPO_ROOT}" && npm install) >/dev/null 2>&1
-  fi
+  echo "[build] Building web assets (Bun)..."
+  (cd "${REPO_ROOT}/src/web" && bun install --frozen-lockfile 2>/dev/null; true)
   make -C "${REPO_ROOT}" web >/dev/null 2>&1
 
   if [[ "${RUN_STREAMING}" -eq 1 ]]; then
