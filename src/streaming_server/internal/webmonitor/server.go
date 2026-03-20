@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -21,6 +23,7 @@ type Server struct {
 	detectionBroadcaster   *DetectionBroadcaster
 	statusBroadcaster      *StatusBroadcaster
 	connectionBroadcaster  *ConnectionBroadcaster
+	comicCapture           *ComicCapture
 }
 
 // NewServer returns a configured monitor server.
@@ -77,6 +80,14 @@ func NewServer(cfg Config) *Server {
 		recorder.NotifyDetection()
 	})
 
+	// Initialize comic capture with its own SHM reader (independent version tracking)
+	var comicCapture *ComicCapture
+	if comicShm, err := newSHMReader(cfg.FrameShmName, cfg.DetectionShmName); err == nil {
+		comicsDir := filepath.Join(cfg.RecordingOutputPath, "comics")
+		comicCapture = NewComicCapture(comicShm, comicsDir)
+		comicCapture.Start()
+	}
+
 	return &Server{
 		cfg:                   cfg,
 		monitor:               monitor,
@@ -86,6 +97,7 @@ func NewServer(cfg Config) *Server {
 		detectionBroadcaster:  detectionBroadcaster,
 		statusBroadcaster:     statusBroadcaster,
 		connectionBroadcaster: connectionBroadcaster,
+		comicCapture:          comicCapture,
 	}
 }
 
@@ -111,6 +123,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/recordings", s.handleRecordingsList)
 	mux.HandleFunc("/api/recordings/", s.handleRecordingDownload)
 	mux.HandleFunc("/api/webrtc/offer", s.handleWebRTCOffer)
+	mux.HandleFunc("/api/comics", s.handleComicsList)
+	mux.HandleFunc("/api/comics/", s.handleComicServe)
 
 	return mux
 }
@@ -435,6 +449,93 @@ func (s *Server) handleConnectionsStream(w http.ResponseWriter, r *http.Request)
 	defer s.connectionBroadcaster.Unsubscribe(id)
 
 	streamConnectionEventsFromChannel(w, r, eventCh)
+}
+
+// Shutdown stops background goroutines.
+func (s *Server) Shutdown() {
+	if s.comicCapture != nil {
+		s.comicCapture.Stop()
+	}
+}
+
+func (s *Server) handleComicsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	comicsDir := filepath.Join(s.cfg.RecordingOutputPath, "comics")
+	entries, err := os.ReadDir(comicsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeJSON(w, map[string]any{"comics": []any{}})
+			return
+		}
+		writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusInternalServerError)
+		return
+	}
+
+	type comicInfo struct {
+		Filename  string `json:"filename"`
+		Size      int64  `json:"size"`
+		CreatedAt string `json:"created_at"`
+	}
+
+	comics := []comicInfo{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jpg") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		comics = append(comics, comicInfo{
+			Filename:  e.Name(),
+			Size:      info.Size(),
+			CreatedAt: info.ModTime().Format(time.RFC3339),
+		})
+	}
+
+	sort.Slice(comics, func(i, j int) bool {
+		return comics[i].CreatedAt > comics[j].CreatedAt
+	})
+
+	writeJSON(w, map[string]any{"comics": comics})
+}
+
+func (s *Server) handleComicServe(w http.ResponseWriter, r *http.Request) {
+	prefix := "/api/comics/"
+	if !strings.HasPrefix(r.URL.Path, prefix) {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+	filename := filepath.Base(strings.TrimPrefix(r.URL.Path, prefix))
+	if filename == "" || filename == "." || !strings.HasSuffix(filename, ".jpg") {
+		http.Error(w, "Invalid filename", http.StatusBadRequest)
+		return
+	}
+
+	comicsDir := filepath.Join(s.cfg.RecordingOutputPath, "comics")
+	filePath := filepath.Join(comicsDir, filename)
+
+	switch r.Method {
+	case http.MethodGet:
+		if _, err := os.Stat(filePath); err != nil {
+			writeJSONWithStatus(w, map[string]any{"error": "not found"}, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		http.ServeFile(w, r, filePath)
+	case http.MethodDelete:
+		if err := os.Remove(filePath); err != nil {
+			writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusNotFound)
+			return
+		}
+		writeJSON(w, map[string]any{"deleted": true, "filename": filename})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, payload any) {

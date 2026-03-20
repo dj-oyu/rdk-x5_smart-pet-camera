@@ -1072,6 +1072,53 @@ a { color: inherit; }
     backdrop-filter: blur(4px);
 }
 
+/* Comic Gallery */
+.comic-gallery {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+}
+.comic-card {
+    border-radius: 8px;
+    overflow: hidden;
+    position: relative;
+    background: rgba(0, 0, 0, 0.28);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    cursor: pointer;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.comic-card:hover {
+    transform: scale(1.02);
+    box-shadow: 0 8px 24px rgba(110, 231, 255, 0.2);
+}
+.comic-card img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+.comic-card-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 10px;
+    background: rgba(0, 0, 0, 0.4);
+}
+.comic-card-date {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.comic-card-delete {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    font-size: 18px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+}
+
 @media (max-width: 960px) {
     .grid {
         grid-template-columns: 1fr;
