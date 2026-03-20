@@ -145,8 +145,9 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
   // Initialize low-light correction state (Phase 2)
   isp_lowlight_state_init(&pipeline->lowlight_state);
 
-  // Night camera: boost 3DNR to maximum for IR noise reduction (one-time setting)
+  // Night camera: ISP tuning for IR (one-time settings)
   if (camera_index == 1) {
+    // 3DNR: max temporal noise reduction for IR noise
     hbn_isp_3dnr_attr_t tnr_attr = {0};
     tnr_attr.mode = HBN_ISP_MODE_MANUAL;
     tnr_attr.manual_attr.tnr_strength = 128;  // Max temporal NR
@@ -156,6 +157,7 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
     } else {
       LOG_INFO(Pipeline_log_header, "Night camera 3DNR set to 128 (max)");
     }
+
   }
 
   LOG_INFO(Pipeline_log_header, "Pipeline created successfully");
@@ -205,6 +207,10 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
   // The frame must not be released until consumer finishes processing
   hbn_vnode_image_t pending_yolo_frame = {0};
   bool has_pending_yolo_frame = false;
+
+  // Night camera AWB flag: set after ISP has processed enough frames to
+  // fully initialize its AWB algorithm. Setting too early gets overwritten.
+  bool night_awb_applied = (pipeline->camera_index != 1);
 
   LOG_INFO(Pipeline_log_header,
            "Starting capture loop (threaded encoder, 30fps NV12+H.264)...");
@@ -554,6 +560,28 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     }
 
     frame_count++;
+
+    // Night camera: fix AWB to Manual after ISP has stabilized (~1 sec).
+    // Auto AWB cannot converge on IR scenes and causes purple/blue drift.
+    // See docs/awb_tuning_report.md for test results and tuning tool usage.
+    if (!night_awb_applied && frame_count == 30) {
+      hbn_isp_awb_attr_t awb_attr = {0};
+      int awb_ret = hbn_isp_get_awb_attr(pipeline->vio.isp_handle, &awb_attr);
+      if (awb_ret == 0) {
+        awb_attr.mode = HBN_ISP_MODE_MANUAL;
+        awb_attr.manual_attr.gain.rgain  = 1.8f;
+        awb_attr.manual_attr.gain.grgain = 1.8f;
+        awb_attr.manual_attr.gain.gbgain = 1.8f;
+        awb_attr.manual_attr.gain.bgain  = 2.34f;
+        awb_ret = hbn_isp_set_awb_attr(pipeline->vio.isp_handle, &awb_attr);
+      }
+      if (awb_ret != 0) {
+        LOG_WARN(Pipeline_log_header, "Failed to set night AWB: %d", awb_ret);
+      } else {
+        LOG_INFO(Pipeline_log_header, "Night camera AWB fixed: R=1.8 G=1.8 B=2.34 (frame %d)", frame_count);
+      }
+      night_awb_applied = true;
+    }
 
     // Print FPS every 30 frames
     if (frame_count % 30 == 0) {

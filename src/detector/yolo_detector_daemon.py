@@ -422,19 +422,22 @@ class YoloDetectorDaemon:
                     motion_dicts = []
                     if self.prev_y_plane is not None and self.motion_cooldown <= 0:
                         diff = cv2.absdiff(y_small_denoised, self.prev_y_plane)
-                        _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+                        _, thresh = cv2.threshold(diff, 15, 255, cv2.THRESH_BINARY)
                         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
                         thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-                        thresh = cv2.dilate(thresh, kernel, iterations=2)
+                        merge_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
+                        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, merge_kernel)
                         contours, _ = cv2.findContours(
                             thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
                         )
-                        min_area = motion_w * motion_h * 0.005  # 0.5% of frame
+                        min_area = motion_w * motion_h * 0.002  # 0.2% of frame
                         for cnt in contours:
                             area = cv2.contourArea(cnt)
                             if area < min_area:
                                 continue
                             x, y, w, h = cv2.boundingRect(cnt)
+                            if w < 15 or h < 15:
+                                continue
                             confidence = min(1.0, area / (motion_w * motion_h * 0.05))
                             # Scale bbox back to full frame coordinates
                             motion_dicts.append({
@@ -442,6 +445,8 @@ class YoloDetectorDaemon:
                                 "confidence": float(confidence),
                                 "bbox": {"x": x * 2, "y": y * 2, "w": w * 2, "h": h * 2},
                             })
+                        if len(motion_dicts) > 5:
+                            motion_dicts = []
                         if motion_dicts:
                             self.motion_cooldown = 5
                             # Collect frames for future fine-tuning
