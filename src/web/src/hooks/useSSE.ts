@@ -8,110 +8,120 @@ interface SSEOptions {
   onViewerCount?: (count: number) => void;
 }
 
+function createSSE(
+  url: string,
+  ac: AbortController,
+  onMessage: (data: string) => void,
+  onReconnect: (retry: number) => void,
+  eventName?: string,
+) {
+  const es = new EventSource(url);
+  let retryCount = 0;
+
+  const handler = (event: Event) => {
+    retryCount = 0;
+    onMessage((event as MessageEvent).data);
+  };
+
+  if (eventName) {
+    es.addEventListener(eventName, handler);
+  } else {
+    es.onmessage = (e) => { retryCount = 0; onMessage(e.data); };
+  }
+
+  es.onerror = () => {
+    es.close();
+    if (ac.signal.aborted) return;
+    retryCount++;
+    if (retryCount <= 5) {
+      const delay = 1000 * Math.pow(2, retryCount - 1);
+      setTimeout(() => {
+        if (!ac.signal.aborted) onReconnect(retryCount);
+      }, delay);
+    }
+  };
+
+  // Abort → close
+  ac.signal.addEventListener('abort', () => es.close());
+  return es;
+}
+
 export function useSSE(options: SSEOptions) {
   const optionsRef = useRef(options);
   optionsRef.current = options;
-
-  const detectionESRef = useRef<EventSource | null>(null);
-  const statusESRef = useRef<EventSource | null>(null);
-  const connectionESRef = useRef<EventSource | null>(null);
-
-  const startDetectionStream = useCallback(() => {
-    detectionESRef.current?.close();
-    const es = new EventSource('/api/detections/stream?format=protobuf');
-    detectionESRef.current = es;
-
-    es.onmessage = (event) => {
-      try {
-        const bytes = base64ToBytes(event.data);
-        const parsed = decodeDetectionEvent(bytes);
-        optionsRef.current.onDetection?.(parsed);
-      } catch (e) {
-        console.error('[SSE] Detection decode error:', e);
-      }
-    };
-    es.onerror = () => {
-      es.close();
-      setTimeout(startDetectionStream, 2000);
-    };
-  }, []);
-
-  const startStatusStream = useCallback((retryCount = 0) => {
-    statusESRef.current?.close();
-    const es = new EventSource('/api/status/stream?format=protobuf');
-    statusESRef.current = es;
-
-    es.onmessage = (event) => {
-      try {
-        const bytes = base64ToBytes(event.data);
-        const data = decodeStatusEvent(bytes);
-        optionsRef.current.onStatus?.(data);
-      } catch (e) {
-        console.error('[SSE] Status decode error:', e);
-      }
-    };
-    es.onerror = () => {
-      es.close();
-      if (retryCount < 3) {
-        setTimeout(() => startStatusStream(retryCount + 1), 1000 * Math.pow(2, retryCount));
-      } else {
-        // Fallback to polling
-        const poll = async () => {
-          try {
-            const res = await fetch('/api/status');
-            if (res.ok) {
-              const data = await res.json();
-              optionsRef.current.onStatus?.(data);
-            }
-          } catch { /* ignore */ }
-        };
-        poll();
-        setInterval(poll, 2000);
-      }
-    };
-  }, []);
-
-  const startConnectionStream = useCallback((retryCount = 0) => {
-    connectionESRef.current?.close();
-    const es = new EventSource('/api/connections/stream');
-    connectionESRef.current = es;
-
-    es.addEventListener('connections', (event: Event) => {
-      try {
-        const data = JSON.parse((event as MessageEvent).data);
-        const viewers = (data.webrtc || 0) + (data.mjpeg || 0);
-        optionsRef.current.onViewerCount?.(viewers);
-      } catch { /* ignore */ }
-    });
-    es.onerror = () => {
-      es.close();
-      if (retryCount < 3) {
-        setTimeout(() => startConnectionStream(retryCount + 1), 1000 * Math.pow(2, retryCount));
-      }
-    };
-
-    // Initial fetch
-    fetch('/api/connections')
-      .then((r) => r.json())
-      .then((data) => {
-        const viewers = (data.webrtc || 0) + (data.mjpeg || 0);
-        optionsRef.current.onViewerCount?.(viewers);
-      })
-      .catch(() => {});
-  }, []);
+  const acRef = useRef<AbortController | null>(null);
 
   const stop = useCallback(() => {
-    detectionESRef.current?.close();
-    statusESRef.current?.close();
-    connectionESRef.current?.close();
-    detectionESRef.current = null;
-    statusESRef.current = null;
-    connectionESRef.current = null;
+    acRef.current?.abort();
+    acRef.current = null;
   }, []);
+
+  const start = useCallback(() => {
+    // Abort any existing connections first
+    stop();
+    const ac = new AbortController();
+    acRef.current = ac;
+
+    // Detection SSE
+    const startDetection = (retry = 0) => {
+      if (ac.signal.aborted) return;
+      createSSE(
+        '/api/detections/stream?format=protobuf', ac,
+        (data) => {
+          try {
+            optionsRef.current.onDetection?.(decodeDetectionEvent(base64ToBytes(data)));
+          } catch { /* ignore */ }
+        },
+        (r) => startDetection(r),
+      );
+    };
+
+    // Status SSE
+    const startStatus = (retry = 0) => {
+      if (ac.signal.aborted) return;
+      createSSE(
+        '/api/status/stream?format=protobuf', ac,
+        (data) => {
+          try {
+            optionsRef.current.onStatus?.(decodeStatusEvent(base64ToBytes(data)));
+          } catch { /* ignore */ }
+        },
+        (r) => startStatus(r),
+      );
+    };
+
+    // Connection SSE (named event)
+    const parseViewers = (data: string) => {
+      try {
+        const d = JSON.parse(data);
+        optionsRef.current.onViewerCount?.((d.webrtc || 0) + (d.mjpeg || 0));
+      } catch { /* ignore */ }
+    };
+
+    const startConnection = (retry = 0) => {
+      if (ac.signal.aborted) return;
+      createSSE(
+        '/api/connections/stream', ac,
+        parseViewers,
+        (r) => startConnection(r),
+        'connections',
+      );
+    };
+
+    startDetection();
+    startStatus();
+    startConnection();
+
+    // Initial viewer count fetch
+    fetch('/api/connections', { signal: ac.signal })
+      .then((r) => r.json())
+      .then((d) => parseViewers(JSON.stringify(d)))
+      .catch(() => {});
+  }, [stop]);
 
   useEffect(() => {
     return () => stop();
   }, [stop]);
 
-  return { startDetectionStream, startStatusStream, startConnectionStream, stop };
+  return { start, stop };
 }
