@@ -6,6 +6,7 @@
 #include "hb_mem_mgr.h"
 #include "isp_brightness.h"
 #include "logger.h"
+#include <hbn_isp_api.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -85,19 +86,6 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
     goto error_cleanup;
   }
 
-  // Open or create shared memory with fixed names (new design)
-  // create_named() will open existing shared memory if already created by
-  // camera_switcher_daemon Active camera NV12 (written only when active)
-  pipeline->shm_active_nv12 =
-      shm_frame_buffer_create_named(SHM_NAME_ACTIVE_FRAME);
-  if (!pipeline->shm_active_nv12) {
-    LOG_ERROR(Pipeline_log_header,
-              "Failed to open/create active NV12 shared memory: %s",
-              SHM_NAME_ACTIVE_FRAME);
-    ret = -1;
-    goto error_cleanup;
-  }
-
   // Active camera H.264 (written only when active)
   pipeline->shm_active_h264 = shm_frame_buffer_create_named(SHM_NAME_STREAM);
   if (!pipeline->shm_active_h264) {
@@ -156,6 +144,19 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
 
   // Initialize low-light correction state (Phase 2)
   isp_lowlight_state_init(&pipeline->lowlight_state);
+
+  // Night camera: boost 3DNR to maximum for IR noise reduction (one-time setting)
+  if (camera_index == 1) {
+    hbn_isp_3dnr_attr_t tnr_attr = {0};
+    tnr_attr.mode = HBN_ISP_MODE_MANUAL;
+    tnr_attr.manual_attr.tnr_strength = 128;  // Max temporal NR
+    int nr_ret = hbn_isp_set_3dnr_attr(pipeline->vio.isp_handle, &tnr_attr);
+    if (nr_ret != 0) {
+      LOG_WARN(Pipeline_log_header, "Failed to set night 3DNR: %d", nr_ret);
+    } else {
+      LOG_INFO(Pipeline_log_header, "Night camera 3DNR set to 128 (max)");
+    }
+  }
 
   LOG_INFO(Pipeline_log_header, "Pipeline created successfully");
   return 0;
@@ -286,55 +287,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     }
 
     if (write_active) {
-      // Convert timeval to timespec
       clock_gettime(CLOCK_REALTIME, &frame_timestamp);
-
-      Frame nv12_frame = {0};
-      nv12_frame.width = pipeline->output_width;
-      nv12_frame.height = pipeline->output_height;
-      nv12_frame.format = 1; // NV12
-      nv12_frame.frame_number = frame_count;
-      nv12_frame.camera_id = pipeline->camera_index;
-      nv12_frame.timestamp = frame_timestamp;
-
-      // Apply brightness data from ISP
-      isp_fill_frame_brightness(&nv12_frame, &brightness_result);
-      nv12_frame.correction_applied = 0;
-
-      // Calculate NV12 size from buffer metadata
-      size_t nv12_size = 0;
-      for (int i = 0; i < vio_frame.buffer.plane_cnt; i++) {
-        nv12_size += vio_frame.buffer.size[i];
-      }
-      nv12_frame.data_size = nv12_size;
-
-      // Copy NV12 data (Y plane + UV plane)
-      if (nv12_size <= sizeof(nv12_frame.data)) {
-        size_t offset = 0;
-        for (int i = 0; i < vio_frame.buffer.plane_cnt; i++) {
-          memcpy(nv12_frame.data + offset, vio_frame.buffer.virt_addr[i],
-                 vio_frame.buffer.size[i]);
-          offset += vio_frame.buffer.size[i];
-        }
-
-        // Write to active shared memory if camera is active
-        if (write_active) {
-          int write_ret =
-              shm_frame_buffer_write(pipeline->shm_active_nv12, &nv12_frame);
-          if (write_ret < 0) {
-            LOG_WARN(Pipeline_log_header, "Failed to write NV12 to active shm");
-          } else if (frame_count % 30 == 0) {
-            LOG_DEBUG(Pipeline_log_header,
-                      "Wrote NV12 frame#%d to active shm (idx=%d)", frame_count,
-                      write_ret);
-          }
-        }
-
-        // Probe mechanism removed (Phase 2) - brightness always available via SHM
-      } else {
-        LOG_WARN(Pipeline_log_header, "NV12 frame too large (%zu bytes)",
-                 nv12_size);
-      }
     }
 
     // Phase 2: Always update brightness in per-camera ZeroCopy SHM
@@ -667,11 +620,6 @@ void pipeline_destroy(camera_pipeline_t *pipeline) {
   }
 
   // Close shared memory (do not destroy - owned by camera_switcher_daemon)
-  if (pipeline->shm_active_nv12) {
-    shm_frame_buffer_close(pipeline->shm_active_nv12);
-    pipeline->shm_active_nv12 = NULL;
-  }
-
   if (pipeline->shm_active_h264) {
     shm_frame_buffer_close(pipeline->shm_active_h264);
     pipeline->shm_active_h264 = NULL;

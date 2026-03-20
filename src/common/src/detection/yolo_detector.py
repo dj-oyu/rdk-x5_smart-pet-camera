@@ -891,7 +891,7 @@ class YoloDetector:
         self, nv12_array: np.ndarray, width: int, height: int
     ) -> np.ndarray:
         """
-        NV12のY平面にCLAHE適用 + UV平面を128固定(無彩色化)
+        NV12のY平面にデノイズ+CLAHE適用 + UV平面を128固定(無彩色化)
 
         CLAHEは局所的なコントラスト改善を行い、低照度画像の視認性を向上させる。
         IR カメラの紫色かぶり(UV異常値)を除去するため、UV平面を128に固定して
