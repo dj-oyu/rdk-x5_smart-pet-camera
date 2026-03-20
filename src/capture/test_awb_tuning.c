@@ -423,19 +423,27 @@ static int set_gamma(hbn_vnode_handle_t isp_handle, float gamma_val) {
     return ret;
   }
 
-  attr.mode = HBN_ISP_MODE_MANUAL;
-  attr.manual_attr.standard = 1;  // Use standard gamma formula
+  // Try 1: keep current mode, just modify standard_val
+  attr.manual_attr.standard = 1;
   attr.manual_attr.standard_val = gamma_val;
 
-  ret = hbn_isp_set_gc_attr(isp_handle, &attr);
-  if (ret != 0) {
-    fprintf(stderr, "[GC] Failed to set gamma attr: %d\n", ret);
-    return ret;
+  int gc_ret = hbn_isp_set_gc_attr(isp_handle, &attr);
+  if (gc_ret == 0) {
+    printf("[GC] Set gamma=%.2f (kept %s mode)\n", gamma_val,
+           attr.mode == HBN_ISP_MODE_AUTO ? "AUTO" : "MANUAL");
+    return 0;
   }
 
-  printf("[GC] Set gamma=%.2f (< 1.0 brightens shadows, > 1.0 darkens)\n", gamma_val);
-  printf("     NOTE: May not take effect on this hardware.\n");
-  return 0;
+  // Try 2: switch to Manual mode
+  attr.mode = HBN_ISP_MODE_MANUAL;
+  gc_ret = hbn_isp_set_gc_attr(isp_handle, &attr);
+  if (gc_ret == 0) {
+    printf("[GC] Set gamma=%.2f (MANUAL mode)\n", gamma_val);
+    return 0;
+  }
+
+  fprintf(stderr, "[GC] Failed to set gamma (all approaches): %d\n", gc_ret);
+  return gc_ret;
 }
 
 // ============================================================================
@@ -474,17 +482,30 @@ static int set_wdr_dark_boost(hbn_vnode_handle_t isp_handle,
     return ret;
   }
 
-  attr.mode = HBN_ISP_MODE_MANUAL;
-  attr.manual_attr.strength_attr.strength = strength;
-  attr.manual_attr.ltm_attr.dark_attention_level = dark_attention;
-
-  ret = hbn_isp_set_wdr_attr(isp_handle, &attr);
-  if (ret != 0) {
-    fprintf(stderr, "[WDR] Failed to set WDR attr: %d\n", ret);
-    return ret;
+  // Try AUTO mode with auto_level first (Manual mode fails on this hardware)
+  int wdr_ret = -1;
+  if (attr.mode == HBN_ISP_MODE_AUTO) {
+    uint8_t level = strength * 10 / 255;
+    attr.auto_attr.auto_level = level;
+    wdr_ret = hbn_isp_set_wdr_attr(isp_handle, &attr);
+    if (wdr_ret == 0) {
+      printf("[WDR] Set AUTO auto_level=%u (from strength=%u)\n", level, strength);
+    }
   }
 
-  printf("[WDR] Set strength=%u, dark_attention=%u\n", strength, dark_attention);
+  // Fallback: try Manual mode
+  if (wdr_ret != 0) {
+    attr.mode = HBN_ISP_MODE_MANUAL;
+    attr.manual_attr.strength_attr.strength = strength;
+    attr.manual_attr.ltm_attr.dark_attention_level = dark_attention;
+    wdr_ret = hbn_isp_set_wdr_attr(isp_handle, &attr);
+    if (wdr_ret != 0) {
+      fprintf(stderr, "[WDR] Failed (AUTO and MANUAL both failed): %d\n", wdr_ret);
+      return wdr_ret;
+    }
+    printf("[WDR] Set MANUAL strength=%u, dark_attention=%u\n", strength, dark_attention);
+  }
+
   return 0;
 }
 
