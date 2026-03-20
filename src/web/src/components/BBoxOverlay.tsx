@@ -83,8 +83,8 @@ export function useBBoxOverlay(videoRef: preact.RefObject<HTMLVideoElement | nul
 
       for (const det of detectionsRef.current) {
         const color = COLORS[det.class_name] || '#FFFFFF';
-        const scaleX = canvas.width / 640;
-        const scaleY = canvas.height / 480;
+        const scaleX = canvas.width / 1280;
+        const scaleY = canvas.height / 720;
         const x = det.bbox.x * scaleX;
         const y = det.bbox.y * scaleY;
         const w = det.bbox.w * scaleX;

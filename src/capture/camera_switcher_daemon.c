@@ -71,7 +71,7 @@ static int spawn_daemon(CameraMode camera) {
     char camera_arg[16];
     snprintf(camera_arg, sizeof(camera_arg), "%d", (int)camera);
 
-    execl(CAPTURE_BIN, CAPTURE_BIN, "-C", camera_arg, "-W", "640", "-H", "480",
+    execl(CAPTURE_BIN, CAPTURE_BIN, "-C", camera_arg, "-W", "1280", "-H", "720",
           NULL);
     perror("execl");
     _exit(1);

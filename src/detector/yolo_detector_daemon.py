@@ -133,7 +133,7 @@ class YoloDetectorDaemon:
         self.running = True
 
         # カメラごとのスケール係数（フレームサイズが異なるため）
-        # Day: 640x360 → 640x480, Night: 1280x720 → 640x480
+        # Day: 640x360 → 1280x720, Night: 1280x720 → 1280x720
         self.scale_x: float | None = None
         self.scale_y: float | None = None
 
@@ -339,10 +339,10 @@ class YoloDetectorDaemon:
                 if self.shm_control and self.shm_control.try_wait_switch():
                     camera_id = self.shm_control.get_active()
                     # Use fixed scale factors based on camera type
-                    # Output is always MJPEG 640x480
-                    if camera_id == 0:  # Day: 640x360 → 640x480
-                        self.scale_x = 1.0
-                        self.scale_y = 480.0 / 360.0  # ~1.333
+                    # Output is always H.264 1280x720
+                    if camera_id == 0:  # Day: 640x360 → 1280x720
+                        self.scale_x = 2.0
+                        self.scale_y = 2.0
                         # Disable night ROI mode, use letterbox
                         self.night_roi_mode = False
                         self.night_roi_regions = []
@@ -352,9 +352,9 @@ class YoloDetectorDaemon:
                         # Restore original score_threshold for day camera
                         self.detector.score_threshold = self.score_threshold
                         logger.debug(f"Camera switched to {camera_id} [day camera letterbox mode]")
-                    else:  # Night: 1280x720 → 640x480
-                        self.scale_x = 0.5
-                        self.scale_y = 480.0 / 720.0  # ~0.667
+                    else:  # Night: 1280x720 → 1280x720
+                        self.scale_x = 1.0
+                        self.scale_y = 1.0
                         # Enable night ROI mode with 3 overlapping regions
                         self.night_roi_mode = True
                         self.night_roi_regions = self.detector.get_roi_regions_720p()
@@ -369,12 +369,12 @@ class YoloDetectorDaemon:
                 if self.scale_x is None or self.scale_y is None:
                     camera_id = zc_frame.camera_id
                     # Use fixed scale factors based on camera type
-                    if camera_id == 0:  # Day: 640x360 → 640x480
+                    if camera_id == 0:  # Day: 640x360 → 1280x720
+                        self.scale_x = 2.0
+                        self.scale_y = 2.0
+                    else:  # Night: 1280x720 → 1280x720
                         self.scale_x = 1.0
-                        self.scale_y = 480.0 / 360.0
-                    else:  # Night: 1280x720 → 640x480
-                        self.scale_x = 0.5
-                        self.scale_y = 480.0 / 720.0
+                        self.scale_y = 1.0
                         # Lower score_threshold for night camera
                         self.detector.score_threshold = max(0.25, self.score_threshold - 0.15)
                     logger.debug(f"Initial scale for camera {camera_id}: ({self.scale_x:.3f}, {self.scale_y:.3f}), score_th={self.detector.score_threshold}")
@@ -468,28 +468,28 @@ class YoloDetectorDaemon:
                         self.roi_index = (self.roi_index + 1) % len(self.night_roi_regions)
                         cycle_complete = (self.roi_index == 0)
                     else:
-                        detections = []
                         cycle_complete = False
 
                     # Release buffer
                     hb_mem_buffer.release()
                     active_zc.mark_consumed()
 
-                    # Convert YOLO detections to dicts
-                    yolo_dicts = [
-                        {
-                            "class_name": det.class_name.value,
-                            "confidence": det.confidence,
-                            "bbox": {
-                                "x": det.bbox.x, "y": det.bbox.y,
-                                "w": det.bbox.w, "h": det.bbox.h,
-                            },
-                        }
-                        for det in detections
-                    ]
+                    if run_yolo:
+                        # Convert YOLO detections to dicts
+                        yolo_dicts = [
+                            {
+                                "class_name": det.class_name.value,
+                                "confidence": det.confidence,
+                                "bbox": {
+                                    "x": det.bbox.x, "y": det.bbox.y,
+                                    "w": det.bbox.w, "h": det.bbox.h,
+                                },
+                            }
+                            for det in detections
+                        ]
 
-                    # Accumulate YOLO ROI results
-                    self.detection_cache[current_roi] = yolo_dicts
+                        # Accumulate YOLO ROI results
+                        self.detection_cache[current_roi] = yolo_dicts
 
                     if cycle_complete:
                         # Merge YOLO ROI detections
