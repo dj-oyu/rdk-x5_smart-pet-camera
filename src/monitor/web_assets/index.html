@@ -91,33 +91,23 @@
                 <span id="record-info"></span>
             </div>
 
-            <!-- Trajectory visualization -->
-            <div class="trajectory-card" id="trajectory-card">
-                <canvas class="trajectory-canvas" id="trajectory-canvas"></canvas>
-                <div class="legend" id="trajectory-legend"></div>
-            </div>
+            <!-- Sidebar: Trajectory + Comic Gallery -->
+            <div class="sidebar">
+                <div class="trajectory-card" id="trajectory-card">
+                    <canvas class="trajectory-canvas" id="trajectory-canvas"></canvas>
+                    <div class="legend" id="trajectory-legend"></div>
+                </div>
 
-            <!-- Detection Insights -->
-            <div class="panel">
-                <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
-                    <div>
-                        <h2>検出インサイト</h2>
-                        <p class="panel-subtitle">履歴・ランキング・タイムラインを切り替えて把握</p>
+                <div class="panel">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <div>
+                            <h2>ねこコミック</h2>
+                            <p class="panel-subtitle">検出時の4コマスナップショット</p>
+                        </div>
                     </div>
-                    <div class="view-toggle" id="view-toggle">
-                        <button type="button" data-view="history" class="active">履歴</button>
-                        <button type="button" data-view="ranking">ランキング</button>
-                        <button type="button" data-view="timeline">タイムライン</button>
+                    <div class="comic-gallery" id="comic-gallery">
+                        <p class="muted">コミックはまだありません。猫の検出を待機しています。</p>
                     </div>
-                </div>
-                <div class="detections" id="history-list">
-                    <p class="muted">まだ検出結果はありません。カメラ入力を待機しています。</p>
-                </div>
-                <div class="rank-list" id="ranking-list" style="display:none;"></div>
-                <div class="timeline" id="timeline-list" style="display:none;"></div>
-                <div class="timeline-chart" id="timeline-chart" style="display:none;">
-                    <canvas class="timeline-canvas" id="timeline-canvas"></canvas>
-                    <div class="legend" id="timeline-legend"></div>
                 </div>
             </div>
         </div>
