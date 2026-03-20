@@ -145,8 +145,9 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
   // Initialize low-light correction state (Phase 2)
   isp_lowlight_state_init(&pipeline->lowlight_state);
 
-  // Night camera: boost 3DNR to maximum for IR noise reduction (one-time setting)
+  // Night camera: ISP tuning for IR (one-time settings)
   if (camera_index == 1) {
+    // 3DNR: max temporal noise reduction for IR noise
     hbn_isp_3dnr_attr_t tnr_attr = {0};
     tnr_attr.mode = HBN_ISP_MODE_MANUAL;
     tnr_attr.manual_attr.tnr_strength = 128;  // Max temporal NR
@@ -155,6 +156,26 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
       LOG_WARN(Pipeline_log_header, "Failed to set night 3DNR: %d", nr_ret);
     } else {
       LOG_INFO(Pipeline_log_header, "Night camera 3DNR set to 128 (max)");
+    }
+
+    // AWB: fix to Manual to prevent color drift in IR
+    // Auto AWB cannot converge on IR-only scenes and causes purple/blue drift.
+    // Gains: R:G:B ratio = 1:1:1.3 (cool tint), overall x1.8 for shadow visibility.
+    // See docs/awb_tuning_report.md for test results.
+    hbn_isp_awb_attr_t awb_attr = {0};
+    int awb_ret = hbn_isp_get_awb_attr(pipeline->vio.isp_handle, &awb_attr);
+    if (awb_ret == 0) {
+      awb_attr.mode = HBN_ISP_MODE_MANUAL;
+      awb_attr.manual_attr.gain.rgain  = 1.8f;
+      awb_attr.manual_attr.gain.grgain = 1.8f;
+      awb_attr.manual_attr.gain.gbgain = 1.8f;
+      awb_attr.manual_attr.gain.bgain  = 2.34f;
+      awb_ret = hbn_isp_set_awb_attr(pipeline->vio.isp_handle, &awb_attr);
+    }
+    if (awb_ret != 0) {
+      LOG_WARN(Pipeline_log_header, "Failed to set night AWB: %d", awb_ret);
+    } else {
+      LOG_INFO(Pipeline_log_header, "Night camera AWB fixed: R=1.8 G=1.8 B=2.34");
     }
   }
 
