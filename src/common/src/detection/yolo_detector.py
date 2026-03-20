@@ -910,7 +910,8 @@ class YoloDetector:
         # Y平面を抽出して2D配列に変換
         y_plane = nv12_array[:y_size].reshape(height, width)
 
-        # CLAHEを適用
+        # IRノイズ除去 → CLAHE (crop後の小さいデータに適用)
+        y_plane = cv2.medianBlur(y_plane, 5)
         y_enhanced = self.clahe.apply(y_plane)
 
         # 結果を元の配列に書き戻す
