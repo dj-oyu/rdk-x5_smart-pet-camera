@@ -45,7 +45,9 @@ typedef struct {
 // SharedFrameBuffer structure matching shared_memory.h
 typedef struct {
     volatile uint32_t write_index;
+    char _pad_wridx[60];          // Cache line isolation padding
     volatile uint32_t frame_interval_ms;
+    char _pad_interval[60];       // Cache line isolation padding
     uint8_t new_frame_sem[32];  // sem_t semaphore (32 bytes on Linux)
     Frame frames[RING_BUFFER_SIZE];
 } SharedFrameBuffer;
