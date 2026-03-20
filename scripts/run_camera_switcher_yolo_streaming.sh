@@ -318,8 +318,11 @@ if [[ "${SKIP_BUILD}" -ne 1 ]]; then
   # Clean stale SHM to avoid layout mismatch after struct changes
   rm -f /dev/shm/pet_camera_* 2>/dev/null
 
-  echo "[build] Building C daemons (incremental)..."
+  echo "[build] Building C daemons..."
   mkdir -p "${BUILD_DIR}"
+  # Remove .o files to ensure headers changes are picked up
+  # (git checkout changes .c timestamps but not .o, confusing make)
+  rm -f "${CAPTURE_DIR}"/*.o 2>/dev/null
   make -C "${CAPTURE_DIR}" >/dev/null
   make -C "${CAPTURE_DIR}" switcher-daemon-build >/dev/null
 
@@ -332,8 +335,8 @@ if [[ "${SKIP_BUILD}" -ne 1 ]]; then
   make -C "${REPO_ROOT}" web >/dev/null 2>&1
 
   if [[ "${RUN_STREAMING}" -eq 1 ]]; then
-    echo "[build] Building Go servers (incremental)..."
-    (cd "${STREAMING_DIR}" && go build -o "${BUILD_DIR}/streaming-server" ./cmd/server) >/dev/null
+    echo "[build] Building Go servers..."
+    (cd "${STREAMING_DIR}" && CGO_ENABLED=1 go build -o "${BUILD_DIR}/streaming-server" ./cmd/server) >/dev/null
   fi
 
   if [[ "${RUN_MONITOR}" -eq 1 ]]; then
