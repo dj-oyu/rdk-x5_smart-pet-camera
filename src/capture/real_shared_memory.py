@@ -61,28 +61,20 @@ except OSError:
         logging.warning(f"Failed to load librt/libpthread for semaphore support: {e}")
 
 # Constants (must match C definitions)
-SHM_NAME_ACTIVE_FRAME = "/pet_camera_active_frame"
 SHM_NAME_STREAM = "/pet_camera_stream"
 SHM_NAME_BRIGHTNESS = "/pet_camera_brightness"  # Lightweight brightness data
-SHM_NAME_FRAMES = os.getenv("SHM_NAME_FRAMES", SHM_NAME_ACTIVE_FRAME)
 SHM_NAME_DETECTIONS = os.getenv("SHM_NAME_DETECTIONS", "/pet_camera_detections")
-RING_BUFFER_SIZE = 30
+RING_BUFFER_SIZE = 6
 MAX_DETECTIONS = 10
 MAX_FRAME_SIZE = 1920 * 1080 * 3 // 2  # Max NV12 frame size (1080p)
 NUM_CAMERAS = 2  # DAY=0, NIGHT=1
 
 # Zero-copy shared memory names (share_id based, no memcpy)
-SHM_NAME_YOLO_ZEROCOPY = "/pet_camera_yolo_zc"  # Legacy (deprecated)
-SHM_NAME_MJPEG_ZEROCOPY = "/pet_camera_mjpeg_zc"
-SHM_NAME_ACTIVE_ZEROCOPY = "/pet_camera_active_zc"
-ZEROCOPY_MAX_PLANES = 2  # NV12 has 2 planes (Y, UV)
-HB_MEM_GRAPHIC_BUF_SIZE = 160  # sizeof(hb_mem_graphic_buf_t) - raw buffer descriptor
-
-# Per-camera zero-copy shared memory (Phase 2: replaces SHM_NAME_YOLO_ZEROCOPY)
-SHM_NAME_ZEROCOPY_DAY = "/pet_camera_zc_0"    # DAY camera zero-copy (YOLO + brightness)
-SHM_NAME_ZEROCOPY_NIGHT = "/pet_camera_zc_1"  # NIGHT camera zero-copy (YOLO + brightness)
-
-# Camera switcher control (Phase 2: active camera selection)
+# Constants must match shm_constants.h
+ZEROCOPY_MAX_PLANES = 2
+HB_MEM_GRAPHIC_BUF_SIZE = 160
+SHM_NAME_ZEROCOPY_DAY = "/pet_camera_zc_0"
+SHM_NAME_ZEROCOPY_NIGHT = "/pet_camera_zc_1"
 SHM_NAME_CONTROL = "/pet_camera_control"
 
 
@@ -355,7 +347,7 @@ class ZeroCopySharedMemory:
     Consumer must call mark_consumed() after processing each frame.
     """
 
-    def __init__(self, shm_name: str = SHM_NAME_YOLO_ZEROCOPY):
+    def __init__(self, shm_name: str = SHM_NAME_ZEROCOPY_DAY):
         self.shm_name = shm_name
         self.fd: Optional[int] = None
         self.mmap_obj: Optional[mmap.mmap] = None
@@ -502,6 +494,75 @@ class ZeroCopySharedMemory:
         return ret == 0  # 0 = success, -1 = timeout (ETIMEDOUT)
 
 
+class DetectionWriter:
+    """
+    Standalone detection result writer.
+
+    Opens only the detection shared memory for writing, independent of any
+    frame shared memory. Used by YOLO detector daemon.
+    """
+
+    def __init__(self, detection_shm_name: str = SHM_NAME_DETECTIONS):
+        self.detection_shm_name = detection_shm_name
+        self.detection_fd: Optional[int] = None
+        self.detection_mmap: Optional[mmap.mmap] = None
+        self.last_detection_version = 0
+
+    def open(self) -> None:
+        """Open detection shared memory in write mode (creates if not exists)."""
+        shm_path = f"/dev/shm{self.detection_shm_name}"
+        try:
+            self.detection_fd = os.open(shm_path, os.O_RDWR)
+        except FileNotFoundError:
+            self.detection_fd = os.open(shm_path, os.O_CREAT | os.O_RDWR, 0o666)
+            os.ftruncate(self.detection_fd, sizeof(CLatestDetectionResult))
+        self.detection_mmap = mmap.mmap(
+            self.detection_fd, sizeof(CLatestDetectionResult),
+            mmap.MAP_SHARED, mmap.PROT_WRITE | mmap.PROT_READ,
+        )
+        print(f"[Info] Detection writer opened: {shm_path}")
+
+    def close(self) -> None:
+        """Close detection shared memory."""
+        if self.detection_mmap:
+            self.detection_mmap.close()
+            self.detection_mmap = None
+        if self.detection_fd is not None:
+            os.close(self.detection_fd)
+            self.detection_fd = None
+
+    def write_detection_result(
+        self,
+        frame_number: int,
+        timestamp_sec: float,
+        detections: list[dict],
+    ) -> None:
+        """Write detection result to shared memory."""
+        if not self.detection_mmap:
+            raise RuntimeError("Detection shared memory not opened")
+
+        c_det = CLatestDetectionResult()
+        c_det.frame_number = frame_number
+        c_det.timestamp.tv_sec = int(timestamp_sec)
+        c_det.timestamp.tv_nsec = int((timestamp_sec - int(timestamp_sec)) * 1e9)
+        c_det.num_detections = min(len(detections), MAX_DETECTIONS)
+        for i, det in enumerate(detections[:MAX_DETECTIONS]):
+            c_detection = c_det.detections[i]
+            c_detection.class_name = det["class_name"].encode("utf-8")
+            c_detection.confidence = det["confidence"]
+            c_detection.bbox.x = det["bbox"]["x"]
+            c_detection.bbox.y = det["bbox"]["y"]
+            c_detection.bbox.w = det["bbox"]["w"]
+            c_detection.bbox.h = det["bbox"]["h"]
+
+        self.last_detection_version += 1
+        c_det.version = self.last_detection_version
+
+        self.detection_mmap.seek(0)
+        self.detection_mmap.write(bytes(c_det))
+        self.detection_mmap.flush()
+
+
 class RealSharedMemory:
     """
     Real POSIX shared memory interface.
@@ -522,7 +583,7 @@ class RealSharedMemory:
         self.last_detection_version = 0
         self.total_frames_read = 0
         self.detection_write_mode = False
-        self.frame_shm_name = frame_shm_name or SHM_NAME_FRAMES
+        self.frame_shm_name = frame_shm_name or SHM_NAME_STREAM
         self.detection_shm_name = detection_shm_name or SHM_NAME_DETECTIONS
 
     def open(self):

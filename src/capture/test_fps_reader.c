@@ -10,7 +10,7 @@
 #include "shared_memory.h"
 
 int main(int argc, char *argv[]) {
-    const char *shm_name = (argc > 1) ? argv[1] : SHM_NAME_ACTIVE_FRAME;
+    const char *shm_name = (argc > 1) ? argv[1] : SHM_NAME_STREAM;
     double duration = (argc > 2) ? atof(argv[2]) : 5.0;
 
     printf("Opening shared memory: %s\n", shm_name);

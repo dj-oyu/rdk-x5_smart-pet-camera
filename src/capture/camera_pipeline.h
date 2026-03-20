@@ -35,7 +35,6 @@ typedef struct {
     encoder_thread_t encoder_thread;
 
     // Shared memory output
-    SharedFrameBuffer *shm_active_nv12;   // Active camera NV12 (only when active)
     SharedFrameBuffer *shm_active_h264;   // Active camera H.264 (only when active)
     SharedBrightnessData *shm_brightness; // Lightweight brightness data (always updated)
     SharedFrameBuffer *shm_mjpeg_frame;   // MJPEG 640x480 NV12 input (VSE Ch2, always active, writable)
@@ -85,7 +84,7 @@ typedef struct {
  *   0 on success, negative error code on failure
  *
  * Note:
- *   - Shared memory names are fixed: SHM_NAME_ACTIVE_FRAME, SHM_NAME_STREAM, SHM_NAME_BRIGHTNESS
+ *   - Shared memory names are fixed: SHM_NAME_STREAM, SHM_NAME_MJPEG_FRAME, SHM_NAME_BRIGHTNESS
  *   - Active state is determined by CameraControl SHM (Phase 2)
  *   - Frames are written conditionally based on active camera index
  *   - Brightness is always written to lightweight shared memory
