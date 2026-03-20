@@ -143,7 +143,9 @@ typedef struct {
 
 typedef struct {
     volatile uint32_t write_index;
+    char _pad_wridx[60];          // Cache line isolation padding
     volatile uint32_t frame_interval_ms;
+    char _pad_interval[60];       // Cache line isolation padding
     sem_t new_frame_sem;  // Semaphore for new frame notifications
     Frame frames[RING_BUFFER_SIZE];
 } SharedFrameBuffer;
