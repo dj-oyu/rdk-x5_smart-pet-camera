@@ -82,7 +82,7 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
   }, [webrtc, stopMJPEG]);
 
   useEffect(() => {
-    webrtc.start();
+    webrtc.start().catch(() => {});
     return () => {
       webrtc.stop();
       stopMJPEG();
