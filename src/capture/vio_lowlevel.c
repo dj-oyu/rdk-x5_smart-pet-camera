@@ -241,7 +241,7 @@ int vio_create(vio_context_t *ctx, int camera_index,
     };
     LOG_INFO("VIO", "VSE Ch1 (YOLO): %dx%d (camera_index=%d)", yolo_width, yolo_height, camera_index);
 
-    // Channel 2: MJPEG/web_monitor input (fixed 640x480)
+    // Channel 2: MJPEG/web_monitor input (768x432, 16:9)
     vse_ochn_attr_t vse_ochn_attr_ch2 = {
         .chn_en = CAM_TRUE,
         .roi = {
@@ -250,8 +250,8 @@ int vio_create(vio_context_t *ctx, int camera_index,
             .w = ctx->sensor_width,
             .h = ctx->sensor_height,
         },
-        .target_w = 640,
-        .target_h = 480,
+        .target_w = 768,
+        .target_h = 432,
         .fmt = FRM_FMT_NV12,
         .bit_width = 8,
     };

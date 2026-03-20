@@ -158,16 +158,21 @@ func (fb *FrameBroadcaster) generateOverlay() []byte {
 			10, 10, stats, 255, 16, 2)
 
 		// Draw bounding boxes and labels
+		// Detection coords are in H.264 space (1280x720), scale to MJPEG frame
 		for _, det := range detections {
+			bx := det.BBox.X * frame.Width / 1280
+			by := det.BBox.Y * frame.Height / 720
+			bw := det.BBox.W * frame.Width / 1280
+			bh := det.BBox.H * frame.Height / 720
 			drawRectColorNV12(frame.Data, frame.Width, frame.Height,
-				det.BBox.X, det.BBox.Y, det.BBox.W, det.BBox.H,
+				bx, by, bw, bh,
 				200, 44, 21, 3)
 
 			label := fmt.Sprintf("%.2f", det.Confidence)
-			labelY := det.BBox.Y - 20
-			labelX := det.BBox.X
+			labelY := by - 20
+			labelX := bx
 			if labelY < 5 {
-				labelY = det.BBox.Y + det.BBox.H + 5
+				labelY = by + bh + 5
 			}
 			if labelY > frame.Height-20 {
 				labelY = frame.Height - 20

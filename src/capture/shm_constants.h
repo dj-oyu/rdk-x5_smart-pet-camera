@@ -17,7 +17,7 @@
 
 // Shared memory segment names
 #define SHM_NAME_STREAM "/pet_camera_stream"              // H.264 stream (30fps)
-#define SHM_NAME_MJPEG_FRAME "/pet_camera_mjpeg_frame"    // 640x480 NV12 for MJPEG/web_monitor
+#define SHM_NAME_MJPEG_FRAME "/pet_camera_mjpeg_frame"    // 768x432 NV12 for MJPEG/web_monitor (16:9)
 #define SHM_NAME_DETECTIONS "/pet_camera_detections"      // YOLO detection results
 #define SHM_NAME_BRIGHTNESS "/pet_camera_brightness"      // Lightweight brightness data
 #define SHM_NAME_CONTROL "/pet_camera_control"            // Camera switcher control
