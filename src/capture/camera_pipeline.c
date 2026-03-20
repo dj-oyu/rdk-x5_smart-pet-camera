@@ -122,7 +122,7 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
   LOG_INFO(Pipeline_log_header, "Zero-copy shared memory created: %s",
            zerocopy_name);
 
-  // MJPEG input NV12 (640x480 from VSE Channel 2, always written when active, writable by web_monitor)
+  // MJPEG input NV12 (768x432 from VSE Channel 2, always written when active, writable by web_monitor)
   pipeline->shm_mjpeg_frame =
       shm_frame_buffer_create_named(SHM_NAME_MJPEG_FRAME);
   if (!pipeline->shm_mjpeg_frame) {
@@ -494,7 +494,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       }
     }
 
-    // Get MJPEG frame from VSE Channel 2 (640x480)
+    // Get MJPEG frame from VSE Channel 2 (768x432, 16:9)
     // This frame is writable by web_monitor for overlay drawing (zero-copy)
     if (write_active) {
       hbn_vnode_image_t mjpeg_frame = {0};
@@ -502,9 +502,9 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       if (ret == 0) {
         // Write MJPEG frame to shared memory
         Frame mjpeg_nv12_frame = {0};
-        // VSE Ch2 is configured for 640x480 (see vio_lowlevel.c:240-252)
-        mjpeg_nv12_frame.width = 640;
-        mjpeg_nv12_frame.height = 480;
+        // VSE Ch2 is configured for 768x432 (see vio_lowlevel.c:244-256)
+        mjpeg_nv12_frame.width = 768;
+        mjpeg_nv12_frame.height = 432;
         mjpeg_nv12_frame.format = 1; // NV12
         mjpeg_nv12_frame.frame_number = frame_count;
         mjpeg_nv12_frame.camera_id = pipeline->camera_index;
@@ -514,7 +514,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
         isp_fill_frame_brightness(&mjpeg_nv12_frame, &brightness_result);
         mjpeg_nv12_frame.correction_applied = 0;
 
-        // Calculate NV12 size for 640x480
+        // Calculate NV12 size for 768x432
         size_t mjpeg_size = 0;
         for (int i = 0; i < mjpeg_frame.buffer.plane_cnt; i++) {
           mjpeg_size += mjpeg_frame.buffer.size[i];
@@ -537,7 +537,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
             // Log first frame and every 30 frames to verify VSE Ch2 size
             if (frame_count == 0) {
               LOG_INFO(Pipeline_log_header,
-                       "VSE Ch2 output: %dx%d, %zu bytes (expected 640x480, ~460KB)",
+                       "VSE Ch2 output: %dx%d, %zu bytes (expected 768x432, ~497KB)",
                        mjpeg_nv12_frame.width, mjpeg_nv12_frame.height, mjpeg_size);
             } else {
               LOG_DEBUG(Pipeline_log_header,

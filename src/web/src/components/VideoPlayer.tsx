@@ -14,37 +14,32 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
   const mjpegRef = useRef<HTMLImageElement>(null);
   const modeRef = useRef<'webrtc' | 'mjpeg'>('webrtc');
   const fallbackAttempted = useRef(false);
-  const mjpegAcRef = useRef<AbortController | null>(null);
 
   const { canvasRef, handleDetection, handleStatus } = useBBoxOverlay(videoRef);
 
+  // Stop MJPEG: replace src with 1px GIF + DOM detach to force connection close
+  // iOS Safari ignores img.src='' but loading a new resource aborts the stream
+  const BLANK_GIF = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
   const stopMJPEG = useCallback(() => {
-    mjpegAcRef.current?.abort();
-    mjpegAcRef.current = null;
     const img = mjpegRef.current;
     if (img) {
-      if (img.src) URL.revokeObjectURL(img.src);
+      // 1) Load a data URI to abort the multipart HTTP request
+      img.src = BLANK_GIF;
+      // 2) DOM detach/reattach as additional measure
+      const parent = img.parentNode;
+      const next = img.nextSibling;
+      if (parent) parent.removeChild(img);
       img.removeAttribute('src');
+      if (parent) parent.insertBefore(img, next);
     }
   }, []);
 
-  // MJPEG via fetch + AbortController: explicit connection lifecycle
+  // MJPEG start: native img.src (universal browser support)
   const startMJPEG = useCallback(() => {
     stopMJPEG();
-    const ac = new AbortController();
-    mjpegAcRef.current = ac;
     const img = mjpegRef.current;
     if (!img) return;
-
-    // Fallback: just set src directly (multipart/x-mixed-replace is browser-native)
-    // But wrap in AbortController-aware fetch to detect abort
     img.src = '/stream?t=' + Date.now();
-
-    // Listen for abort to clear img src and close HTTP connection
-    ac.signal.addEventListener('abort', () => {
-      img.src = '';
-      img.removeAttribute('src');
-    });
   }, [stopMJPEG]);
 
   const onWebRTCError = useCallback(() => {
