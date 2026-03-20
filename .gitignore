@@ -153,6 +153,10 @@ core.*
 # recorded videos
 recordings/
 
+# Node/Bun
+node_modules/
+bun.lock
+
 # Go build artifacts in source directory
 src/streaming_server/server
 src/streaming_server/web_monitor
