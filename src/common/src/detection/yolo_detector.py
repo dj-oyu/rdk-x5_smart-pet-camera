@@ -616,7 +616,7 @@ class YoloDetector:
         start_total = time.perf_counter()
         self._total_calls += 1
 
-        # 1. ROIクロップ + CLAHE
+        # 1. ROIクロップ → CLAHE（crop後に適用で処理量削減）
         start_prep = time.perf_counter()
 
         # CLAHE適用判定
@@ -625,28 +625,23 @@ class YoloDetector:
             brightness_avg < 0 or brightness_avg < self.clahe_brightness_threshold
         )
 
-        # NV12データをnumpy配列に変換
-        if need_clahe:
-            nv12_array = np.frombuffer(nv12_data, dtype=np.uint8).copy()
-        else:
-            nv12_array = np.frombuffer(nv12_data, dtype=np.uint8)
+        # NV12データをnumpy配列に変換（read-only、cropが新バッファを作る）
+        nv12_array = np.frombuffer(nv12_data, dtype=np.uint8)
 
-        # CLAHE適用（低照度時のみ、クロップ前に適用）
-        if need_clahe:
-            start_clahe = time.perf_counter()
-            nv12_array = self._apply_clahe_nv12(nv12_array, width, height)
-            clahe_time = (time.perf_counter() - start_clahe) * 1000
-            self._brightness_stats["clahe_time_total_ms"] += clahe_time
-            self._brightness_stats["frames_clahe_applied"] += 1
-        else:
-            self._brightness_stats["frames_clahe_skipped"] += 1
-
-        # ROIクロップ
+        # ROIクロップ（先にクロップしてからCLAHE適用 = 処理ピクセル数削減）
         if roi_w == self.input_w and roi_h == self.input_h:
-            # ROIサイズが推論サイズと一致
             cropped = self._crop_nv12_roi(
                 nv12_array, width, height, roi_x, roi_y, roi_w, roi_h
             )
+            # CLAHE + UV=128 をcrop後の小さいデータに適用
+            if need_clahe:
+                start_clahe = time.perf_counter()
+                cropped = self._apply_clahe_nv12(cropped, roi_w, roi_h)
+                clahe_time = (time.perf_counter() - start_clahe) * 1000
+                self._brightness_stats["clahe_time_total_ms"] += clahe_time
+                self._brightness_stats["frames_clahe_applied"] += 1
+            else:
+                self._brightness_stats["frames_clahe_skipped"] += 1
             input_tensor = cropped
             scale = (1.0, 1.0)
             shift = (0.0, 0.0)
@@ -658,6 +653,8 @@ class YoloDetector:
             cropped = self._crop_nv12_roi(
                 nv12_array, width, height, roi_x, roi_y, roi_w, roi_h
             )
+            if need_clahe:
+                cropped = self._apply_clahe_nv12(cropped, roi_w, roi_h)
             # NV12→BGR→リサイズ→NV12 (遅いパス)
             img = self._decode_nv12(cropped.tobytes(), roi_w, roi_h)
             if img is None:

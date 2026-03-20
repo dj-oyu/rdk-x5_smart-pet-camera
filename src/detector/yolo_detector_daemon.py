@@ -449,9 +449,9 @@ class YoloDetectorDaemon:
                         self.motion_cooldown -= 1
                     self.prev_y_plane = y_denoised
 
-                    # Build denoised NV12 for YOLO (reuse motion's denoised Y)
-                    nv12_denoised = np.array(nv12_data, dtype=np.uint8)
-                    nv12_denoised[:y_size] = y_denoised.flatten()
+                    # Build denoised NV12 for YOLO (denoised Y + original UV)
+                    uv_data = np.frombuffer(nv12_data[y_size:], dtype=np.uint8)
+                    nv12_denoised = np.concatenate([y_denoised.ravel(), uv_data])
 
                     # YOLO ROI detection (nv12_denoised has medianBlur'd Y plane)
                     current_roi = self.roi_index
