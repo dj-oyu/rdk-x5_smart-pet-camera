@@ -449,10 +449,14 @@ class YoloDetectorDaemon:
                         self.motion_cooldown -= 1
                     self.prev_y_plane = y_denoised
 
+                    # Prepare denoised NV12 for YOLO (reuse motion's denoised Y plane)
+                    nv12_denoised = np.array(nv12_data, dtype=np.uint8)
+                    nv12_denoised[:y_size] = y_denoised.flatten()
+
                     # YOLO ROI detection (cycle through ROIs as before)
                     current_roi = self.roi_index
                     detections = self.detector.detect_nv12_roi_720p(
-                        nv12_data=nv12_data,
+                        nv12_data=nv12_denoised,
                         roi_index=current_roi,
                         brightness_avg=brightness_avg,
                     )
