@@ -73,7 +73,6 @@ export function useWebRTC(
       video.play().catch(() => {});
     } catch (error) {
       onError?.(error as Error);
-      throw error;
     }
   }, [videoRef, stop, onError]);
 
