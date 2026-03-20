@@ -12,23 +12,15 @@ window.addEventListener('DOMContentLoaded', () => {
     const shmBufferEl = document.getElementById('shm-buffer');
     const framesTotalEl = document.getElementById('frames-total');
     const detectionVersionEl = document.getElementById('detection-version');
-    const historyListEl = document.getElementById('history-list');
-    const rankingListEl = document.getElementById('ranking-list');
-    const timelineListEl = document.getElementById('timeline-list');
-    const timelineChartEl = document.getElementById('timeline-chart');
-    const timelineCanvas = document.getElementById('timeline-canvas');
     const trajectoryCardEl = document.getElementById('trajectory-card');
     const trajectoryCanvas = document.getElementById('trajectory-canvas');
     const trajectoryLegendEl = document.getElementById('trajectory-legend');
-    const timelineLegendEl = document.getElementById('timeline-legend');
-    const viewToggle = document.getElementById('view-toggle');
+    const comicGalleryEl = document.getElementById('comic-gallery');
     const statusBadge = document.getElementById('status-badge');
     const lastUpdatedEl = document.getElementById('last-updated');
     const targetFpsEl = document.getElementById('target-fps');
     const recordingsListEl = document.getElementById('recordings-list');
 
-    let activeView = 'history';
-    let lastHistory = [];
     let trajectoryPoints = [];
     let lastTrajectoryKey = null;
 
@@ -62,28 +54,72 @@ window.addEventListener('DOMContentLoaded', () => {
         return date.toLocaleString();
     }
 
-    function bucketCount(count) {
-        if (count <= 1) return '1';
-        if (count <= 3) return '2-3';
-        if (count <= 5) return '4-5';
-        if (count <= 10) return '6-10';
-        return '11+';
+    // Comic Gallery
+    async function fetchComics() {
+        try {
+            const res = await fetch('/api/comics');
+            if (!res.ok) throw new Error('Failed to fetch comics');
+            const data = await res.json();
+            renderComics(data.comics || []);
+        } catch (error) {
+            console.error('[Comics] Fetch error:', error);
+        }
     }
 
-    function summarizeDetections(detections) {
-        if (!detections || detections.length === 0) {
-            return '<span class="tag tag-accent">no detections</span>';
-        }
-        const counts = {};
-        detections.forEach((det) => {
-            counts[det.class_name] = (counts[det.class_name] || 0) + 1;
-        });
-        return Object.entries(counts)
-            .map(([name, count]) => {
-                return `<span class="tag ${name}">${name} x${count}</span>`;
-            })
-            .join('');
+    function parseComicDate(filename) {
+        const match = filename.match(/comic_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+        if (!match) return null;
+        return new Date(match[1], match[2] - 1, match[3], match[4], match[5], match[6]);
     }
+
+    function renderComics(comics) {
+        if (!comicGalleryEl) return;
+        if (!comics || comics.length === 0) {
+            comicGalleryEl.innerHTML =
+                '<p class="muted">コミックはまだありません。猫の検出を待機しています。</p>';
+            return;
+        }
+
+        comicGalleryEl.innerHTML = comics.map(comic => {
+            const date = parseComicDate(comic.filename);
+            const dateStr = date ? formatRecordingDate(date) : comic.created_at;
+            const imgUrl = `/api/comics/${encodeURIComponent(comic.filename)}`;
+            return `
+                <div class="comic-card" data-filename="${comic.filename}">
+                    <img src="${imgUrl}" alt="${comic.filename}" loading="lazy"
+                         onclick="window.openThumbnailPreview('${imgUrl}', '${comic.filename}')">
+                    <div class="comic-card-footer">
+                        <span class="comic-card-date">${dateStr}</span>
+                        <button class="btn-delete comic-card-delete" onclick="window.deleteComic('${comic.filename}')" title="削除">
+                            &times;
+                        </button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    async function deleteComic(filename) {
+        if (!confirm(`「${filename}」を削除しますか？`)) return;
+        try {
+            const res = await fetch(`/api/comics/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+            if (res.ok) {
+                fetchComics();
+            } else {
+                const data = await res.json();
+                alert('削除に失敗しました: ' + (data.error || 'Unknown error'));
+            }
+        } catch (error) {
+            console.error('[Comics] Delete error:', error);
+            alert('削除に失敗しました');
+        }
+    }
+
+    window.deleteComic = deleteComic;
+
+    // Auto-refresh comics every 30 seconds
+    fetchComics();
+    setInterval(fetchComics, 30000);
 
     function renderLegend(container, classCounts, options = {}) {
         if (!container) return;
@@ -95,18 +131,6 @@ window.addEventListener('DOMContentLoaded', () => {
             empty.textContent = 'データなし';
             container.appendChild(empty);
             return;
-        }
-
-        if (options.fillLabel) {
-            const fillItem = document.createElement('span');
-            fillItem.className = 'legend-item';
-            const swatch = document.createElement('span');
-            swatch.className = 'legend-swatch fill';
-            const label = document.createElement('span');
-            label.textContent = options.fillLabel;
-            fillItem.appendChild(swatch);
-            fillItem.appendChild(label);
-            container.appendChild(fillItem);
         }
 
         classCounts.forEach(([name]) => {
@@ -122,224 +146,6 @@ window.addEventListener('DOMContentLoaded', () => {
             item.appendChild(label);
             container.appendChild(item);
         });
-
-        if (options.moreCount && options.moreCount > 0) {
-            const moreItem = document.createElement('span');
-            moreItem.className = 'legend-item';
-            moreItem.textContent = `+${options.moreCount} more`;
-            container.appendChild(moreItem);
-        }
-    }
-
-    function updateLegends(history, points) {
-        const historyCounts = {};
-        (history || []).forEach((entry) => {
-            entry.detections.forEach((det) => {
-                historyCounts[det.class_name] = (historyCounts[det.class_name] || 0) + 1;
-            });
-        });
-        const historyEntries = Object.entries(historyCounts).sort((a, b) => b[1] - a[1]);
-        const historyTop = historyEntries.slice(0, 5);
-        renderLegend(timelineLegendEl, historyTop, {
-            fillLabel: '検出量',
-            moreCount: Math.max(historyEntries.length - historyTop.length, 0),
-        });
-
-        const trajectoryCounts = {};
-        (points || []).forEach((point) => {
-            if (!point.className) return;
-            trajectoryCounts[point.className] =
-                (trajectoryCounts[point.className] || 0) + 1;
-        });
-        const trajectoryEntries = Object.entries(trajectoryCounts).sort((a, b) => b[1] - a[1]);
-        const trajectoryTop = trajectoryEntries.slice(0, 5);
-        renderLegend(trajectoryLegendEl, trajectoryTop, {
-            moreCount: Math.max(trajectoryEntries.length - trajectoryTop.length, 0),
-        });
-    }
-
-    function renderHistory(history) {
-        if (!history || history.length === 0) {
-            historyListEl.innerHTML =
-                '<p class="muted">まだ検出結果はありません。カメラ入力を待機しています。</p>';
-            return;
-        }
-
-        historyListEl.innerHTML = history
-            .map((entry, index) => {
-                const timeLabel = formatTimestamp(entry.timestamp);
-                const header = `${bucketCount(entry.num_detections)} detections / Frame #${entry.frame_number}`;
-                const meta = `v${entry.version} ・ ${timeLabel}`;
-                return `
-                    <div class="history-card">
-                        <div class="history-title">${header}</div>
-                        <div class="history-meta">
-                            <span>${index === 0 ? 'latest' : 'history'}</span>
-                            <span>${meta}</span>
-                        </div>
-                        <div class="history-tags">
-                            ${summarizeDetections(entry.detections)}
-                        </div>
-                    </div>
-                `;
-            })
-            .join('');
-    }
-
-    function renderRanking(history) {
-        if (!history || history.length === 0) {
-            rankingListEl.innerHTML =
-                '<p class="muted">まだ検出結果はありません。カメラ入力を待機しています。</p>';
-            return;
-        }
-
-        const counts = {};
-        history.forEach((entry) => {
-            entry.detections.forEach((det) => {
-                counts[det.class_name] = (counts[det.class_name] || 0) + 1;
-            });
-        });
-
-        const ranked = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-        if (ranked.length === 0) {
-            rankingListEl.innerHTML =
-                '<p class="muted">まだ検出結果はありません。カメラ入力を待機しています。</p>';
-            return;
-        }
-
-        rankingListEl.innerHTML = ranked
-            .map(([name, count], index) => {
-                const badge = index === 0 ? '👑' : `#${index + 1}`;
-                return `
-                    <div class="rank-item">
-                        <div class="rank-name">${badge} ${name}</div>
-                        <div class="rank-value">${bucketCount(count)} hits</div>
-                    </div>
-                `;
-            })
-            .join('');
-    }
-
-    function renderTimeline(history) {
-        if (!history || history.length === 0) {
-            timelineListEl.innerHTML =
-                '<p class="muted">まだ検出結果はありません。カメラ入力を待機しています。</p>';
-            return;
-        }
-
-        const maxDetections = Math.max(...history.map((entry) => entry.num_detections), 1);
-        timelineListEl.innerHTML = history
-            .map((entry) => {
-                const timeLabel = formatTimestamp(entry.timestamp);
-                const barWidth = Math.max(
-                    6,
-                    Math.round((entry.num_detections / maxDetections) * 100)
-                );
-                const classCounts = {};
-                entry.detections.forEach((det) => {
-                    classCounts[det.class_name] = (classCounts[det.class_name] || 0) + 1;
-                });
-                const dominant = Object.entries(classCounts).sort((a, b) => b[1] - a[1])[0];
-                const color = dominant
-                    ? trajectoryColors[dominant[0]] || [110, 231, 255]
-                    : [110, 231, 255];
-                return `
-                    <div class="timeline-row">
-                        <div class="timeline-time">${timeLabel}</div>
-                        <div class="timeline-bar" style="width:${barWidth}%; background: linear-gradient(90deg, rgba(${color[0]}, ${color[1]}, ${color[2]}, 0.25), rgba(${color[0]}, ${color[1]}, ${color[2]}, 0.9));"></div>
-                        <div class="timeline-count">${bucketCount(entry.num_detections)}</div>
-                    </div>
-                `;
-            })
-            .join('');
-    }
-
-    function drawTimelineChart(history) {
-        if (!timelineCanvas) return;
-        const ctx = timelineCanvas.getContext('2d');
-        if (!ctx) return;
-
-        const width = timelineCanvas.clientWidth || 320;
-        const height = timelineCanvas.clientHeight || 140;
-        timelineCanvas.width = width * window.devicePixelRatio;
-        timelineCanvas.height = height * window.devicePixelRatio;
-        ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
-
-        ctx.clearRect(0, 0, width, height);
-
-        if (!history || history.length === 0) {
-            ctx.fillStyle = 'rgba(154, 174, 211, 0.6)';
-            ctx.font = '12px "Space Grotesk", sans-serif';
-            ctx.fillText('no data', 10, height / 2);
-            return;
-        }
-
-        const values = history.map((entry) => entry.num_detections).reverse();
-        const classes = history
-            .map((entry) => {
-                const classCounts = {};
-                entry.detections.forEach((det) => {
-                    classCounts[det.class_name] = (classCounts[det.class_name] || 0) + 1;
-                });
-                const dominant = Object.entries(classCounts).sort((a, b) => b[1] - a[1])[0];
-                return dominant ? dominant[0] : null;
-            })
-            .reverse();
-        const maxValue = Math.max(...values, 1);
-        const minValue = 0;
-        const padding = 12;
-        const chartWidth = width - padding * 2;
-        const chartHeight = height - padding * 2;
-
-        ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-        ctx.lineWidth = 1;
-        for (let i = 0; i <= 4; i++) {
-            const y = padding + (chartHeight / 4) * i;
-            ctx.beginPath();
-            ctx.moveTo(padding, y);
-            ctx.lineTo(width - padding, y);
-            ctx.stroke();
-        }
-
-        values.forEach((value, index) => {
-            const x = padding + (chartWidth / Math.max(values.length - 1, 1)) * index;
-            const y =
-                padding +
-                chartHeight -
-                ((value - minValue) / (maxValue - minValue || 1)) * chartHeight;
-            if (index === 0) {
-                ctx.beginPath();
-                ctx.moveTo(x, y);
-            } else {
-                ctx.lineTo(x, y);
-                const className = classes[index];
-                const color = trajectoryColors[className] || [110, 231, 255];
-                ctx.strokeStyle = `rgba(${color[0]}, ${color[1]}, ${color[2]}, 0.9)`;
-                ctx.lineWidth = 2;
-                ctx.stroke();
-                ctx.beginPath();
-                ctx.moveTo(x, y);
-            }
-        });
-
-        ctx.beginPath();
-        values.forEach((value, index) => {
-            const x = padding + (chartWidth / Math.max(values.length - 1, 1)) * index;
-            const y =
-                padding +
-                chartHeight -
-                ((value - minValue) / (maxValue - minValue || 1)) * chartHeight;
-            if (index === 0) {
-                ctx.moveTo(x, y);
-            } else {
-                ctx.lineTo(x, y);
-            }
-        });
-        ctx.lineTo(width - padding, height - padding);
-        ctx.lineTo(padding, height - padding);
-        ctx.closePath();
-        ctx.fillStyle = 'rgba(110, 231, 255, 0.18)';
-        ctx.fill();
     }
 
     function drawTrajectory(points) {
@@ -436,15 +242,16 @@ window.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function applyView(view) {
-        activeView = view;
-        historyListEl.style.display = view === 'history' ? 'flex' : 'none';
-        rankingListEl.style.display = view === 'ranking' ? 'flex' : 'none';
-        timelineListEl.style.display = view === 'timeline' ? 'flex' : 'none';
-        timelineChartEl.style.display = view === 'timeline' ? 'block' : 'none';
-        viewToggle.querySelectorAll('button').forEach((btn) => {
-            btn.classList.toggle('active', btn.dataset.view === view);
+    function updateTrajectoryLegend(points) {
+        const trajectoryCounts = {};
+        (points || []).forEach((point) => {
+            if (!point.className) return;
+            trajectoryCounts[point.className] =
+                (trajectoryCounts[point.className] || 0) + 1;
         });
+        const trajectoryEntries = Object.entries(trajectoryCounts).sort((a, b) => b[1] - a[1]);
+        const trajectoryTop = trajectoryEntries.slice(0, 5);
+        renderLegend(trajectoryLegendEl, trajectoryTop);
     }
 
     // Recordings Modal
@@ -645,12 +452,6 @@ window.addEventListener('DOMContentLoaded', () => {
     window.downloadRecording = downloadRecording;
     window.deleteRecording = deleteRecording;
 
-    viewToggle.addEventListener('click', (event) => {
-        const target = event.target.closest('button[data-view]');
-        if (!target) return;
-        applyView(target.dataset.view);
-    });
-
     function updateStatus(data) {
         fpsEl.textContent = `${formatNumber(data.monitor.current_fps)} fps`;
         detectionsEl.textContent = formatNumber(data.monitor.detection_count);
@@ -670,19 +471,9 @@ window.addEventListener('DOMContentLoaded', () => {
         const updatedAt = new Date(data.timestamp * 1000);
         lastUpdatedEl.textContent = updatedAt.toLocaleTimeString();
 
-        const filteredHistory = (data.detection_history || []).filter(
-            (entry) => entry.num_detections > 0
-        );
-        lastHistory = filteredHistory;
-        renderHistory(filteredHistory);
-        renderRanking(filteredHistory);
-        renderTimeline(filteredHistory);
         updateTrajectory(data.latest_detection);
         drawTrajectory(trajectoryPoints);
-        updateLegends(filteredHistory, trajectoryPoints);
-        if (activeView === 'timeline') {
-            drawTimelineChart(filteredHistory);
-        }
+        updateTrajectoryLegend(trajectoryPoints);
     }
 
     async function fetchStatus() {
@@ -1057,12 +848,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
     startStatusStream();
     startConnectionStream();
-    applyView('history');
 
     window.addEventListener('resize', () => {
-        if (activeView === 'timeline') {
-            drawTimelineChart(lastHistory);
-        }
         drawTrajectory(trajectoryPoints);
     });
 
