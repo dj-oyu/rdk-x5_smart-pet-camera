@@ -8,6 +8,7 @@ import (
 	"image/draw"
 	"image/jpeg"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sync"
@@ -32,9 +33,10 @@ const (
 )
 
 type capturedPanel struct {
-	jpegData  []byte
-	timestamp time.Time
-	bbox      *BoundingBox
+	jpegData    []byte
+	timestamp   time.Time
+	bbox        *BoundingBox
+	placeholder bool // filled panel (wider crop to show context)
 }
 
 // ComicCapture monitors detection SHM for cat presence and produces
@@ -112,21 +114,24 @@ func (cc *ComicCapture) tick(now time.Time) {
 	det, ok := cc.src.LatestDetection()
 	if ok {
 		cc.lastVersionChange = now
-		if hasCat(det) {
+		if hasPet(det) {
 			cc.lastCatSeen = now
-			cc.lastCatBBox = catBBox(det)
+			cc.lastCatBBox = petBBox(det)
 			if cc.catFirstSeen.IsZero() {
 				cc.catFirstSeen = now
 			}
-		} else {
-			// Detection updated but no cat → reset continuous tracking
-			cc.catFirstSeen = time.Time{}
-			cc.lastCatBBox = nil
 		}
+		// Don't reset catFirstSeen on a single miss — use timeout instead.
+		// YOLO may miss a frame or two while the pet is still present.
 	}
 
 	catGone := !cc.lastCatSeen.IsZero() && now.Sub(cc.lastCatSeen) > cc.DetectionLost
 	versionStale := !cc.lastVersionChange.IsZero() && now.Sub(cc.lastVersionChange) > cc.DetectionLost
+
+	// Reset continuous tracking only after the full timeout elapses
+	if catGone || versionStale {
+		cc.catFirstSeen = time.Time{}
+	}
 
 	switch cc.state {
 	case comicIdle:
@@ -185,6 +190,10 @@ func (cc *ComicCapture) startCapturing(now time.Time) {
 }
 
 func (cc *ComicCapture) finishCapturing() {
+	// Fill missing panels with current frame + last known bbox (wide crop)
+	if n := len(cc.panels); n > 0 && n < cc.MaxPanels {
+		cc.fillMissingPanels(time.Now())
+	}
 	if len(cc.panels) > 0 {
 		cc.stitchAndSave()
 	}
@@ -192,6 +201,35 @@ func (cc *ComicCapture) finishCapturing() {
 	cc.panels = nil
 	cc.catFirstSeen = time.Time{}
 	log.Printf("[Comic] Session finished: %s", cc.sessionID)
+}
+
+// fillMissingPanels captures the current frame for each missing slot,
+// using the last known bbox as a hint (the pet may still be in frame
+// even if the detector missed it).
+func (cc *ComicCapture) fillMissingPanels(now time.Time) {
+	jpegData, ok := cc.src.LatestJPEG()
+	if !ok {
+		return
+	}
+	// Use the last known bbox from any captured panel
+	var lastBBox *BoundingBox
+	for i := len(cc.panels) - 1; i >= 0; i-- {
+		if cc.panels[i].bbox != nil {
+			bb := *cc.panels[i].bbox
+			lastBBox = &bb
+			break
+		}
+	}
+	for len(cc.panels) < cc.MaxPanels {
+		panel := capturedPanel{
+			jpegData:    jpegData,
+			timestamp:   now,
+			bbox:        lastBBox,
+			placeholder: true,
+		}
+		cc.panels = append(cc.panels, panel)
+		log.Printf("[Comic] Panel %d filled (placeholder, session=%s)", len(cc.panels), cc.sessionID)
+	}
 }
 
 func (cc *ComicCapture) capturePanel(now time.Time) {
@@ -227,6 +265,9 @@ func (cc *ComicCapture) stitchAndSave() {
 	}
 
 	// Decode and crop panels
+	// Panel 0: full frame (establishing shot)
+	// Panel 1-3: random zoom (1.3x-2.5x)
+	// Placeholder panels: wide crop (3.0x-4.0x) to show context around last known position
 	images := make([]image.Image, 0, len(cc.panels))
 	for i, p := range cc.panels {
 		img, err := jpeg.Decode(bytes.NewReader(p.jpegData))
@@ -234,8 +275,14 @@ func (cc *ComicCapture) stitchAndSave() {
 			log.Printf("[Comic] Failed to decode panel %d: %v", i, err)
 			return
 		}
-		if p.bbox != nil {
-			img = cropToDetection(img, p.bbox)
+		if p.bbox != nil && i > 0 {
+			var factor float64
+			if p.placeholder {
+				factor = 3.0 + rand.Float64()*1.0 // 3.0x ~ 4.0x (wide)
+			} else {
+				factor = 1.3 + rand.Float64()*1.2 // 1.3x ~ 2.5x (close-up)
+			}
+			img = cropToDetection(img, p.bbox, factor)
 		}
 		images = append(images, img)
 	}
@@ -386,14 +433,14 @@ func scaleImage(dst *image.RGBA, dstRect image.Rectangle, src image.Image) {
 	}
 }
 
-// cropToDetection crops the image around the bounding box center with 1.5x expansion.
-func cropToDetection(img image.Image, bbox *BoundingBox) image.Image {
+// cropToDetection crops the image around the bounding box center with the given expansion factor.
+func cropToDetection(img image.Image, bbox *BoundingBox, factor float64) image.Image {
 	bounds := img.Bounds()
 
 	cx := bbox.X + bbox.W/2
 	cy := bbox.Y + bbox.H/2
-	expandW := int(float64(bbox.W) * 1.5)
-	expandH := int(float64(bbox.H) * 1.5)
+	expandW := int(float64(bbox.W) * factor)
+	expandH := int(float64(bbox.H) * factor)
 
 	x0 := cx - expandW/2
 	y0 := cy - expandH/2
@@ -430,54 +477,100 @@ func cropToDetection(img image.Image, bbox *BoundingBox) image.Image {
 	return cropped
 }
 
-// drawTimestamp renders a timestamp string in the bottom-right of a panel.
+// drawTimestamp renders a 2x-scaled timestamp with semi-transparent background bar.
 func drawTimestamp(canvas *image.RGBA, panelRect image.Rectangle, text string) {
+	const scale = 2
 	face := inconsolata.Regular8x16
-	charW := 8 // inconsolata Regular8x16 character width
-	textW := len(text) * charW
-	pad := 4
+	charW := 8 // base character width
+	textW := len(text) * charW * scale
+	textH := 16 * scale
+	pad := 6
 
-	// Shadow
-	shadowDrawer := &font.Drawer{
-		Dst:  canvas,
-		Src:  image.NewUniform(color.RGBA{0, 0, 0, 180}),
-		Face: face,
-		Dot:  xdraw.P(panelRect.Max.X-textW-pad+1, panelRect.Max.Y-pad+1),
+	// Semi-transparent black background bar
+	barRect := image.Rect(
+		panelRect.Max.X-textW-pad*2,
+		panelRect.Max.Y-textH-pad,
+		panelRect.Max.X,
+		panelRect.Max.Y,
+	)
+	bgColor := color.RGBA{0, 0, 0, 160}
+	for y := barRect.Min.Y; y < barRect.Max.Y; y++ {
+		for x := barRect.Min.X; x < barRect.Max.X; x++ {
+			if x >= panelRect.Min.X && y >= panelRect.Min.Y {
+				off := (y-canvas.Rect.Min.Y)*canvas.Stride + (x-canvas.Rect.Min.X)*4
+				// Alpha blend
+				canvas.Pix[off+0] = uint8((int(canvas.Pix[off+0])*96 + int(bgColor.R)*160) / 256)
+				canvas.Pix[off+1] = uint8((int(canvas.Pix[off+1])*96 + int(bgColor.G)*160) / 256)
+				canvas.Pix[off+2] = uint8((int(canvas.Pix[off+2])*96 + int(bgColor.B)*160) / 256)
+				canvas.Pix[off+3] = 255
+			}
+		}
 	}
-	shadowDrawer.DrawString(text)
 
-	// Foreground
-	fgDrawer := &font.Drawer{
-		Dst:  canvas,
-		Src:  image.NewUniform(color.RGBA{255, 255, 255, 220}),
+	// Render text at 1x into a temporary canvas, then blit at 2x
+	tmpW := len(text) * charW
+	tmpH := 16
+	tmp := image.NewRGBA(image.Rect(0, 0, tmpW, tmpH))
+	d := &font.Drawer{
+		Dst:  tmp,
+		Src:  image.NewUniform(color.White),
 		Face: face,
-		Dot:  xdraw.P(panelRect.Max.X-textW-pad, panelRect.Max.Y-pad),
+		Dot:  xdraw.P(0, 13), // baseline for 8x16 font
 	}
-	fgDrawer.DrawString(text)
+	d.DrawString(text)
+
+	// Blit 2x scaled into canvas
+	ox := panelRect.Max.X - textW - pad
+	oy := panelRect.Max.Y - textH - pad/2
+	for sy := 0; sy < tmpH; sy++ {
+		for sx := 0; sx < tmpW; sx++ {
+			a := tmp.Pix[(sy*tmp.Stride)+sx*4+3]
+			if a == 0 {
+				continue
+			}
+			for dy := 0; dy < scale; dy++ {
+				for dx := 0; dx < scale; dx++ {
+					px := ox + sx*scale + dx
+					py := oy + sy*scale + dy
+					if px >= panelRect.Min.X && px < panelRect.Max.X && py >= panelRect.Min.Y && py < panelRect.Max.Y {
+						off := (py-canvas.Rect.Min.Y)*canvas.Stride + (px-canvas.Rect.Min.X)*4
+						canvas.Pix[off+0] = 255
+						canvas.Pix[off+1] = 255
+						canvas.Pix[off+2] = 255
+						canvas.Pix[off+3] = 255
+					}
+				}
+			}
+		}
+	}
 }
 
-// hasCat returns true if any detection has class_name "cat".
-func hasCat(det *DetectionResult) bool {
+func isPetClass(name string) bool {
+	return name == "cat" || name == "dog"
+}
+
+// hasPet returns true if any detection is a pet (cat or dog).
+func hasPet(det *DetectionResult) bool {
 	if det == nil {
 		return false
 	}
 	for _, d := range det.Detections {
-		if d.ClassName == "cat" {
+		if isPetClass(d.ClassName) {
 			return true
 		}
 	}
 	return false
 }
 
-// catBBox returns the bounding box of the highest-confidence cat detection.
-func catBBox(det *DetectionResult) *BoundingBox {
+// petBBox returns the bounding box of the highest-confidence pet detection.
+func petBBox(det *DetectionResult) *BoundingBox {
 	if det == nil {
 		return nil
 	}
 	var best *BoundingBox
 	bestConf := 0.0
 	for _, d := range det.Detections {
-		if d.ClassName == "cat" && d.Confidence > bestConf {
+		if isPetClass(d.ClassName) && d.Confidence > bestConf {
 			bestConf = d.Confidence
 			bb := d.BBox
 			best = &bb

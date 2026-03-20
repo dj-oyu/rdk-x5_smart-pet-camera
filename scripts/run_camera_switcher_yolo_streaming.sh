@@ -363,7 +363,7 @@ echo "[start] Launching camera_switcher_daemon..."
 PIDS+=("$!")
 
 echo "[wait] Waiting for shared memory..."
-if ! wait_for_shm "pet_camera_active_frame" 10; then
+if ! wait_for_shm "pet_camera_stream" 10; then
   echo "[error] SHM not found. camera_daemon may have failed." >&2
   exit 1
 fi

@@ -19,23 +19,8 @@
 #include <stdbool.h>
 #include <semaphore.h>
 
-// Configuration constants
-// Main shared memory (consumed by detection/monitoring/streaming)
-#define SHM_NAME_ACTIVE_FRAME "/pet_camera_active_frame"  // NV12 frame from active camera (30fps)
-#define SHM_NAME_STREAM "/pet_camera_stream"              // H.264 stream from active camera (30fps)
-#define SHM_NAME_MJPEG_FRAME "/pet_camera_mjpeg_frame"    // 640x480 NV12 for MJPEG/web_monitor (VSE Channel 2)
-#define SHM_NAME_DETECTIONS "/pet_camera_detections"      // YOLO detection results
-#define SHM_NAME_BRIGHTNESS "/pet_camera_brightness"      // Lightweight brightness data (per-camera)
-
-// Camera switcher control (active camera selection)
-#define SHM_NAME_CONTROL "/pet_camera_control"
-
-// Legacy name for backward compatibility (keep API names stable)
-#define SHM_NAME_FRAMES SHM_NAME_ACTIVE_FRAME
-
-#define RING_BUFFER_SIZE 30  // 30 frames (1 second at 30fps)
-#define MAX_DETECTIONS 10    // Maximum detections per frame
-#define MAX_FRAME_SIZE (1920 * 1080 * 3 / 2)  // Max NV12 frame size (1080p)
+// All constants (names, sizes) are in shm_constants.h (single source of truth)
+#include "shm_constants.h"
 
 /**
  * Brightness zone classification for low-light detection
@@ -46,8 +31,6 @@ typedef enum {
     BRIGHTNESS_ZONE_NORMAL = 2,  // 70 <= brightness_avg < 180
     BRIGHTNESS_ZONE_BRIGHT = 3,  // brightness_avg >= 180
 } BrightnessZone;
-
-#define NUM_CAMERAS 2  // DAY=0, NIGHT=1
 
 /**
  * Camera control structure for switcher daemon
@@ -137,8 +120,7 @@ typedef struct {
 // Zero-Copy Shared Memory (VIO buffer sharing via hb_mem share_id)
 // ============================================================================
 
-#define ZEROCOPY_MAX_PLANES 2    // NV12 has 2 planes (Y, UV)
-#define HB_MEM_GRAPHIC_BUF_SIZE 160  // sizeof(hb_mem_graphic_buf_t) - raw buffer descriptor
+// ZEROCOPY_MAX_PLANES, HB_MEM_GRAPHIC_BUF_SIZE defined in shm_constants.h
 
 /**
  * Zero-copy frame - VIO buffer shared directly without memcpy
@@ -197,14 +179,7 @@ typedef struct {
     ZeroCopyFrame frame;        // Current frame
 } ZeroCopyFrameBuffer;
 
-// Zero-copy shared memory names
-#define SHM_NAME_YOLO_ZEROCOPY "/pet_camera_yolo_zc"     // Zero-copy YOLO input (legacy, use per-camera)
-#define SHM_NAME_MJPEG_ZEROCOPY "/pet_camera_mjpeg_zc"   // Zero-copy MJPEG input (deprecated)
-#define SHM_NAME_ACTIVE_ZEROCOPY "/pet_camera_active_zc" // Zero-copy active frame (deprecated)
-
-// Per-camera zero-copy shared memory (new design)
-#define SHM_NAME_ZEROCOPY_DAY "/pet_camera_zc_0"         // DAY camera zero-copy (YOLO + brightness)
-#define SHM_NAME_ZEROCOPY_NIGHT "/pet_camera_zc_1"       // NIGHT camera zero-copy (YOLO + brightness)
+// SHM names defined in shm_constants.h
 
 /**
  * Create zero-copy shared memory
@@ -213,7 +188,7 @@ typedef struct {
  * Used by camera daemon (producer).
  *
  * Args:
- *   name: Shared memory name (e.g., SHM_NAME_YOLO_ZEROCOPY)
+ *   name: Shared memory name (e.g., SHM_NAME_ZEROCOPY_DAY)
  *
  * Returns:
  *   Pointer to mapped ZeroCopyFrameBuffer, or NULL on error
@@ -227,7 +202,7 @@ ZeroCopyFrameBuffer* shm_zerocopy_create(const char* name);
  * Used by consumers (YOLO daemon, web_monitor).
  *
  * Args:
- *   name: Shared memory name (e.g., SHM_NAME_YOLO_ZEROCOPY)
+ *   name: Shared memory name (e.g., SHM_NAME_ZEROCOPY_DAY)
  *
  * Returns:
  *   Pointer to mapped ZeroCopyFrameBuffer, or NULL on error
