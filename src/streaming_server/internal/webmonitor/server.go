@@ -159,7 +159,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	// Session-based dedup: cancel stale MJPEG stream from the same browser tab/device
-	sessionID := s.getMJPEGSessionID(w, r)
+	sessionID := s.getSessionID(w, r)
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -187,10 +187,25 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	streamMJPEGFromChannel(w, r.WithContext(ctx), frameCh)
 }
 
-// getMJPEGSessionID returns a stable session ID per browser.
+// cancelMJPEGForSession cancels any active MJPEG stream for the given session.
+func (s *Server) cancelMJPEGForSession(r *http.Request) {
+	c, err := r.Cookie("stream_sid")
+	if err != nil || c.Value == "" {
+		return
+	}
+	s.mjpegStreamsMu.Lock()
+	if old, ok := s.mjpegStreams[c.Value]; ok {
+		old.cancel()
+		delete(s.mjpegStreams, c.Value)
+		logger.Info("MJPEG", "Cancelled stream for session %s (switched to WebRTC)", c.Value)
+	}
+	s.mjpegStreamsMu.Unlock()
+}
+
+// getSessionID returns a stable session ID per browser.
 // Uses a cookie so multiple devices behind the same NAT get distinct IDs.
-func (s *Server) getMJPEGSessionID(w http.ResponseWriter, r *http.Request) string {
-	const cookieName = "mjpeg_sid"
+func (s *Server) getSessionID(w http.ResponseWriter, r *http.Request) string {
+	const cookieName = "stream_sid"
 	if c, err := r.Cookie(cookieName); err == nil && c.Value != "" {
 		return c.Value
 	}
@@ -460,6 +475,9 @@ func (s *Server) handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	// Cancel any active MJPEG stream for this session (1 stream per session)
+	s.cancelMJPEGForSession(r)
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
