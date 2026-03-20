@@ -21,7 +21,7 @@ try:
         CFrame, 
         RING_BUFFER_SIZE, 
         MAX_FRAME_SIZE,
-        SHM_NAME_ACTIVE_FRAME
+        SHM_NAME_STREAM
     )
 except ImportError:
     # Handle sys.path
@@ -33,14 +33,14 @@ except ImportError:
         CFrame, 
         RING_BUFFER_SIZE, 
         MAX_FRAME_SIZE,
-        SHM_NAME_ACTIVE_FRAME
+        SHM_NAME_STREAM
     )
 
 import mmap
 
 def main():
     parser = argparse.ArgumentParser(description="Mock Camera Daemon (Real SHM)")
-    parser.add_argument("--shm-name", type=str, default=SHM_NAME_ACTIVE_FRAME)
+    parser.add_argument("--shm-name", type=str, default=SHM_NAME_STREAM)
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)

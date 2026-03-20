@@ -14,15 +14,12 @@ package shm
 #include <semaphore.h>
 #include <errno.h>
 
-// Ensure EINVAL is defined
+// Constants from single source of truth
+#include "shm_constants.h"
+
 #ifndef EINVAL
 #define EINVAL 22
 #endif
-
-// Constants from shared_memory.h
-#define SHM_NAME_STREAM "/pet_camera_stream"
-#define RING_BUFFER_SIZE 30
-#define MAX_FRAME_SIZE (1920 * 1080 * 3 / 2)
 
 // Frame structure matching shared_memory.h
 typedef struct {
@@ -33,22 +30,21 @@ typedef struct {
     int height;
     int format;
     size_t data_size;
-    // Brightness metrics (Phase 0: ISP low-light enhancement)
-    float brightness_avg;       // Y-plane average brightness (0-255)
-    uint32_t brightness_lux;    // Environment illuminance from ISP cur_lux
-    uint8_t brightness_zone;    // 0=dark, 1=dim, 2=normal, 3=bright
-    uint8_t correction_applied; // 1 if ISP low-light correction is active
-    uint8_t _reserved[2];       // Padding for alignment
+    float brightness_avg;
+    uint32_t brightness_lux;
+    uint8_t brightness_zone;
+    uint8_t correction_applied;
+    uint8_t _reserved[2];
     uint8_t data[MAX_FRAME_SIZE];
 } Frame __attribute__((aligned(64)));
 
 // SharedFrameBuffer structure matching shared_memory.h
 typedef struct {
     volatile uint32_t write_index;
-    char _pad_wridx[60];          // Cache line isolation padding
+    char _pad_wridx[60];
     volatile uint32_t frame_interval_ms;
-    char _pad_interval[60];       // Cache line isolation padding
-    uint8_t new_frame_sem[32];  // sem_t semaphore (32 bytes on Linux)
+    char _pad_interval[60];
+    uint8_t new_frame_sem[32];  // sem_t (32 bytes on Linux)
     Frame frames[RING_BUFFER_SIZE];
 } SharedFrameBuffer;
 
@@ -154,9 +150,9 @@ const (
 	FormatRGB  = 2
 	FormatH264 = 3
 
-	// Buffer constants
-	RingBufferSize = 30
-	MaxFrameSize   = 1920 * 1080 * 3 / 2
+	// Buffer constants (must match shm_constants.h)
+	RingBufferSize = C.RING_BUFFER_SIZE
+	MaxFrameSize   = C.MAX_FRAME_SIZE
 )
 
 // Reader reads H.264 frames from shared memory
