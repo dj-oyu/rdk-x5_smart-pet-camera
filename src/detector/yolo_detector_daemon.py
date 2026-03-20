@@ -453,18 +453,23 @@ class YoloDetectorDaemon:
                         self.motion_cooldown -= 1
                     self.prev_y_plane = y_small_denoised
 
-                    # YOLO ROI detection (CLAHE handles denoise on crop)
-                    current_roi = self.roi_index
-                    detections = self.detector.detect_nv12_roi_720p(
-                        nv12_data=nv12_data,
-                        roi_index=current_roi,
-                        brightness_avg=brightness_avg,
-                    )
-                    if current_roi == 0:
-                        self.cache_frame_number = frame_number
-                        self.cache_timestamp = timestamp_sec
-                    self.roi_index = (self.roi_index + 1) % len(self.night_roi_regions)
-                    cycle_complete = (self.roi_index == 0)
+                    # YOLO ROI detection (every 3rd frame — motion runs every frame)
+                    run_yolo = (self.stats["frames_processed"] % 3 == 0)
+                    if run_yolo:
+                        current_roi = self.roi_index
+                        detections = self.detector.detect_nv12_roi_720p(
+                            nv12_data=nv12_data,
+                            roi_index=current_roi,
+                            brightness_avg=brightness_avg,
+                        )
+                        if current_roi == 0:
+                            self.cache_frame_number = frame_number
+                            self.cache_timestamp = timestamp_sec
+                        self.roi_index = (self.roi_index + 1) % len(self.night_roi_regions)
+                        cycle_complete = (self.roi_index == 0)
+                    else:
+                        detections = []
+                        cycle_complete = False
 
                     # Release buffer
                     hb_mem_buffer.release()
