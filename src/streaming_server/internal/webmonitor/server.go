@@ -131,7 +131,13 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	// Serve index.html from assets directory (supports LSP in editor)
+	// Prefer built index.html (contains content-hashed JS filenames)
+	buildIndex := filepath.Join(s.cfg.BuildAssetsDir, "index.html")
+	if fileExists(buildIndex) {
+		http.ServeFile(w, r, buildIndex)
+		return
+	}
+	// Fallback to source template
 	indexPath := filepath.Join(s.cfg.AssetsDir, "index.html")
 	http.ServeFile(w, r, indexPath)
 }
