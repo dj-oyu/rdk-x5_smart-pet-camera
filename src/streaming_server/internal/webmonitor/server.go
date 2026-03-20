@@ -2,6 +2,7 @@ package webmonitor
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,8 +12,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+type mjpegStreamEntry struct {
+	id     int
+	cancel context.CancelFunc
+}
 
 // Server serves the Go-based web monitor endpoints.
 type Server struct {
@@ -25,6 +32,11 @@ type Server struct {
 	statusBroadcaster      *StatusBroadcaster
 	connectionBroadcaster  *ConnectionBroadcaster
 	comicCapture           *ComicCapture
+
+	// Per-session MJPEG stream tracking: cancel old stream when same browser reconnects
+	mjpegStreamsMu sync.Mutex
+	mjpegStreams   map[string]mjpegStreamEntry // key: session ID (cookie-based)
+	mjpegStreamSeq int                         // monotonic ID generator
 }
 
 // NewServer returns a configured monitor server.
@@ -99,6 +111,7 @@ func NewServer(cfg Config) *Server {
 		statusBroadcaster:     statusBroadcaster,
 		connectionBroadcaster: connectionBroadcaster,
 		comicCapture:          comicCapture,
+		mjpegStreams:          make(map[string]mjpegStreamEntry),
 	}
 }
 
@@ -143,9 +156,57 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
+	// Session-based dedup: cancel stale MJPEG stream from the same browser tab/device
+	sessionID := s.getMJPEGSessionID(w, r)
+
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	s.mjpegStreamsMu.Lock()
+	s.mjpegStreamSeq++
+	myID := s.mjpegStreamSeq
+	if old, ok := s.mjpegStreams[sessionID]; ok {
+		old.cancel()
+		logger.Info("MJPEG", "Cancelled stale stream for session %s", sessionID)
+	}
+	s.mjpegStreams[sessionID] = mjpegStreamEntry{id: myID, cancel: cancel}
+	s.mjpegStreamsMu.Unlock()
+
 	id, frameCh := s.broadcaster.Subscribe()
-	defer s.broadcaster.Unsubscribe(id)
-	streamMJPEGFromChannel(w, r, frameCh)
+	defer func() {
+		s.broadcaster.Unsubscribe(id)
+		s.mjpegStreamsMu.Lock()
+		if entry, ok := s.mjpegStreams[sessionID]; ok && entry.id == myID {
+			delete(s.mjpegStreams, sessionID)
+		}
+		s.mjpegStreamsMu.Unlock()
+	}()
+
+	streamMJPEGFromChannel(w, r.WithContext(ctx), frameCh)
+}
+
+// getMJPEGSessionID returns a stable session ID per browser.
+// Uses a cookie so multiple devices behind the same NAT get distinct IDs.
+func (s *Server) getMJPEGSessionID(w http.ResponseWriter, r *http.Request) string {
+	const cookieName = "mjpeg_sid"
+	if c, err := r.Cookie(cookieName); err == nil && c.Value != "" {
+		return c.Value
+	}
+	// Generate a simple unique ID
+	s.mjpegStreamsMu.Lock()
+	s.mjpegStreamSeq++
+	sid := fmt.Sprintf("s%d-%d", time.Now().UnixMilli(), s.mjpegStreamSeq)
+	s.mjpegStreamsMu.Unlock()
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieName,
+		Value:    sid,
+		Path:     "/",
+		MaxAge:   86400, // 1 day
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+	return sid
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

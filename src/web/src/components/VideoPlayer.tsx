@@ -17,15 +17,18 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
 
   const { canvasRef, handleDetection, handleStatus } = useBBoxOverlay(videoRef);
 
-  // Stop MJPEG: detach img from DOM to force TCP connection closure
-  // (img.src='' alone is unreliable on mobile browsers)
+  // Stop MJPEG: replace src with 1px GIF + DOM detach to force connection close
+  // iOS Safari ignores img.src='' but loading a new resource aborts the stream
+  const BLANK_GIF = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
   const stopMJPEG = useCallback(() => {
     const img = mjpegRef.current;
     if (img) {
+      // 1) Load a data URI to abort the multipart HTTP request
+      img.src = BLANK_GIF;
+      // 2) DOM detach/reattach as additional measure
       const parent = img.parentNode;
       const next = img.nextSibling;
       if (parent) parent.removeChild(img);
-      img.src = '';
       img.removeAttribute('src');
       if (parent) parent.insertBefore(img, next);
     }
