@@ -81,8 +81,13 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
     }
   }, [webrtc, stopMJPEG]);
 
-  useEffect(() => {
+  // Expose startWebRTC for parent to call after DOM mount
+  const startWebRTC = useCallback(() => {
     webrtc.start().catch(() => {});
+  }, [webrtc]);
+
+  // Cleanup on unmount
+  useEffect(() => {
     return () => {
       webrtc.stop();
       stopMJPEG();
@@ -109,6 +114,7 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
     videoRef,
     canvasRef,
     mode,
+    startWebRTC,
     switchToWebRTC,
     switchToMJPEG,
     mjpegRef,
