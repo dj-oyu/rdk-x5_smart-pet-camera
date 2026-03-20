@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 
 // Thread worker function
 static void *encoder_thread_worker(void *arg) {
@@ -28,8 +29,21 @@ static void *encoder_thread_worker(void *arg) {
     uint32_t write_idx = __atomic_load_n(&ctx->write_index, __ATOMIC_ACQUIRE);
 
     if (read_idx == write_idx) {
-      // Queue empty, sleep briefly
-      usleep(1000); // 1ms
+      // Queue empty — wait on condition variable instead of polling
+      pthread_mutex_lock(&ctx->queue_mutex);
+      // Re-check under lock to avoid missed signal
+      write_idx = __atomic_load_n(&ctx->write_index, __ATOMIC_ACQUIRE);
+      if (read_idx == write_idx && ctx->running) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 50 * 1000000; // 50ms timeout
+        if (ts.tv_nsec >= 1000000000) {
+          ts.tv_sec++;
+          ts.tv_nsec -= 1000000000;
+        }
+        pthread_cond_timedwait(&ctx->queue_cond, &ctx->queue_mutex, &ts);
+      }
+      pthread_mutex_unlock(&ctx->queue_mutex);
       continue;
     }
 
@@ -85,9 +99,7 @@ static void *encoder_thread_worker(void *arg) {
                h264_size);
     }
 
-    // Free frame data
-    free(frame->y_data);
-    free(frame->uv_data);
+    // Pool buffers stay allocated — no free needed
     frame->y_data = NULL;
     frame->uv_data = NULL;
 
@@ -122,7 +134,32 @@ int encoder_thread_create(encoder_thread_t *ctx, encoder_context_t *encoder,
   ctx->frames_encoded = 0;
   ctx->frames_dropped = 0;
 
-  LOG_INFO("EncoderThread", "Created (queue_size=%d)", ENCODER_QUEUE_SIZE);
+  // Pre-allocate frame buffer pool
+  size_t y_cap = (size_t)output_width * output_height;
+  size_t uv_cap = y_cap / 2; // NV12: UV is half of Y
+  ctx->pool_y_capacity = y_cap;
+  ctx->pool_uv_capacity = uv_cap;
+
+  for (int i = 0; i < ENCODER_QUEUE_SIZE; i++) {
+    ctx->pool_y[i] = malloc(y_cap);
+    ctx->pool_uv[i] = malloc(uv_cap);
+    if (!ctx->pool_y[i] || !ctx->pool_uv[i]) {
+      LOG_ERROR("EncoderThread", "Failed to pre-allocate frame pool slot %d", i);
+      // Clean up already allocated
+      for (int j = 0; j <= i; j++) {
+        free(ctx->pool_y[j]);
+        free(ctx->pool_uv[j]);
+      }
+      return -1;
+    }
+  }
+
+  // Initialize condition variable
+  pthread_mutex_init(&ctx->queue_mutex, NULL);
+  pthread_cond_init(&ctx->queue_cond, NULL);
+
+  LOG_INFO("EncoderThread", "Created (queue_size=%d, pool: %zuKB Y + %zuKB UV per slot)",
+           ENCODER_QUEUE_SIZE, y_cap / 1024, uv_cap / 1024);
   return 0;
 }
 
@@ -160,24 +197,22 @@ int encoder_thread_push_frame(encoder_thread_t *ctx, const uint8_t *y_data,
     return -1;
   }
 
-  // Allocate and copy frame data
-  uint8_t *y_copy = malloc(y_size);
-  uint8_t *uv_copy = malloc(uv_size);
+  // Use pre-allocated pool buffers instead of malloc
+  uint32_t slot = write_idx % ENCODER_QUEUE_SIZE;
 
-  if (!y_copy || !uv_copy) {
-    free(y_copy);
-    free(uv_copy);
-    LOG_ERROR("EncoderThread", "Failed to allocate frame buffer");
+  if (y_size > ctx->pool_y_capacity || uv_size > ctx->pool_uv_capacity) {
+    LOG_ERROR("EncoderThread", "Frame too large for pool: y=%zu/%zu uv=%zu/%zu",
+              y_size, ctx->pool_y_capacity, uv_size, ctx->pool_uv_capacity);
     return -1;
   }
 
-  memcpy(y_copy, y_data, y_size);
-  memcpy(uv_copy, uv_data, uv_size);
+  memcpy(ctx->pool_y[slot], y_data, y_size);
+  memcpy(ctx->pool_uv[slot], uv_data, uv_size);
 
   // Add to queue
-  encoder_frame_t *frame = &ctx->queue[write_idx % ENCODER_QUEUE_SIZE];
-  frame->y_data = y_copy;
-  frame->uv_data = uv_copy;
+  encoder_frame_t *frame = &ctx->queue[slot];
+  frame->y_data = ctx->pool_y[slot];
+  frame->uv_data = ctx->pool_uv[slot];
   frame->y_size = y_size;
   frame->uv_size = uv_size;
   frame->frame_number = frame_number;
@@ -186,6 +221,9 @@ int encoder_thread_push_frame(encoder_thread_t *ctx, const uint8_t *y_data,
 
   // Advance write index
   __atomic_store_n(&ctx->write_index, write_idx + 1, __ATOMIC_RELEASE);
+
+  // Signal worker thread
+  pthread_cond_signal(&ctx->queue_cond);
 
   return 0;
 }
@@ -197,6 +235,9 @@ void encoder_thread_stop(encoder_thread_t *ctx) {
   LOG_INFO("EncoderThread", "Stopping...");
   ctx->running = false;
 
+  // Wake up worker if it's waiting on condition
+  pthread_cond_signal(&ctx->queue_cond);
+
   pthread_join(ctx->thread, NULL);
 
   LOG_INFO("EncoderThread", "Stopped");
@@ -206,11 +247,16 @@ void encoder_thread_destroy(encoder_thread_t *ctx) {
   if (!ctx)
     return;
 
-  // Free any remaining frames in queue
+  // Free pre-allocated pool
   for (int i = 0; i < ENCODER_QUEUE_SIZE; i++) {
-    free(ctx->queue[i].y_data);
-    free(ctx->queue[i].uv_data);
+    free(ctx->pool_y[i]);
+    free(ctx->pool_uv[i]);
+    ctx->pool_y[i] = NULL;
+    ctx->pool_uv[i] = NULL;
   }
+
+  pthread_mutex_destroy(&ctx->queue_mutex);
+  pthread_cond_destroy(&ctx->queue_cond);
 
   memset(ctx, 0, sizeof(encoder_thread_t));
   LOG_INFO("EncoderThread", "Destroyed");
