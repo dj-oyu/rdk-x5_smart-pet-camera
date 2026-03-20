@@ -3,6 +3,7 @@ package webmonitor
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -545,6 +546,9 @@ func TestHandleComicsList_Empty(t *testing.T) {
 	if len(comics) != 0 {
 		t.Fatalf("expected empty comics list, got %d", len(comics))
 	}
+	if total := int(resp["total"].(float64)); total != 0 {
+		t.Fatalf("expected total=0, got %d", total)
+	}
 }
 
 func TestHandleComicsList_WithFiles(t *testing.T) {
@@ -568,6 +572,60 @@ func TestHandleComicsList_WithFiles(t *testing.T) {
 	comics := resp["comics"].([]any)
 	if len(comics) != 2 {
 		t.Fatalf("expected 2 comics, got %d", len(comics))
+	}
+	if total := int(resp["total"].(float64)); total != 2 {
+		t.Fatalf("expected total=2, got %d", total)
+	}
+	// Newest first
+	first := comics[0].(map[string]any)["filename"].(string)
+	if first != "comic_20260320_150000.jpg" {
+		t.Fatalf("expected newest first, got %s", first)
+	}
+}
+
+func TestHandleComicsList_Pagination(t *testing.T) {
+	comicsDir, s := setupComicsTestDir(t)
+
+	for i := 0; i < 5; i++ {
+		name := fmt.Sprintf("comic_20260320_1%d0000.jpg", i)
+		os.WriteFile(filepath.Join(comicsDir, name), makeTestJPEG(10, 10), 0644)
+	}
+
+	// First page: limit=2, offset=0
+	req := httptest.NewRequest(http.MethodGet, "/api/comics?limit=2&offset=0", nil)
+	w := httptest.NewRecorder()
+	s.handleComicsList(w, req)
+
+	var resp map[string]any
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	comics := resp["comics"].([]any)
+	if len(comics) != 2 {
+		t.Fatalf("page 1: expected 2 comics, got %d", len(comics))
+	}
+	if total := int(resp["total"].(float64)); total != 5 {
+		t.Fatalf("expected total=5, got %d", total)
+	}
+
+	// Second page: limit=2, offset=2
+	req = httptest.NewRequest(http.MethodGet, "/api/comics?limit=2&offset=2", nil)
+	w = httptest.NewRecorder()
+	s.handleComicsList(w, req)
+
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	comics = resp["comics"].([]any)
+	if len(comics) != 2 {
+		t.Fatalf("page 2: expected 2 comics, got %d", len(comics))
+	}
+
+	// Beyond end: offset=10
+	req = httptest.NewRequest(http.MethodGet, "/api/comics?limit=2&offset=10", nil)
+	w = httptest.NewRecorder()
+	s.handleComicsList(w, req)
+
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	comics = resp["comics"].([]any)
+	if len(comics) != 0 {
+		t.Fatalf("beyond end: expected 0 comics, got %d", len(comics))
 	}
 }
 

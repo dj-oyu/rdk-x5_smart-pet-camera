@@ -678,8 +678,16 @@ a { color: inherit; }
     min-height: 38px;
 }
 
-/* Main content layout */
+/* Main content layout — 2-column on desktop */
 .main-content {
+    display: grid;
+    grid-template-columns: 3fr 2fr;
+    gap: 18px;
+    align-items: start;
+}
+
+/* Sidebar (trajectory + comics) */
+.sidebar {
     display: flex;
     flex-direction: column;
     gap: 18px;
@@ -1072,13 +1080,36 @@ a { color: inherit; }
     backdrop-filter: blur(4px);
 }
 
-/* Comic Gallery */
+/* Comic Gallery — horizontal scroll */
 .comic-gallery {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    display: flex;
+    overflow-x: auto;
     gap: 12px;
+    padding-bottom: 8px;
+    scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch;
+}
+.comic-gallery::-webkit-scrollbar {
+    height: 6px;
+}
+.comic-gallery::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 3px;
+}
+.comic-gallery::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 3px;
+}
+.comic-gallery::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.25);
+}
+.comic-gallery .load-sentinel {
+    flex-shrink: 0;
+    width: 1px;
 }
 .comic-card {
+    flex-shrink: 0;
+    width: 220px;
     border-radius: 8px;
     overflow: hidden;
     position: relative;
@@ -1086,6 +1117,7 @@ a { color: inherit; }
     border: 1px solid rgba(255, 255, 255, 0.08);
     cursor: pointer;
     transition: transform 0.15s ease, box-shadow 0.15s ease;
+    scroll-snap-align: start;
 }
 .comic-card:hover {
     transform: scale(1.02);
@@ -1120,6 +1152,9 @@ a { color: inherit; }
 }
 
 @media (max-width: 960px) {
+    .main-content {
+        grid-template-columns: 1fr;
+    }
     .grid {
         grid-template-columns: 1fr;
     }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -468,40 +469,59 @@ func (s *Server) handleComicsList(w http.ResponseWriter, r *http.Request) {
 	entries, err := os.ReadDir(comicsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			writeJSON(w, map[string]any{"comics": []any{}})
+			writeJSON(w, map[string]any{"comics": []any{}, "total": 0})
 			return
 		}
 		writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusInternalServerError)
 		return
 	}
 
-	type comicInfo struct {
-		Filename  string `json:"filename"`
-		Size      int64  `json:"size"`
-		CreatedAt string `json:"created_at"`
-	}
-
-	comics := []comicInfo{}
+	// Collect filenames only (no stat calls — SD card friendly)
+	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jpg") {
-			continue
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".jpg") {
+			names = append(names, e.Name())
 		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		comics = append(comics, comicInfo{
-			Filename:  e.Name(),
-			Size:      info.Size(),
-			CreatedAt: info.ModTime().Format(time.RFC3339),
-		})
 	}
 
-	sort.Slice(comics, func(i, j int) bool {
-		return comics[i].CreatedAt > comics[j].CreatedAt
-	})
+	// Sort by filename descending (filenames contain timestamps: comic_YYYYMMDD_HHMMSS.jpg)
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
 
-	writeJSON(w, map[string]any{"comics": comics})
+	total := len(names)
+
+	// Pagination: ?limit=N&offset=M
+	limit := total
+	offset := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+
+	if offset >= total {
+		writeJSON(w, map[string]any{"comics": []any{}, "total": total})
+		return
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	page := names[offset:end]
+
+	type comicInfo struct {
+		Filename string `json:"filename"`
+	}
+	comics := make([]comicInfo, len(page))
+	for i, name := range page {
+		comics[i] = comicInfo{Filename: name}
+	}
+
+	writeJSON(w, map[string]any{"comics": comics, "total": total})
 }
 
 func (s *Server) handleComicServe(w http.ResponseWriter, r *http.Request) {

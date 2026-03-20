@@ -91,22 +91,23 @@
                 <span id="record-info"></span>
             </div>
 
-            <!-- Trajectory visualization -->
-            <div class="trajectory-card" id="trajectory-card">
-                <canvas class="trajectory-canvas" id="trajectory-canvas"></canvas>
-                <div class="legend" id="trajectory-legend"></div>
-            </div>
-
-            <!-- Comic Gallery -->
-            <div class="panel">
-                <div style="display:flex;justify-content:space-between;align-items:center;">
-                    <div>
-                        <h2>ねこコミック</h2>
-                        <p class="panel-subtitle">検出時の4コマスナップショット</p>
-                    </div>
+            <!-- Sidebar: Trajectory + Comic Gallery -->
+            <div class="sidebar">
+                <div class="trajectory-card" id="trajectory-card">
+                    <canvas class="trajectory-canvas" id="trajectory-canvas"></canvas>
+                    <div class="legend" id="trajectory-legend"></div>
                 </div>
-                <div class="comic-gallery" id="comic-gallery">
-                    <p class="muted">コミックはまだありません。猫の検出を待機しています。</p>
+
+                <div class="panel">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <div>
+                            <h2>ねこコミック</h2>
+                            <p class="panel-subtitle">検出時の4コマスナップショット</p>
+                        </div>
+                    </div>
+                    <div class="comic-gallery" id="comic-gallery">
+                        <p class="muted">コミックはまだありません。猫の検出を待機しています。</p>
+                    </div>
                 </div>
             </div>
         </div>

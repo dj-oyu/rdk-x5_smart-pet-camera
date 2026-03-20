@@ -54,16 +54,83 @@ window.addEventListener('DOMContentLoaded', () => {
         return date.toLocaleString();
     }
 
-    // Comic Gallery
-    async function fetchComics() {
+    // Comic Gallery — horizontal scroll with incremental loading
+    const COMICS_PAGE_SIZE = 6;
+    let comicsOffset = 0;
+    let comicsTotal = 0;
+    let comicsLoading = false;
+    let comicsSentinelObserver = null;
+
+    async function fetchComicsPage(offset, limit) {
+        const res = await fetch(`/api/comics?limit=${limit}&offset=${offset}`);
+        if (!res.ok) throw new Error('Failed to fetch comics');
+        return await res.json();
+    }
+
+    async function loadInitialComics() {
         try {
-            const res = await fetch('/api/comics');
-            if (!res.ok) throw new Error('Failed to fetch comics');
-            const data = await res.json();
-            renderComics(data.comics || []);
+            comicsOffset = 0;
+            const data = await fetchComicsPage(0, COMICS_PAGE_SIZE);
+            comicsTotal = data.total || 0;
+            const comics = data.comics || [];
+            comicsOffset = comics.length;
+
+            if (!comicGalleryEl) return;
+            if (comics.length === 0) {
+                comicGalleryEl.innerHTML =
+                    '<p class="muted">コミックはまだありません。猫の検出を待機しています。</p>';
+                return;
+            }
+
+            comicGalleryEl.innerHTML = '';
+            comics.forEach(c => comicGalleryEl.appendChild(createComicCard(c.filename)));
+            setupLoadMoreSentinel();
         } catch (error) {
             console.error('[Comics] Fetch error:', error);
         }
+    }
+
+    async function loadMoreComics() {
+        if (comicsLoading || comicsOffset >= comicsTotal) return;
+        comicsLoading = true;
+        try {
+            const data = await fetchComicsPage(comicsOffset, COMICS_PAGE_SIZE);
+            const comics = data.comics || [];
+            comicsTotal = data.total || comicsTotal;
+            comicsOffset += comics.length;
+
+            // Insert before sentinel
+            const sentinel = comicGalleryEl.querySelector('.load-sentinel');
+            comics.forEach(c => {
+                const card = createComicCard(c.filename);
+                comicGalleryEl.insertBefore(card, sentinel);
+            });
+
+            // No more pages — remove sentinel
+            if (comicsOffset >= comicsTotal && sentinel) {
+                sentinel.remove();
+                comicsSentinelObserver?.disconnect();
+            }
+        } catch (error) {
+            console.error('[Comics] Load more error:', error);
+        } finally {
+            comicsLoading = false;
+        }
+    }
+
+    function setupLoadMoreSentinel() {
+        if (comicsOffset >= comicsTotal) return;
+
+        // Invisible element at end of scroll — triggers load when visible
+        const sentinel = document.createElement('div');
+        sentinel.className = 'load-sentinel';
+        comicGalleryEl.appendChild(sentinel);
+
+        comicsSentinelObserver?.disconnect();
+        comicsSentinelObserver = new IntersectionObserver((entries) => {
+            if (entries[0].isIntersecting) loadMoreComics();
+        }, { root: comicGalleryEl, rootMargin: '0px 200px 0px 0px' });
+        comicsSentinelObserver.observe(sentinel);
     }
 
     function parseComicDate(filename) {
@@ -72,31 +139,25 @@ window.addEventListener('DOMContentLoaded', () => {
         return new Date(match[1], match[2] - 1, match[3], match[4], match[5], match[6]);
     }
 
-    function renderComics(comics) {
-        if (!comicGalleryEl) return;
-        if (!comics || comics.length === 0) {
-            comicGalleryEl.innerHTML =
-                '<p class="muted">コミックはまだありません。猫の検出を待機しています。</p>';
-            return;
-        }
+    function createComicCard(filename) {
+        const date = parseComicDate(filename);
+        const dateStr = date ? formatRecordingDate(date) : '';
+        const imgUrl = `/api/comics/${encodeURIComponent(filename)}`;
 
-        comicGalleryEl.innerHTML = comics.map(comic => {
-            const date = parseComicDate(comic.filename);
-            const dateStr = date ? formatRecordingDate(date) : comic.created_at;
-            const imgUrl = `/api/comics/${encodeURIComponent(comic.filename)}`;
-            return `
-                <div class="comic-card" data-filename="${comic.filename}">
-                    <img src="${imgUrl}" alt="${comic.filename}" loading="lazy"
-                         onclick="window.openThumbnailPreview('${imgUrl}', '${comic.filename}')">
-                    <div class="comic-card-footer">
-                        <span class="comic-card-date">${dateStr}</span>
-                        <button class="btn-delete comic-card-delete" onclick="window.deleteComic('${comic.filename}')" title="削除">
-                            &times;
-                        </button>
-                    </div>
-                </div>
-            `;
-        }).join('');
+        const card = document.createElement('div');
+        card.className = 'comic-card';
+        card.dataset.filename = filename;
+        card.innerHTML = `
+            <img src="${imgUrl}" alt="${filename}" loading="lazy"
+                 onclick="window.openThumbnailPreview('${imgUrl}', '${filename}')">
+            <div class="comic-card-footer">
+                <span class="comic-card-date">${dateStr}</span>
+                <button class="btn-delete comic-card-delete" onclick="window.deleteComic('${filename}')" title="削除">
+                    &times;
+                </button>
+            </div>
+        `;
+        return card;
     }
 
     async function deleteComic(filename) {
@@ -104,7 +165,15 @@ window.addEventListener('DOMContentLoaded', () => {
         try {
             const res = await fetch(`/api/comics/${encodeURIComponent(filename)}`, { method: 'DELETE' });
             if (res.ok) {
-                fetchComics();
+                // Remove card from DOM without refetching
+                const card = comicGalleryEl.querySelector(`[data-filename="${filename}"]`);
+                if (card) card.remove();
+                comicsTotal--;
+                comicsOffset--;
+                if (comicsTotal <= 0) {
+                    comicGalleryEl.innerHTML =
+                        '<p class="muted">コミックはまだありません。猫の検出を待機しています。</p>';
+                }
             } else {
                 const data = await res.json();
                 alert('削除に失敗しました: ' + (data.error || 'Unknown error'));
@@ -117,9 +186,9 @@ window.addEventListener('DOMContentLoaded', () => {
 
     window.deleteComic = deleteComic;
 
-    // Auto-refresh comics every 30 seconds
-    fetchComics();
-    setInterval(fetchComics, 30000);
+    // Initial load + auto-refresh (only checks for new comics at the front)
+    loadInitialComics();
+    setInterval(loadInitialComics, 30000);
 
     function renderLegend(container, classCounts, options = {}) {
         if (!container) return;
