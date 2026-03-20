@@ -95,16 +95,17 @@ export function useBBoxOverlay(videoRef: preact.RefObject<HTMLVideoElement | nul
         ctx.strokeRect(x, y, w, h);
 
         const label = `${det.class_name}: ${(det.confidence * 100).toFixed(0)}%`;
-        ctx.font = '14px Arial';
+        const fontSize = Math.round(14 * scaleX);
+        ctx.font = `${fontSize}px Arial`;
         const metrics = ctx.measureText(label);
-        const labelH = 18;
+        const labelH = Math.round(18 * scaleX);
         const labelW = metrics.width + 8;
         const labelY = Math.max(y - labelH, 0);
 
         ctx.fillStyle = color;
         ctx.fillRect(x, labelY, labelW, labelH);
         ctx.fillStyle = '#000000';
-        ctx.fillText(label, x + 4, labelY + 13);
+        ctx.fillText(label, x + 4, labelY + labelH - Math.round(5 * scaleX));
       }
 
       const fi = frameInfoRef.current;
@@ -128,14 +129,18 @@ export function useBBoxOverlay(videoRef: preact.RefObject<HTMLVideoElement | nul
       const frameStr = String(frameNum).padStart(minDigits, ' ');
       const text = `Frame: ${frameStr}  Time: ${timeStr}`;
 
-      ctx.font = '16px monospace';
-      const charWidth = 9.6;
+      const infoScale = canvas.width / 640;
+      const infoFontSize = Math.round(16 * infoScale);
+      ctx.font = `${infoFontSize}px monospace`;
+      const charWidth = 9.6 * infoScale;
       const totalChars = 34 + minDigits;
-      const bgWidth = totalChars * charWidth + 20;
+      const bgWidth = totalChars * charWidth + 20 * infoScale;
+      const bgHeight = Math.round(24 * infoScale);
+      const margin = Math.round(10 * infoScale);
       ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-      ctx.fillRect(10, 10, bgWidth, 24);
+      ctx.fillRect(margin, margin, bgWidth, bgHeight);
       ctx.fillStyle = '#FFFF00';
-      ctx.fillText(text, 15, 27);
+      ctx.fillText(text, margin + Math.round(5 * infoScale), margin + bgHeight - Math.round(7 * infoScale));
 
       animIdRef.current = requestAnimationFrame(renderLoop);
     };
