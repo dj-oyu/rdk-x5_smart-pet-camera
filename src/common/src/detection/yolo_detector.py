@@ -490,7 +490,6 @@ class YoloDetector:
         nv12_data: bytes | memoryview,
         roi_index: int,
         brightness_avg: float = -1.0,
-        pre_denoised: bool = False,
     ) -> list[Detection]:
         """
         1280x720 NV12フレームから指定ROIの物体検出を実行
@@ -502,7 +501,6 @@ class YoloDetector:
             nv12_data: 1280x720 NV12フォーマットのフレームデータ
             roi_index: ROIインデックス (0, 1, 2)
             brightness_avg: ISPからの平均輝度 (0-255)
-            pre_denoised: Yプレーンがデノイズ済みならTrue（重複デノイズをスキップ）
 
         Returns:
             検出結果のリスト (座標は1280x720フレーム座標系)
@@ -537,7 +535,6 @@ class YoloDetector:
             roi_w=roi_w,
             roi_h=roi_h,
             brightness_avg=brightness_avg,
-            pre_denoised=pre_denoised,
         )
 
     def _crop_nv12_roi(
@@ -596,7 +593,6 @@ class YoloDetector:
         roi_w: int = 640,
         roi_h: int = 640,
         brightness_avg: float = -1.0,
-        pre_denoised: bool = False,
     ) -> list[Detection]:
         """
         NV12フレームの指定ROI領域から物体検出を実行
@@ -651,14 +647,6 @@ class YoloDetector:
             cropped = self._crop_nv12_roi(
                 nv12_array, width, height, roi_x, roi_y, roi_w, roi_h
             )
-            # IRノイズ除去 (低照度/夜間のみ、crop後の640x640に適用)
-            # pre_denoised=True の場合はスキップ（daemon側で full frame デノイズ済み）
-            if need_clahe and not pre_denoised:
-                crop_y_size = roi_w * roi_h
-                y_crop = cropped[:crop_y_size].reshape(roi_h, roi_w)
-                y_crop = cv2.medianBlur(y_crop, 5)
-                cropped = cropped.copy()
-                cropped[:crop_y_size] = y_crop.flatten()
             input_tensor = cropped
             scale = (1.0, 1.0)
             shift = (0.0, 0.0)
