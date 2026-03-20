@@ -247,13 +247,12 @@ export function SidebarView(props: ReturnType<typeof useSidebar>) {
       <div class="panel">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
-            <h2>Cat Comics</h2>
-            <p class="panel-subtitle">4-frame snapshots on detection</p>
+            <h2>アルバム</h2>
           </div>
         </div>
         <div class="comic-gallery" ref={props.galleryRef}>
           {props.comics.length === 0 ? (
-            <p class="muted">No comics yet. Waiting for cat detection.</p>
+            <p class="muted">まだコミックがありません。ねこの検出を待っています。</p>
           ) : (
             <>
               {props.comics.map((filename) => {
