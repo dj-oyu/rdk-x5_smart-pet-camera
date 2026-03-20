@@ -112,8 +112,8 @@ def main():
             
             # Write frame to ring buffer
             idx = write_index % RING_BUFFER_SIZE
-            # Offset: write_index(4) + frame_interval_ms(4) + sem_t(32) + frames[idx]
-            frame_offset = sizeof(ctypes.c_uint32) * 2 + 32 + sizeof(CFrame) * idx
+            # Use struct field offset for correct padding-aware calculation
+            frame_offset = CSharedFrameBuffer.frames.offset + sizeof(CFrame) * idx
             
             shm_mmap.seek(frame_offset)
             shm_mmap.write(bytes(c_frame))
