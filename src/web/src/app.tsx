@@ -41,6 +41,8 @@ function App() {
   });
 
   useEffect(() => {
+    // Start after DOM mount so videoRef is attached
+    videoPlayer.startWebRTC();
     sse.start();
     return () => sse.stop();
   }, []);
