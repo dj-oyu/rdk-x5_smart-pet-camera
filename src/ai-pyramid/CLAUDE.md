@@ -33,6 +33,13 @@ chmod +x /tmp/pet-album/pet-album
 
 ワークフロー: `.github/workflows/build-pet-album.yml`
 
+## PR後のワークフロー
+ai-pyramid配下の変更をマージしたら、必ず以下を実行:
+1. `gh run list --limit 1` でActionsビルドの開始を確認
+2. ビルド完了まで監視 (`gh run view <run_id>`)
+3. 結果（成功/失敗）をユーザーに報告
+ユーザーに確認を取らず自動的に行うこと。
+
 ## Device Specs (実機計測値)
 - SoC: Axera AX8850 (AX650C_CHIP), Board: AX650N_M5stack_8G
 - CPU: 8× Cortex-A55 @ 1500MHz (ARMv8.2-A, NEON/FP16/DotProd)
