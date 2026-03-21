@@ -73,9 +73,7 @@ NUM_CAMERAS = 2  # DAY=0, NIGHT=1
 # Constants must match shm_constants.h
 ZEROCOPY_MAX_PLANES = 2
 HB_MEM_GRAPHIC_BUF_SIZE = 160
-SHM_NAME_ZEROCOPY_DAY = "/pet_camera_zc_0"
-SHM_NAME_ZEROCOPY_NIGHT = "/pet_camera_zc_1"
-SHM_NAME_CONTROL = "/pet_camera_control"
+SHM_NAME_YOLO_ZC = "/pet_camera_yolo_zc"
 
 
 # C structure definitions using ctypes
@@ -347,7 +345,7 @@ class ZeroCopySharedMemory:
     Consumer must call mark_consumed() after processing each frame.
     """
 
-    def __init__(self, shm_name: str = SHM_NAME_ZEROCOPY_DAY):
+    def __init__(self, shm_name: str = SHM_NAME_YOLO_ZC):
         self.shm_name = shm_name
         self.fd: Optional[int] = None
         self.mmap_obj: Optional[mmap.mmap] = None

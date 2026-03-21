@@ -27,9 +27,7 @@ sys.path.insert(0, str(COMMON_SRC))
 from real_shared_memory import (
     DetectionWriter,
     ZeroCopySharedMemory,
-    CameraControlSharedMemory,
-    SHM_NAME_ZEROCOPY_DAY,
-    SHM_NAME_ZEROCOPY_NIGHT,
+    SHM_NAME_YOLO_ZC,
 )
 from detection.yolo_detector import YoloDetector
 
@@ -109,16 +107,8 @@ class YoloDetectorDaemon:
 
         # 共有メモリ
         self.detection_writer: DetectionWriter | None = None  # Detection result writer
-        self.shm_zerocopy_day: ZeroCopySharedMemory | None = (
-            None  # DAY camera zero-copy
-        )
-        self.shm_zerocopy_night: ZeroCopySharedMemory | None = (
-            None  # NIGHT camera zero-copy
-        )
-        self.shm_control: CameraControlSharedMemory | None = (
-            None  # Camera control (active index)
-        )
-        self.active_camera: int = 0  # Currently active camera (0=DAY, 1=NIGHT)
+        self.shm_zerocopy: ZeroCopySharedMemory | None = None
+        self.active_camera: int = 0  # Determined from frame camera_id
 
         # YOLODetector
         self.detector: YoloDetector | None = None
@@ -189,30 +179,11 @@ class YoloDetectorDaemon:
 
         # 共有メモリを開く
         try:
-            # CameraControl SHM (to determine active camera)
-            self.shm_control = CameraControlSharedMemory()
-            if self.shm_control.open():
-                self.active_camera = self.shm_control.get_active()
-                logger.debug(f"CameraControl SHM opened, active camera: {self.active_camera}")
-            else:
-                logger.debug("CameraControl SHM not available, defaulting to DAY camera")
-
-            # Per-camera zero-copy SHMs (Phase 2)
-            self.shm_zerocopy_day = ZeroCopySharedMemory(SHM_NAME_ZEROCOPY_DAY)
-            self.shm_zerocopy_night = ZeroCopySharedMemory(SHM_NAME_ZEROCOPY_NIGHT)
-
-            day_ok = self.shm_zerocopy_day.open()
-            night_ok = self.shm_zerocopy_night.open()
-
-            if not day_ok and not night_ok:
-                raise RuntimeError(
-                    f"Zero-copy SHM not available: {SHM_NAME_ZEROCOPY_DAY} and {SHM_NAME_ZEROCOPY_NIGHT}"
-                )
-
-            if day_ok:
-                logger.debug(f"Connected to DAY zero-copy: {SHM_NAME_ZEROCOPY_DAY}")
-            if night_ok:
-                logger.debug(f"Connected to NIGHT zero-copy: {SHM_NAME_ZEROCOPY_NIGHT}")
+            # Unified zero-copy SHM (active camera writes here)
+            self.shm_zerocopy = ZeroCopySharedMemory(SHM_NAME_YOLO_ZC)
+            if not self.shm_zerocopy.open():
+                raise RuntimeError(f"Zero-copy SHM not available: {SHM_NAME_YOLO_ZC}")
+            logger.debug(f"Connected to zero-copy SHM: {SHM_NAME_YOLO_ZC}")
 
             # Detection result writer (independent of frame SHM)
             self.detection_writer = DetectionWriter()
@@ -237,24 +208,12 @@ class YoloDetectorDaemon:
             raise
 
     def _get_active_zerocopy(self) -> ZeroCopySharedMemory | None:
-        """Get the ZeroCopy SHM for the currently active camera."""
-        if self.shm_control:
-            self.active_camera = self.shm_control.get_active()
-        if self.active_camera == 0 and self.shm_zerocopy_day:
-            return self.shm_zerocopy_day
-        if self.active_camera == 1 and self.shm_zerocopy_night:
-            return self.shm_zerocopy_night
-        # Fallback: return whichever is available
-        return self.shm_zerocopy_day or self.shm_zerocopy_night
+        return self.shm_zerocopy
 
     def cleanup(self) -> None:
         """クリーンアップ"""
-        if self.shm_zerocopy_day:
-            self.shm_zerocopy_day.close()
-        if self.shm_zerocopy_night:
-            self.shm_zerocopy_night.close()
-        if self.shm_control:
-            self.shm_control.close()
+        if self.shm_zerocopy:
+            self.shm_zerocopy.close()
         if self.detection_writer:
             self.detection_writer.close()
         if self.stats["frames_processed"] > 0:
@@ -329,12 +288,13 @@ class YoloDetectorDaemon:
                     active_zc.mark_consumed()
                     continue
 
-                # CLAHE is only for night (IR) camera
+                # Update active camera from frame and set CLAHE
+                self.active_camera = zc_frame.camera_id
                 self.detector.clahe_enabled = (self.active_camera == 1)
 
-                # Check for camera switch via semaphore (non-blocking)
-                if self.shm_control and self.shm_control.try_wait_switch():
-                    camera_id = self.shm_control.get_active()
+                # Detect camera switch from frame camera_id
+                camera_id = zc_frame.camera_id
+                if camera_id != self.active_camera:
                     # Use fixed scale factors based on camera type
                     # Output is always H.264 1280x720
                     if camera_id == 0:  # Day: 640x360 → 1280x720
