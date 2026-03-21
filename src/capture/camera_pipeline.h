@@ -35,15 +35,15 @@ typedef struct {
     encoder_thread_t encoder_thread;
 
     // Shared memory output
-    H265ZeroCopyBuffer *shm_h265_zc;      // H.265 zero-copy (share_id based)
-    SharedBrightnessData *shm_brightness; // Lightweight brightness data (always updated)
-    SharedFrameBuffer *shm_mjpeg_frame;   // MJPEG 640x480 NV12 input (VSE Ch2, always active, writable)
+    // SHM output (only 2 remain)
+    H265ZeroCopyBuffer *shm_h265_zc;        // H.265 stream zero-copy (Go streaming)
+    ZeroCopyFrameBuffer *shm_yolo_zerocopy; // YOLO zero-copy (Python detector)
 
-    // Zero-copy shared memory (share_id based, no memcpy)
-    ZeroCopyFrameBuffer *shm_yolo_zerocopy; // YOLO 1280x720 zero-copy (VSE Ch1, always active)
+    // MJPEG (TODO: migrate to zero-copy like YOLO)
+    SharedFrameBuffer *shm_mjpeg_frame;
 
-    // Camera control (Phase 2: SHM-based instead of signal-based)
-    CameraControl *control_shm;           // CameraControl shared memory (active camera index)
+    // Active camera (shared variable, no SHM — same process)
+    volatile int *active_camera;            // Points to g_active_camera in main
 
     // Runtime control
     volatile bool *running_flag;           // External running flag
