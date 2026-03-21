@@ -184,10 +184,9 @@ func (s *Server) Start() error {
 	}()
 
 	// Start goroutines
-	s.wg.Add(4)
+	// readFrames handles process + WebRTC inline (zero-copy requires same goroutine)
+	s.wg.Add(2)
 	go s.readFrames()
-	go s.processFrames()
-	go s.distributeWebRTC()
 	go s.distributeRecorder()
 
 	log.Println("Server started successfully")
@@ -252,10 +251,31 @@ func (s *Server) readFrames() {
 		s.metrics.FramesRead.Add(1)
 		s.metrics.UpdateFrameLatency(frame.Timestamp)
 
-		select {
-		case s.processChan <- frame:
-		default:
-			s.metrics.FramesDropped.Add(1)
+		// Process inline (same goroutine — frame.Data is valid until next ReadLatest)
+		if err := s.processor.Process(frame); err != nil {
+			s.metrics.ProcessErrors.Add(1)
+			continue
+		}
+		if s.processor.HasHeaders() {
+			s.recorder.UpdateHeaders(s.processor.GetVPS(), s.processor.GetSPS(), s.processor.GetPPS())
+		}
+		s.metrics.FramesProcessed.Add(1)
+
+		// WebRTC: send directly (zero-copy, pion copies internally)
+		s.webrtc.SendFrame(frame)
+		s.metrics.WebRTCFramesSent.Add(1)
+
+		// Recorder: copy data (async write needs independent buffer)
+		if s.recorder.IsRecording() {
+			dataCopy := make([]byte, len(frame.Data))
+			copy(dataCopy, frame.Data)
+			recFrame := *frame
+			recFrame.Data = dataCopy
+			select {
+			case s.recorderChan <- &recFrame:
+			default:
+				s.metrics.RecorderFramesDropped.Add(1)
+			}
 		}
 	}
 }
@@ -337,12 +357,8 @@ func (s *Server) distributeRecorder() {
 		case <-s.ctx.Done():
 			return
 		case frame := <-s.recorderChan:
-			// Copy frame data — original points to VPU memory freed on next ReadLatest
-			dataCopy := make([]byte, len(frame.Data))
-			copy(dataCopy, frame.Data)
-			recFrame := *frame
-			recFrame.Data = dataCopy
-			if s.recorder.SendFrame(&recFrame) {
+			// frame.Data is already copied by readFrames (VPU buffer is transient)
+			if s.recorder.SendFrame(frame) {
 				s.metrics.RecorderFramesSent.Add(1)
 			}
 
