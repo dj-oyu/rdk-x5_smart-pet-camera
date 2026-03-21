@@ -684,21 +684,17 @@ CameraControl* shm_control_create(void) {
 
     if (ctrl) {
         if (created_new) {
-            // Initialize to DAY camera (index 0)
             ctrl->active_camera_index = 0;
-            ctrl->version = 0;
-            // Initialize switch semaphore (pshared=1 for inter-process)
-            if (sem_init(&ctrl->switch_sem, 1, 0) != 0) {
-                LOG_ERROR("SharedMemory", "sem_init(switch_sem) failed: %s", strerror(errno));
-                munmap(ctrl, sizeof(CameraControl));
-                shm_unlink(SHM_NAME_CONTROL);
-                return NULL;
-            }
-            LOG_INFO("SharedMemory", "Camera control shared memory created: %s (size=%zu bytes)",
+            ctrl->switch_version = 0;
+            sem_init(&ctrl->switch_sem, 1, 0);
+            sem_init(&ctrl->frame_sem, 1, 0);
+            sem_init(&ctrl->consumed_sem, 1, 1);
+            ctrl->yolo_frame.version = 0;
+            ctrl->yolo_frame.consumed = 1;
+            LOG_INFO("SharedMemory", "Camera control SHM created: %s (%zu bytes)",
                      SHM_NAME_CONTROL, sizeof(CameraControl));
         } else {
-            LOG_INFO("SharedMemory", "Camera control shared memory opened (already exists): %s",
-                     SHM_NAME_CONTROL);
+            LOG_INFO("SharedMemory", "Camera control SHM opened: %s", SHM_NAME_CONTROL);
         }
     }
 
@@ -743,7 +739,7 @@ void shm_control_set_active(CameraControl* ctrl, int camera_index) {
     __atomic_store_n(&ctrl->active_camera_index, camera_index, __ATOMIC_RELEASE);
 
     // Increment version to signal change
-    __atomic_fetch_add(&ctrl->version, 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&ctrl->switch_version, 1, __ATOMIC_RELEASE);
 
     // Notify consumers of camera switch
     sem_post(&ctrl->switch_sem);
@@ -762,5 +758,5 @@ uint32_t shm_control_get_version(CameraControl* ctrl) {
         return 0;
     }
 
-    return __atomic_load_n(&ctrl->version, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&ctrl->switch_version, __ATOMIC_ACQUIRE);
 }
