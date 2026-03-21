@@ -148,7 +148,7 @@ class YoloDetectorDaemon:
 
         # Detection result cache for temporal integration
         self.detection_cache: list[list[dict]] = []  # [roi_0_dets, roi_1_dets, ...]
-        self.cache_frame_number: int = -1  # Frame number when cache started
+        self.cache_zc_frame.frame_number: int = -1  # Frame number when cache started
         self.cache_timestamp: float = 0.0  # Timestamp when cache started
 
         # Night motion detection state
@@ -329,11 +329,8 @@ class YoloDetectorDaemon:
                     active_zc.mark_consumed()
                     continue
 
-                frame_width = zc_frame.width
-                frame_height = zc_frame.height
-                frame_number = zc_frame.frame_number
-                timestamp_sec = zc_frame.timestamp_sec
-                brightness_avg = zc_frame.brightness_avg
+                # CLAHE is only for night (IR) camera
+                self.detector.clahe_enabled = (self.active_camera == 1)
 
                 # Check for camera switch via semaphore (non-blocking)
                 if self.shm_control and self.shm_control.try_wait_switch():
@@ -367,7 +364,6 @@ class YoloDetectorDaemon:
 
                 # Initialize scale factors on first frame (before any switch)
                 if self.scale_x is None or self.scale_y is None:
-                    camera_id = zc_frame.camera_id
                     # Use fixed scale factors based on camera type
                     if camera_id == 0:  # Day: 640x360 → 1280x720
                         self.scale_x = 2.0
@@ -381,10 +377,10 @@ class YoloDetectorDaemon:
 
                 # Initialize ROI regions on first frame
                 if self.stats["frames_processed"] == 0:
-                    logger.debug(f"YOLO input: {frame_width}x{frame_height}, camera_id={zc_frame.camera_id}")
+                    logger.debug(f"YOLO input: {zc_frame.width}x{zc_frame.height}, camera_id={zc_frame.camera_id}")
 
                     # Night camera (camera_id=1) with 1280x720: enable ROI mode
-                    if zc_frame.camera_id == 1 and frame_width == 1280 and frame_height == 720:
+                    if zc_frame.camera_id == 1 and zc_frame.width == 1280 and zc_frame.height == 720:
                         self.night_roi_mode = True
                         self.night_roi_regions = self.detector.get_roi_regions_720p()
                         logger.debug(f"Night camera ROI mode: {len(self.night_roi_regions)} regions")
@@ -395,7 +391,7 @@ class YoloDetectorDaemon:
                         # Day camera or other resolutions: use original logic
                         self.night_roi_mode = False
                         self.roi_regions = self.detector.get_roi_regions(
-                            frame_width, frame_height
+                            zc_frame.width, zc_frame.height
                         )
 
                         if len(self.roi_regions) > 1:
@@ -409,13 +405,13 @@ class YoloDetectorDaemon:
                 # Run detection
                 if self.night_roi_mode:
                     # Night camera: motion detection + YOLO hybrid
-                    y_size = frame_width * frame_height
+                    y_size = zc_frame.width * zc_frame.height
 
                     # Motion detection on downscaled Y (640x360 = 1/4 pixels)
                     y_plane = np.frombuffer(nv12_data[:y_size], dtype=np.uint8).reshape(
-                        frame_height, frame_width
+                        zc_frame.height, zc_frame.width
                     )
-                    motion_h, motion_w = frame_height // 2, frame_width // 2
+                    motion_h, motion_w = zc_frame.height // 2, zc_frame.width // 2
                     y_small = cv2.resize(y_plane, (motion_w, motion_h), interpolation=cv2.INTER_AREA)
                     y_small_denoised = cv2.medianBlur(y_small, 3)
 
@@ -452,7 +448,7 @@ class YoloDetectorDaemon:
                             # Collect frames for future fine-tuning
                             if (self.night_collect_count < self.night_collect_max
                                     and self.stats["frames_processed"] % self.night_collect_interval == 0):
-                                self._save_night_frame(nv12_data, frame_width, frame_height, frame_number)
+                                self._save_night_frame(nv12_data, zc_frame.width, zc_frame.height, zc_frame.frame_number)
 
                     if self.motion_cooldown > 0:
                         self.motion_cooldown -= 1
@@ -465,11 +461,11 @@ class YoloDetectorDaemon:
                         detections = self.detector.detect_nv12_roi_720p(
                             nv12_data=nv12_data,
                             roi_index=current_roi,
-                            brightness_avg=brightness_avg,
+                            brightness_avg=zc_frame.brightness_avg,
                         )
                         if current_roi == 0:
-                            self.cache_frame_number = frame_number
-                            self.cache_timestamp = timestamp_sec
+                            self.cache_zc_frame.frame_number = zc_frame.frame_number
+                            self.cache_timestamp = zc_frame.timestamp_sec
                         self.roi_index = (self.roi_index + 1) % len(self.night_roi_regions)
                         cycle_complete = (self.roi_index == 0)
                     else:
@@ -529,7 +525,7 @@ class YoloDetectorDaemon:
 
                         if scaled_dicts:
                             self.detection_writer.write_detection_result(
-                                frame_number=self.cache_frame_number,
+                                frame_number=self.cache_zc_frame.frame_number,
                                 timestamp_sec=self.cache_timestamp,
                                 detections=scaled_dicts,
                             )
@@ -555,7 +551,7 @@ class YoloDetectorDaemon:
                             f"det={self.stats['total_detections']}(mot={mot},yolo={yolo}) "
                             f"inf={self.stats['avg_inference_time_ms']:.0f}ms "
                             f"cam={self.active_camera} "
-                            f"bright={brightness_avg:.1f}"
+                            f"bright={zc_frame.brightness_avg:.1f}"
                         )
 
                     if is_debug and cycle_complete and detection_dicts:
@@ -570,19 +566,19 @@ class YoloDetectorDaemon:
                     roi_x, roi_y, roi_w, roi_h = self.roi_regions[current_roi]
                     detections = self.detector.detect_nv12_roi(
                         nv12_data=nv12_data,
-                        width=frame_width,
-                        height=frame_height,
+                        width=zc_frame.width,
+                        height=zc_frame.height,
                         roi_x=roi_x,
                         roi_y=roi_y,
                         roi_w=roi_w,
                         roi_h=roi_h,
-                        brightness_avg=brightness_avg,
+                        brightness_avg=zc_frame.brightness_avg,
                     )
 
                     # Track cache start for first ROI
                     if current_roi == 0:
-                        self.cache_frame_number = frame_number
-                        self.cache_timestamp = timestamp_sec
+                        self.cache_zc_frame.frame_number = zc_frame.frame_number
+                        self.cache_timestamp = zc_frame.timestamp_sec
 
                     # Advance to next ROI for next frame
                     self.roi_index = (self.roi_index + 1) % len(self.roi_regions)
@@ -591,9 +587,9 @@ class YoloDetectorDaemon:
                     # Direct mode: full frame detection
                     detections = self.detector.detect_nv12(
                         nv12_data=nv12_data,
-                        width=frame_width,
-                        height=frame_height,
-                        brightness_avg=brightness_avg,
+                        width=zc_frame.width,
+                        height=zc_frame.height,
+                        brightness_avg=zc_frame.brightness_avg,
                     )
                     current_roi = -1
                     cycle_complete = True
@@ -664,7 +660,7 @@ class YoloDetectorDaemon:
                         # Write scaled results
                         if scaled_dicts:
                             self.detection_writer.write_detection_result(
-                                frame_number=self.cache_frame_number,
+                                frame_number=self.cache_zc_frame.frame_number,
                                 timestamp_sec=self.cache_timestamp,
                                 detections=scaled_dicts,
                             )
@@ -719,7 +715,7 @@ class YoloDetectorDaemon:
                         # Write scaled results
                         if scaled_dicts:
                             self.detection_writer.write_detection_result(
-                                frame_number=self.cache_frame_number,
+                                frame_number=self.cache_zc_frame.frame_number,
                                 timestamp_sec=self.cache_timestamp,
                                 detections=scaled_dicts,
                             )
@@ -746,8 +742,8 @@ class YoloDetectorDaemon:
                     ]
                     if scaled_dicts:
                         self.detection_writer.write_detection_result(
-                            frame_number=frame_number,
-                            timestamp_sec=timestamp_sec,
+                            frame_number=zc_frame.frame_number,
+                            timestamp_sec=zc_frame.timestamp_sec,
                             detections=scaled_dicts,
                         )
                     detection_dicts = scaled_dicts
@@ -768,16 +764,13 @@ class YoloDetectorDaemon:
 
                 # Periodic stats log (every 300 frames)
                 if self.stats["frames_processed"] % 300 == 0:
-                    clahe_status = "yes" if (
-                        self.detector.clahe_enabled
-                        and (brightness_avg < 0 or brightness_avg < self.detector.clahe_brightness_threshold)
-                    ) else "no"
+                    clahe_status = "yes" if self.detector.clahe_enabled else "no"
                     logger.info(
                         f"[{self.stats['frames_processed']}f] "
                         f"det={self.stats['total_detections']} "
                         f"inf={self.stats['avg_inference_time_ms']:.0f}ms "
                         f"cam={self.active_camera} "
-                        f"bright={brightness_avg:.1f} "
+                        f"bright={zc_frame.brightness_avg:.1f} "
                         f"clahe={clahe_status}"
                     )
 

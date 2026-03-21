@@ -211,8 +211,7 @@ class YoloDetector:
         strides: list[int] = [8, 16, 32],
         input_size: tuple[int, int] = (640, 640),
         auto_download: bool = True,
-        clahe_enabled: bool = True,
-        clahe_brightness_threshold: float = 80.0,
+        clahe_enabled: bool = False,
         clahe_clip_limit: float = 3.0,
     ) -> None:
         """
@@ -230,8 +229,7 @@ class YoloDetector:
             strides: ストライド値
             input_size: 入力画像サイズ (height, width)
             auto_download: モデルが存在しない場合に自動ダウンロード
-            clahe_enabled: CLAHE前処理を有効化
-            clahe_brightness_threshold: この輝度以下でCLAHE適用 (0-255)
+            clahe_enabled: CLAHE前処理を有効化 (nightカメラ専用、daemon側で制御)
             clahe_clip_limit: CLAHEのコントラスト制限値 (大きいほど強調)
         """
         self.model_path = model_path
@@ -248,10 +246,8 @@ class YoloDetector:
             self.model_type = model_type
         logger.debug(f"Model type: {self.model_type}")
 
-        # CLAHE前処理設定 (ISP補正の代替)
-        # 実測brightness_avgは最大80程度。IR LED環境(brightness ~60-75)でもCLAHE適用するため閾値80
+        # CLAHE前処理設定 (nightカメラのIR映像用、daemon側でclahe_enabledを制御)
         self.clahe_enabled = clahe_enabled
-        self.clahe_brightness_threshold = clahe_brightness_threshold
         self.clahe = cv2.createCLAHE(clipLimit=clahe_clip_limit, tileGridSize=(8, 8))
 
         # モデルの自動ダウンロード
@@ -619,11 +615,7 @@ class YoloDetector:
         # 1. ROIクロップ → CLAHE（crop後に適用で処理量削減）
         start_prep = time.perf_counter()
 
-        # CLAHE適用判定
-        # brightness_avg=0.0 (夜カメラ等) や -1 (未設定) でも常に適用
-        need_clahe = self.clahe_enabled and (
-            brightness_avg < 0 or brightness_avg < self.clahe_brightness_threshold
-        )
+        need_clahe = self.clahe_enabled
 
         # NV12データをnumpy配列に変換（read-only、cropが新バッファを作る）
         nv12_array = np.frombuffer(nv12_data, dtype=np.uint8)
@@ -733,11 +725,7 @@ class YoloDetector:
         # 1. 前処理（CLAHE適用 + サイズ調整）
         start_prep = time.perf_counter()
 
-        # CLAHE適用判定（コピー要否を先に決定）
-        # brightness_avg=0.0 (夜カメラ等) や -1 (未設定) でも常に適用
-        need_clahe = self.clahe_enabled and (
-            brightness_avg < 0 or brightness_avg < self.clahe_brightness_threshold
-        )
+        need_clahe = self.clahe_enabled
 
         # NV12データをnumpy配列に変換
         # CLAHE適用時のみコピー（元データを変更するため）
@@ -747,21 +735,18 @@ class YoloDetector:
         else:
             nv12_array = np.frombuffer(nv12_data, dtype=np.uint8)
 
-        # CLAHE適用（低照度時のみ）
+        # CLAHE適用 (nightカメラ時のみ、daemon側でclahe_enabledを制御)
         clahe_applied = False
         if brightness_avg >= 0:
             self._brightness_stats["last_brightness_avg"] = brightness_avg
-            if need_clahe:
-                start_clahe = time.perf_counter()
-                nv12_array = self._apply_clahe_nv12(nv12_array, width, height)
-                clahe_time = (time.perf_counter() - start_clahe) * 1000
-                self._brightness_stats["clahe_time_total_ms"] += clahe_time
-                self._brightness_stats["frames_clahe_applied"] += 1
-                clahe_applied = True
-            else:
-                self._brightness_stats["frames_clahe_skipped"] += 1
+        if need_clahe:
+            start_clahe = time.perf_counter()
+            nv12_array = self._apply_clahe_nv12(nv12_array, width, height)
+            clahe_time = (time.perf_counter() - start_clahe) * 1000
+            self._brightness_stats["clahe_time_total_ms"] += clahe_time
+            self._brightness_stats["frames_clahe_applied"] += 1
+            clahe_applied = True
         else:
-            # 輝度情報なし → CLAHEスキップ
             self._brightness_stats["frames_clahe_skipped"] += 1
 
         self._brightness_stats["last_clahe_applied"] = clahe_applied
