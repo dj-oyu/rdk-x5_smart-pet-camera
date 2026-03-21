@@ -207,9 +207,15 @@ class YoloDetectorDaemon:
             logger.error(f"Failed to load YOLO model: {e}")
             raise
 
-        # HW preprocessor (nano2D letterbox) disabled pending n2d_wrap stride fix
-        # See n2d_letterbox.c — n2d_blit fails with gcCheckTile error
-        # when wrapping hb_mem physical address (alignedh not set)
+        # HW preprocessor (nano2D letterbox on GPU)
+        try:
+            from detection.yolo_detector import HWPreprocessor
+            hw_prep = HWPreprocessor(self.detector)
+            if hw_prep._lib is not None:
+                self.detector.preprocessor = hw_prep
+                logger.info("HW preprocessor enabled (nano2D letterbox)")
+        except Exception as e:
+            logger.debug(f"HW preprocessor init failed: {e}")
 
     def _get_active_zerocopy(self) -> ZeroCopySharedMemory | None:
         return self.shm_zerocopy
@@ -285,6 +291,8 @@ class YoloDetectorDaemon:
                         expected_plane_sizes=zc_frame.plane_size,
                     )
                     nv12_data = np.concatenate([y_arr, uv_arr])
+                    if hasattr(self.detector.preprocessor, 'set_hb_mem_buffer'):
+                        self.detector.preprocessor.set_hb_mem_buffer(hb_mem_buffer)
                 except Exception as e:
                     logger.error(f"Zero-copy import failed: {e}")
                     if hb_mem_buffer:

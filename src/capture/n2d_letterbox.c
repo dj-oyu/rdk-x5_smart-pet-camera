@@ -73,26 +73,36 @@ int n2d_letterbox_process(n2d_letterbox_ctx_t *ctx,
                           size_t *out_size) {
     if (!ctx || !ctx->initialized || !out_virt_addr || !out_size) return -1;
     (void)src_phys_addr_uv;  // UV is contiguous after Y in NV12
+    (void)src_stride;        // stride computed from alignedw
 
     // Wrap hbmem physical address as nano2D source buffer (zero-copy)
+    // Must set alignedw/alignedh/stride like zerocopy_bench.c
     n2d_buffer_t src_buf = {0};
+    src_buf.width = ctx->src_w;
+    src_buf.height = ctx->src_h;
+    src_buf.format = N2D_NV12;
+    src_buf.orientation = N2D_0;
+    src_buf.srcType = N2D_SOURCE_DEFAULT;
+    src_buf.tiling = N2D_LINEAR;
+    src_buf.cacheMode = N2D_CACHE_128;
+    src_buf.alignedw = gcmALIGN(src_buf.width, 64);
+    src_buf.alignedh = src_buf.height;
+    float nv12_bpp = gcmALIGN(16, 8) * 1.0f / 8;
+    src_buf.stride = gcmALIGN((int)(src_buf.alignedw * nv12_bpp), 64);
+
     n2d_user_memory_desc_t desc = {0};
     desc.flag = N2D_WRAP_FROM_USERMEMORY;
     desc.logical = 0;
     desc.physical = (n2d_uintptr_t)src_phys_addr_y;
-    desc.size = src_stride * ctx->src_h * 3 / 2;
+    desc.size = src_buf.stride * src_buf.alignedh * 3 / 2;
 
-    n2d_buffer_format_t src_format = N2D_NV12;
-    n2d_error_t err = n2d_wrap(&desc, &src_buf.handle);
+    n2d_uintptr_t handle;
+    n2d_error_t err = n2d_wrap(&desc, &handle);
     if (N2D_IS_ERROR(err)) {
         LOG_ERROR("N2D_Letterbox", "n2d_wrap failed: %d", err);
         return -1;
     }
-
-    src_buf.width = ctx->src_w;
-    src_buf.height = ctx->src_h;
-    src_buf.stride = src_stride;
-    src_buf.format = src_format;
+    src_buf.handle = handle;
 
     err = n2d_map(&src_buf);
     if (N2D_IS_ERROR(err)) {
