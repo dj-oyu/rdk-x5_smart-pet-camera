@@ -196,7 +196,7 @@ export function SidebarView(props: ReturnType<typeof useSidebar>) {
           <iframe
             src={ALBUM_URL}
             class="album-iframe"
-            scrolling="no"
+            scrolling="auto"
             style={albumHeight ? { height: `${albumHeight}px` } : undefined}
             onError={() => setAlbumOffline(true)}
           />

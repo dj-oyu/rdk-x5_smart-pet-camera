@@ -293,7 +293,8 @@ var inIframe = window.self !== window.top;
 function showLightbox(src, meta) {
   var info = meta ? { date: meta.date, pet: meta.pet, behavior: meta.behavior, caption: meta.caption } : {};
   if (inIframe) {
-    window.parent.postMessage({ type: 'album-lightbox', src: src, meta: info }, '*');
+    var absoluteSrc = new URL(src, window.location.origin).href;
+    window.parent.postMessage({ type: 'album-lightbox', src: absoluteSrc, meta: info }, '*');
   } else {
     document.getElementById('lb-img').src = src;
     document.getElementById('lightbox').classList.add('show');
