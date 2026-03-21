@@ -192,61 +192,45 @@
   }
   .gallery-wrap.at-end::after { opacity: 1; }
 
-  /* ── Default: grid mode (wide iframe / standalone) ── */
-  .gallery {
+  /* ── Carousel mode: body = horizontal scroll container ── */
+  body.carousel {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: none;
+  }
+  body.carousel::-webkit-scrollbar { display: none; }
+  body.carousel .filters {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    padding: 8px 8px 6px;
+    background: var(--bg-deep);
+    z-index: 10;
+  }
+  body.carousel .gallery-wrap {
+    margin-top: 32px;
+  }
+  body.carousel .gallery-spacer { display: none; }
+  body.carousel .gallery-wrap::after { display: none; }
+  body.carousel .gallery-wrap { margin-left: -8px; margin-right: -8px; }
+
+  /* ── Grid mode (standalone / wide iframe on mobile) ── */
+  body.grid-mode .gallery {
     flex-wrap: wrap;
     width: auto;
   }
-  .gallery-spacer { display: none; }
-  .card { width: calc(50% - 8px); }
-  .card-footer {
+  body.grid-mode .gallery-spacer { display: none; }
+  body.grid-mode .card { width: calc(50% - 4px); }
+  body.grid-mode .card-footer {
     max-height: none;
     padding: 5px 8px;
     opacity: 1;
   }
-  .gallery-wrap::after { display: none; }
+  body.grid-mode .gallery-wrap::after { display: none; }
   @media (max-width: 480px) {
-    .card { width: 100%; }
-  }
-
-  /* ── Carousel mode: narrow viewport (sidebar iframe ~246px) ── */
-  @media (max-width: 300px) {
-    body {
-      overflow-x: auto;
-      overflow-y: hidden;
-      scroll-snap-type: x mandatory;
-      scrollbar-width: none;
-    }
-    body::-webkit-scrollbar { display: none; }
-    .filters {
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      padding: 8px 8px 6px;
-      background: var(--bg-deep);
-      z-index: 10;
-    }
-    .gallery-wrap { margin-top: 32px; }
-    .gallery {
-      flex-wrap: nowrap;
-      width: max-content;
-    }
-    .gallery-spacer { display: block; }
-    .card {
-      width: 220px;
-      flex-shrink: 0;
-    }
-    .card-footer {
-      max-height: 0;
-      padding: 0 8px;
-      opacity: 0;
-    }
-    .card.active .card-footer {
-      max-height: 40px;
-      padding: 5px 8px;
-      opacity: 1;
-    }
+    body.grid-mode .card { width: 100%; }
   }
 
   @media (hover: none) { .card-overlay { opacity: 1; } }
@@ -301,7 +285,12 @@
 </div>
 
 <script>
-var inIframe = window.self !== window.top;
+// Layout: carousel everywhere, except iframe mobile (wide) → grid
+var inIframe = (function() {
+  try { return window.self !== window.top; } catch(e) { return true; }
+})();
+var isGrid = inIframe && document.documentElement.clientWidth > 300;
+document.body.classList.add(isGrid ? 'grid-mode' : 'carousel');
 function showLightbox(src, meta) {
   var info = meta ? { date: meta.date, pet: meta.pet, behavior: meta.behavior, caption: meta.caption } : {};
   if (inIframe) {
@@ -316,168 +305,141 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') document.getElementById('lightbox').classList.remove('show');
 });
 
-// All mode-dependent init — CSS media query handles layout,
-// JS uses matchMedia for carousel-specific behavior
+// Carousel: mouse wheel → horizontal scroll (body is the scroll container)
 (function() {
-  var isCarousel = window.matchMedia('(max-width: 300px)').matches;
-
+  if (!document.body.classList.contains('carousel')) return;
   var scrollEl = document.scrollingElement || document.documentElement;
-  var gallery = document.getElementById('gallery');
+  var g = document.getElementById('gallery');
   var wrap = document.querySelector('.gallery-wrap');
+  if (!g) return;
+  var bounceTimer = null;
 
-  // ── Carousel: wheel → horizontal scroll ──
-  if (isCarousel && gallery) {
-    var bounceTimer = null;
-    function updateEdge() {
-      var atEnd = scrollEl.scrollLeft >= scrollEl.scrollWidth - scrollEl.clientWidth - 2;
-      if (wrap) wrap.classList.toggle('at-end', atEnd);
-    }
-    document.addEventListener('wheel', function(e) {
-      e.preventDefault();
-      scrollEl.scrollLeft += e.deltaY * 0.3;
-      updateEdge();
-      var atRight = scrollEl.scrollLeft >= scrollEl.scrollWidth - scrollEl.clientWidth - 2 && e.deltaY > 0;
-      var atLeft = scrollEl.scrollLeft <= 0 && e.deltaY < 0;
-      if (atRight || atLeft) {
-        if (bounceTimer) return;
-        gallery.style.transition = 'transform 0.15s';
-        gallery.style.transform = atRight ? 'translateX(-8px)' : 'translateX(8px)';
-        bounceTimer = setTimeout(function() {
-          gallery.style.transform = '';
-          setTimeout(function() { gallery.style.transition = ''; bounceTimer = null; }, 150);
-        }, 150);
-      }
-    }, { passive: false });
-    scrollEl.scrollLeft = scrollEl.scrollWidth;
+  function updateEdge() {
+    var atEnd = scrollEl.scrollLeft >= scrollEl.scrollWidth - scrollEl.clientWidth - 2;
+    if (wrap) wrap.classList.toggle('at-end', atEnd);
+  }
+
+  document.addEventListener('wheel', function(e) {
+    e.preventDefault();
+    scrollEl.scrollLeft += e.deltaY * 0.3;
     updateEdge();
-    document.addEventListener('scroll', updateEdge);
-
-    // Center-card detection
-    var activeCard = null;
-    function updateActive() {
-      var cards = document.querySelectorAll('.card');
-      var center = scrollEl.scrollLeft + scrollEl.clientWidth / 2;
-      var best = null, bestDist = Infinity;
-      cards.forEach(function(c) {
-        var mid = c.offsetLeft + c.offsetWidth / 2;
-        var dist = Math.abs(mid - center);
-        if (dist < bestDist) { bestDist = dist; best = c; }
-      });
-      if (best !== activeCard) {
-        if (activeCard) activeCard.classList.remove('active');
-        if (best) best.classList.add('active');
-        activeCard = best;
-      }
+    var atRight = scrollEl.scrollLeft >= scrollEl.scrollWidth - scrollEl.clientWidth - 2 && e.deltaY > 0;
+    var atLeft = scrollEl.scrollLeft <= 0 && e.deltaY < 0;
+    if (atRight || atLeft) {
+      if (bounceTimer) return;
+      g.style.transition = 'transform 0.15s';
+      g.style.transform = atRight ? 'translateX(-8px)' : 'translateX(8px)';
+      bounceTimer = setTimeout(function() {
+        g.style.transform = '';
+        setTimeout(function() { g.style.transition = ''; bounceTimer = null; }, 150);
+      }, 150);
     }
-    document.addEventListener('scroll', updateActive);
-    requestAnimationFrame(updateActive);
-  }
+  }, { passive: false });
 
-  // ── Incremental loading ──
-  var sentinel = document.getElementById('load-sentinel');
-  if (gallery && sentinel) {
-    var total = {{ total }};
-    var loaded = {{ photos.len() }};
-    var loading = false;
-    var params = new URLSearchParams(window.location.search);
+  // Start at right (newest)
+  scrollEl.scrollLeft = scrollEl.scrollWidth;
+  updateEdge();
+  document.addEventListener('scroll', updateEdge);
+})();
 
-    function buildUrl(offset, limit) {
-      var url = '/api/photos?limit=' + limit + '&offset=' + offset;
-      if (params.get('is_valid')) url += '&is_valid=' + params.get('is_valid');
-      if (params.get('pet_id')) url += '&pet_id=' + params.get('pet_id');
-      return url;
-    }
-    function statusClass(v) {
-      if (v === true) return 'valid';
-      if (v === false) return 'invalid';
-      return 'pending';
-    }
-    function createCard(p) {
-      var div = document.createElement('div');
-      div.className = 'card ' + statusClass(p.is_valid);
-      div.dataset.date = p.captured_at || '';
-      div.dataset.pet = p.pet_id || '';
-      div.dataset.behavior = p.behavior || '';
-      div.dataset.caption = p.caption || '';
-      div.onclick = function() { showLightbox('/api/photos/' + p.filename, div.dataset); };
-      var pid = p.pet_id || '';
-      var pidBadge = pid ? '<span class="badge ' + pid + (pid === 'other' ? ' other-badge' : '') + '">' + pid + '</span>' : '';
-      var cap = p.caption ? p.caption.replace(/</g, '&lt;') : '';
-      var beh = p.behavior ? '<span class="behavior">' + p.behavior + '</span>' : '';
-      div.innerHTML =
-        '<img src="/api/photos/' + p.filename + '" loading="lazy">' +
-        '<div class="card-badges">' + pidBadge + '</div>' +
-        '<div class="card-overlay"><div class="card-overlay-bg">' + cap + '</div></div>' +
-        '<div class="card-footer"><span>' + (p.captured_at||'') + '</span>' + beh + '</div>';
-      return div;
-    }
-    function loadMore() {
-      if (loading || loaded >= total) return;
-      loading = true;
-      var prevScrollWidth = isCarousel ? scrollEl.scrollWidth : 0;
-      var prevScrollLeft = isCarousel ? scrollEl.scrollLeft : 0;
-      fetch(buildUrl(loaded, 20))
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-          var ref = sentinel.nextSibling;
-          (data.photos || []).forEach(function(p) {
-            gallery.insertBefore(createCard(p), ref);
-          });
-          loaded += (data.photos || []).length;
-          if (isCarousel) {
-            var added = scrollEl.scrollWidth - prevScrollWidth;
-            scrollEl.scrollLeft = prevScrollLeft + added;
-          }
-          loading = false;
-        })
-        .catch(function() { loading = false; });
-    }
-    var obs = new IntersectionObserver(function(entries) {
-      if (entries[0].isIntersecting) loadMore();
-    }, { rootMargin: '0px 0px 0px 300px' });
-    obs.observe(sentinel);
-  }
+// Center-card detection — only the center card shows its footer (carousel only)
+(function() {
+  if (!document.body.classList.contains('carousel')) return;
+  var scrollEl = document.scrollingElement || document.documentElement;
 
-  // ── SSE: live photo updates ──
-  if (gallery) {
-    var es = new EventSource('/api/events');
-    es.addEventListener('photo', function(e) {
-      var p;
-      try { p = JSON.parse(e.data); } catch(_) { return; }
-      if (!p.is_valid) return;
-      if (gallery.querySelector('[data-filename="' + p.filename + '"]')) return;
-
-      var div = document.createElement('div');
-      div.className = 'card';
-      div.setAttribute('data-filename', p.filename);
-      div.dataset.pet = p.pet_id || '';
-      div.dataset.behavior = p.behavior || '';
-      div.dataset.caption = p.caption || '';
-      div.onclick = function() { showLightbox('/api/photos/' + p.filename, div.dataset); };
-      var pid = p.pet_id || '';
-      var pidBadge = pid ? '<span class="badge ' + pid + (pid === 'other' ? ' other-badge' : '') + '">' + pid + '</span>' : '';
-      var cap = p.caption ? p.caption.replace(/</g, '&lt;') : '';
-      var beh = p.behavior ? '<span class="behavior">' + p.behavior + '</span>' : '';
-      div.innerHTML =
-        '<img src="/api/photos/' + p.filename + '" loading="lazy">' +
-        '<div class="card-badges">' + pidBadge + '</div>' +
-        '<div class="card-overlay"><div class="card-overlay-bg">' + cap + '</div></div>' +
-        '<div class="card-footer"><span>' + (p.filename.match(/\d{8}_\d{6}/)||[''])[0].replace(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/,'$1/$2/$3 $4:$5') + '</span>' + beh + '</div>';
-
-      div.style.opacity = '0';
-      div.style.transform = 'translateX(40px) scale(0.95)';
-      div.style.transition = 'opacity 0.4s, transform 0.4s';
-      gallery.appendChild(div);
-
-      requestAnimationFrame(function() {
-        if (isCarousel) scrollEl.scrollLeft = scrollEl.scrollWidth;
-        requestAnimationFrame(function() {
-          div.style.opacity = '1';
-          div.style.transform = 'translateX(0) scale(1)';
-        });
-      });
+  var activeCard = null;
+  function updateActive() {
+    var cards = document.querySelectorAll('.card');
+    var center = scrollEl.scrollLeft + scrollEl.clientWidth / 2;
+    var best = null, bestDist = Infinity;
+    cards.forEach(function(c) {
+      var mid = c.offsetLeft + c.offsetWidth / 2;
+      var dist = Math.abs(mid - center);
+      if (dist < bestDist) { bestDist = dist; best = c; }
     });
+    if (best !== activeCard) {
+      if (activeCard) activeCard.classList.remove('active');
+      if (best) best.classList.add('active');
+      activeCard = best;
+    }
   }
+  document.addEventListener('scroll', updateActive);
+  requestAnimationFrame(updateActive);
+})();
+
+// Incremental loading — older images load as user scrolls left
+(function() {
+  var gallery = document.getElementById('gallery');
+  var sentinel = document.getElementById('load-sentinel');
+  if (!gallery || !sentinel) return;
+
+  var total = {{ total }};
+  var loaded = {{ photos.len() }};
+  var loading = false;
+  var params = new URLSearchParams(window.location.search);
+  var isCarousel = document.body.classList.contains('carousel');
+  var scrollEl = document.scrollingElement || document.documentElement;
+
+  function buildUrl(offset, limit) {
+    var url = '/api/photos?limit=' + limit + '&offset=' + offset;
+    if (params.get('is_valid')) url += '&is_valid=' + params.get('is_valid');
+    if (params.get('pet_id')) url += '&pet_id=' + params.get('pet_id');
+    return url;
+  }
+
+  function statusClass(v) {
+    if (v === true) return 'valid';
+    if (v === false) return 'invalid';
+    return 'pending';
+  }
+
+  function createCard(p) {
+    var div = document.createElement('div');
+    div.className = 'card ' + statusClass(p.is_valid);
+    div.dataset.date = p.captured_at || '';
+    div.dataset.pet = p.pet_id || '';
+    div.dataset.behavior = p.behavior || '';
+    div.dataset.caption = p.caption || '';
+    div.onclick = function() { showLightbox('/api/photos/' + p.filename, div.dataset); };
+    var pid = p.pet_id || '';
+    var pidBadge = pid ? '<span class="badge ' + pid + (pid === 'other' ? ' other-badge' : '') + '">' + pid + '</span>' : '';
+    var cap = p.caption ? p.caption.replace(/</g, '&lt;') : '';
+    var beh = p.behavior ? '<span class="behavior">' + p.behavior + '</span>' : '';
+    div.innerHTML =
+      '<img src="/api/photos/' + p.filename + '" loading="lazy">' +
+      '<div class="card-badges">' + pidBadge + '</div>' +
+      '<div class="card-overlay"><div class="card-overlay-bg">' + cap + '</div></div>' +
+      '<div class="card-footer"><span>' + (p.captured_at||'') + '</span>' + beh + '</div>';
+    return div;
+  }
+
+  function loadMore() {
+    if (loading || loaded >= total) return;
+    loading = true;
+    var prevScrollWidth = isCarousel ? scrollEl.scrollWidth : 0;
+    var prevScrollLeft = isCarousel ? scrollEl.scrollLeft : 0;
+    fetch(buildUrl(loaded, 20))
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var ref = sentinel.nextSibling;
+        (data.photos || []).forEach(function(p) {
+          gallery.insertBefore(createCard(p), ref);
+        });
+        loaded += (data.photos || []).length;
+        if (isCarousel) {
+          var added = scrollEl.scrollWidth - prevScrollWidth;
+          scrollEl.scrollLeft = prevScrollLeft + added;
+        }
+        loading = false;
+      })
+      .catch(function() { loading = false; });
+  }
+
+  // Observe sentinel — use viewport (root: null) for carousel, since body scrolls
+  var obs = new IntersectionObserver(function(entries) {
+    if (entries[0].isIntersecting) loadMore();
+  }, { rootMargin: '0px 0px 0px 300px' });
+  obs.observe(sentinel);
 })();
 
 // Notify parent iframe of content height
@@ -491,6 +453,53 @@ document.addEventListener('keydown', function(e) {
   window.addEventListener('resize', sendHeight);
   document.querySelectorAll('img').forEach(function(img) {
     img.addEventListener('load', sendHeight);
+  });
+})();
+
+// SSE: live photo updates — new card slides in from right
+(function() {
+  var gallery = document.getElementById('gallery');
+  if (!gallery) return;
+  var isCarousel = document.body.classList.contains('carousel');
+  var scrollEl = document.scrollingElement || document.documentElement;
+
+  var es = new EventSource('/api/events');
+  es.addEventListener('photo', function(e) {
+    var p;
+    try { p = JSON.parse(e.data); } catch(_) { return; }
+    if (!p.is_valid) return;
+
+    if (gallery.querySelector('[data-filename="' + p.filename + '"]')) return;
+
+    var div = document.createElement('div');
+    div.className = 'card';
+    div.setAttribute('data-filename', p.filename);
+    div.dataset.pet = p.pet_id || '';
+    div.dataset.behavior = p.behavior || '';
+    div.dataset.caption = p.caption || '';
+    div.onclick = function() { showLightbox('/api/photos/' + p.filename, div.dataset); };
+    var pid = p.pet_id || '';
+    var pidBadge = pid ? '<span class="badge ' + pid + (pid === 'other' ? ' other-badge' : '') + '">' + pid + '</span>' : '';
+    var cap = p.caption ? p.caption.replace(/</g, '&lt;') : '';
+    var beh = p.behavior ? '<span class="behavior">' + p.behavior + '</span>' : '';
+    div.innerHTML =
+      '<img src="/api/photos/' + p.filename + '" loading="lazy">' +
+      '<div class="card-badges">' + pidBadge + '</div>' +
+      '<div class="card-overlay"><div class="card-overlay-bg">' + cap + '</div></div>' +
+      '<div class="card-footer"><span>' + (p.filename.match(/\d{8}_\d{6}/)||[''])[0].replace(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/,'$1/$2/$3 $4:$5') + '</span>' + beh + '</div>';
+
+    div.style.opacity = '0';
+    div.style.transform = 'translateX(40px) scale(0.95)';
+    div.style.transition = 'opacity 0.4s, transform 0.4s';
+    gallery.appendChild(div);
+
+    requestAnimationFrame(function() {
+      if (isCarousel) scrollEl.scrollLeft = scrollEl.scrollWidth;
+      requestAnimationFrame(function() {
+        div.style.opacity = '1';
+        div.style.transform = 'translateX(0) scale(1)';
+      });
+    });
   });
 })();
 </script>
