@@ -78,7 +78,12 @@ async fn main() {
         timeout: Duration::from_secs(30),
     };
 
-    let watcher = PhotoWatcher::new(args.photos_dir.clone(), Arc::clone(&store), vlm_config);
+    // Broadcast channel: watcher notifies SSE clients when photos are processed
+    let (event_tx, _) = tokio::sync::broadcast::channel::<server::PhotoEvent>(64);
+
+    let watcher = PhotoWatcher::new(
+        args.photos_dir.clone(), Arc::clone(&store), vlm_config, event_tx.clone(),
+    );
     tokio::spawn(async move {
         watcher.run().await;
     });
@@ -86,6 +91,7 @@ async fn main() {
     let app_state = server::AppState {
         store,
         photos_dir: args.photos_dir,
+        event_tx,
     };
     let app = server::router(app_state);
 
