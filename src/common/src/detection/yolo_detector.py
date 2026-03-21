@@ -118,8 +118,7 @@ class HWPreprocessor(Preprocessor):
                     arr_type = ctypes.c_uint8 * out_size.value
                     return np.ctypeslib.as_array(arr_type.from_address(out_ptr.value))
 
-        # Fallback to CPU
-        return self._detector._letterbox_nv12(nv12_array, width, height, pad_top, pad_bottom)
+        raise RuntimeError("HWPreprocessor: nano2D letterbox failed")
 
     def crop_roi(self, nv12_array: np.ndarray, width: int, height: int,
                  roi_x: int, roi_y: int, roi_w: int, roi_h: int) -> np.ndarray:
