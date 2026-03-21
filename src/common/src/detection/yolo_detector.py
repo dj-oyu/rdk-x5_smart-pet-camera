@@ -397,53 +397,6 @@ class YoloDetector:
                 f"YOLO26 grid stride={stride}: shape={self.grids_yolo26[stride].shape}"
             )
 
-    def detect(self, frame_data: bytes) -> list[Detection]:
-        """
-        物体検出を実行
-
-        Args:
-            frame_data: JPEGエンコードされたフレームデータ
-
-        Returns:
-            検出結果のリスト
-        """
-        import time
-
-        start_total = time.perf_counter()
-        self._total_calls += 1
-
-        # 1. JPEGデコード + 前処理（YUV420SP変換、letterbox）
-        start_prep = time.perf_counter()
-        img = self._decode_jpeg(frame_data)
-        if img is None:
-            logger.warning("Failed to decode JPEG frame")
-            return []
-
-        input_tensor, scale, shift = self._preprocess_yuv420sp(img)
-        end_prep = time.perf_counter()
-        self._last_timing["preprocessing"] = end_prep - start_prep
-
-        # 2. BPU推論
-        start_infer = time.perf_counter()
-        outputs = self._forward(input_tensor)
-        end_infer = time.perf_counter()
-        self._last_timing["inference"] = end_infer - start_infer
-
-        # 3. 後処理（NMS、座標変換）
-        start_post = time.perf_counter()
-        detections = self._postprocess(outputs, scale, shift, img.shape[:2])
-        end_post = time.perf_counter()
-        self._last_timing["postprocessing"] = end_post - start_post
-
-        end_total = time.perf_counter()
-        self._last_timing["total"] = end_total - start_total
-
-        # 統計情報の更新
-        self._total_detections += len(detections)
-        self._total_inference_time += self._last_timing["total"]
-
-        return detections
-
     def get_roi_regions(
         self, width: int, height: int
     ) -> list[tuple[int, int, int, int]]:
@@ -671,20 +624,10 @@ class YoloDetector:
             scale = (1.0, 1.0)
             shift = (0.0, 0.0)
         else:
-            # ROIサイズが異なる場合はリサイズが必要
-            logger.warning(
-                f"ROI size {roi_w}x{roi_h} differs from model input {self.input_w}x{self.input_h}"
+            logger.error(
+                f"ROI size {roi_w}x{roi_h} must match model input {self.input_w}x{self.input_h}"
             )
-            cropped = self.preprocessor.crop_roi(
-                nv12_array, width, height, roi_x, roi_y, roi_w, roi_h
-            )
-            if need_clahe:
-                cropped = self._apply_clahe_nv12(cropped, roi_w, roi_h)
-            # NV12→BGR→リサイズ→NV12 (遅いパス)
-            img = self._decode_nv12(cropped.tobytes(), roi_w, roi_h)
-            if img is None:
-                return []
-            input_tensor, scale, shift = self._preprocess_yuv420sp(img)
+            return []
 
         end_prep = time.perf_counter()
         self._last_timing["preprocessing"] = end_prep - start_prep
@@ -827,17 +770,10 @@ class YoloDetector:
                     f"NV12 letterbox path: {width}x{height} -> {self.input_w}x{self.input_h} (pad_top={pad_top})"
                 )
         else:
-            # サイズが異なる場合：NV12→BGR→前処理
-            if not self._nv12_path_debug_logged:
-                logger.debug(
-                    f"NV12 resize path: {width}x{height} -> {self.input_w}x{self.input_h}"
-                )
-            img = self._decode_nv12(nv12_array.tobytes(), width, height)
-            if img is None:
-                logger.warning("Failed to decode NV12 frame")
-                return []
-            input_tensor, scale, shift = self._preprocess_yuv420sp(img)
-            original_shape = (height, width)
+            logger.error(
+                f"NV12 {width}x{height} must be {self.input_w}x{self.input_w} (direct) or {self.input_w}x* (letterbox)"
+            )
+            return []
 
         end_prep = time.perf_counter()
         self._last_timing["preprocessing"] = end_prep - start_prep
@@ -866,44 +802,6 @@ class YoloDetector:
         self._total_inference_time += self._last_timing["total"]
 
         return detections
-
-    def _decode_jpeg(self, frame_data: bytes) -> Optional[np.ndarray]:
-        """JPEGデータをデコードしてBGR画像に変換"""
-        try:
-            img_array = np.frombuffer(frame_data, dtype=np.uint8)
-            img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-            return img
-        except Exception as e:
-            logger.error(f"JPEG decode failed: {e}")
-            return None
-
-    def _decode_nv12(
-        self, nv12_data: bytes | memoryview, width: int, height: int
-    ) -> Optional[np.ndarray]:
-        """NV12データをデコードしてBGR画像に変換"""
-        try:
-            y_size = width * height
-            uv_size = y_size // 2
-
-            if len(nv12_data) < y_size + uv_size:
-                logger.error(
-                    f"NV12 data too small: {len(nv12_data)} < {y_size + uv_size}"
-                )
-                return None
-
-            # NV12を1次元配列として準備
-            yuv_data = np.frombuffer(nv12_data[: y_size + uv_size], dtype=np.uint8)
-
-            # NV12形式: [Y: height x width] [UV: height/2 x width (interleaved)]
-            yuv_img = yuv_data.reshape((height * 3 // 2, width))
-
-            # NV12 → BGR変換
-            bgr_img = cv2.cvtColor(yuv_img, cv2.COLOR_YUV2BGR_NV12)
-
-            return bgr_img
-        except Exception as e:
-            logger.error(f"NV12 decode failed: {e}")
-            return None
 
     def _apply_clahe_nv12(
         self, nv12_array: np.ndarray, width: int, height: int
@@ -1016,70 +914,6 @@ class YoloDetector:
         self._lb_uv_dst[:] = uv_in
 
         return self._lb_buf
-
-    def _preprocess_yuv420sp(
-        self, img: np.ndarray
-    ) -> tuple[np.ndarray, tuple[float, float], tuple[float, float]]:
-        """
-        前処理: BGR → YUV420SP (NV12) 変換 + letterbox
-
-        Returns:
-            (input_tensor, (y_scale, x_scale), (y_shift, x_shift))
-        """
-        img_h, img_w = img.shape[:2]
-
-        # letterboxのスケール計算
-        scale = min(self.input_h / img_h, self.input_w / img_w)
-        new_h, new_w = int(img_h * scale), int(img_w * scale)
-
-        # リサイズ
-        img_resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-
-        # パディング（中央配置）
-        pad_h = (self.input_h - new_h) // 2
-        pad_w = (self.input_w - new_w) // 2
-
-        img_padded = np.full((self.input_h, self.input_w, 3), 114, dtype=np.uint8)
-        img_padded[pad_h : pad_h + new_h, pad_w : pad_w + new_w] = img_resized
-
-        # BGR → YUV420SP (NV12)
-        img_yuv = cv2.cvtColor(img_padded, cv2.COLOR_BGR2YUV_I420)
-        img_nv12 = self._yuv_i420_to_nv12(img_yuv, self.input_h, self.input_w)
-
-        # スケールとシフト情報を返す（ピクセル単位）
-        y_scale = x_scale = scale
-        y_shift = float(pad_h)
-        x_shift = float(pad_w)
-
-        return img_nv12, (y_scale, x_scale), (y_shift, x_shift)
-
-    def _yuv_i420_to_nv12(
-        self, yuv_i420: np.ndarray, height: int, width: int
-    ) -> np.ndarray:
-        """
-        YUV I420 → NV12 変換
-
-        I420形式: YYYYYYYY UU VV (planar)
-        NV12形式: YYYYYYYY UVUVUVUV (semi-planar)
-        """
-        area = height * width
-
-        # I420を1次元配列に変換
-        yuv420p = yuv_i420.reshape((area * 3 // 2,))
-
-        # Y平面を取得
-        y = yuv420p[:area]
-
-        # UV平面を取得してインターリーブ
-        uv_planar = yuv420p[area:].reshape((2, area // 4))
-        uv_packed = uv_planar.transpose((1, 0)).reshape((area // 2,))
-
-        # NV12形式で結合
-        nv12 = np.zeros_like(yuv420p)
-        nv12[:area] = y
-        nv12[area:] = uv_packed
-
-        return nv12
 
     def _forward(self, input_tensor: np.ndarray) -> list[np.ndarray]:
         """BPU推論を実行"""
@@ -1521,21 +1355,6 @@ if __name__ == "__main__":
         nms_threshold=0.7,
         auto_download=True,
     )
-
-    # ダミーJPEGフレーム（実際のカメラ画像を使用する場合は置き換え）
-    test_img_path = "/app/github/rdk_model_zoo/demos/Vision/ultralytics_YOLO/source/reference_yamls/bus.jpg"
-    if os.path.exists(test_img_path):
-        with open(test_img_path, "rb") as f:
-            frame_data = f.read()
-
-        detections = detector.detect(frame_data)
-        print(f"Detected {len(detections)} objects")
-        for det in detections:
-            print(
-                f"  - {det.class_name.value}: "
-                f"confidence={det.confidence:.2f}, "
-                f"bbox=({det.bbox.x}, {det.bbox.y}, {det.bbox.w}, {det.bbox.h})"
-            )
 
     print(f"\n{detector}")
     print(f"Stats: {detector.get_stats()}")
