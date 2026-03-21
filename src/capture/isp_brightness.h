@@ -10,7 +10,13 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "shared_memory.h"  // For BrightnessZone enum
+
+typedef enum {
+    BRIGHTNESS_ZONE_DARK = 0,
+    BRIGHTNESS_ZONE_DIM = 1,
+    BRIGHTNESS_ZONE_NORMAL = 2,
+    BRIGHTNESS_ZONE_BRIGHT = 3,
+} BrightnessZone;
 
 // Forward declaration for ISP handle type
 typedef int64_t hbn_vnode_handle_t;
@@ -52,17 +58,6 @@ int isp_get_brightness(hbn_vnode_handle_t isp_handle, isp_brightness_result_t *r
  *   BrightnessZone enum value
  */
 BrightnessZone isp_classify_brightness_zone(float brightness_avg, uint32_t cur_lux);
-
-/**
- * Fill Frame structure with brightness data
- *
- * Convenience function to populate Frame brightness fields from ISP result.
- *
- * Args:
- *   frame: Frame structure to update
- *   result: ISP brightness measurement result
- */
-void isp_fill_frame_brightness(Frame *frame, const isp_brightness_result_t *result);
 
 /**
  * Low-light correction state (for hysteresis tracking)
