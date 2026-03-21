@@ -20,7 +20,8 @@ char Pipeline_log_header[16];
 int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
                     int sensor_width, int sensor_height, int output_width,
                     int output_height, int fps, int bitrate,
-                    volatile int *active_camera) {
+                    volatile int *active_camera,
+                    uint64_t *frame_counter) {
   int ret = 0;
 
   snprintf(Pipeline_log_header, sizeof(Pipeline_log_header), "Pipeline %d",
@@ -45,6 +46,7 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
 
   // Active camera pointer (shared variable in same process, no SHM)
   pipeline->active_camera = active_camera;
+  pipeline->frame_counter = frame_counter;
 
   // Initialize memory manager
   ret = hb_mem_module_open();
@@ -155,7 +157,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
 
   pipeline->running_flag = running_flag;
 
-  int frame_count = 0;
+  uint64_t frame_count = 0; // Local copy from global counter
   struct timespec start_time, current_time, frame_timestamp;
   clock_gettime(CLOCK_MONOTONIC, &start_time);
 
@@ -179,6 +181,14 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
 
   while (*running_flag) {
     int ret;
+
+    // Non-active pipeline: sleep and skip everything
+    bool write_active = pipeline->active_camera &&
+                        *pipeline->active_camera == pipeline->camera_index;
+    if (!write_active) {
+      usleep(100000); // 100ms
+      continue;
+    }
 
     // Get NV12 frame from VIO
     ret = vio_get_frame(&pipeline->vio, &vio_frame, 2000);
@@ -217,9 +227,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       hbn_isp_set_3dnr_attr(pipeline->vio.isp_handle, &tnr_attr);
     }
 
-    // Determine active state
-    bool write_active = pipeline->active_camera &&
-                        *pipeline->active_camera == pipeline->camera_index;
+    // write_active already checked at loop top
 
     // Get ISP brightness statistics with throttling (using power-of-2 masks for fast bitwise AND)
     // - DAY camera active: every 8 frames (~3.75Hz) for fast DAY→NIGHT detection
@@ -505,7 +513,10 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       }
     }
 
-    frame_count++;
+    if (write_active && pipeline->frame_counter) {
+      (*pipeline->frame_counter)++;
+    }
+    frame_count = pipeline->frame_counter ? *pipeline->frame_counter : 0;
 
     // Night camera: fix AWB to Manual after ISP has stabilized (~1 sec).
     // Auto AWB cannot converge on IR scenes and causes purple/blue drift.

@@ -42,8 +42,9 @@ typedef struct {
     // MJPEG NV12 zero-copy (Go web_monitor)
     ZeroCopyFrameBuffer *shm_mjpeg_zc;
 
-    // Active camera (shared variable, no SHM — same process)
-    volatile int *active_camera;            // Points to g_active_camera in main
+    // Shared state (same process, no SHM needed)
+    volatile int *active_camera;
+    uint64_t *frame_counter;                // Global frame counter (atomic increment)
 
     // Runtime control
     volatile bool *running_flag;           // External running flag
@@ -93,7 +94,8 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
                     int sensor_width, int sensor_height,
                     int output_width, int output_height,
                     int fps, int bitrate,
-                    volatile int *active_camera);
+                    volatile int *active_camera,
+                    uint64_t *frame_counter);
 
 /**
  * Start camera pipeline
