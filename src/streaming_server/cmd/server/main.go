@@ -26,7 +26,7 @@ import (
 
 var (
 	// Command-line flags
-	shmName     = flag.String("shm", "/pet_camera_stream", "Shared memory name")
+	shmName     = flag.String("shm", "/pet_camera_h265_zc", "H.265 zero-copy shared memory name")
 	httpAddr    = flag.String("http", ":8081", "HTTP server address")
 	metricsAddr = flag.String("metrics", ":9090", "Metrics server address")
 	pprofAddr   = flag.String("pprof", ":6060", "pprof server address")

@@ -21,8 +21,8 @@ const (
 	MaxRecordingDuration = 30 * time.Minute
 )
 
-// H264Recorder manages H.264 recording from shared memory
-type H264Recorder struct {
+// Recorder manages H.264 recording from shared memory
+type Recorder struct {
 	mu sync.RWMutex
 
 	// Configuration
@@ -49,16 +49,16 @@ type H264Recorder struct {
 	wg     sync.WaitGroup
 }
 
-// NewH264Recorder creates a new H.264 recorder
-func NewH264Recorder(outputPath, shmName string) *H264Recorder {
-	return &H264Recorder{
+// NewRecorder creates a new H.264 recorder
+func NewRecorder(outputPath, shmName string) *Recorder {
+	return &Recorder{
 		outputPath: outputPath,
 		shmName:    shmName,
 	}
 }
 
 // Start begins recording H.264 frames to a new file
-func (r *H264Recorder) Start() (string, error) {
+func (r *Recorder) Start() (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -111,12 +111,12 @@ func (r *H264Recorder) Start() (string, error) {
 	r.wg.Add(1)
 	go r.recordLoop()
 
-	logger.Info("H264Recorder", "Started recording to %s", filepath)
+	logger.Info("Recorder", "Started recording to %s", filepath)
 	return r.filename, nil
 }
 
 // Stop stops recording and returns the filename
-func (r *H264Recorder) Stop() (string, error) {
+func (r *Recorder) Stop() (string, error) {
 	r.mu.Lock()
 
 	if !r.recording {
@@ -144,10 +144,10 @@ func (r *H264Recorder) Stop() (string, error) {
 	// Close file
 	if r.file != nil {
 		if err := r.file.Sync(); err != nil {
-			logger.Warn("H264Recorder", "Failed to sync file: %v", err)
+			logger.Warn("Recorder", "Failed to sync file: %v", err)
 		}
 		if err := r.file.Close(); err != nil {
-			logger.Warn("H264Recorder", "Failed to close file: %v", err)
+			logger.Warn("Recorder", "Failed to close file: %v", err)
 		}
 		r.file = nil
 	}
@@ -158,7 +158,7 @@ func (r *H264Recorder) Stop() (string, error) {
 		r.shmReader = nil
 	}
 
-	logger.Info("H264Recorder", "Stopped recording: %s (frames=%d, bytes=%d, firstDetection=%.2fs)",
+	logger.Info("Recorder", "Stopped recording: %s (frames=%d, bytes=%d, firstDetection=%.2fs)",
 		filename, r.frameCount, r.bytesWritten, detectionOffset)
 
 	// Start MP4 conversion in background
@@ -169,7 +169,7 @@ func (r *H264Recorder) Stop() (string, error) {
 }
 
 // recordLoop reads frames from SHM and writes to file
-func (r *H264Recorder) recordLoop() {
+func (r *Recorder) recordLoop() {
 	defer r.wg.Done()
 
 	ticker := time.NewTicker(33 * time.Millisecond) // ~30fps
@@ -192,7 +192,7 @@ func (r *H264Recorder) recordLoop() {
 			// Check for heartbeat timeout
 			if time.Since(r.lastHeartbeat) > HeartbeatTimeout {
 				r.mu.RUnlock()
-				logger.Warn("H264Recorder", "Heartbeat timeout, auto-stopping recording")
+				logger.Warn("Recorder", "Heartbeat timeout, auto-stopping recording")
 				r.autoStop("heartbeat timeout")
 				return
 			}
@@ -200,7 +200,7 @@ func (r *H264Recorder) recordLoop() {
 			// Check for max duration
 			if time.Since(r.startTime) > MaxRecordingDuration {
 				r.mu.RUnlock()
-				logger.Warn("H264Recorder", "Max duration reached, auto-stopping recording")
+				logger.Warn("Recorder", "Max duration reached, auto-stopping recording")
 				r.autoStop("max duration reached")
 				return
 			}
@@ -212,7 +212,7 @@ func (r *H264Recorder) recordLoop() {
 			// Read frame from SHM
 			frame, err := reader.ReadLatest()
 			if err != nil {
-				logger.Debug("H264Recorder", "Read error: %v", err)
+				logger.Debug("Recorder", "Read error: %v", err)
 				continue
 			}
 			if frame == nil {
@@ -227,7 +227,7 @@ func (r *H264Recorder) recordLoop() {
 
 			// Process frame to detect IDR and cache SPS/PPS
 			if err := processor.Process(frame); err != nil {
-				logger.Debug("H264Recorder", "Process error: %v", err)
+				logger.Debug("Recorder", "Process error: %v", err)
 			}
 
 			// Write frame to file
@@ -254,7 +254,7 @@ func (r *H264Recorder) recordLoop() {
 
 			n, err := r.file.Write(dataToWrite)
 			if err != nil {
-				logger.Warn("H264Recorder", "Write error: %v", err)
+				logger.Warn("Recorder", "Write error: %v", err)
 				r.mu.Unlock()
 				continue
 			}
@@ -268,13 +268,13 @@ func (r *H264Recorder) recordLoop() {
 
 // convertToMP4 converts H.264 file to MP4 using ffmpeg (background task)
 // detectionOffset is the timestamp (in seconds) of first detection, or -1 if none
-func (r *H264Recorder) convertToMP4(h264Filename string, detectionOffset float64) {
+func (r *Recorder) convertToMP4(h264Filename string, detectionOffset float64) {
 	// Ensure converting flag is cleared when done
 	defer func() {
 		r.mu.Lock()
 		r.converting = false
 		r.mu.Unlock()
-		logger.Info("H264Recorder", "Post-processing complete, ready for new recording")
+		logger.Info("Recorder", "Post-processing complete, ready for new recording")
 	}()
 
 	h264Path := filepath.Join(r.outputPath, h264Filename)
@@ -282,7 +282,7 @@ func (r *H264Recorder) convertToMP4(h264Filename string, detectionOffset float64
 	mp4Filename := h264Filename[:len(h264Filename)-len(ext)] + ".mp4"
 	mp4Path := filepath.Join(r.outputPath, mp4Filename)
 
-	logger.Info("H264Recorder", "Starting MP4 conversion: %s -> %s", h264Filename, mp4Filename)
+	logger.Info("Recorder", "Starting MP4 conversion: %s -> %s", h264Filename, mp4Filename)
 
 	// Run ffmpeg with low priority (nice -n 19)
 	cmd := exec.Command("nice", "-n", "19",
@@ -295,28 +295,28 @@ func (r *H264Recorder) convertToMP4(h264Filename string, detectionOffset float64
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		logger.Warn("H264Recorder", "MP4 conversion failed: %v\n%s", err, string(output))
+		logger.Warn("Recorder", "MP4 conversion failed: %v\n%s", err, string(output))
 		return
 	}
 
-	logger.Info("H264Recorder", "MP4 conversion complete: %s", mp4Filename)
+	logger.Info("Recorder", "MP4 conversion complete: %s", mp4Filename)
 
 	// Generate thumbnail at first detection time, or fallback to default
 	r.generateThumbnail(mp4Path, detectionOffset)
 
 	// Delete H.264 file after successful conversion
 	if err := os.Remove(h264Path); err != nil {
-		logger.Warn("H264Recorder", "Failed to delete H.264 file: %v", err)
+		logger.Warn("Recorder", "Failed to delete H.264 file: %v", err)
 	} else {
-		logger.Info("H264Recorder", "Deleted H.264 file: %s", h264Filename)
+		logger.Info("Recorder", "Deleted H.264 file: %s", h264Filename)
 	}
 }
 
 // generateThumbnail generates a JPG thumbnail from the MP4 file
 // detectionOffset is the preferred timestamp (in seconds), or -1 to use default fallback
-func (r *H264Recorder) generateThumbnail(mp4Path string, detectionOffset float64) {
+func (r *Recorder) generateThumbnail(mp4Path string, detectionOffset float64) {
 	thumbPath := mp4Path[:len(mp4Path)-4] + ".jpg"
-	logger.Info("H264Recorder", "Generating thumbnail: %s (detectionOffset=%.2f)", filepath.Base(thumbPath), detectionOffset)
+	logger.Info("Recorder", "Generating thumbnail: %s (detectionOffset=%.2f)", filepath.Base(thumbPath), detectionOffset)
 
 	// Build seek times to try: detection offset (if valid), then 3s, then 0s
 	var seekTimes []string
@@ -340,31 +340,31 @@ func (r *H264Recorder) generateThumbnail(mp4Path string, detectionOffset float64
 		if err != nil {
 			if i < len(seekTimes)-1 {
 				// Retry with next fallback
-				logger.Debug("H264Recorder", "Thumbnail at %ss failed, trying next: %s", seekTime, filepath.Base(mp4Path))
+				logger.Debug("Recorder", "Thumbnail at %ss failed, trying next: %s", seekTime, filepath.Base(mp4Path))
 				continue
 			}
-			logger.Warn("H264Recorder", "Thumbnail generation failed: %v\n%s", err, string(output))
+			logger.Warn("Recorder", "Thumbnail generation failed: %v\n%s", err, string(output))
 			return
 		}
 
 		// Check if file was actually created and has content
 		if info, err := os.Stat(thumbPath); err == nil && info.Size() > 0 {
-			logger.Info("H264Recorder", "Thumbnail generated (at %ss): %s", seekTime, filepath.Base(thumbPath))
+			logger.Info("Recorder", "Thumbnail generated (at %ss): %s", seekTime, filepath.Base(thumbPath))
 			return
 		}
 
 		if i < len(seekTimes)-1 {
 			// Empty file, retry with next fallback
-			logger.Debug("H264Recorder", "Thumbnail at %ss empty, trying next: %s", seekTime, filepath.Base(mp4Path))
+			logger.Debug("Recorder", "Thumbnail at %ss empty, trying next: %s", seekTime, filepath.Base(mp4Path))
 			continue
 		}
 	}
 
-	logger.Warn("H264Recorder", "Thumbnail generation failed for: %s", filepath.Base(mp4Path))
+	logger.Warn("Recorder", "Thumbnail generation failed for: %s", filepath.Base(mp4Path))
 }
 
 // RegenerateThumbnail regenerates thumbnail at specified timestamp
-func (r *H264Recorder) RegenerateThumbnail(filename string, timestamp float64) error {
+func (r *Recorder) RegenerateThumbnail(filename string, timestamp float64) error {
 	// Validate filename
 	mp4Path, err := r.GetRecordingPath(filename)
 	if err != nil {
@@ -391,12 +391,12 @@ func (r *H264Recorder) RegenerateThumbnail(filename string, timestamp float64) e
 		return fmt.Errorf("thumbnail generation failed: %v\n%s", err, string(output))
 	}
 
-	logger.Info("H264Recorder", "Thumbnail regenerated at %.2fs: %s", timestamp, filepath.Base(thumbPath))
+	logger.Info("Recorder", "Thumbnail regenerated at %.2fs: %s", timestamp, filepath.Base(thumbPath))
 	return nil
 }
 
 // autoStop stops recording due to timeout (called from recordLoop)
-func (r *H264Recorder) autoStop(reason string) {
+func (r *Recorder) autoStop(reason string) {
 	r.mu.Lock()
 	if !r.recording {
 		r.mu.Unlock()
@@ -422,7 +422,7 @@ func (r *H264Recorder) autoStop(reason string) {
 	}
 	r.mu.Unlock()
 
-	logger.Info("H264Recorder", "Auto-stopped recording: %s (reason=%s)", filename, reason)
+	logger.Info("Recorder", "Auto-stopped recording: %s (reason=%s)", filename, reason)
 
 	// Start MP4 conversion in background
 	r.mu.Lock()
@@ -432,7 +432,7 @@ func (r *H264Recorder) autoStop(reason string) {
 }
 
 // Heartbeat updates the last heartbeat time to prevent auto-stop
-func (r *H264Recorder) Heartbeat() bool {
+func (r *Recorder) Heartbeat() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -446,7 +446,7 @@ func (r *H264Recorder) Heartbeat() bool {
 
 // NotifyDetection records the first detection time during recording
 // Returns true if this was the first detection, false if already recorded or not recording
-func (r *H264Recorder) NotifyDetection() bool {
+func (r *Recorder) NotifyDetection() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -460,19 +460,19 @@ func (r *H264Recorder) NotifyDetection() bool {
 	}
 
 	r.firstDetectionOffset = time.Since(r.startTime).Seconds()
-	logger.Info("H264Recorder", "First detection at %.2fs into recording", r.firstDetectionOffset)
+	logger.Info("Recorder", "First detection at %.2fs into recording", r.firstDetectionOffset)
 	return true
 }
 
 // IsRecording returns true if currently recording
-func (r *H264Recorder) IsRecording() bool {
+func (r *Recorder) IsRecording() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.recording
 }
 
 // Status returns the current recording status
-func (r *H264Recorder) Status() map[string]any {
+func (r *Recorder) Status() map[string]any {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -500,7 +500,7 @@ func (r *H264Recorder) Status() map[string]any {
 }
 
 // ListRecordings returns a list of recording files
-func (r *H264Recorder) ListRecordings() ([]RecordingInfo, error) {
+func (r *Recorder) ListRecordings() ([]RecordingInfo, error) {
 	entries, err := os.ReadDir(r.outputPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -567,7 +567,7 @@ func (r *H264Recorder) ListRecordings() ([]RecordingInfo, error) {
 }
 
 // generateMissingThumbnails generates thumbnails for MP4 files that don't have them
-func (r *H264Recorder) generateMissingThumbnails(filenames []string) {
+func (r *Recorder) generateMissingThumbnails(filenames []string) {
 	for _, filename := range filenames {
 		mp4Path := filepath.Join(r.outputPath, filename)
 		thumbPath := mp4Path[:len(mp4Path)-4] + ".jpg"
@@ -577,13 +577,13 @@ func (r *H264Recorder) generateMissingThumbnails(filenames []string) {
 			continue
 		}
 
-		logger.Info("H264Recorder", "Generating missing thumbnail for: %s", filename)
+		logger.Info("Recorder", "Generating missing thumbnail for: %s", filename)
 		r.generateThumbnail(mp4Path, -1) // -1 = no detection data for existing recordings
 	}
 }
 
 // GetRecordingPath returns the full path to a recording file
-func (r *H264Recorder) GetRecordingPath(filename string) (string, error) {
+func (r *Recorder) GetRecordingPath(filename string) (string, error) {
 	// Sanitize filename to prevent directory traversal
 	cleanName := filepath.Base(filename)
 	if cleanName != filename {
@@ -601,7 +601,7 @@ func (r *H264Recorder) GetRecordingPath(filename string) (string, error) {
 }
 
 // DeleteRecording deletes a recording file and its corresponding thumbnail
-func (r *H264Recorder) DeleteRecording(filename string) error {
+func (r *Recorder) DeleteRecording(filename string) error {
 	path, err := r.GetRecordingPath(filename)
 	if err != nil {
 		return err
@@ -618,9 +618,9 @@ func (r *H264Recorder) DeleteRecording(filename string) error {
 		thumbPath := path[:len(path)-len(ext)] + ".jpg"
 		if _, err := os.Stat(thumbPath); err == nil {
 			if err := os.Remove(thumbPath); err != nil {
-				logger.Warn("H264Recorder", "Failed to delete thumbnail: %v", err)
+				logger.Warn("Recorder", "Failed to delete thumbnail: %v", err)
 			} else {
-				logger.Info("H264Recorder", "Deleted thumbnail: %s", filepath.Base(thumbPath))
+				logger.Info("Recorder", "Deleted thumbnail: %s", filepath.Base(thumbPath))
 			}
 		}
 	}

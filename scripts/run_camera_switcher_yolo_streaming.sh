@@ -58,7 +58,7 @@ JPEG_QUALITY="${JPEG_QUALITY:-65}"
 
 # Streaming設定
 STREAMING_MAX_CLIENTS="${STREAMING_MAX_CLIENTS:-10}"
-STREAMING_SHM="${STREAMING_SHM:-/pet_camera_stream}"
+STREAMING_SHM="${STREAMING_SHM:-/pet_camera_h265_zc}"
 RECORDING_PATH="${RECORDING_PATH:-${REPO_ROOT}/recordings}"
 
 RUN_DETECTOR=1
@@ -99,7 +99,7 @@ Options:
   METRICS_PORT           Prometheusメトリクスポート
   PPROF_PORT             pprofプロファイリングポート
   STREAMING_MAX_CLIENTS  最大WebRTCクライアント数
-  STREAMING_SHM          共有メモリ名 (default: /pet_camera_stream)
+  STREAMING_SHM          共有メモリ名 (default: /pet_camera_h265_zc)
   RECORDING_PATH         録画ファイル保存先 (default: ./recordings)
   YOLO_MODEL             YOLOモデル (v8n/v11n/v13n/v26n)
   YOLO_SCORE_THRESHOLD   検出スコア閾値

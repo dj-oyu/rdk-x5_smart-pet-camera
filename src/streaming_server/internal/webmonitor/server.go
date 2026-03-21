@@ -27,7 +27,7 @@ type mjpegStreamEntry struct {
 type Server struct {
 	cfg                    Config
 	monitor                *Monitor
-	recorder               *H264Recorder
+	recorder               *Recorder
 	webrtc                 *http.Client
 	broadcaster            *FrameBroadcaster
 	detectionBroadcaster   *DetectionBroadcaster
@@ -83,12 +83,12 @@ func NewServer(cfg Config) *Server {
 	connectionBroadcaster.Start()
 
 	// Initialize H.264 recorder with SHM name
-	h264ShmName := cfg.H264ShmName
-	if h264ShmName == "" {
-		h264ShmName = "/pet_camera_stream"
+	streamShmName := cfg.StreamShmName
+	if streamShmName == "" {
+		streamShmName = "/pet_camera_h265_zc"
 	}
 
-	recorder := NewH264Recorder(cfg.RecordingOutputPath, h264ShmName)
+	recorder := NewRecorder(cfg.RecordingOutputPath, streamShmName)
 
 	// Wire up detection callback for recording thumbnail
 	detectionBroadcaster.SetOnDetection(func() {
