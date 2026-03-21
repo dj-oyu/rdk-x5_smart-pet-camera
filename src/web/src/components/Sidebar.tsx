@@ -29,32 +29,13 @@ interface TrajectoryPoint {
   color: [number, number, number];
 }
 
-const COMICS_PAGE_SIZE = 6;
+const ALBUM_URL = 'https://m5stack-ai-pyramid.tail848eb5.ts.net:8082/album';
 
-function parseComicDate(filename: string): Date | null {
-  const match = filename.match(/comic_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
-  if (!match) return null;
-  return new Date(+match[1], +match[2] - 1, +match[3], +match[4], +match[5], +match[6]);
-}
-
-function formatDate(date: Date | null): string {
-  if (!date) return '--';
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-}
-
-export function useSidebar(onOpenThumbnail: (url: string, name: string) => void) {
+export function useSidebar() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pointsRef = useRef<TrajectoryPoint[]>([]);
   const lastKeyRef = useRef<string>('');
   const [legendEntries, setLegendEntries] = useState<[string, number][]>([]);
-
-  const [comics, setComics] = useState<string[]>([]);
-  const [comicsTotal, setComicsTotal] = useState(0);
-  const comicsOffsetRef = useRef(0);
-  const galleryRef = useRef<HTMLDivElement>(null);
-  const sentinelRef = useRef<HTMLDivElement>(null);
-  const loadingRef = useRef(false);
 
   const drawTrajectory = useCallback(() => {
     const canvas = canvasRef.current;
@@ -151,78 +132,12 @@ export function useSidebar(onOpenThumbnail: (url: string, name: string) => void)
     return () => window.removeEventListener('resize', handler);
   }, [drawTrajectory]);
 
-  const fetchComicsPage = async (offset: number, limit: number) => {
-    const res = await fetch(`/api/comics?limit=${limit}&offset=${offset}`);
-    if (!res.ok) throw new Error('Failed to fetch comics');
-    return (await res.json()) as { comics: { filename: string }[]; total: number };
-  };
-
-  const loadInitialComics = useCallback(async () => {
-    try {
-      const data = await fetchComicsPage(0, COMICS_PAGE_SIZE);
-      setComicsTotal(data.total || 0);
-      const filenames = (data.comics || []).map((c) => c.filename);
-      comicsOffsetRef.current = filenames.length;
-      setComics(filenames);
-    } catch (e) {
-      console.error('[Comics] Fetch error:', e);
-    }
-  }, []);
-
-  const loadMore = useCallback(async () => {
-    if (loadingRef.current || comicsOffsetRef.current >= comicsTotal) return;
-    loadingRef.current = true;
-    try {
-      const data = await fetchComicsPage(comicsOffsetRef.current, COMICS_PAGE_SIZE);
-      const filenames = (data.comics || []).map((c) => c.filename);
-      comicsOffsetRef.current += filenames.length;
-      setComicsTotal(data.total || comicsTotal);
-      setComics((prev) => [...prev, ...filenames]);
-    } catch (e) {
-      console.error('[Comics] Load more error:', e);
-    } finally {
-      loadingRef.current = false;
-    }
-  }, [comicsTotal]);
-
-  useEffect(() => {
-    loadInitialComics();
-    const id = setInterval(loadInitialComics, 30000);
-    return () => clearInterval(id);
-  }, [loadInitialComics]);
-
-  useEffect(() => {
-    const sentinel = sentinelRef.current;
-    const gallery = galleryRef.current;
-    if (!sentinel || !gallery || comicsOffsetRef.current >= comicsTotal) return;
-
-    const observer = new IntersectionObserver(
-      (entries) => { if (entries[0].isIntersecting) loadMore(); },
-      { root: gallery, rootMargin: '0px 200px 0px 0px' },
-    );
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [comics.length, comicsTotal, loadMore]);
-
-  const deleteComic = useCallback(async (filename: string) => {
-    if (!confirm(`Delete "${filename}"?`)) return;
-    try {
-      const res = await fetch(`/api/comics/${encodeURIComponent(filename)}`, { method: 'DELETE' });
-      if (res.ok) {
-        setComics((prev) => prev.filter((c) => c !== filename));
-        setComicsTotal((t) => t - 1);
-        comicsOffsetRef.current--;
-      } else {
-        const data = await res.json();
-        alert('Delete failed: ' + (data.error || 'Unknown error'));
-      }
-    } catch { alert('Delete failed'); }
-  }, []);
-
-  return { canvasRef, legendEntries, comics, comicsTotal, galleryRef, sentinelRef, updateTrajectory, deleteComic, onOpenThumbnail };
+  return { canvasRef, legendEntries, updateTrajectory };
 }
 
 export function SidebarView(props: ReturnType<typeof useSidebar>) {
+  const [albumOffline, setAlbumOffline] = useState(false);
+
   return (
     <div class="sidebar">
       <div class="trajectory-card">
@@ -246,34 +161,18 @@ export function SidebarView(props: ReturnType<typeof useSidebar>) {
 
       <div class="panel">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <h2>アルバム</h2>
-          </div>
+          <h2>アルバム</h2>
+          <a href={ALBUM_URL} target="_blank" class="album-link" title="別タブで開く">↗</a>
         </div>
-        <div class="comic-gallery" ref={props.galleryRef}>
-          {props.comics.length === 0 ? (
-            <p class="muted">まだ写真がありません。ねこの検出を待っています。</p>
-          ) : (
-            <>
-              {props.comics.map((filename) => {
-                const date = parseComicDate(filename);
-                const imgUrl = `/api/comics/${encodeURIComponent(filename)}`;
-                return (
-                  <div class="comic-card" key={filename} data-filename={filename}>
-                    <img src={imgUrl} alt={filename} loading="lazy" onClick={() => props.onOpenThumbnail(imgUrl, filename)} />
-                    <div class="comic-card-footer">
-                      <span class="comic-card-date">{formatDate(date)}</span>
-                      <button class="btn-delete comic-card-delete" onClick={(e) => { e.stopPropagation(); props.deleteComic(filename); }} title="Delete">&times;</button>
-                    </div>
-                  </div>
-                );
-              })}
-              {props.comics.length < props.comicsTotal && (
-                <div class="load-sentinel" ref={props.sentinelRef} />
-              )}
-            </>
-          )}
-        </div>
+        {albumOffline ? (
+          <div class="album-offline">アルバムサービスに接続できません</div>
+        ) : (
+          <iframe
+            src={ALBUM_URL}
+            class="album-iframe"
+            onError={() => setAlbumOffline(true)}
+          />
+        )}
       </div>
     </div>
   );
