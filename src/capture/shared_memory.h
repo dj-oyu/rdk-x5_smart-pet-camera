@@ -83,7 +83,7 @@ typedef struct {
     int camera_id;              // Camera index (0 or 1)
     int width;                  // Frame width in pixels
     int height;                 // Frame height in pixels
-    int format;                 // 0=JPEG, 1=NV12, 2=RGB, 3=H264
+    int format;                 // 0=JPEG, 1=NV12, 2=RGB, 3=H264, 4=H265
     size_t data_size;           // Actual data size in bytes
 
     // Brightness metrics (Phase 0: ISP low-light enhancement)

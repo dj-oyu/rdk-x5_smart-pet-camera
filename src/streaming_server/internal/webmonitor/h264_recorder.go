@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/h264"
+	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/codec"
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/logger"
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/shm"
 )
@@ -31,7 +31,7 @@ type H264Recorder struct {
 
 	// Runtime state
 	shmReader            *shm.Reader
-	h264Processor        *h264.Processor
+	h264Processor        *codec.Processor
 	recording            bool
 	converting           bool // true while MP4 conversion is in progress
 	file                 *os.File
@@ -77,7 +77,7 @@ func (r *H264Recorder) Start() (string, error) {
 
 	// Generate filename with timestamp
 	timestamp := time.Now().Format("20060102_150405")
-	r.filename = fmt.Sprintf("recording_%s.h264", timestamp)
+	r.filename = fmt.Sprintf("recording_%s.hevc", timestamp)
 	filepath := filepath.Join(r.outputPath, r.filename)
 
 	// Create file
@@ -96,7 +96,7 @@ func (r *H264Recorder) Start() (string, error) {
 
 	// Initialize state
 	r.shmReader = reader
-	r.h264Processor = h264.NewProcessor()
+	r.h264Processor = codec.NewProcessor()
 	r.file = file
 	r.recording = true
 	r.startTime = time.Now()
@@ -278,7 +278,8 @@ func (r *H264Recorder) convertToMP4(h264Filename string, detectionOffset float64
 	}()
 
 	h264Path := filepath.Join(r.outputPath, h264Filename)
-	mp4Filename := h264Filename[:len(h264Filename)-5] + ".mp4" // Replace .h264 with .mp4
+	ext := filepath.Ext(h264Filename)
+	mp4Filename := h264Filename[:len(h264Filename)-len(ext)] + ".mp4"
 	mp4Path := filepath.Join(r.outputPath, mp4Filename)
 
 	logger.Info("H264Recorder", "Starting MP4 conversion: %s -> %s", h264Filename, mp4Filename)
@@ -286,7 +287,7 @@ func (r *H264Recorder) convertToMP4(h264Filename string, detectionOffset float64
 	// Run ffmpeg with low priority (nice -n 19)
 	cmd := exec.Command("nice", "-n", "19",
 		"ffmpeg", "-y",
-		"-f", "h264",
+		"-f", "hevc",
 		"-i", h264Path,
 		"-c", "copy",
 		mp4Path,
@@ -530,7 +531,7 @@ func (r *H264Recorder) ListRecordings() ([]RecordingInfo, error) {
 
 		name := entry.Name()
 		ext := filepath.Ext(name)
-		if ext != ".mp4" && ext != ".h264" {
+		if ext != ".mp4" && ext != ".hevc" && ext != ".h264" {
 			continue
 		}
 
@@ -613,7 +614,7 @@ func (r *H264Recorder) DeleteRecording(filename string) error {
 
 	// Also delete corresponding thumbnail if it exists
 	ext := filepath.Ext(filename)
-	if ext == ".mp4" || ext == ".h264" {
+	if ext == ".mp4" || ext == ".hevc" || ext == ".h264" {
 		thumbPath := path[:len(path)-len(ext)] + ".jpg"
 		if _, err := os.Stat(thumbPath); err == nil {
 			if err := os.Remove(thumbPath); err != nil {

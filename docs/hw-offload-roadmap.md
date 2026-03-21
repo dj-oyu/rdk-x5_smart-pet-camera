@@ -47,7 +47,7 @@ JPEG変換: VPU HW (変更なし)
 
 ターゲットクライアント: iPhone (Safari)、Chrome、Safari — 全てH.265対応済み。
 
-### 1-1. C側エンコーダー変更
+### 1-1. C側エンコーダー変更 ✅
 
 **対象**: `src/capture/encoder_lowlevel.c`
 
@@ -59,38 +59,41 @@ params:       h264_cbr_params → h265_cbr_params
 追加:         ctu_level_rc_enalbe = 1
 ```
 
+SHMフォーマット値も更新: `format = 3 (H.264)` → `format = 4 (H.265)`
+
 リファレンス: `/app/multimedia_samples/sample_pipeline/common/vp_codec.c:176-182`
 
 検証: `docs/hardware-specs.md` の実測ベンチマーク参照。同QP比較で9-24%サイズ削減、エンコード速度はH.264と同等 (68-71 fps)。
 
-### 1-2. Go側WebRTCコーデック変更
+### 1-2. Go側WebRTCコーデック変更 ✅
 
 **対象**: `src/streaming_server/internal/webrtc/server.go`
 
-```go
-// MimeType変更
-webrtc.MimeTypeH264 → webrtc.MimeTypeH265
-```
+- pion/webrtc v3 → **v4にアップグレード** (v3にはH.265 RTP payloaderが存在しなかった)
+- `webrtc.MimeTypeH265` を使用 (v4で標準提供)
 
-### 1-3. NALユニット処理の更新
+### 1-3. NALユニット処理の更新 ✅
 
-**対象**: `src/streaming_server/internal/h264/processor.go`
+**対象**: `src/streaming_server/internal/h264/` → `internal/codec/` にリネーム
 
-- H.265 NALユニットタイプの認識 (VPS=32, SPS=33, PPS=34 vs H.264 SPS=7, PPS=8)
+- H.265 NALユニットタイプの認識: `(byte >> 1) & 0x3F` (VPS=32, SPS=33, PPS=34, IDR=19/20)
 - VPS (Video Parameter Set) のキャッシュ追加
-- IDRフレーム判定ロジック更新
+- IDRフレーム判定ロジック更新 (IDR_W_RADL=19, IDR_N_LP=20)
+- `H264Frame` → `VideoFrame` にリネーム (codec-agnostic化)
 
-### 1-4. 録画パイプライン
+### 1-4. 録画パイプライン ✅
 
-**変更なし**: ffmpeg `copy` モードは H.265 をそのままパススルー。
+- ファイル拡張子: `.h264` → `.hevc`
+- ffmpeg引数: `-f h264` → `-f hevc` (`-c copy` モードでパススルー)
+- VPS/SPS/PPSヘッダーをIDRフレームに付与
 
 ### 検証項目
 
-- [ ] H.265エンコード動作確認 (カメラデーモン)
-- [ ] WebRTC H.265配信 → iPhone Safari で再生確認
-- [ ] WebRTC H.265配信 → Chrome で再生確認
-- [ ] 録画 (.h265 → .mp4 変換) 確認
-- [ ] MJPEGパイプラインが影響を受けていないことを確認
+- [x] H.265エンコード動作確認 (カメラデーモン) — 2026-03-21 完了
+- [x] WebRTC H.265配信 → iPhone Safari で再生確認 — 2026-03-21 完了 (pion/webrtc v4)
+- [x] WebRTC H.265配信 → Chrome で再生確認 — 2026-03-21 完了
+- [x] 録画 (.hevc → .mp4 変換) 確認 — 2026-03-21 完了
+- [x] MJPEGパイプラインが影響を受けていないことを確認 — 2026-03-21 完了
 - [ ] CPU使用率のbefore/after比較
 
 ---
