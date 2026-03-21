@@ -94,6 +94,31 @@ class CZeroCopyFrameBuffer(Structure):
 
 
 # ============================================================================
+# Detection structures (matching shared_memory.h)
+# ============================================================================
+
+class CBoundingBox(Structure):
+    _fields_ = [("x", c_int), ("y", c_int), ("w", c_int), ("h", c_int)]
+
+class CDetection(Structure):
+    _fields_ = [
+        ("class_name", c_uint8 * 32),
+        ("confidence", c_float),
+        ("bbox", CBoundingBox),
+    ]
+
+class CLatestDetectionResult(Structure):
+    _fields_ = [
+        ("frame_number", c_uint64),
+        ("timestamp", CTimespec),
+        ("num_detections", c_int),
+        ("detections", CDetection * MAX_DETECTIONS),
+        ("version", c_uint32),
+        ("detection_update_sem", c_uint8 * 32),
+    ]
+
+
+# ============================================================================
 # Python dataclass for frame metadata
 # ============================================================================
 
@@ -200,3 +225,59 @@ class ZeroCopySharedMemory:
 
         ret = librt.sem_timedwait(addressof(sem_buf), addressof(timespec_buf))
         return ret == 0
+
+
+# ============================================================================
+# DetectionWriter — writes YOLO results to detection SHM
+# ============================================================================
+
+class DetectionWriter:
+    def __init__(self, detection_shm_name: str = SHM_NAME_DETECTIONS):
+        self.detection_shm_name = detection_shm_name
+        self.detection_fd: Optional[int] = None
+        self.detection_mmap: Optional[mmap.mmap] = None
+        self.last_detection_version = 0
+
+    def open(self) -> None:
+        shm_path = f"/dev/shm{self.detection_shm_name}"
+        try:
+            self.detection_fd = os.open(shm_path, os.O_RDWR)
+        except FileNotFoundError:
+            self.detection_fd = os.open(shm_path, os.O_CREAT | os.O_RDWR, 0o666)
+            os.ftruncate(self.detection_fd, sizeof(CLatestDetectionResult))
+        self.detection_mmap = mmap.mmap(
+            self.detection_fd, sizeof(CLatestDetectionResult),
+            mmap.MAP_SHARED, mmap.PROT_WRITE | mmap.PROT_READ,
+        )
+
+    def close(self) -> None:
+        if self.detection_mmap:
+            self.detection_mmap.close()
+            self.detection_mmap = None
+        if self.detection_fd is not None:
+            os.close(self.detection_fd)
+            self.detection_fd = None
+
+    def write_detection_result(
+        self, frame_number: int, timestamp_sec: float, detections: list[dict],
+    ) -> None:
+        if not self.detection_mmap:
+            return
+        c_det = CLatestDetectionResult()
+        c_det.frame_number = frame_number
+        c_det.timestamp.tv_sec = int(timestamp_sec)
+        c_det.timestamp.tv_nsec = int((timestamp_sec - int(timestamp_sec)) * 1e9)
+        c_det.num_detections = min(len(detections), MAX_DETECTIONS)
+        for i, det in enumerate(detections[:MAX_DETECTIONS]):
+            c_detection = c_det.detections[i]
+            c_detection.class_name = det["class_name"].encode("utf-8")
+            c_detection.confidence = det["confidence"]
+            c_detection.bbox.x = det["bbox"]["x"]
+            c_detection.bbox.y = det["bbox"]["y"]
+            c_detection.bbox.w = det["bbox"]["w"]
+            c_detection.bbox.h = det["bbox"]["h"]
+        self.last_detection_version += 1
+        c_det.version = self.last_detection_version
+        self.detection_mmap.seek(0)
+        self.detection_mmap.write(bytes(c_det))
+        self.detection_mmap.flush()
