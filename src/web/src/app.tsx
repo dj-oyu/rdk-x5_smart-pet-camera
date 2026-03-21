@@ -18,7 +18,7 @@ function App() {
     setThumbnailPreview({ url, name });
   }, []);
 
-  const sidebar = useSidebar(openThumbnail);
+  const sidebar = useSidebar();
 
   const onStatus = useCallback(
     (data: StatusEvent) => {

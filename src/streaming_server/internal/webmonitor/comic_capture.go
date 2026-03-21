@@ -45,7 +45,8 @@ type capturedPanel struct {
 	height      int
 	timestamp   time.Time
 	bbox        *BoundingBox
-	placeholder bool // filled panel (wider crop to show context)
+	placeholder bool   // filled panel (wider crop to show context)
+	petClass    string // "mike", "chatora", "other", or "" if unknown
 }
 
 // ComicCapture monitors detection SHM for cat presence and produces
@@ -58,6 +59,7 @@ type ComicCapture struct {
 	catFirstSeen     time.Time
 	lastCatSeen      time.Time
 	lastCatBBox      *BoundingBox
+	lastCatClass     string
 	lastVersionChange time.Time
 	sessionID        string
 	panels           []capturedPanel
@@ -126,7 +128,7 @@ func (cc *ComicCapture) tick(now time.Time) {
 		cc.lastVersionChange = now
 		if hasPet(det) {
 			cc.lastCatSeen = now
-			cc.lastCatBBox = petBBox(det)
+			cc.lastCatBBox, cc.lastCatClass = petDetection(det)
 			if cc.catFirstSeen.IsZero() {
 				cc.catFirstSeen = now
 			}
@@ -252,12 +254,19 @@ func (cc *ComicCapture) capturePanel(now time.Time) {
 		return
 	}
 
+	// Classify pet color from bbox region
+	var petClass string
+	if cc.lastCatBBox != nil {
+		petClass = classifyPetColor(frame.Data, frame.Width, frame.Height, *cc.lastCatBBox)
+	}
+
 	panel := capturedPanel{
 		nv12Data:  append([]byte(nil), frame.Data...),
 		width:     frame.Width,
 		height:    frame.Height,
 		timestamp: now,
 		bbox:      cc.lastCatBBox,
+		petClass:  petClass,
 	}
 	cc.panels = append(cc.panels, panel)
 	cc.lastCaptureTime = now
@@ -378,7 +387,8 @@ func (cc *ComicCapture) stitchAndSave() {
 		return
 	}
 
-	filename := fmt.Sprintf("comic_%s.jpg", cc.sessionID)
+	petID := dominantPetID(cc.panels)
+	filename := fmt.Sprintf("comic_%s_%s.jpg", cc.sessionID, petID)
 	outPath := filepath.Join(cc.outputDir, filename)
 	if err := os.WriteFile(outPath, jpegData, 0644); err != nil {
 		log.Printf("[Comic] Failed to write %s: %v", filename, err)
@@ -416,19 +426,21 @@ func hasPet(det *DetectionResult) bool {
 	return false
 }
 
-// petBBox returns the bounding box of the highest-confidence pet detection.
-func petBBox(det *DetectionResult) *BoundingBox {
+// petDetection returns the bounding box and class name of the highest-confidence pet detection.
+func petDetection(det *DetectionResult) (*BoundingBox, string) {
 	if det == nil {
-		return nil
+		return nil, ""
 	}
 	var best *BoundingBox
 	bestConf := 0.0
+	bestClass := ""
 	for _, d := range det.Detections {
 		if isPetClass(d.ClassName) && d.Confidence > bestConf {
 			bestConf = d.Confidence
 			bb := d.BBox
 			best = &bb
+			bestClass = d.ClassName
 		}
 	}
-	return best
+	return best, bestClass
 }
