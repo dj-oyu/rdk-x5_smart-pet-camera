@@ -1,28 +1,35 @@
 package webmonitor
 
+/*
+#cgo CFLAGS: -I../../../capture -I/usr/include/GC820
+#cgo LDFLAGS: -L../../../../build -ln2d_comic -lNano2D -lNano2Dutil
+
+#include "n2d_comic.h"
+#include <stdlib.h>
+*/
+import "C"
 import (
-	"bytes"
 	"fmt"
-	"image"
-	"image/color"
-	"image/draw"
-	"image/jpeg"
 	"log"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
-
-	"golang.org/x/image/font"
-	"golang.org/x/image/font/inconsolata"
-	xdraw "golang.org/x/image/math/fixed"
+	"unsafe"
 )
+
+// NV12Frame holds an NV12 frame with dimensions.
+type NV12Frame struct {
+	Data          []byte
+	Width, Height int
+}
 
 // frameSource abstracts SHM access for testability.
 type frameSource interface {
 	LatestDetection() (*DetectionResult, bool)
-	LatestJPEG() ([]byte, bool)
+	LatestNV12() (*NV12Frame, bool)
 }
 
 type comicState int
@@ -33,7 +40,9 @@ const (
 )
 
 type capturedPanel struct {
-	jpegData    []byte
+	nv12Data    []byte
+	width       int
+	height      int
 	timestamp   time.Time
 	bbox        *BoundingBox
 	placeholder bool // filled panel (wider crop to show context)
@@ -66,6 +75,7 @@ type ComicCapture struct {
 	MaxPanels           int
 	RateLimitWindow     time.Duration
 	RateLimitMax        int
+	SkipStitch          bool          // Skip nano2D composition (for testing)
 }
 
 func NewComicCapture(src frameSource, outputDir string) *ComicCapture {
@@ -197,7 +207,7 @@ func (cc *ComicCapture) finishCapturing() {
 	if n := len(cc.panels); n > 0 && n < cc.MaxPanels {
 		cc.fillMissingPanels(time.Now())
 	}
-	if len(cc.panels) > 0 {
+	if len(cc.panels) > 0 && !cc.SkipStitch {
 		cc.stitchAndSave()
 	}
 	cc.state = comicIdle
@@ -210,11 +220,10 @@ func (cc *ComicCapture) finishCapturing() {
 // using the last known bbox as a hint (the pet may still be in frame
 // even if the detector missed it).
 func (cc *ComicCapture) fillMissingPanels(now time.Time) {
-	jpegData, ok := cc.src.LatestJPEG()
+	frame, ok := cc.src.LatestNV12()
 	if !ok {
 		return
 	}
-	// Use the last known bbox from any captured panel
 	var lastBBox *BoundingBox
 	for i := len(cc.panels) - 1; i >= 0; i-- {
 		if cc.panels[i].bbox != nil {
@@ -225,7 +234,9 @@ func (cc *ComicCapture) fillMissingPanels(now time.Time) {
 	}
 	for len(cc.panels) < cc.MaxPanels {
 		panel := capturedPanel{
-			jpegData:    jpegData,
+			nv12Data:    append([]byte(nil), frame.Data...),
+			width:       frame.Width,
+			height:      frame.Height,
 			timestamp:   now,
 			bbox:        lastBBox,
 			placeholder: true,
@@ -236,13 +247,15 @@ func (cc *ComicCapture) fillMissingPanels(now time.Time) {
 }
 
 func (cc *ComicCapture) capturePanel(now time.Time) {
-	jpegData, ok := cc.src.LatestJPEG()
+	frame, ok := cc.src.LatestNV12()
 	if !ok {
 		return
 	}
 
 	panel := capturedPanel{
-		jpegData:  jpegData,
+		nv12Data:  append([]byte(nil), frame.Data...),
+		width:     frame.Width,
+		height:    frame.Height,
 		timestamp: now,
 		bbox:      cc.lastCatBBox,
 	}
@@ -252,12 +265,15 @@ func (cc *ComicCapture) capturePanel(now time.Time) {
 }
 
 // Layout constants for the comic grid.
+// Canvas must be 16-aligned width, 8-aligned height for HW JPEG encoder.
+// outW = margin*2 + (panelW + border*2)*2 + gap = 24 + 408*2 + 8 = 848 (848/16=53)
+// outH = margin*2 + (panelH + border*2)*2 + gap = 24 + 232*2 + 8 = 496 (496/8=62)
 const (
 	comicMargin  = 12
-	comicGap     = 12
+	comicGap     = 8
 	comicBorder  = 2
-	comicPanelW  = 400
-	comicPanelH  = 225
+	comicPanelW  = 404
+	comicPanelH  = 228
 	comicQuality = 85
 )
 
@@ -267,47 +283,109 @@ func (cc *ComicCapture) stitchAndSave() {
 		return
 	}
 
-	// Decode and crop panels
-	// Panel 0: full frame (establishing shot)
-	// Panel 1-3: random zoom (1.3x-2.5x)
-	// Placeholder panels: wide crop (3.0x-4.0x) to show context around last known position
-	images := make([]image.Image, 0, len(cc.panels))
-	for i, p := range cc.panels {
-		img, err := jpeg.Decode(bytes.NewReader(p.jpegData))
-		if err != nil {
-			log.Printf("[Comic] Failed to decode panel %d: %v", i, err)
-			return
-		}
+	numPanels := len(cc.panels)
+	if numPanels == 0 {
+		return
+	}
+	if numPanels > 4 {
+		numPanels = 4
+	}
+
+	// Prepare C arrays for nano2D composition
+	cFrames := make([]*C.uint8_t, numPanels)
+	cWidths := make([]C.int, numPanels)
+	cHeights := make([]C.int, numPanels)
+	cCrops := make([]C.comic_crop_t, numPanels)
+
+	// Pin Go slices for CGo (required by Go runtime)
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+
+	for i := 0; i < numPanels; i++ {
+		p := cc.panels[i]
+		pinner.Pin(&p.nv12Data[0])
+		cFrames[i] = (*C.uint8_t)(unsafe.Pointer(&p.nv12Data[0]))
+		cWidths[i] = C.int(p.width)
+		cHeights[i] = C.int(p.height)
+
+		// Compute crop region
 		if p.bbox != nil && i > 0 {
 			var factor float64
 			if p.placeholder {
-				factor = 3.0 + rand.Float64()*1.0 // 3.0x ~ 4.0x (wide)
+				factor = 3.0 + rand.Float64()*1.0
 			} else {
-				factor = 1.3 + rand.Float64()*1.2 // 1.3x ~ 2.5x (close-up)
+				factor = 1.3 + rand.Float64()*1.2
 			}
-			img = cropToDetection(img, p.bbox, factor)
+			cx := p.bbox.X + p.bbox.W/2
+			cy := p.bbox.Y + p.bbox.H/2
+			expandW := int(float64(p.bbox.W) * factor)
+			expandH := int(float64(p.bbox.H) * factor)
+			x0, y0 := cx-expandW/2, cy-expandH/2
+			if x0 < 0 { x0 = 0 }
+			if y0 < 0 { y0 = 0 }
+			if x0+expandW > p.width { expandW = p.width - x0 }
+			if y0+expandH > p.height { expandH = p.height - y0 }
+			cCrops[i] = C.comic_crop_t{
+				src_x: C.int(x0), src_y: C.int(y0),
+				src_w: C.int(expandW), src_h: C.int(expandH),
+			}
 		}
-		images = append(images, img)
+		// else: zero-initialized = full frame
 	}
 
-	canvas := renderComicGrid(images, cc.panels)
+	// Canvas dimensions
+	border := 2
+	cellW := comicPanelW + 2*border
+	cellH := comicPanelH + 2*border
+	outW := comicMargin*2 + cellW*2 + comicGap
+	outH := comicMargin*2 + cellH*2 + comicGap
+
+	outNV12 := make([]byte, outW*outH*3/2)
+
+	ret := C.n2d_comic_compose(
+		(**C.uint8_t)(unsafe.Pointer(&cFrames[0])),
+		(*C.int)(unsafe.Pointer(&cWidths[0])),
+		(*C.int)(unsafe.Pointer(&cHeights[0])),
+		(*C.comic_crop_t)(unsafe.Pointer(&cCrops[0])),
+		C.int(numPanels),
+		C.int(comicPanelW), C.int(comicPanelH),
+		C.int(comicMargin), C.int(comicGap),
+		(*C.uint8_t)(unsafe.Pointer(&outNV12[0])),
+		C.int(outW), C.int(outH),
+	)
+	if ret != 0 {
+		log.Printf("[Comic] nano2D composition failed: %d", ret)
+		return
+	}
+
+	// Draw timestamps on NV12 canvas
+	for i := 0; i < numPanels && i < 4; i++ {
+		ts := cc.panels[i].timestamp.Format("15:04:05")
+		px := comicMargin + border
+		py := comicMargin + border
+		if i%2 == 1 { px += cellW + comicGap }
+		if i >= 2 { py += cellH + comicGap }
+		// Draw timestamp at bottom-right of panel
+		drawTextWithBackgroundNV12(outNV12, outW, outH,
+			px+comicPanelW-len(ts)*8*2-12, py+comicPanelH-32-6,
+			ts, 255, 16, 2)
+	}
+
+	// HW JPEG encode (via VPU, same path as MJPEG)
+	jpegData, err := nv12ToJPEG(outNV12, outW, outH)
+	if err != nil {
+		log.Printf("[Comic] HW JPEG encode failed: %v", err)
+		return
+	}
 
 	filename := fmt.Sprintf("comic_%s.jpg", cc.sessionID)
 	outPath := filepath.Join(cc.outputDir, filename)
-	f, err := os.Create(outPath)
-	if err != nil {
-		log.Printf("[Comic] Failed to create %s: %v", filename, err)
-		return
-	}
-	defer f.Close()
-
-	if err := jpeg.Encode(f, canvas, &jpeg.Options{Quality: comicQuality}); err != nil {
-		log.Printf("[Comic] Failed to encode %s: %v", filename, err)
+	if err := os.WriteFile(outPath, jpegData, 0644); err != nil {
+		log.Printf("[Comic] Failed to write %s: %v", filename, err)
 		return
 	}
 
 	cc.recentComics = append(cc.recentComics, time.Now())
-	// Trim old entries
 	cutoff := time.Now().Add(-cc.RateLimitWindow)
 	trimmed := cc.recentComics[:0]
 	for _, t := range cc.recentComics {
@@ -317,236 +395,9 @@ func (cc *ComicCapture) stitchAndSave() {
 	}
 	cc.recentComics = trimmed
 
-	log.Printf("[Comic] Saved %s (%d panels)", filename, len(images))
+	log.Printf("[Comic] Saved %s (%d panels, nano2D+HW JPEG)", filename, numPanels)
 }
 
-// renderComicGrid creates a 2x2 white-background comic grid with black panel borders.
-func renderComicGrid(images []image.Image, panels []capturedPanel) *image.RGBA {
-	cellW := comicPanelW + 2*comicBorder
-	cellH := comicPanelH + 2*comicBorder
-	canvasW := comicMargin*2 + cellW*2 + comicGap
-	canvasH := comicMargin*2 + cellH*2 + comicGap
-
-	canvas := image.NewRGBA(image.Rect(0, 0, canvasW, canvasH))
-	// Fill white background
-	draw.Draw(canvas, canvas.Bounds(), image.White, image.Point{}, draw.Src)
-
-	positions := [4][2]int{
-		{comicMargin, comicMargin},
-		{comicMargin + cellW + comicGap, comicMargin},
-		{comicMargin, comicMargin + cellH + comicGap},
-		{comicMargin + cellW + comicGap, comicMargin + cellH + comicGap},
-	}
-
-	black := image.NewUniform(color.Black)
-
-	for i, img := range images {
-		if i >= 4 {
-			break
-		}
-		x, y := positions[i][0], positions[i][1]
-
-		// Draw black border
-		borderRect := image.Rect(x, y, x+cellW, y+cellH)
-		draw.Draw(canvas, borderRect, black, image.Point{}, draw.Src)
-
-		// Scale panel content into the inner area
-		contentRect := image.Rect(x+comicBorder, y+comicBorder, x+comicBorder+comicPanelW, y+comicBorder+comicPanelH)
-		scaleImage(canvas, contentRect, img)
-
-		// Draw timestamp
-		ts := panels[i].timestamp.Format("15:04:05")
-		drawTimestamp(canvas, contentRect, ts)
-	}
-
-	return canvas
-}
-
-// scaleImage scales src into dst rectangle using nearest-neighbor with direct Pix access.
-func scaleImage(dst *image.RGBA, dstRect image.Rectangle, src image.Image) {
-	dw := dstRect.Dx()
-	dh := dstRect.Dy()
-	srcBounds := src.Bounds()
-	sw := srcBounds.Dx()
-	sh := srcBounds.Dy()
-
-	// Fast path: direct Pix manipulation for RGBA sources (avoids interface dispatch per pixel)
-	if srcRGBA, ok := src.(*image.RGBA); ok {
-		for dy := 0; dy < dh; dy++ {
-			sy := srcBounds.Min.Y + dy*sh/dh
-			dstOff := (dstRect.Min.Y+dy-dst.Rect.Min.Y)*dst.Stride + (dstRect.Min.X-dst.Rect.Min.X)*4
-			srcRow := (sy-srcRGBA.Rect.Min.Y)*srcRGBA.Stride - srcRGBA.Rect.Min.X*4
-			for dx := 0; dx < dw; dx++ {
-				sx := srcBounds.Min.X + dx*sw/dw
-				srcOff := srcRow + sx*4
-				copy(dst.Pix[dstOff:dstOff+4], srcRGBA.Pix[srcOff:srcOff+4])
-				dstOff += 4
-			}
-		}
-		return
-	}
-
-	// Fast path: YCbCr sources (jpeg.Decode returns this)
-	if srcYCbCr, ok := src.(*image.YCbCr); ok {
-		for dy := 0; dy < dh; dy++ {
-			sy := srcBounds.Min.Y + dy*sh/dh
-			dstOff := (dstRect.Min.Y+dy-dst.Rect.Min.Y)*dst.Stride + (dstRect.Min.X-dst.Rect.Min.X)*4
-			for dx := 0; dx < dw; dx++ {
-				sx := srcBounds.Min.X + dx*sw/dw
-				yi := srcYCbCr.YOffset(sx, sy)
-				ci := srcYCbCr.COffset(sx, sy)
-				yy := int32(srcYCbCr.Y[yi])
-				cb := int32(srcYCbCr.Cb[ci]) - 128
-				cr := int32(srcYCbCr.Cr[ci]) - 128
-				r := yy + 91881*cr/65536
-				g := yy - 22554*cb/65536 - 46802*cr/65536
-				b := yy + 116130*cb/65536
-				if r < 0 {
-					r = 0
-				} else if r > 255 {
-					r = 255
-				}
-				if g < 0 {
-					g = 0
-				} else if g > 255 {
-					g = 255
-				}
-				if b < 0 {
-					b = 0
-				} else if b > 255 {
-					b = 255
-				}
-				dst.Pix[dstOff] = uint8(r)
-				dst.Pix[dstOff+1] = uint8(g)
-				dst.Pix[dstOff+2] = uint8(b)
-				dst.Pix[dstOff+3] = 255
-				dstOff += 4
-			}
-		}
-		return
-	}
-
-	// Generic fallback
-	for dy := 0; dy < dh; dy++ {
-		sy := srcBounds.Min.Y + dy*sh/dh
-		for dx := 0; dx < dw; dx++ {
-			sx := srcBounds.Min.X + dx*sw/dw
-			dst.Set(dstRect.Min.X+dx, dstRect.Min.Y+dy, src.At(sx, sy))
-		}
-	}
-}
-
-// cropToDetection crops the image around the bounding box center with the given expansion factor.
-func cropToDetection(img image.Image, bbox *BoundingBox, factor float64) image.Image {
-	bounds := img.Bounds()
-
-	cx := bbox.X + bbox.W/2
-	cy := bbox.Y + bbox.H/2
-	expandW := int(float64(bbox.W) * factor)
-	expandH := int(float64(bbox.H) * factor)
-
-	x0 := cx - expandW/2
-	y0 := cy - expandH/2
-	x1 := cx + expandW/2
-	y1 := cy + expandH/2
-
-	// Clamp to image bounds
-	if x0 < bounds.Min.X {
-		x0 = bounds.Min.X
-	}
-	if y0 < bounds.Min.Y {
-		y0 = bounds.Min.Y
-	}
-	if x1 > bounds.Max.X {
-		x1 = bounds.Max.X
-	}
-	if y1 > bounds.Max.Y {
-		y1 = bounds.Max.Y
-	}
-
-	if x1 <= x0 || y1 <= y0 {
-		return img
-	}
-
-	type subImager interface {
-		SubImage(r image.Rectangle) image.Image
-	}
-	if si, ok := img.(subImager); ok {
-		return si.SubImage(image.Rect(x0, y0, x1, y1))
-	}
-
-	cropped := image.NewRGBA(image.Rect(0, 0, x1-x0, y1-y0))
-	draw.Draw(cropped, cropped.Bounds(), img, image.Pt(x0, y0), draw.Src)
-	return cropped
-}
-
-// drawTimestamp renders a 2x-scaled timestamp with semi-transparent background bar.
-func drawTimestamp(canvas *image.RGBA, panelRect image.Rectangle, text string) {
-	const scale = 2
-	face := inconsolata.Regular8x16
-	charW := 8 // base character width
-	textW := len(text) * charW * scale
-	textH := 16 * scale
-	pad := 6
-
-	// Semi-transparent black background bar
-	barRect := image.Rect(
-		panelRect.Max.X-textW-pad*2,
-		panelRect.Max.Y-textH-pad,
-		panelRect.Max.X,
-		panelRect.Max.Y,
-	)
-	bgColor := color.RGBA{0, 0, 0, 160}
-	for y := barRect.Min.Y; y < barRect.Max.Y; y++ {
-		for x := barRect.Min.X; x < barRect.Max.X; x++ {
-			if x >= panelRect.Min.X && y >= panelRect.Min.Y {
-				off := (y-canvas.Rect.Min.Y)*canvas.Stride + (x-canvas.Rect.Min.X)*4
-				// Alpha blend
-				canvas.Pix[off+0] = uint8((int(canvas.Pix[off+0])*96 + int(bgColor.R)*160) / 256)
-				canvas.Pix[off+1] = uint8((int(canvas.Pix[off+1])*96 + int(bgColor.G)*160) / 256)
-				canvas.Pix[off+2] = uint8((int(canvas.Pix[off+2])*96 + int(bgColor.B)*160) / 256)
-				canvas.Pix[off+3] = 255
-			}
-		}
-	}
-
-	// Render text at 1x into a temporary canvas, then blit at 2x
-	tmpW := len(text) * charW
-	tmpH := 16
-	tmp := image.NewRGBA(image.Rect(0, 0, tmpW, tmpH))
-	d := &font.Drawer{
-		Dst:  tmp,
-		Src:  image.NewUniform(color.White),
-		Face: face,
-		Dot:  xdraw.P(0, 13), // baseline for 8x16 font
-	}
-	d.DrawString(text)
-
-	// Blit 2x scaled into canvas
-	ox := panelRect.Max.X - textW - pad
-	oy := panelRect.Max.Y - textH - pad/2
-	for sy := 0; sy < tmpH; sy++ {
-		for sx := 0; sx < tmpW; sx++ {
-			a := tmp.Pix[(sy*tmp.Stride)+sx*4+3]
-			if a == 0 {
-				continue
-			}
-			for dy := 0; dy < scale; dy++ {
-				for dx := 0; dx < scale; dx++ {
-					px := ox + sx*scale + dx
-					py := oy + sy*scale + dy
-					if px >= panelRect.Min.X && px < panelRect.Max.X && py >= panelRect.Min.Y && py < panelRect.Max.Y {
-						off := (py-canvas.Rect.Min.Y)*canvas.Stride + (px-canvas.Rect.Min.X)*4
-						canvas.Pix[off+0] = 255
-						canvas.Pix[off+1] = 255
-						canvas.Pix[off+2] = 255
-						canvas.Pix[off+3] = 255
-					}
-				}
-			}
-		}
-	}
-}
 
 func isPetClass(name string) bool {
 	return name == "cat" || name == "dog"

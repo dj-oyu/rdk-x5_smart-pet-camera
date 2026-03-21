@@ -26,7 +26,7 @@ import (
 
 var (
 	// Command-line flags
-	shmName     = flag.String("shm", "/pet_camera_stream", "Shared memory name")
+	shmName     = flag.String("shm", "/pet_camera_h265_zc", "H.265 zero-copy shared memory name")
 	httpAddr    = flag.String("http", ":8081", "HTTP server address")
 	metricsAddr = flag.String("metrics", ":9090", "Metrics server address")
 	pprofAddr   = flag.String("pprof", ":6060", "pprof server address")
@@ -184,10 +184,9 @@ func (s *Server) Start() error {
 	}()
 
 	// Start goroutines
-	s.wg.Add(4)
+	// readFrames handles process + WebRTC inline (zero-copy requires same goroutine)
+	s.wg.Add(2)
 	go s.readFrames()
-	go s.processFrames()
-	go s.distributeWebRTC()
 	go s.distributeRecorder()
 
 	log.Println("Server started successfully")
@@ -198,61 +197,86 @@ func (s *Server) Start() error {
 func (s *Server) readFrames() {
 	defer s.wg.Done()
 
-	logger.Info("Reader", "Starting frame reading (polling at 30fps)")
+	// Measure camera frame interval and sync to frame boundary
+	interval := s.shmReader.MeasureFrameInterval(5)
+	logger.Info("Reader", "Frame interval: %v (zero-copy)", interval)
 
-	// Poll at 30fps (33.3ms interval)
-	ticker := time.NewTicker(33 * time.Millisecond)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	idleCount := 0
+	missCount := 0
+	lastVer := s.shmReader.Version()
 
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			// OPTIMIZATION: Skip reading if no clients and not recording
-			// This reduces CPU usage when server is idle
-			hasClients := s.webrtc.GetClientCount() > 0
-			isRecording := s.recorder.IsRecording()
+		}
 
-			if !hasClients && !isRecording {
-				idleCount++
-				if idleCount%30 == 0 {
-					logger.Debug("Reader", "No clients and not recording, idle (count=%d)", idleCount)
-				}
-				continue // Skip reading to reduce CPU usage
+		// Skip reading if no clients and not recording
+		if s.webrtc.GetClientCount() == 0 && !s.recorder.IsRecording() {
+			lastVer = s.shmReader.Version()
+			continue
+		}
+
+		// Check for new frame
+		ver := s.shmReader.Version()
+		if ver == lastVer {
+			missCount++
+			// Camera switch or stall — re-sync after 5 consecutive misses
+			if missCount > 5 {
+				interval = s.shmReader.MeasureFrameInterval(3)
+				ticker.Reset(interval)
+				lastVer = s.shmReader.Version()
+				missCount = 0
+				logger.Debug("Reader", "Re-synced frame interval: %v", interval)
 			}
+			continue
+		}
+		lastVer = ver
+		missCount = 0
 
-			// Reset idle counter when active
-			if idleCount > 0 {
-				logger.Info("Reader", "Resuming frame reading (clients=%d, recording=%v)",
-					s.webrtc.GetClientCount(), isRecording)
-				idleCount = 0
-			}
+		// Read latest frame (zero-copy: Data points to VPU memory)
+		frame, err := s.shmReader.ReadLatest()
+		if err != nil {
+			s.metrics.ReadErrors.Add(1)
+			logger.Warn("Reader", "Read error: %v", err)
+			continue
+		}
+		if frame == nil {
+			continue
+		}
 
-			// Read latest frame
-			frame, err := s.shmReader.ReadLatest()
-			if err != nil {
-				s.metrics.ReadErrors.Add(1)
-				logger.Warn("Reader", "Read error: %v", err)
-				continue
-			}
+		s.metrics.FramesRead.Add(1)
+		s.metrics.UpdateFrameLatency(frame.Timestamp)
 
-			if frame == nil {
-				continue // No new frame
-			}
+		// Process inline (same goroutine — frame.Data is valid until next ReadLatest)
+		if err := s.processor.Process(frame); err != nil {
+			s.metrics.ProcessErrors.Add(1)
+			continue
+		}
+		if s.processor.HasHeaders() {
+			s.recorder.UpdateHeaders(s.processor.GetVPS(), s.processor.GetSPS(), s.processor.GetPPS())
+		}
+		s.metrics.FramesProcessed.Add(1)
 
-			s.metrics.FramesRead.Add(1)
-			s.metrics.UpdateFrameLatency(frame.Timestamp)
-
-			// Send to processor (non-blocking)
+		// Recorder: copy before SendFrame (VPU buffer freed on next ReadLatest)
+		if s.recorder.IsRecording() {
+			dataCopy := make([]byte, len(frame.Data))
+			copy(dataCopy, frame.Data)
+			recFrame := *frame
+			recFrame.Data = dataCopy
 			select {
-			case s.processChan <- frame:
+			case s.recorderChan <- &recFrame:
 			default:
-				s.metrics.FramesDropped.Add(1)
+				s.metrics.RecorderFramesDropped.Add(1)
 			}
 		}
+
+		// WebRTC: parallel WriteSample to all clients, blocks until done
+		s.webrtc.SendFrame(frame)
+		s.metrics.WebRTCFramesSent.Add(1)
 	}
 }
 
@@ -333,6 +357,7 @@ func (s *Server) distributeRecorder() {
 		case <-s.ctx.Done():
 			return
 		case frame := <-s.recorderChan:
+			// frame.Data is already copied by readFrames (VPU buffer is transient)
 			if s.recorder.SendFrame(frame) {
 				s.metrics.RecorderFramesSent.Add(1)
 			}

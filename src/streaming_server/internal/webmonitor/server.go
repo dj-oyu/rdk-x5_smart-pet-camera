@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -27,7 +28,7 @@ type mjpegStreamEntry struct {
 type Server struct {
 	cfg                    Config
 	monitor                *Monitor
-	recorder               *H264Recorder
+	recorder               *Recorder
 	webrtc                 *http.Client
 	broadcaster            *FrameBroadcaster
 	detectionBroadcaster   *DetectionBroadcaster
@@ -83,12 +84,12 @@ func NewServer(cfg Config) *Server {
 	connectionBroadcaster.Start()
 
 	// Initialize H.264 recorder with SHM name
-	h264ShmName := cfg.H264ShmName
-	if h264ShmName == "" {
-		h264ShmName = "/pet_camera_stream"
+	streamShmName := cfg.StreamShmName
+	if streamShmName == "" {
+		streamShmName = "/pet_camera_h265_zc"
 	}
 
-	recorder := NewH264Recorder(cfg.RecordingOutputPath, h264ShmName)
+	recorder := NewRecorder(cfg.RecordingOutputPath, streamShmName)
 
 	// Wire up detection callback for recording thumbnail
 	detectionBroadcaster.SetOnDetection(func() {
@@ -101,6 +102,9 @@ func NewServer(cfg Config) *Server {
 		comicsDir := filepath.Join(cfg.RecordingOutputPath, "comics")
 		comicCapture = NewComicCapture(comicShm, comicsDir)
 		comicCapture.Start()
+		log.Printf("[Comic] Started (frame=%s, detection=%s, output=%s)", cfg.FrameShmName, cfg.DetectionShmName, comicsDir)
+	} else {
+		log.Printf("[Comic] Disabled: SHM reader failed: %v", err)
 	}
 
 	return &Server{
@@ -336,6 +340,7 @@ func (s *Server) handleRecordingStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("[Recorder] Stop API called")
 	filename, err := s.recorder.Stop()
 	if err != nil {
 		writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusBadRequest)

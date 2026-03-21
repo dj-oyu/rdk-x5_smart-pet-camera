@@ -1,8 +1,7 @@
 /**
  * shared_memory.c - POSIX shared memory implementation
  *
- * Implements lock-free ring buffer for camera frames and detection results
- * using POSIX shared memory (shm_open/mmap).
+ * Zero-copy SHM for inter-process frame sharing + detection results.
  */
 
 #include "shared_memory.h"
@@ -18,694 +17,178 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-// Helper function to create or open shared memory
-// Returns pointer to shared memory, and sets *created_new to true if newly created
+// ============================================================================
+// Internal helpers
+// ============================================================================
+
 static void* shm_create_or_open_ex(const char* name, size_t size, bool create, bool* created_new) {
-    int shm_fd;
-    void* ptr;
-    bool is_new = false;
-
-    if (create) {
-        // Try to create exclusively first to detect if already exists
-        shm_fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0666);
-        if (shm_fd == -1 && errno == EEXIST) {
-            // Already exists — check if size matches (layout may have changed)
-            shm_fd = shm_open(name, O_RDWR, 0666);
-            if (shm_fd != -1) {
-                struct stat st;
-                if (fstat(shm_fd, &st) == 0 && (size_t)st.st_size != size) {
-                    LOG_WARN("SharedMemory", "Size mismatch for %s: existing=%zu expected=%zu, recreating",
-                             name, (size_t)st.st_size, size);
-                    close(shm_fd);
-                    shm_unlink(name);
-                    // Retry creation
-                    shm_fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0666);
-                    if (shm_fd != -1) {
-                        is_new = true;
-                        if (ftruncate(shm_fd, size) == -1) {
-                            LOG_ERROR("SharedMemory", "ftruncate failed on recreate: %s", strerror(errno));
-                            close(shm_fd);
-                            shm_unlink(name);
-                            return NULL;
-                        }
-                    } else {
-                        LOG_ERROR("SharedMemory", "shm_open recreate failed for %s: %s", name, strerror(errno));
-                        return NULL;
-                    }
-                } else {
-                    is_new = false;
-                }
-            }
-        } else if (shm_fd != -1) {
-            // Successfully created new shared memory
-            is_new = true;
-
-            // Set size for new shared memory
-            if (ftruncate(shm_fd, size) == -1) {
-                LOG_ERROR("SharedMemory", "ftruncate failed: %s", strerror(errno));
-                close(shm_fd);
-                shm_unlink(name);
-                return NULL;
-            }
-        } else {
-            LOG_ERROR("SharedMemory", "shm_open create failed for %s: %s",
-                      name, strerror(errno));
-            return NULL;
-        }
-    } else {
-        // Open existing shared memory segment
-        shm_fd = shm_open(name, O_RDWR, 0666);
-        if (shm_fd == -1) {
-            LOG_ERROR("SharedMemory", "shm_open failed for %s: %s",
-                      name, strerror(errno));
-            return NULL;
-        }
-        is_new = false;
-    }
-
-    // Map to memory (MAP_POPULATE for producer to pre-fault pages, avoiding latency spikes)
-    int mmap_flags = MAP_SHARED;
-    if (is_new) {
-        mmap_flags |= MAP_POPULATE;
-    }
-    ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, mmap_flags, shm_fd, 0);
-    if (ptr == MAP_FAILED) {
-        LOG_ERROR("SharedMemory", "mmap failed: %s", strerror(errno));
-        close(shm_fd);
-        if (is_new) {
-            shm_unlink(name);
-        }
+    int flags = create ? (O_CREAT | O_RDWR) : O_RDWR;
+    int fd = shm_open(name, flags, 0666);
+    if (fd == -1) {
+        if (create) LOG_ERROR("SharedMemory", "shm_open failed for %s: %s", name, strerror(errno));
         return NULL;
     }
-
-    close(shm_fd);  // Can close fd after mmap
-
-    // Initialize to zero on creation
-    if (is_new) {
-        memset(ptr, 0, size);
+    if (create && ftruncate(fd, size) == -1) {
+        LOG_ERROR("SharedMemory", "ftruncate failed for %s: %s", name, strerror(errno));
+        close(fd);
+        return NULL;
     }
-
-    if (created_new) {
-        *created_new = is_new;
-    }
-
+    void* ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (ptr == MAP_FAILED) return NULL;
+    if (created_new) *created_new = create;
     return ptr;
 }
 
-// Legacy wrapper for backwards compatibility
 static void* shm_create_or_open(const char* name, size_t size, bool create) {
     return shm_create_or_open_ex(name, size, create, NULL);
 }
 
-// Frame buffer functions
-
-SharedFrameBuffer* shm_frame_buffer_create(void) {
-    bool created_new = false;
-    SharedFrameBuffer* shm = (SharedFrameBuffer*)shm_create_or_open_ex(
-        SHM_NAME_STREAM,
-        sizeof(SharedFrameBuffer),
-        true,
-        &created_new
-    );
-
-    if (shm) {
-        if (created_new) {
-            // Initialize semaphore only for newly created shared memory
-            // (re-init on existing sem_t is undefined behavior)
-            if (sem_init(&shm->new_frame_sem, 1, 0) != 0) {
-                LOG_ERROR("SharedMemory", "sem_init failed: %s", strerror(errno));
-                munmap(shm, sizeof(SharedFrameBuffer));
-                shm_unlink(SHM_NAME_STREAM);
-                return NULL;
-            }
-            LOG_INFO("SharedMemory", "Shared memory created: %s (size=%zu bytes)",
-                     SHM_NAME_STREAM, sizeof(SharedFrameBuffer));
-        } else {
-            LOG_INFO("SharedMemory", "Shared memory opened (already exists): %s",
-                     SHM_NAME_STREAM);
-        }
-    }
-
-    return shm;
-}
-
-SharedFrameBuffer* shm_frame_buffer_open(void) {
-    SharedFrameBuffer* shm = (SharedFrameBuffer*)shm_create_or_open(
-        SHM_NAME_STREAM,
-        sizeof(SharedFrameBuffer),
-        false  // open existing
-    );
-
-    if (shm) {
-        LOG_INFO("SharedMemory", "Shared memory opened: %s", SHM_NAME_STREAM);
-    }
-
-    return shm;
-}
-
-void shm_frame_buffer_close(SharedFrameBuffer* shm) {
-    if (shm) {
-        munmap(shm, sizeof(SharedFrameBuffer));
-    }
-}
-
-void shm_frame_buffer_destroy(SharedFrameBuffer* shm) {
-    if (shm) {
-        // Destroy semaphore before unmapping
-        sem_destroy(&shm->new_frame_sem);
-
-        munmap(shm, sizeof(SharedFrameBuffer));
-        shm_unlink(SHM_NAME_STREAM);
-        LOG_INFO("SharedMemory", "Shared memory destroyed: %s", SHM_NAME_STREAM);
-    }
-}
-
-SharedFrameBuffer* shm_frame_buffer_create_named(const char* name) {
-    bool created_new = false;
-    SharedFrameBuffer* shm = (SharedFrameBuffer*)shm_create_or_open_ex(
-        name,
-        sizeof(SharedFrameBuffer),
-        true,  // create (or open if exists)
-        &created_new
-    );
-
-    if (shm) {
-        if (created_new) {
-            // Initialize semaphore only for newly created shared memory
-            if (sem_init(&shm->new_frame_sem, 1, 0) != 0) {
-                LOG_ERROR("SharedMemory", "sem_init failed for %s: %s",
-                          name, strerror(errno));
-                munmap(shm, sizeof(SharedFrameBuffer));
-                shm_unlink(name);
-                return NULL;
-            }
-            LOG_INFO("SharedMemory", "Shared memory created: %s (size=%zu bytes)",
-                     name, sizeof(SharedFrameBuffer));
-        } else {
-            LOG_INFO("SharedMemory", "Shared memory opened (already exists): %s",
-                     name);
-        }
-    }
-
-    return shm;
-}
-
-SharedFrameBuffer* shm_frame_buffer_open_named(const char* name) {
-    SharedFrameBuffer* shm = (SharedFrameBuffer*)shm_create_or_open(
-        name,
-        sizeof(SharedFrameBuffer),
-        false  // open existing
-    );
-
-    if (shm) {
-        LOG_INFO("SharedMemory", "Shared memory opened: %s", name);
-    }
-
-    return shm;
-}
-
-void shm_frame_buffer_destroy_named(SharedFrameBuffer* shm, const char* name) {
-    if (shm) {
-        // Destroy semaphore before unmapping
-        sem_destroy(&shm->new_frame_sem);
-
-        munmap(shm, sizeof(SharedFrameBuffer));
-        shm_unlink(name);
-        LOG_INFO("SharedMemory", "Shared memory destroyed: %s", name);
-    }
-}
-
-int shm_frame_buffer_write(SharedFrameBuffer* shm, const Frame* frame) {
-    if (!shm || !frame) {
-        return -1;
-    }
-
-    // 1. Read current write_index to determine slot
-    uint32_t current_idx = __atomic_load_n(&shm->write_index, __ATOMIC_ACQUIRE);
-    uint32_t slot = current_idx % RING_BUFFER_SIZE;
-
-    // 2. Copy frame data FIRST (before incrementing write_index)
-    // Partial copy: metadata + actual data_size only (avoid copying unused MAX_FRAME_SIZE)
-    size_t metadata_size = offsetof(Frame, data);
-    memcpy(&shm->frames[slot], frame, metadata_size);
-    if (frame->data_size > 0 && frame->data_size <= MAX_FRAME_SIZE) {
-        memcpy(shm->frames[slot].data, frame->data, frame->data_size);
-    }
-
-    // 3. Memory barrier: ensure memcpy visible before index update
-    __atomic_thread_fence(__ATOMIC_RELEASE);
-
-    // 4. Increment write_index AFTER data is ready
-    // Reader sees write_index = N only AFTER slot (N-1) % 30 is fully written
-    __atomic_store_n(&shm->write_index, current_idx + 1, __ATOMIC_RELEASE);
-
-    // Notify waiting readers that a new frame is available
-    sem_post(&shm->new_frame_sem);
-
-    return 0;
-}
-
-int shm_frame_buffer_read_latest(SharedFrameBuffer* shm, Frame* frame) {
-    if (!shm || !frame) {
-        return -1;
-    }
-
-    // Atomically read current write_index
-    uint32_t write_idx = __atomic_load_n(&shm->write_index, __ATOMIC_ACQUIRE);
-
-    if (write_idx == 0) {
-        // No frames written yet
-        return -1;
-    }
-
-    // Calculate the index of the latest frame
-    uint32_t latest_idx = (write_idx - 1) % RING_BUFFER_SIZE;
-
-    // Copy frame data
-    memcpy(frame, &shm->frames[latest_idx], sizeof(Frame));
-
-    return (int)latest_idx;
-}
-
-uint32_t shm_frame_buffer_get_write_index(SharedFrameBuffer* shm) {
-    if (!shm) {
-        return 0;
-    }
-    return __atomic_load_n(&shm->write_index, __ATOMIC_ACQUIRE);
-}
-
-// Detection result functions
+// ============================================================================
+// Detection Results
+// ============================================================================
 
 LatestDetectionResult* shm_detection_create(void) {
     bool created_new = false;
     LatestDetectionResult* shm = (LatestDetectionResult*)shm_create_or_open_ex(
-        SHM_NAME_DETECTIONS,
-        sizeof(LatestDetectionResult),
-        true,
-        &created_new
-    );
-
-    if (shm) {
-        if (created_new) {
-            // Initialize semaphore only for newly created shared memory
-            if (sem_init(&shm->detection_update_sem, 1, 0) != 0) {
-                LOG_ERROR("SharedMemory", "Failed to initialize detection semaphore: %s", strerror(errno));
-                munmap(shm, sizeof(LatestDetectionResult));
-                shm_unlink(SHM_NAME_DETECTIONS);
-                return NULL;
-            }
-            LOG_INFO("SharedMemory", "Detection shared memory created: %s (size=%zu bytes)",
-                     SHM_NAME_DETECTIONS, sizeof(LatestDetectionResult));
-        } else {
-            LOG_INFO("SharedMemory", "Detection shared memory opened (already exists): %s",
-                     SHM_NAME_DETECTIONS);
-        }
+        SHM_NAME_DETECTIONS, sizeof(LatestDetectionResult), true, &created_new);
+    if (shm && created_new) {
+        memset(shm, 0, sizeof(LatestDetectionResult));
+        sem_init(&shm->detection_update_sem, 1, 0);
+        LOG_INFO("SharedMemory", "Detection SHM created: %s (%zu bytes)",
+                 SHM_NAME_DETECTIONS, sizeof(LatestDetectionResult));
     }
-
     return shm;
 }
 
 LatestDetectionResult* shm_detection_open(void) {
-    LatestDetectionResult* shm = (LatestDetectionResult*)shm_create_or_open(
-        SHM_NAME_DETECTIONS,
-        sizeof(LatestDetectionResult),
-        false  // open existing
-    );
-
-    if (shm) {
-        LOG_INFO("SharedMemory", "Detection shared memory opened: %s", SHM_NAME_DETECTIONS);
-    }
-
-    return shm;
+    return (LatestDetectionResult*)shm_create_or_open(
+        SHM_NAME_DETECTIONS, sizeof(LatestDetectionResult), false);
 }
 
 void shm_detection_close(LatestDetectionResult* shm) {
-    if (shm) {
-        munmap(shm, sizeof(LatestDetectionResult));
-    }
+    if (shm) munmap(shm, sizeof(LatestDetectionResult));
 }
 
 void shm_detection_destroy(LatestDetectionResult* shm) {
     if (shm) {
-        // Destroy semaphore before unmapping
         sem_destroy(&shm->detection_update_sem);
-
         munmap(shm, sizeof(LatestDetectionResult));
         shm_unlink(SHM_NAME_DETECTIONS);
-        LOG_INFO("SharedMemory", "Detection shared memory destroyed: %s", SHM_NAME_DETECTIONS);
     }
 }
 
 int shm_detection_write(LatestDetectionResult* shm,
-                        uint64_t frame_number,
-                        const Detection* detections,
-                        int num_detections) {
-    if (!shm || !detections || num_detections < 0 || num_detections > MAX_DETECTIONS) {
-        return -1;
-    }
-
-    // Update data
-    clock_gettime(CLOCK_MONOTONIC, &shm->timestamp);
+                        const DetectionEntry* detections, int count,
+                        uint64_t frame_number, double timestamp) {
+    if (!shm || !detections || count < 0) return -1;
+    if (count > MAX_DETECTIONS) count = MAX_DETECTIONS;
     shm->frame_number = frame_number;
-    shm->num_detections = num_detections;
-    memcpy(shm->detections, detections, sizeof(Detection) * num_detections);
-
-    // Atomically increment version (RELEASE: data writes visible before version update)
+    shm->timestamp = timestamp;
+    shm->num_detections = count;
+    memcpy(shm->detections, detections, count * sizeof(DetectionEntry));
     __atomic_fetch_add(&shm->version, 1, __ATOMIC_RELEASE);
-
-    // Signal semaphore to notify event-driven consumers
     sem_post(&shm->detection_update_sem);
-
     return 0;
 }
 
 uint32_t shm_detection_read(LatestDetectionResult* shm,
-                             Detection* detections,
-                             int* num_detections) {
-    if (!shm || !detections || !num_detections) {
-        return 0;
-    }
-
-    // Atomically read version (ACQUIRE: subsequent data reads see version's writes)
+                             DetectionEntry* out_detections, int* out_count) {
+    if (!shm || !out_detections || !out_count) return 0;
     uint32_t version = __atomic_load_n(&shm->version, __ATOMIC_ACQUIRE);
-
-    // Copy detection data
-    *num_detections = shm->num_detections;
-    if (*num_detections > 0) {
-        memcpy(detections, shm->detections, sizeof(Detection) * (*num_detections));
-    }
-
-    return version;
-}
-
-// Brightness shared memory functions
-
-SharedBrightnessData* shm_brightness_create(void) {
-    bool created_new = false;
-    SharedBrightnessData* shm = (SharedBrightnessData*)shm_create_or_open_ex(
-        SHM_NAME_BRIGHTNESS,
-        sizeof(SharedBrightnessData),
-        true,  // create
-        &created_new
-    );
-
-    if (shm) {
-        if (created_new) {
-            // Initialize semaphore for inter-process notification
-            if (sem_init(&shm->update_sem, 1, 0) != 0) {
-                LOG_ERROR("SharedMemory", "sem_init failed for brightness: %s", strerror(errno));
-                munmap(shm, sizeof(SharedBrightnessData));
-                shm_unlink(SHM_NAME_BRIGHTNESS);
-                return NULL;
-            }
-            LOG_INFO("SharedMemory", "Brightness shared memory created: %s (size=%zu bytes)",
-                     SHM_NAME_BRIGHTNESS, sizeof(SharedBrightnessData));
-        } else {
-            LOG_INFO("SharedMemory", "Brightness shared memory opened (already exists): %s",
-                     SHM_NAME_BRIGHTNESS);
-        }
-    }
-
-    return shm;
-}
-
-SharedBrightnessData* shm_brightness_open(void) {
-    SharedBrightnessData* shm = (SharedBrightnessData*)shm_create_or_open(
-        SHM_NAME_BRIGHTNESS,
-        sizeof(SharedBrightnessData),
-        false  // open existing
-    );
-
-    if (shm) {
-        LOG_INFO("SharedMemory", "Brightness shared memory opened: %s", SHM_NAME_BRIGHTNESS);
-    }
-
-    return shm;
-}
-
-void shm_brightness_close(SharedBrightnessData* shm) {
-    if (shm) {
-        munmap(shm, sizeof(SharedBrightnessData));
-    }
-}
-
-void shm_brightness_write(SharedBrightnessData* shm, int camera_id,
-                          const CameraBrightness* brightness) {
-    if (!shm || !brightness || camera_id < 0 || camera_id >= NUM_CAMERAS) {
-        return;
-    }
-
-    // Copy brightness data for this camera
-    memcpy(&shm->cameras[camera_id], brightness, sizeof(CameraBrightness));
-
-    // Memory barrier
-    __atomic_thread_fence(__ATOMIC_RELEASE);
-
-    // Atomically increment version (RELEASE: brightness data visible before version update)
-    __atomic_fetch_add(&shm->version, 1, __ATOMIC_RELEASE);
-
-    // Notify waiting readers
-    sem_post(&shm->update_sem);
-}
-
-uint32_t shm_brightness_read(SharedBrightnessData* shm, int camera_id,
-                              CameraBrightness* brightness) {
-    if (!shm || !brightness || camera_id < 0 || camera_id >= NUM_CAMERAS) {
-        return 0;
-    }
-
-    // Atomically read version (ACQUIRE: subsequent data reads see version's writes)
-    uint32_t version = __atomic_load_n(&shm->version, __ATOMIC_ACQUIRE);
-
-    // Copy brightness data
-    memcpy(brightness, &shm->cameras[camera_id], sizeof(CameraBrightness));
-
+    int count = shm->num_detections;
+    if (count > MAX_DETECTIONS) count = MAX_DETECTIONS;
+    memcpy(out_detections, shm->detections, count * sizeof(DetectionEntry));
+    *out_count = count;
     return version;
 }
 
 // ============================================================================
-// Zero-Copy Shared Memory Functions
+// Zero-Copy Frame (NV12, for YOLO + MJPEG)
 // ============================================================================
 
 ZeroCopyFrameBuffer* shm_zerocopy_create(const char* name) {
     bool created_new = false;
     ZeroCopyFrameBuffer* shm = (ZeroCopyFrameBuffer*)shm_create_or_open_ex(
-        name,
-        sizeof(ZeroCopyFrameBuffer),
-        true,  // create
-        &created_new
-    );
-
-    if (shm) {
-        if (created_new) {
-            // Initialize semaphores for SPSC synchronization
-            // new_frame_sem: producer posts when frame is ready
-            if (sem_init(&shm->new_frame_sem, 1, 0) != 0) {
-                LOG_ERROR("SharedMemory", "sem_init(new_frame_sem) failed for %s: %s",
-                          name, strerror(errno));
-                munmap(shm, sizeof(ZeroCopyFrameBuffer));
-                shm_unlink(name);
-                return NULL;
-            }
-            // consumed_sem: starts at 1 (first frame doesn't wait), consumer posts after processing
-            if (sem_init(&shm->consumed_sem, 1, 1) != 0) {
-                LOG_ERROR("SharedMemory", "sem_init(consumed_sem) failed for %s: %s",
-                          name, strerror(errno));
-                sem_destroy(&shm->new_frame_sem);
-                munmap(shm, sizeof(ZeroCopyFrameBuffer));
-                shm_unlink(name);
-                return NULL;
-            }
-
-            // Initialize frame to invalid state
-            shm->frame.version = 0;
-            shm->frame.consumed = 1;  // Ready for first write
-
-            LOG_INFO("SharedMemory", "Zero-copy shared memory created: %s (size=%zu bytes)",
-                     name, sizeof(ZeroCopyFrameBuffer));
-        } else {
-            LOG_INFO("SharedMemory", "Zero-copy shared memory opened (already exists): %s", name);
-        }
+        name, sizeof(ZeroCopyFrameBuffer), true, &created_new);
+    if (shm && created_new) {
+        sem_init(&shm->new_frame_sem, 1, 0);
+        shm->frame.version = 0;
+        LOG_INFO("SharedMemory", "Zero-copy SHM created: %s (%zu bytes)",
+                 name, sizeof(ZeroCopyFrameBuffer));
     }
-
     return shm;
 }
 
 ZeroCopyFrameBuffer* shm_zerocopy_open(const char* name) {
     ZeroCopyFrameBuffer* shm = (ZeroCopyFrameBuffer*)shm_create_or_open(
-        name,
-        sizeof(ZeroCopyFrameBuffer),
-        false  // open existing
-    );
-
-    if (shm) {
-        LOG_INFO("SharedMemory", "Zero-copy shared memory opened: %s", name);
-    }
-
+        name, sizeof(ZeroCopyFrameBuffer), false);
+    if (shm) LOG_INFO("SharedMemory", "Zero-copy SHM opened: %s", name);
     return shm;
 }
 
 void shm_zerocopy_close(ZeroCopyFrameBuffer* shm) {
-    if (shm) {
-        munmap(shm, sizeof(ZeroCopyFrameBuffer));
-    }
+    if (shm) munmap(shm, sizeof(ZeroCopyFrameBuffer));
 }
 
 void shm_zerocopy_destroy(ZeroCopyFrameBuffer* shm, const char* name) {
     if (shm) {
         sem_destroy(&shm->new_frame_sem);
-        sem_destroy(&shm->consumed_sem);
         munmap(shm, sizeof(ZeroCopyFrameBuffer));
         shm_unlink(name);
-        LOG_INFO("SharedMemory", "Zero-copy shared memory destroyed: %s", name);
     }
 }
 
 int shm_zerocopy_write(ZeroCopyFrameBuffer* shm, const ZeroCopyFrame* frame) {
-    if (!shm || !frame) {
-        return -1;
-    }
-
-    // Non-blocking check: skip frame if consumer is still processing.
-    // YOLO runs at ~10fps; capture loop must stay at 30fps for streaming.
-    int ret = sem_trywait(&shm->consumed_sem);
-    if (ret != 0) {
-        // Consumer still processing - skip this frame (don't block capture loop)
-        return -1;
-    }
-
-    // Save current version before memcpy overwrites it
-    // (the source frame has version=0 which would reset the counter)
-    uint32_t cur_version = __atomic_load_n(&shm->frame.version, __ATOMIC_ACQUIRE);
-
-    // Copy frame metadata (NOT the actual frame data - that's the point of zero-copy)
+    if (!shm || !frame) return -1;
+    uint32_t ver = __atomic_load_n(&shm->frame.version, __ATOMIC_ACQUIRE);
     memcpy(&shm->frame, frame, sizeof(ZeroCopyFrame));
-
-    // Mark as not yet consumed
-    __atomic_store_n(&shm->frame.consumed, 0, __ATOMIC_RELEASE);
-
-    // Restore and increment version to signal new frame
-    uint32_t new_version = cur_version + 1;
-    __atomic_store_n(&shm->frame.version, new_version, __ATOMIC_RELEASE);
-
-    // Notify consumer
+    __atomic_store_n(&shm->frame.version, ver + 1, __ATOMIC_RELEASE);
     sem_post(&shm->new_frame_sem);
-
-    // Log first successful write
-    static int first_write_logged = 0;
-    if (!first_write_logged) {
-        LOG_INFO("SharedMemory", "Zero-copy first write: version=%u, share_id[0]=%d, planes=%d",
-                 new_version, frame->share_id[0], frame->plane_cnt);
-        first_write_logged = 1;
-    }
-
     return 0;
 }
 
-void shm_zerocopy_mark_consumed(ZeroCopyFrameBuffer* shm) {
-    if (!shm) {
-        return;
-    }
-
-    // Mark frame as consumed
-    __atomic_store_n(&shm->frame.consumed, 1, __ATOMIC_RELEASE);
-
-    // Signal producer that it can write next frame
-    sem_post(&shm->consumed_sem);
-}
-
 // ============================================================================
-// Camera Control Shared Memory Functions
+// H.265 Zero-Copy (bitstream)
 // ============================================================================
 
-CameraControl* shm_control_create(void) {
+H265ZeroCopyBuffer* shm_h265_zc_create(const char* name) {
     bool created_new = false;
-    CameraControl* ctrl = (CameraControl*)shm_create_or_open_ex(
-        SHM_NAME_CONTROL,
-        sizeof(CameraControl),
-        true,  // create
-        &created_new
-    );
-
-    if (ctrl) {
-        if (created_new) {
-            // Initialize to DAY camera (index 0)
-            ctrl->active_camera_index = 0;
-            ctrl->version = 0;
-            // Initialize switch semaphore (pshared=1 for inter-process)
-            if (sem_init(&ctrl->switch_sem, 1, 0) != 0) {
-                LOG_ERROR("SharedMemory", "sem_init(switch_sem) failed: %s", strerror(errno));
-                munmap(ctrl, sizeof(CameraControl));
-                shm_unlink(SHM_NAME_CONTROL);
-                return NULL;
-            }
-            LOG_INFO("SharedMemory", "Camera control shared memory created: %s (size=%zu bytes)",
-                     SHM_NAME_CONTROL, sizeof(CameraControl));
-        } else {
-            LOG_INFO("SharedMemory", "Camera control shared memory opened (already exists): %s",
-                     SHM_NAME_CONTROL);
-        }
+    H265ZeroCopyBuffer* shm = (H265ZeroCopyBuffer*)shm_create_or_open_ex(
+        name, sizeof(H265ZeroCopyBuffer), true, &created_new);
+    if (shm && created_new) {
+        sem_init(&shm->new_frame_sem, 1, 0);
+        sem_init(&shm->consumed_sem, 1, 0);
+        shm->frame.version = 0;
+        LOG_INFO("SharedMemory", "H.265 zero-copy SHM created: %s (%zu bytes)",
+                 name, sizeof(H265ZeroCopyBuffer));
     }
-
-    return ctrl;
+    return shm;
 }
 
-CameraControl* shm_control_open(void) {
-    CameraControl* ctrl = (CameraControl*)shm_create_or_open(
-        SHM_NAME_CONTROL,
-        sizeof(CameraControl),
-        false  // open existing
-    );
-
-    if (ctrl) {
-        LOG_INFO("SharedMemory", "Camera control shared memory opened: %s", SHM_NAME_CONTROL);
-    }
-
-    return ctrl;
+H265ZeroCopyBuffer* shm_h265_zc_open(const char* name) {
+    return (H265ZeroCopyBuffer*)shm_create_or_open(
+        name, sizeof(H265ZeroCopyBuffer), false);
 }
 
-void shm_control_close(CameraControl* ctrl) {
-    if (ctrl) {
-        munmap(ctrl, sizeof(CameraControl));
+void shm_h265_zc_close(H265ZeroCopyBuffer* shm) {
+    if (shm) munmap(shm, sizeof(H265ZeroCopyBuffer));
+}
+
+void shm_h265_zc_destroy(H265ZeroCopyBuffer* shm, const char* name) {
+    if (shm) {
+        sem_destroy(&shm->new_frame_sem);
+        sem_destroy(&shm->consumed_sem);
+        munmap(shm, sizeof(H265ZeroCopyBuffer));
+        shm_unlink(name);
     }
 }
 
-void shm_control_destroy(CameraControl* ctrl) {
-    if (ctrl) {
-        sem_destroy(&ctrl->switch_sem);
-        munmap(ctrl, sizeof(CameraControl));
-        shm_unlink(SHM_NAME_CONTROL);
-        LOG_INFO("SharedMemory", "Camera control shared memory destroyed: %s", SHM_NAME_CONTROL);
-    }
-}
-
-void shm_control_set_active(CameraControl* ctrl, int camera_index) {
-    if (!ctrl || camera_index < 0 || camera_index >= NUM_CAMERAS) {
-        return;
-    }
-
-    // Atomically update active camera index
-    __atomic_store_n(&ctrl->active_camera_index, camera_index, __ATOMIC_RELEASE);
-
-    // Increment version to signal change
-    __atomic_fetch_add(&ctrl->version, 1, __ATOMIC_RELEASE);
-
-    // Notify consumers of camera switch
-    sem_post(&ctrl->switch_sem);
-}
-
-int shm_control_get_active(CameraControl* ctrl) {
-    if (!ctrl) {
-        return 0;  // Default to DAY camera
-    }
-
-    return __atomic_load_n(&ctrl->active_camera_index, __ATOMIC_ACQUIRE);
-}
-
-uint32_t shm_control_get_version(CameraControl* ctrl) {
-    if (!ctrl) {
-        return 0;
-    }
-
-    return __atomic_load_n(&ctrl->version, __ATOMIC_ACQUIRE);
+int shm_h265_zc_write(H265ZeroCopyBuffer* shm, const H265ZeroCopyFrame* frame) {
+    if (!shm || !frame) return -1;
+    uint32_t ver = __atomic_load_n(&shm->frame.version, __ATOMIC_ACQUIRE);
+    memcpy(&shm->frame, frame, sizeof(H265ZeroCopyFrame));
+    __atomic_store_n(&shm->frame.version, ver + 1, __ATOMIC_RELEASE);
+    sem_post(&shm->new_frame_sem);
+    return 0;
 }

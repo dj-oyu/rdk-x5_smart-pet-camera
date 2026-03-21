@@ -58,7 +58,7 @@ JPEG_QUALITY="${JPEG_QUALITY:-65}"
 
 # Streaming設定
 STREAMING_MAX_CLIENTS="${STREAMING_MAX_CLIENTS:-10}"
-STREAMING_SHM="${STREAMING_SHM:-/pet_camera_stream}"
+STREAMING_SHM="${STREAMING_SHM:-/pet_camera_h265_zc}"
 RECORDING_PATH="${RECORDING_PATH:-${REPO_ROOT}/recordings}"
 
 RUN_DETECTOR=1
@@ -99,7 +99,7 @@ Options:
   METRICS_PORT           Prometheusメトリクスポート
   PPROF_PORT             pprofプロファイリングポート
   STREAMING_MAX_CLIENTS  最大WebRTCクライアント数
-  STREAMING_SHM          共有メモリ名 (default: /pet_camera_stream)
+  STREAMING_SHM          共有メモリ名 (default: /pet_camera_h265_zc)
   RECORDING_PATH         録画ファイル保存先 (default: ./recordings)
   YOLO_MODEL             YOLOモデル (v8n/v11n/v13n/v26n)
   YOLO_SCORE_THRESHOLD   検出スコア閾値
@@ -324,7 +324,7 @@ if [[ "${SKIP_BUILD}" -ne 1 ]]; then
   # (git checkout changes .c timestamps but not .o, confusing make)
   rm -f "${CAPTURE_DIR}"/*.o 2>/dev/null
   make -C "${CAPTURE_DIR}" >/dev/null
-  make -C "${CAPTURE_DIR}" switcher-daemon-build >/dev/null
+  # switcher is now integrated into camera_daemon_drobotics
 
   echo "[build] Building web assets (Bun)..."
   (cd "${REPO_ROOT}/src/web" && bun install --frozen-lockfile 2>/dev/null; true)
@@ -351,25 +351,25 @@ if [[ "${RUN_STREAMING}" -eq 1 ]]; then
   mkdir -p "${RECORDING_PATH}"
 fi
 
-echo "[start] Launching camera_switcher_daemon..."
+echo "[start] Launching camera daemon (unified)..."
 (
   cd "${REPO_ROOT}"
-  "${BUILD_DIR}/camera_switcher_daemon" 2>&1 | tee -a /tmp/camera_switcher.log
+  "${BUILD_DIR}/camera_daemon_drobotics" -W 1280 -H 720 2>&1 | tee -a /tmp/camera_switcher.log
 ) &
 PIDS+=("$!")
 
 echo "[wait] Waiting for shared memory..."
-if ! wait_for_shm "pet_camera_stream" 10; then
+if ! wait_for_shm "pet_camera_h265_zc" 10; then
   echo "[error] SHM not found. camera_daemon may have failed." >&2
   exit 1
 fi
 
 if [[ "${RUN_MONITOR}" -eq 1 ]]; then
-  wait_for_shm "pet_camera_mjpeg_frame" 10 || echo "[warn] MJPEG SHM not found" >&2
+  wait_for_shm "pet_camera_mjpeg_zc" 10 || echo "[warn] MJPEG SHM not found" >&2
 fi
 
 if [[ "${RUN_STREAMING}" -eq 1 ]]; then
-  wait_for_shm "pet_camera_stream" 10 || echo "[warn] H.264 SHM not found" >&2
+  wait_for_shm "pet_camera_h265_zc" 10 || echo "[warn] H.264 SHM not found" >&2
 fi
 
 if [[ "${RUN_DETECTOR}" -eq 1 ]]; then
@@ -404,7 +404,7 @@ if [[ "${RUN_MONITOR}" -eq 1 ]]; then
       -http "${MONITOR_HOST}:${MONITOR_PORT}" \
       -assets "${REPO_ROOT}/src/web" \
       -assets-build "${BUILD_DIR}/web" \
-      -frame-shm "/pet_camera_mjpeg_frame" \
+      -frame-shm "/pet_camera_mjpeg_zc" \
       -detection-shm "/pet_camera_detections" \
       -webrtc-base "http://localhost:${STREAMING_PORT}" \
       -fps 30 \

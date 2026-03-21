@@ -52,7 +52,7 @@ export function useRecording() {
   };
 
   const waitForConversion = useCallback(async (h264Filename: string) => {
-    const mp4Filename = h264Filename.replace('.h264', '.mp4');
+    const mp4Filename = h264Filename.replace('.hevc', '.mp4').replace('.h264', '.mp4');
     const maxWaitMs = 120000;
     const startTime = Date.now();
 

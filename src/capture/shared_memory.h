@@ -1,14 +1,11 @@
 /**
- * shared_memory.h - Shared memory structures for camera frame buffer
+ * shared_memory.h - Shared memory for inter-process communication
  *
- * This header defines the POSIX shared memory interface used for
- * inter-process communication between the camera capture daemon (C)
- * and the detection/monitoring processes (Python).
- *
- * Design principles:
- * - Ring buffer for lock-free read/write
- * - Atomic operations for write_index
- * - Compatible with Python ctypes/mmap
+ * SHM segments:
+ *   h265_zc  — H.265 stream zero-copy (encoder → Go streaming)
+ *   yolo_zc  — YOLO NV12 zero-copy (camera → Python detector)
+ *   mjpeg_zc — MJPEG NV12 zero-copy (camera → Go web_monitor)
+ *   detections — Detection results (Python → Go web_monitor)
  */
 
 #ifndef SHARED_MEMORY_H
@@ -19,523 +16,99 @@
 #include <stdbool.h>
 #include <semaphore.h>
 
-// All constants (names, sizes) are in shm_constants.h (single source of truth)
 #include "shm_constants.h"
 
-/**
- * Brightness zone classification for low-light detection
- */
-typedef enum {
-    BRIGHTNESS_ZONE_DARK = 0,    // brightness_avg < 50 (needs correction)
-    BRIGHTNESS_ZONE_DIM = 1,     // 50 <= brightness_avg < 70 (mild correction)
-    BRIGHTNESS_ZONE_NORMAL = 2,  // 70 <= brightness_avg < 180
-    BRIGHTNESS_ZONE_BRIGHT = 3,  // brightness_avg >= 180
-} BrightnessZone;
-
-/**
- * Camera control structure for switcher daemon
- *
- * Simple atomic flag to indicate which camera is active.
- * Camera daemons read this to decide whether to encode H.264.
- * Switcher daemon writes this when switching cameras.
- */
-typedef struct {
-    volatile int active_camera_index;  // 0=DAY, 1=NIGHT
-    volatile uint32_t version;         // Incremented on each switch
-    sem_t switch_sem;                  // Posted on camera switch (for consumer notification)
-} CameraControl;
-
-/**
- * Lightweight brightness data for a single camera
- * ~32 bytes per camera (vs ~3MB for full Frame)
- */
-typedef struct {
-    uint64_t frame_number;      // Frame counter when brightness was measured
-    struct timespec timestamp;  // Measurement timestamp
-    float brightness_avg;       // ISP brightness (0-255)
-    uint32_t brightness_lux;    // Environment illuminance
-    uint8_t brightness_zone;    // BrightnessZone enum
-    uint8_t correction_applied; // ISP low-light correction active
-    uint8_t _reserved[2];       // Alignment padding
-} CameraBrightness;
-
-/**
- * Shared brightness data for all cameras
- * Each camera daemon updates its own slot
- */
-typedef struct {
-    volatile uint32_t version;           // Incremented on any update
-    CameraBrightness cameras[NUM_CAMERAS]; // Per-camera brightness
-    sem_t update_sem;                    // Semaphore for update notification
-} SharedBrightnessData;
-
-/**
- * Frame structure - represents a single camera frame
- *
- * Layout:
- * - Metadata (frame_number, timestamp, camera_id)
- * - Brightness metrics (ISP statistics)
- * - Frame data (JPEG or raw YUV)
- */
-typedef struct {
-    uint64_t frame_number;      // Monotonic frame counter
-    struct timespec timestamp;  // Capture timestamp (CLOCK_MONOTONIC)
-    int camera_id;              // Camera index (0 or 1)
-    int width;                  // Frame width in pixels
-    int height;                 // Frame height in pixels
-    int format;                 // 0=JPEG, 1=NV12, 2=RGB, 3=H264, 4=H265
-    size_t data_size;           // Actual data size in bytes
-
-    // Brightness metrics (Phase 0: ISP low-light enhancement)
-    // Updated by camera daemon from ISP AE statistics
-    // -1.0f indicates invalid/not yet measured (used for CLAHE skip decision)
-    float brightness_avg;       // Y-plane average brightness (0-255), from ISP AE stats
-    uint32_t brightness_lux;    // Environment illuminance from ISP cur_lux
-    uint8_t brightness_zone;    // BrightnessZone enum value
-    uint8_t correction_applied; // 1 if ISP low-light correction is active
-    uint8_t _reserved[2];       // Padding for alignment
-
-    uint8_t data[MAX_FRAME_SIZE]; // Frame data
-} Frame __attribute__((aligned(64)));
-
-/**
- * Shared frame buffer - ring buffer for camera frames
- *
- * Thread-safety:
- * - Writer (camera daemon) atomically updates write_index
- * - Readers can use new_frame_sem for event-driven frame notification (sem_wait)
- * - Polling is still supported via write_index for backward compatibility
- * - frame_interval_ms can be updated by external process for dynamic FPS control
- */
-typedef struct {
-    volatile uint32_t write_index; // Atomic write pointer (wraps at RING_BUFFER_SIZE)
-    char _pad_wridx[60];          // Isolate write_index to its own 64B cache line
-    volatile uint32_t frame_interval_ms; // Dynamic frame interval control (0 = 30fps, 500 = ~2fps)
-    char _pad_interval[60];       // Isolate frame_interval_ms to its own cache line
-    sem_t new_frame_sem; // Semaphore for new frame notification (posted on each write)
-    Frame frames[RING_BUFFER_SIZE]; // Ring buffer of frames
-} SharedFrameBuffer;
-
 // ============================================================================
-// Zero-Copy Shared Memory (VIO buffer sharing via hb_mem share_id)
+// Zero-Copy Frame (NV12, shared via hb_mem share_id)
+// Used by: yolo_zc, mjpeg_zc
 // ============================================================================
 
-// ZEROCOPY_MAX_PLANES, HB_MEM_GRAPHIC_BUF_SIZE defined in shm_constants.h
-
-/**
- * Zero-copy frame - VIO buffer shared directly without memcpy
- *
- * Each VSE channel has its own 3-buffer pool managed by SDK.
- * We share VIO buffers directly using hb_mem share_id.
- *
- * Lifecycle:
- * 1. Camera daemon: hbn_vnode_getframe() → gets VIO buffer with share_id
- * 2. Camera daemon: writes share_id + metadata to ZeroCopyFrame
- * 3. Consumer: hb_mem_import_com_buf(share_id) → maps same buffer
- * 4. Consumer: processes frame, sets consumed=1
- * 5. Camera daemon: waits for consumed=1, calls hbn_vnode_releaseframe()
- *
- * Timing constraint: consumer must finish within ~66ms (2 frames at 30fps)
- * to avoid VIO pipeline stall (3-buffer pool allows 2 frames in-flight).
- */
 typedef struct {
-    // Frame metadata
-    uint64_t frame_number;      // Monotonic frame counter
-    struct timespec timestamp;  // Capture timestamp
-    int camera_id;              // Camera index (0 or 1)
-    int width;                  // Frame width in pixels
-    int height;                 // Frame height in pixels
-    int format;                 // 1=NV12
-
-    // Brightness metrics (from ISP)
-    float brightness_avg;       // Y-plane average (0-255)
-    uint8_t correction_applied; // ISP correction active
-    uint8_t _pad1[3];
-
-    // VIO buffer info (from hb_mem_graphic_buf_t)
-    int32_t share_id[ZEROCOPY_MAX_PLANES];    // hb_mem share_id for Y/UV
-    uint64_t plane_size[ZEROCOPY_MAX_PLANES]; // Size of each plane
-    int32_t plane_cnt;                        // Number of planes (2 for NV12)
-
-    // Raw hb_mem_graphic_buf_t descriptor (opaque bytes, for import API)
-    // C compiler writes correct binary layout; Python passes raw bytes to hb_mem_import_graph_buf
+    uint64_t frame_number;
+    struct timespec timestamp;
+    int camera_id;
+    int width, height;
+    float brightness_avg;
+    int32_t share_id[ZEROCOPY_MAX_PLANES];
+    uint64_t plane_size[ZEROCOPY_MAX_PLANES];
+    int32_t plane_cnt;
     uint8_t hb_mem_buf_data[HB_MEM_GRAPHIC_BUF_SIZE];
-
-    // Synchronization (single-producer single-consumer)
-    volatile uint32_t version;  // Incremented when frame is ready
-    volatile uint8_t consumed;  // Consumer sets to 1 when done processing
-    uint8_t _pad2[3];
+    volatile uint32_t version;
 } ZeroCopyFrame;
 
-/**
- * Zero-copy shared memory - single frame slot for SPSC pattern
- *
- * Simple design: one slot per channel, camera waits for consumed before next frame.
- * This naturally throttles to consumer speed (good for YOLO which is slower than 30fps).
- */
 typedef struct {
-    sem_t new_frame_sem;        // Posted when new frame is ready
-    sem_t consumed_sem;         // Posted when consumer is done (camera waits on this)
-    ZeroCopyFrame frame;        // Current frame
+    sem_t new_frame_sem;
+    ZeroCopyFrame frame;
 } ZeroCopyFrameBuffer;
 
-// SHM names defined in shm_constants.h
-
-/**
- * Create zero-copy shared memory
- *
- * Creates a ZeroCopyFrameBuffer for sharing VIO buffers via hb_mem share_id.
- * Used by camera daemon (producer).
- *
- * Args:
- *   name: Shared memory name (e.g., SHM_NAME_ZEROCOPY_DAY)
- *
- * Returns:
- *   Pointer to mapped ZeroCopyFrameBuffer, or NULL on error
- */
 ZeroCopyFrameBuffer* shm_zerocopy_create(const char* name);
-
-/**
- * Open existing zero-copy shared memory
- *
- * Opens a ZeroCopyFrameBuffer created by camera daemon.
- * Used by consumers (YOLO daemon, web_monitor).
- *
- * Args:
- *   name: Shared memory name (e.g., SHM_NAME_ZEROCOPY_DAY)
- *
- * Returns:
- *   Pointer to mapped ZeroCopyFrameBuffer, or NULL on error
- */
 ZeroCopyFrameBuffer* shm_zerocopy_open(const char* name);
-
-/**
- * Close zero-copy shared memory (consumer)
- *
- * Unmaps the shared memory. Does NOT delete the segment.
- */
 void shm_zerocopy_close(ZeroCopyFrameBuffer* shm);
-
-/**
- * Destroy zero-copy shared memory (producer)
- *
- * Unmaps and deletes the shared memory segment.
- */
 void shm_zerocopy_destroy(ZeroCopyFrameBuffer* shm, const char* name);
-
-/**
- * Write frame metadata to zero-copy shared memory (producer)
- *
- * Writes VIO buffer share_id and metadata. Does NOT copy frame data.
- * Waits for consumed_sem before overwriting (throttles to consumer speed).
- *
- * Args:
- *   shm: Zero-copy shared memory pointer
- *   frame: Frame metadata including share_id
- *
- * Returns:
- *   0 on success, -1 on error
- */
 int shm_zerocopy_write(ZeroCopyFrameBuffer* shm, const ZeroCopyFrame* frame);
 
-/**
- * Mark frame as consumed (consumer)
- *
- * Signals to producer that the frame has been processed and VIO buffer
- * can be released. MUST be called after processing each frame.
- *
- * Args:
- *   shm: Zero-copy shared memory pointer
- */
-void shm_zerocopy_mark_consumed(ZeroCopyFrameBuffer* shm);
+// ============================================================================
+// H.265 Zero-Copy (bitstream, shared via hb_mem share_id)
+// Used by: h265_zc
+// ============================================================================
 
-/**
- * Bounding box for object detection
- */
-typedef struct {
-    int x;      // Left-top X coordinate
-    int y;      // Left-top Y coordinate
-    int w;      // Width
-    int h;      // Height
-} BoundingBox;
+#define HB_MEM_COM_BUF_SIZE 48  // sizeof(hb_mem_common_buf_t)
 
-/**
- * Detection result for a single object
- */
 typedef struct {
-    char class_name[32];    // "cat", "food_bowl", "water_bowl"
-    float confidence;       // 0.0 ~ 1.0
-    BoundingBox bbox;       // Bounding box
-} Detection;
+    uint64_t frame_number;
+    struct timespec timestamp;
+    int camera_id;
+    int width, height;
+    uint32_t data_size;
+    uint8_t hb_mem_buf_data[HB_MEM_COM_BUF_SIZE]; // Full hb_mem_common_buf_t for import
+    volatile uint32_t version;
+} H265ZeroCopyFrame;
 
-/**
- * Latest detection result - shared by detection process
- *
- * Only stores the most recent detection result to minimize memory usage.
- * Detection process updates this after each inference.
- */
 typedef struct {
-    uint64_t frame_number;          // Frame number this detection corresponds to
-    struct timespec timestamp;      // Detection timestamp
-    int num_detections;             // Number of valid detections (0 ~ MAX_DETECTIONS)
-    Detection detections[MAX_DETECTIONS];
-    volatile uint32_t version;      // Incremented on each update (atomic)
-    sem_t detection_update_sem;     // Semaphore for event-driven detection updates
+    sem_t new_frame_sem;
+    sem_t consumed_sem;     // Initially 0: encoder skips until Go posts first consumed
+    H265ZeroCopyFrame frame;
+} H265ZeroCopyBuffer;
+
+H265ZeroCopyBuffer* shm_h265_zc_create(const char* name);
+H265ZeroCopyBuffer* shm_h265_zc_open(const char* name);
+void shm_h265_zc_close(H265ZeroCopyBuffer* shm);
+void shm_h265_zc_destroy(H265ZeroCopyBuffer* shm, const char* name);
+int shm_h265_zc_write(H265ZeroCopyBuffer* shm, const H265ZeroCopyFrame* frame);
+
+// ============================================================================
+// Detection Results
+// ============================================================================
+
+#define MAX_DETECTIONS 10
+
+typedef struct {
+    int x, y, w, h;
+} DetectionBBox;
+
+typedef struct {
+    char class_name[32];
+    float confidence;
+    DetectionBBox bbox;
+} DetectionEntry;
+
+typedef struct {
+    uint64_t frame_number;
+    double timestamp;
+    int num_detections;
+    DetectionEntry detections[MAX_DETECTIONS];
+    volatile uint32_t version;
+    sem_t detection_update_sem;
 } LatestDetectionResult;
 
-/**
- * Initialize shared memory for frame buffer
- *
- * Creates and maps POSIX shared memory segment.
- * Should be called once by the camera daemon at startup.
- *
- * Returns:
- *   Pointer to mapped SharedFrameBuffer, or NULL on error
- */
-SharedFrameBuffer* shm_frame_buffer_create(void);
-
-/**
- * Open existing shared memory for frame buffer
- *
- * Opens and maps an existing shared memory segment.
- * Used by reader processes (detection, monitor).
- *
- * Returns:
- *   Pointer to mapped SharedFrameBuffer, or NULL on error
- */
-SharedFrameBuffer* shm_frame_buffer_open(void);
-
-/**
- * Close and unmap shared memory
- *
- * Unmaps the shared memory segment.
- * Does NOT delete the segment (use shm_frame_buffer_destroy for that).
- */
-void shm_frame_buffer_close(SharedFrameBuffer* shm);
-
-/**
- * Destroy shared memory segment
- *
- * Unmaps and deletes the shared memory segment.
- * Should be called by the camera daemon at shutdown.
- */
-void shm_frame_buffer_destroy(SharedFrameBuffer* shm);
-
-/**
- * Create shared memory with custom name (for probe)
- *
- * Creates a temporary shared memory segment with a custom name.
- * Useful for probe captures to avoid ring buffer conflicts.
- *
- * Returns:
- *   Pointer to mapped SharedFrameBuffer, or NULL on error
- */
-SharedFrameBuffer* shm_frame_buffer_create_named(const char* name);
-
-/**
- * Open shared memory with custom name (for probe)
- *
- * Opens an existing shared memory segment with a custom name.
- *
- * Returns:
- *   Pointer to mapped SharedFrameBuffer, or NULL on error
- */
-SharedFrameBuffer* shm_frame_buffer_open_named(const char* name);
-
-/**
- * Destroy shared memory with custom name (for probe)
- *
- * Unmaps and deletes a custom-named shared memory segment.
- */
-void shm_frame_buffer_destroy_named(SharedFrameBuffer* shm, const char* name);
-
-/**
- * Write a frame to the ring buffer (camera daemon only)
- *
- * Atomically increments write_index and copies frame data.
- * Lock-free operation.
- *
- * Args:
- *   shm: Shared memory pointer
- *   frame: Frame to write
- *
- * Returns:
- *   0 on success, -1 on error
- */
-int shm_frame_buffer_write(SharedFrameBuffer* shm, const Frame* frame);
-
-/**
- * Read the latest frame from ring buffer
- *
- * Non-blocking read of the most recently written frame.
- *
- * Args:
- *   shm: Shared memory pointer
- *   frame: Output buffer for frame data
- *
- * Returns:
- *   Frame index on success, -1 if no frames available
- */
-int shm_frame_buffer_read_latest(SharedFrameBuffer* shm, Frame* frame);
-
-/**
- * Get current write index (for polling)
- *
- * Returns the current write_index atomically.
- * Readers can use this to detect new frames.
- */
-uint32_t shm_frame_buffer_get_write_index(SharedFrameBuffer* shm);
-
-/**
- * Initialize shared memory for detection results
- */
 LatestDetectionResult* shm_detection_create(void);
-
-/**
- * Open existing shared memory for detection results
- */
 LatestDetectionResult* shm_detection_open(void);
-
-/**
- * Close detection shared memory
- */
 void shm_detection_close(LatestDetectionResult* shm);
-
-/**
- * Destroy detection shared memory
- */
 void shm_detection_destroy(LatestDetectionResult* shm);
-
-/**
- * Write detection results (detection process only)
- *
- * Atomically increments version and writes detection data.
- */
 int shm_detection_write(LatestDetectionResult* shm,
-                        uint64_t frame_number,
-                        const Detection* detections,
-                        int num_detections);
-
-/**
- * Read detection results
- *
- * Returns the current version number.
- * Readers can compare version to detect updates.
- */
+                        const DetectionEntry* detections, int count,
+                        uint64_t frame_number, double timestamp);
 uint32_t shm_detection_read(LatestDetectionResult* shm,
-                             Detection* detections,
-                             int* num_detections);
-
-/**
- * Create shared memory for brightness data
- */
-SharedBrightnessData* shm_brightness_create(void);
-
-/**
- * Open existing shared memory for brightness data
- */
-SharedBrightnessData* shm_brightness_open(void);
-
-/**
- * Close brightness shared memory
- */
-void shm_brightness_close(SharedBrightnessData* shm);
-
-/**
- * Write brightness for a specific camera
- *
- * Args:
- *   shm: Shared memory pointer
- *   camera_id: Camera index (0 or 1)
- *   brightness: Brightness data to write
- */
-void shm_brightness_write(SharedBrightnessData* shm, int camera_id,
-                          const CameraBrightness* brightness);
-
-/**
- * Read brightness for a specific camera
- *
- * Args:
- *   shm: Shared memory pointer
- *   camera_id: Camera index (0 or 1)
- *   brightness: Output buffer for brightness data
- *
- * Returns:
- *   Current version number
- */
-uint32_t shm_brightness_read(SharedBrightnessData* shm, int camera_id,
-                              CameraBrightness* brightness);
-
-// ============================================================================
-// Camera Control Shared Memory (for switcher daemon)
-// ============================================================================
-
-/**
- * Create camera control shared memory
- *
- * Creates CameraControl for active camera index communication.
- * Used by switcher daemon (producer).
- *
- * Returns:
- *   Pointer to mapped CameraControl, or NULL on error
- */
-CameraControl* shm_control_create(void);
-
-/**
- * Open existing camera control shared memory
- *
- * Opens CameraControl created by switcher daemon.
- * Used by camera daemons (consumers).
- *
- * Returns:
- *   Pointer to mapped CameraControl, or NULL on error
- */
-CameraControl* shm_control_open(void);
-
-/**
- * Close camera control shared memory (consumer)
- *
- * Unmaps the shared memory. Does NOT delete the segment.
- */
-void shm_control_close(CameraControl* ctrl);
-
-/**
- * Destroy camera control shared memory (producer)
- *
- * Unmaps and deletes the shared memory segment.
- */
-void shm_control_destroy(CameraControl* ctrl);
-
-/**
- * Set active camera index (switcher daemon only)
- *
- * Atomically updates the active camera index.
- * Camera daemons poll this to decide whether to encode.
- *
- * Args:
- *   ctrl: Camera control shared memory pointer
- *   camera_index: 0=DAY, 1=NIGHT
- */
-void shm_control_set_active(CameraControl* ctrl, int camera_index);
-
-/**
- * Get active camera index
- *
- * Atomically reads the active camera index.
- *
- * Args:
- *   ctrl: Camera control shared memory pointer
- *
- * Returns:
- *   Active camera index (0=DAY, 1=NIGHT)
- */
-int shm_control_get_active(CameraControl* ctrl);
-
-/**
- * Get camera control version
- *
- * Returns the current version number for change detection.
- */
-uint32_t shm_control_get_version(CameraControl* ctrl);
+                             DetectionEntry* out_detections, int* out_count);
 
 #endif // SHARED_MEMORY_H

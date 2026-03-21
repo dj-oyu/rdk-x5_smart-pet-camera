@@ -27,9 +27,7 @@ sys.path.insert(0, str(COMMON_SRC))
 from real_shared_memory import (
     DetectionWriter,
     ZeroCopySharedMemory,
-    CameraControlSharedMemory,
-    SHM_NAME_ZEROCOPY_DAY,
-    SHM_NAME_ZEROCOPY_NIGHT,
+    SHM_NAME_YOLO_ZC,
 )
 from detection.yolo_detector import YoloDetector
 
@@ -109,16 +107,8 @@ class YoloDetectorDaemon:
 
         # 共有メモリ
         self.detection_writer: DetectionWriter | None = None  # Detection result writer
-        self.shm_zerocopy_day: ZeroCopySharedMemory | None = (
-            None  # DAY camera zero-copy
-        )
-        self.shm_zerocopy_night: ZeroCopySharedMemory | None = (
-            None  # NIGHT camera zero-copy
-        )
-        self.shm_control: CameraControlSharedMemory | None = (
-            None  # Camera control (active index)
-        )
-        self.active_camera: int = 0  # Currently active camera (0=DAY, 1=NIGHT)
+        self.shm_zerocopy: ZeroCopySharedMemory | None = None
+        self.active_camera: int = 0  # Determined from frame camera_id
 
         # YOLODetector
         self.detector: YoloDetector | None = None
@@ -189,30 +179,11 @@ class YoloDetectorDaemon:
 
         # 共有メモリを開く
         try:
-            # CameraControl SHM (to determine active camera)
-            self.shm_control = CameraControlSharedMemory()
-            if self.shm_control.open():
-                self.active_camera = self.shm_control.get_active()
-                logger.debug(f"CameraControl SHM opened, active camera: {self.active_camera}")
-            else:
-                logger.debug("CameraControl SHM not available, defaulting to DAY camera")
-
-            # Per-camera zero-copy SHMs (Phase 2)
-            self.shm_zerocopy_day = ZeroCopySharedMemory(SHM_NAME_ZEROCOPY_DAY)
-            self.shm_zerocopy_night = ZeroCopySharedMemory(SHM_NAME_ZEROCOPY_NIGHT)
-
-            day_ok = self.shm_zerocopy_day.open()
-            night_ok = self.shm_zerocopy_night.open()
-
-            if not day_ok and not night_ok:
-                raise RuntimeError(
-                    f"Zero-copy SHM not available: {SHM_NAME_ZEROCOPY_DAY} and {SHM_NAME_ZEROCOPY_NIGHT}"
-                )
-
-            if day_ok:
-                logger.debug(f"Connected to DAY zero-copy: {SHM_NAME_ZEROCOPY_DAY}")
-            if night_ok:
-                logger.debug(f"Connected to NIGHT zero-copy: {SHM_NAME_ZEROCOPY_NIGHT}")
+            # Unified zero-copy SHM (active camera writes here)
+            self.shm_zerocopy = ZeroCopySharedMemory(SHM_NAME_YOLO_ZC)
+            if not self.shm_zerocopy.open():
+                raise RuntimeError(f"Zero-copy SHM not available: {SHM_NAME_YOLO_ZC}")
+            logger.debug(f"Connected to zero-copy SHM: {SHM_NAME_YOLO_ZC}")
 
             # Detection result writer (independent of frame SHM)
             self.detection_writer = DetectionWriter()
@@ -236,25 +207,23 @@ class YoloDetectorDaemon:
             logger.error(f"Failed to load YOLO model: {e}")
             raise
 
+        # HW preprocessor (nano2D letterbox on GPU)
+        try:
+            from detection.yolo_detector import HWPreprocessor
+            hw_prep = HWPreprocessor(self.detector)
+            if hw_prep._lib is not None:
+                self.detector.preprocessor = hw_prep
+                logger.info("HW preprocessor enabled (nano2D letterbox)")
+        except Exception as e:
+            logger.debug(f"HW preprocessor init failed: {e}")
+
     def _get_active_zerocopy(self) -> ZeroCopySharedMemory | None:
-        """Get the ZeroCopy SHM for the currently active camera."""
-        if self.shm_control:
-            self.active_camera = self.shm_control.get_active()
-        if self.active_camera == 0 and self.shm_zerocopy_day:
-            return self.shm_zerocopy_day
-        if self.active_camera == 1 and self.shm_zerocopy_night:
-            return self.shm_zerocopy_night
-        # Fallback: return whichever is available
-        return self.shm_zerocopy_day or self.shm_zerocopy_night
+        return self.shm_zerocopy
 
     def cleanup(self) -> None:
         """クリーンアップ"""
-        if self.shm_zerocopy_day:
-            self.shm_zerocopy_day.close()
-        if self.shm_zerocopy_night:
-            self.shm_zerocopy_night.close()
-        if self.shm_control:
-            self.shm_control.close()
+        if self.shm_zerocopy:
+            self.shm_zerocopy.close()
         if self.detection_writer:
             self.detection_writer.close()
         if self.stats["frames_processed"] > 0:
@@ -311,7 +280,7 @@ class YoloDetectorDaemon:
                         logger.warning(
                             f"Unexpected plane_cnt={zc_frame.plane_cnt}, skipping"
                         )
-                    active_zc.mark_consumed()
+
                     continue
 
                 try:
@@ -322,22 +291,18 @@ class YoloDetectorDaemon:
                         expected_plane_sizes=zc_frame.plane_size,
                     )
                     nv12_data = np.concatenate([y_arr, uv_arr])
+                    if hasattr(self.detector.preprocessor, 'set_hb_mem_buffer'):
+                        self.detector.preprocessor.set_hb_mem_buffer(hb_mem_buffer)
                 except Exception as e:
                     logger.error(f"Zero-copy import failed: {e}")
                     if hb_mem_buffer:
                         hb_mem_buffer.release()
-                    active_zc.mark_consumed()
+
                     continue
 
-                frame_width = zc_frame.width
-                frame_height = zc_frame.height
-                frame_number = zc_frame.frame_number
-                timestamp_sec = zc_frame.timestamp_sec
-                brightness_avg = zc_frame.brightness_avg
-
-                # Check for camera switch via semaphore (non-blocking)
-                if self.shm_control and self.shm_control.try_wait_switch():
-                    camera_id = self.shm_control.get_active()
+                # Detect camera switch from frame camera_id
+                camera_id = zc_frame.camera_id
+                if camera_id != self.active_camera:
                     # Use fixed scale factors based on camera type
                     # Output is always H.264 1280x720
                     if camera_id == 0:  # Day: 640x360 → 1280x720
@@ -365,9 +330,12 @@ class YoloDetectorDaemon:
                         self.detector.score_threshold = max(0.25, self.score_threshold - 0.15)
                         logger.debug(f"Camera switched to {camera_id} [night ROI mode: {len(self.night_roi_regions)} regions, score_th={self.detector.score_threshold:.2f}]")
 
+                    # Update active camera after processing switch
+                    self.active_camera = camera_id
+                    self.detector.clahe_enabled = (self.active_camera == 1)
+
                 # Initialize scale factors on first frame (before any switch)
                 if self.scale_x is None or self.scale_y is None:
-                    camera_id = zc_frame.camera_id
                     # Use fixed scale factors based on camera type
                     if camera_id == 0:  # Day: 640x360 → 1280x720
                         self.scale_x = 2.0
@@ -381,10 +349,10 @@ class YoloDetectorDaemon:
 
                 # Initialize ROI regions on first frame
                 if self.stats["frames_processed"] == 0:
-                    logger.debug(f"YOLO input: {frame_width}x{frame_height}, camera_id={zc_frame.camera_id}")
+                    logger.debug(f"YOLO input: {zc_frame.width}x{zc_frame.height}, camera_id={zc_frame.camera_id}")
 
                     # Night camera (camera_id=1) with 1280x720: enable ROI mode
-                    if zc_frame.camera_id == 1 and frame_width == 1280 and frame_height == 720:
+                    if zc_frame.camera_id == 1 and zc_frame.width == 1280 and zc_frame.height == 720:
                         self.night_roi_mode = True
                         self.night_roi_regions = self.detector.get_roi_regions_720p()
                         logger.debug(f"Night camera ROI mode: {len(self.night_roi_regions)} regions")
@@ -395,7 +363,7 @@ class YoloDetectorDaemon:
                         # Day camera or other resolutions: use original logic
                         self.night_roi_mode = False
                         self.roi_regions = self.detector.get_roi_regions(
-                            frame_width, frame_height
+                            zc_frame.width, zc_frame.height
                         )
 
                         if len(self.roi_regions) > 1:
@@ -409,13 +377,13 @@ class YoloDetectorDaemon:
                 # Run detection
                 if self.night_roi_mode:
                     # Night camera: motion detection + YOLO hybrid
-                    y_size = frame_width * frame_height
+                    y_size = zc_frame.width * zc_frame.height
 
                     # Motion detection on downscaled Y (640x360 = 1/4 pixels)
                     y_plane = np.frombuffer(nv12_data[:y_size], dtype=np.uint8).reshape(
-                        frame_height, frame_width
+                        zc_frame.height, zc_frame.width
                     )
-                    motion_h, motion_w = frame_height // 2, frame_width // 2
+                    motion_h, motion_w = zc_frame.height // 2, zc_frame.width // 2
                     y_small = cv2.resize(y_plane, (motion_w, motion_h), interpolation=cv2.INTER_AREA)
                     y_small_denoised = cv2.medianBlur(y_small, 3)
 
@@ -452,7 +420,7 @@ class YoloDetectorDaemon:
                             # Collect frames for future fine-tuning
                             if (self.night_collect_count < self.night_collect_max
                                     and self.stats["frames_processed"] % self.night_collect_interval == 0):
-                                self._save_night_frame(nv12_data, frame_width, frame_height, frame_number)
+                                self._save_night_frame(nv12_data, zc_frame.width, zc_frame.height, zc_frame.frame_number)
 
                     if self.motion_cooldown > 0:
                         self.motion_cooldown -= 1
@@ -465,11 +433,11 @@ class YoloDetectorDaemon:
                         detections = self.detector.detect_nv12_roi_720p(
                             nv12_data=nv12_data,
                             roi_index=current_roi,
-                            brightness_avg=brightness_avg,
+                            brightness_avg=zc_frame.brightness_avg,
                         )
                         if current_roi == 0:
-                            self.cache_frame_number = frame_number
-                            self.cache_timestamp = timestamp_sec
+                            self.cache_frame_number = zc_frame.frame_number
+                            self.cache_timestamp = zc_frame.timestamp_sec
                         self.roi_index = (self.roi_index + 1) % len(self.night_roi_regions)
                         cycle_complete = (self.roi_index == 0)
                     else:
@@ -477,7 +445,7 @@ class YoloDetectorDaemon:
 
                     # Release buffer
                     hb_mem_buffer.release()
-                    active_zc.mark_consumed()
+
 
                     if run_yolo:
                         # Convert YOLO detections to dicts
@@ -555,7 +523,7 @@ class YoloDetectorDaemon:
                             f"det={self.stats['total_detections']}(mot={mot},yolo={yolo}) "
                             f"inf={self.stats['avg_inference_time_ms']:.0f}ms "
                             f"cam={self.active_camera} "
-                            f"bright={brightness_avg:.1f}"
+                            f"bright={zc_frame.brightness_avg:.1f}"
                         )
 
                     if is_debug and cycle_complete and detection_dicts:
@@ -570,19 +538,19 @@ class YoloDetectorDaemon:
                     roi_x, roi_y, roi_w, roi_h = self.roi_regions[current_roi]
                     detections = self.detector.detect_nv12_roi(
                         nv12_data=nv12_data,
-                        width=frame_width,
-                        height=frame_height,
+                        width=zc_frame.width,
+                        height=zc_frame.height,
                         roi_x=roi_x,
                         roi_y=roi_y,
                         roi_w=roi_w,
                         roi_h=roi_h,
-                        brightness_avg=brightness_avg,
+                        brightness_avg=zc_frame.brightness_avg,
                     )
 
                     # Track cache start for first ROI
                     if current_roi == 0:
-                        self.cache_frame_number = frame_number
-                        self.cache_timestamp = timestamp_sec
+                        self.cache_frame_number = zc_frame.frame_number
+                        self.cache_timestamp = zc_frame.timestamp_sec
 
                     # Advance to next ROI for next frame
                     self.roi_index = (self.roi_index + 1) % len(self.roi_regions)
@@ -591,16 +559,15 @@ class YoloDetectorDaemon:
                     # Direct mode: full frame detection
                     detections = self.detector.detect_nv12(
                         nv12_data=nv12_data,
-                        width=frame_width,
-                        height=frame_height,
-                        brightness_avg=brightness_avg,
+                        width=zc_frame.width,
+                        height=zc_frame.height,
+                        brightness_avg=zc_frame.brightness_avg,
                     )
                     current_roi = -1
                     cycle_complete = True
 
-                # Release zero-copy buffer and signal consumed
+                # Release zero-copy buffer
                 hb_mem_buffer.release()
-                active_zc.mark_consumed()
 
                 timing = self.detector.get_last_timing()
 
@@ -746,8 +713,8 @@ class YoloDetectorDaemon:
                     ]
                     if scaled_dicts:
                         self.detection_writer.write_detection_result(
-                            frame_number=frame_number,
-                            timestamp_sec=timestamp_sec,
+                            frame_number=zc_frame.frame_number,
+                            timestamp_sec=zc_frame.timestamp_sec,
                             detections=scaled_dicts,
                         )
                     detection_dicts = scaled_dicts
@@ -768,16 +735,13 @@ class YoloDetectorDaemon:
 
                 # Periodic stats log (every 300 frames)
                 if self.stats["frames_processed"] % 300 == 0:
-                    clahe_status = "yes" if (
-                        self.detector.clahe_enabled
-                        and (brightness_avg < 0 or brightness_avg < self.detector.clahe_brightness_threshold)
-                    ) else "no"
+                    clahe_status = "yes" if self.detector.clahe_enabled else "no"
                     logger.info(
                         f"[{self.stats['frames_processed']}f] "
                         f"det={self.stats['total_detections']} "
                         f"inf={self.stats['avg_inference_time_ms']:.0f}ms "
                         f"cam={self.active_camera} "
-                        f"bright={brightness_avg:.1f} "
+                        f"bright={zc_frame.brightness_avg:.1f} "
                         f"clahe={clahe_status}"
                     )
 

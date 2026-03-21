@@ -256,6 +256,42 @@ int vio_create(vio_context_t *ctx, int camera_index,
         .bit_width = 8,
     };
 
+    // Channels 3-5: Night camera ROI crops (only for camera_index=1)
+    // ROI regions on 1920x1080 input, output 640x640 for direct YOLO input
+    // Equivalent to Python's 1280x720 ROIs scaled to sensor resolution
+    vse_ochn_attr_t vse_ochn_attr_roi[3];
+    if (camera_index == 1) {
+        int scale_x = ctx->sensor_width;   // 1920
+        int scale_y = ctx->sensor_height;  // 1080
+        // ROI definitions (sensor coordinates)
+        // Original 1280x720 ROIs: (0,40,640,640), (320,40,640,640), (640,40,640,640)
+        // Scale: 1920/1280=1.5, 1080/720=1.5
+        // ROI must fit within sensor bounds and be even-aligned
+        // Sensor: 1920x1080. Keep ROIs within safe margin.
+        struct { int x, y, w, h; } rois[3] = {
+            {0,   60, 960, 960},
+            {480, 60, 960, 960},
+            {896, 60, 960, 960},   // x+w=1856 < 1920 (margin for alignment)
+        };
+        for (int i = 0; i < 3; i++) {
+            // Clamp ROI to sensor bounds
+            int roi_x = rois[i].x;
+            int roi_y = rois[i].y;
+            int roi_w = (roi_x + rois[i].w > scale_x) ? (scale_x - roi_x) : rois[i].w;
+            int roi_h = (roi_y + rois[i].h > scale_y) ? (scale_y - roi_y) : rois[i].h;
+
+            vse_ochn_attr_roi[i] = (vse_ochn_attr_t){
+                .chn_en = CAM_TRUE,
+                .roi = { .x = roi_x, .y = roi_y, .w = roi_w, .h = roi_h },
+                .target_w = 640,
+                .target_h = 640,
+                .fmt = FRM_FMT_NV12,
+                .bit_width = 8,
+            };
+        }
+        LOG_INFO("VIO", "VSE Ch3-5 (Night ROI): 3x 640x640 from %dx%d", scale_x, scale_y);
+    }
+
     ret = hbn_vnode_open(HB_VSE, 0, AUTO_ALLOC_ID, &ctx->vse_handle);
     if (ret != 0) goto error_cleanup;
 
@@ -285,6 +321,21 @@ int vio_create(vio_context_t *ctx, int camera_index,
 
     ret = hbn_vnode_set_ochn_buf_attr(ctx->vse_handle, 2, &alloc_attr);
     if (ret != 0) goto error_cleanup;
+
+    // Set Channels 3-5 for night ROI crops
+    if (camera_index == 1) {
+        for (int i = 0; i < 3; i++) {
+            ret = hbn_vnode_set_ochn_attr(ctx->vse_handle, 3 + i, &vse_ochn_attr_roi[i]);
+            if (ret != 0) {
+                LOG_WARN("VIO", "VSE Ch%d ROI setup failed: %d (skipping)", 3 + i, ret);
+                continue;
+            }
+            ret = hbn_vnode_set_ochn_buf_attr(ctx->vse_handle, 3 + i, &alloc_attr);
+            if (ret != 0) {
+                LOG_WARN("VIO", "VSE Ch%d buf setup failed: %d (skipping)", 3 + i, ret);
+            }
+        }
+    }
 
     // Create vflow
     ret = hbn_vflow_create(&ctx->vflow_fd);
@@ -413,6 +464,33 @@ int vio_release_frame_ch2(vio_context_t *ctx, hbn_vnode_image_t *frame) {
     if (!ctx || !frame) return -1;
 
     return hbn_vnode_releaseframe(ctx->vse_handle, 2, frame);
+}
+
+int vio_get_frame_roi(vio_context_t *ctx, int roi_index,
+                      hbn_vnode_image_t *frame, int timeout_ms) {
+    if (!ctx || !frame || roi_index < 0 || roi_index > 2) return -1;
+
+    int ch = 3 + roi_index;
+    int ret = hbn_vnode_getframe(ctx->vse_handle, ch, timeout_ms, frame);
+    if (ret != 0) return ret;
+
+    if (frame->buffer.virt_addr[0]) {
+        hb_mem_invalidate_buf_with_vaddr((uint64_t)frame->buffer.virt_addr[0],
+                                         frame->buffer.size[0]);
+    }
+    if (frame->buffer.virt_addr[1]) {
+        hb_mem_invalidate_buf_with_vaddr((uint64_t)frame->buffer.virt_addr[1],
+                                         frame->buffer.size[1]);
+    }
+
+    return 0;
+}
+
+int vio_release_frame_roi(vio_context_t *ctx, int roi_index,
+                          hbn_vnode_image_t *frame) {
+    if (!ctx || !frame || roi_index < 0 || roi_index > 2) return -1;
+
+    return hbn_vnode_releaseframe(ctx->vse_handle, 3 + roi_index, frame);
 }
 
 void vio_stop(vio_context_t *ctx) {

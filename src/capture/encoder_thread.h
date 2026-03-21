@@ -21,10 +21,10 @@
  * Frame data for encoder queue
  */
 typedef struct {
-  uint8_t *y_data;           // Y plane data (points to pre-allocated pool)
-  uint8_t *uv_data;          // UV plane data (points to pre-allocated pool)
-  size_t y_size;             // Y plane size
-  size_t uv_size;            // UV plane size
+  // VSE frame held until encoding completes (eliminates pool buffer memcpy)
+  hbn_vnode_image_t vse_frame; // VSE output frame (virt_addr used for encoding)
+
+  // Metadata
   uint64_t frame_number;     // Frame number
   int camera_id;             // Camera ID
   struct timespec timestamp; // Frame timestamp
@@ -41,9 +41,8 @@ typedef struct {
   // Encoder
   encoder_context_t *encoder;
 
-  // Output
-  SharedFrameBuffer *shm_h264;
-  char shm_h264_name[64];
+  // Output (zero-copy: share_id via SHM, no bitstream memcpy)
+  H265ZeroCopyBuffer *shm_h265_zc;
 
   // Configuration
   int output_width;
@@ -54,11 +53,11 @@ typedef struct {
   volatile uint32_t write_index; // Producer writes here
   volatile uint32_t read_index;  // Consumer reads here
 
-  // Pre-allocated frame buffer pool (avoids malloc/free per frame)
-  uint8_t *pool_y[ENCODER_QUEUE_SIZE];
-  uint8_t *pool_uv[ENCODER_QUEUE_SIZE];
-  size_t pool_y_capacity;  // Allocated size per Y slot
-  size_t pool_uv_capacity; // Allocated size per UV slot
+  // VSE handle (for releasing frames after encoding)
+  hbn_vnode_handle_t vse_handle;
+
+  // Previous VPU output (held for Go to import, released on next frame)
+  encoder_output_t prev_enc_out;
 
   // Condition variable for event-driven wakeup (replaces usleep polling)
   pthread_mutex_t queue_mutex;
@@ -75,18 +74,19 @@ typedef struct {
  * Args:
  *   ctx: Encoder thread context to initialize
  *   encoder: Encoder context (must be already initialized)
- *   shm_h264: H.264 shared memory
- *   shm_h264_name: H.264 shared memory name (for logging)
+ *   shm_h264: H.265 shared memory
+ *   shm_h264_name: H.265 shared memory name (for logging)
  *   output_width: Output width
  *   output_height: Output height
+ *   vse_handle: VSE handle (for releasing frames after encoding)
  *
  * Returns:
  *   0 on success, negative error code on failure
  */
 int encoder_thread_create(encoder_thread_t *ctx, encoder_context_t *encoder,
-                          SharedFrameBuffer *shm_h264,
-                          const char *shm_h264_name, int output_width,
-                          int output_height);
+                          H265ZeroCopyBuffer *shm_h265_zc,
+                          int output_width, int output_height,
+                          hbn_vnode_handle_t vse_handle);
 
 /**
  * Start encoder thread
@@ -100,30 +100,25 @@ int encoder_thread_create(encoder_thread_t *ctx, encoder_context_t *encoder,
 int encoder_thread_start(encoder_thread_t *ctx);
 
 /**
- * Push frame to encoder queue (non-blocking)
+ * Push VSE frame to encoder queue (zero-copy, non-blocking)
  *
  * Args:
  *   ctx: Encoder thread context
- *   y_data: Y plane data
- *   uv_data: UV plane data
- *   y_size: Y plane size
- *   uv_size: UV plane size
+ *   vse_frame: VSE output frame (ownership transferred to encoder thread)
  *   frame_number: Frame number
  *   camera_id: Camera ID
  *   timestamp: Frame timestamp
  *
  * Returns:
- *   0 on success, -1 if queue is full (frame dropped)
+ *   0 on success, -1 if queue is full (frame dropped, caller must release)
  *
  * Note:
- *   - This function copies the frame data into pre-allocated pool buffers
- *   - Non-blocking (returns immediately if queue is full)
+ *   - Zero-copy: passes VSE phys_addr directly to VPU encoder
+ *   - Caller must NOT release vse_frame on success (encoder thread will release)
+ *   - Caller MUST release vse_frame on failure (-1 return)
  */
 int encoder_thread_push_frame(encoder_thread_t *ctx,
-                              const uint8_t *y_data,
-                              const uint8_t *uv_data,
-                              size_t y_size,
-                              size_t uv_size,
+                              hbn_vnode_image_t *vse_frame,
                               uint64_t frame_number,
                               int camera_id,
                               struct timespec timestamp);

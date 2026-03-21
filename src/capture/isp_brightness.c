@@ -172,24 +172,6 @@ int isp_get_brightness(hbn_vnode_handle_t isp_handle, isp_brightness_result_t *r
     return 0;
 }
 
-void isp_fill_frame_brightness(Frame *frame, const isp_brightness_result_t *result) {
-    if (!frame || !result) {
-        return;
-    }
-
-    if (result->valid) {
-        frame->brightness_avg = result->brightness_avg;
-        frame->brightness_lux = result->brightness_lux;
-        frame->brightness_zone = (uint8_t)result->zone;
-        // correction_applied is set separately when ISP correction is actually applied
-    } else {
-        // Mark as invalid/unknown (-1.0f indicates no brightness data available)
-        frame->brightness_avg = -1.0f;
-        frame->brightness_lux = 0;
-        frame->brightness_zone = BRIGHTNESS_ZONE_NORMAL;  // Default to normal
-    }
-}
-
 // ============================================================================
 // Low-light correction implementation
 // ============================================================================

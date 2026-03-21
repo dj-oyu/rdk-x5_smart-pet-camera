@@ -183,6 +183,30 @@ int vio_get_frame_ch2(vio_context_t *ctx, hbn_vnode_image_t *frame, int timeout_
 int vio_release_frame_ch2(vio_context_t *ctx, hbn_vnode_image_t *frame);
 
 /**
+ * Get a frame from VIO pipeline Channel 3-5 (Night ROI crops)
+ *
+ * Retrieves a 640x640 NV12 frame from VSE Channel 3+roi_index.
+ * Only available for night camera (camera_index=1).
+ *
+ * Args:
+ *   ctx: VIO context
+ *   roi_index: ROI index (0, 1, or 2)
+ *   frame: Output frame buffer
+ *   timeout_ms: Timeout in milliseconds
+ *
+ * Returns:
+ *   0 on success, negative error code on failure/timeout
+ */
+int vio_get_frame_roi(vio_context_t *ctx, int roi_index,
+                      hbn_vnode_image_t *frame, int timeout_ms);
+
+/**
+ * Release a frame back to VIO pipeline (Channel 3-5)
+ */
+int vio_release_frame_roi(vio_context_t *ctx, int roi_index,
+                          hbn_vnode_image_t *frame);
+
+/**
  * Stop VIO pipeline
  *
  * Stops frame capture.

@@ -211,8 +211,7 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 	s.clients[client.id] = client
 	s.clientsMu.Unlock()
 
-	// Start frame sender goroutine
-	go s.sendFrames(client)
+	// Frame sending is done synchronously in SendFrame (zero-copy safety)
 
 	logger.Info("WebRTC", "Client %s connected", client.id)
 
@@ -231,21 +230,38 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 	return answerJSON, nil
 }
 
-// SendFrame sends a frame to all connected clients
+// SendFrame sends a frame to all connected clients in parallel.
+// Blocks until all WriteSample calls complete (frame.Data must stay valid).
 func (s *Server) SendFrame(frame *types.VideoFrame) {
 	s.clientsMu.RLock()
-	defer s.clientsMu.RUnlock()
-
-	for _, client := range s.clients {
-		// Non-blocking send
-		select {
-		case client.frameChan <- frame:
-			client.framesSent++
-		default:
-			// Channel full, drop frame
-			client.framesDropped++
-		}
+	clients := make([]*Client, 0, len(s.clients))
+	for _, c := range s.clients {
+		clients = append(clients, c)
 	}
+	s.clientsMu.RUnlock()
+
+	if len(clients) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	for _, client := range clients {
+		wg.Add(1)
+		go func(c *Client) {
+			defer wg.Done()
+			if err := c.videoTrack.WriteSample(media.Sample{
+				Data:     frame.Data,
+				Duration: time.Second / 30,
+			}); err != nil {
+				if err != io.ErrClosedPipe {
+					logger.Warn("WebRTC", "Error writing sample for client %s: %v", c.id, err)
+				}
+				return
+			}
+			c.framesSent++
+		}(client)
+	}
+	wg.Wait()
 }
 
 // sendFrames sends frames to a specific client
@@ -262,7 +278,7 @@ func (s *Server) sendFrames(client *Client) {
 			}
 			// Calculate timestamp (assuming 30fps)
 			// timestamp = frame_num * (clock_rate / fps)
-			timestamp := frame.FrameNum * (videoClockRate / 30)
+			timestamp := frame.FrameNumber * (videoClockRate / 30)
 
 			// Write H.264 sample to track
 			if err := client.videoTrack.WriteSample(media.Sample{
@@ -276,9 +292,9 @@ func (s *Server) sendFrames(client *Client) {
 			}
 
 			// Log every 30 frames to track frame_number
-			if frame.FrameNum%30 == 0 {
+			if frame.FrameNumber%30 == 0 {
 				logger.Debug("WebRTC", "Sent H.265 frame#%d to client %s (timestamp=%d)",
-					frame.FrameNum, client.id, timestamp)
+					frame.FrameNumber, client.id, timestamp)
 			}
 
 			_ = timestamp // Timestamp is handled by pion internally

@@ -1,13 +1,13 @@
 CC := gcc
 CFLAGS := -Wall -Wextra -O2 -std=c11
-CPPFLAGS := -D_GNU_SOURCE -I/usr/include
+CPPFLAGS := -D_GNU_SOURCE -I/usr/include -I/usr/include/GC820
 
 BUILD_DIR := ../../build
 BUILD_DIR_ABS := $(abspath $(BUILD_DIR))
 
 LDFLAGS := -L/usr/hobot/lib
 
-DAEMON_SOURCES := camera_daemon_main.c camera_pipeline.c vio_lowlevel.c encoder_lowlevel.c encoder_thread.c shared_memory.c isp_brightness.c logger.c
+DAEMON_SOURCES := camera_daemon_main.c camera_pipeline.c camera_switcher.c vio_lowlevel.c encoder_lowlevel.c encoder_thread.c shared_memory.c isp_brightness.c logger.c
 SHM_TEST_SOURCES := test_shm.c shared_memory.c logger.c
 FPS_READER_SOURCES := test_fps_reader.c shared_memory.c logger.c
 SWITCHER_DEMO_SOURCES := camera_switcher_demo.c camera_switcher.c shared_memory.c logger.c
@@ -20,9 +20,15 @@ HB_MEM_IMPORT_SOURCES := test_hb_mem_import.c shared_memory.c logger.c
 HB_MEM_DMA_SOURCES := test_hb_mem_dma.c logger.c
 HAL_SOURCES := vio_lowlevel.c encoder_lowlevel.c logger.c
 JPEG_ENCODER_SOURCES := jpeg_encoder.c logger.c
+N2D_COMIC_SOURCES := n2d_comic.c logger.c
+RGN_OVERLAY_SOURCES := rgn_overlay.c
+N2D_LETTERBOX_SOURCES := n2d_letterbox.c logger.c
 
 DAEMON_OBJECTS := $(DAEMON_SOURCES:.c=.o)
 JPEG_ENCODER_OBJECTS := $(JPEG_ENCODER_SOURCES:.c=.o)
+N2D_COMIC_OBJECTS := $(N2D_COMIC_SOURCES:.c=.o)
+RGN_OVERLAY_OBJECTS := $(RGN_OVERLAY_SOURCES:.c=.o)
+N2D_LETTERBOX_OBJECTS := $(N2D_LETTERBOX_SOURCES:.c=.o)
 SHM_TEST_OBJECTS := $(SHM_TEST_SOURCES:.c=.o)
 FPS_READER_OBJECTS := $(FPS_READER_SOURCES:.c=.o)
 SWITCHER_DEMO_OBJECTS := $(SWITCHER_DEMO_SOURCES:.c=.o)
@@ -46,6 +52,9 @@ AWB_TUNING_BINARY := $(BUILD_DIR)/test_awb_tuning
 HB_MEM_IMPORT_BINARY := $(BUILD_DIR)/test_hb_mem_import
 HB_MEM_DMA_BINARY := $(BUILD_DIR)/test_hb_mem_dma
 JPEG_ENCODER_LIB := $(BUILD_DIR)/libjpeg_encoder.a
+N2D_COMIC_LIB := $(BUILD_DIR)/libn2d_comic.a
+RGN_OVERLAY_LIB := $(BUILD_DIR)/librgn_overlay.a
+N2D_LETTERBOX_SO := $(BUILD_DIR)/libn2d_letterbox.so
 
 LDLIBS_COMMON := -lrt
 LDLIBS_DAEMON := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lmultimedia -lm
@@ -53,15 +62,15 @@ LDLIBS_DAEMON_OLD := $(LDLIBS_COMMON) -lpthread -lspcdev -lcam -lvpf -lhbmem
 LDLIBS_POC_LOWLEVEL := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lmultimedia
 LDLIBS_ISP_LOWLIGHT := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lm
 LDLIBS_AWB_TUNING := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem
-LDLIBS_SWITCHER_DEMO := $(LDLIBS_COMMON) -ljpeg
-LDLIBS_SWITCHER_DAEMON := $(LDLIBS_COMMON) -lpthread -ljpeg
+LDLIBS_SWITCHER_DEMO := $(LDLIBS_COMMON)
+LDLIBS_SWITCHER_DAEMON := $(LDLIBS_COMMON) -lpthread
 LDLIBS_HB_MEM_IMPORT := $(LDLIBS_COMMON) -lpthread -lhbmem
 
 DAEMON_ARGS ?= -C 0 -P 1
 
 .PHONY: all clean test switcher-demo switcher-daemon switcher-daemon-build run run-daemon cleanup kill-processes help poc-lowlevel poc-vse-dual isp-lowlight awb-tuning test-hb-mem-import test-hb-mem-dma jpeg-encoder-lib
 
-all: $(DAEMON_BINARY) $(SHM_TEST_BINARY) $(SWITCHER_DAEMON_BINARY) $(JPEG_ENCODER_LIB)
+all: $(DAEMON_BINARY) $(JPEG_ENCODER_LIB) $(N2D_COMIC_LIB) $(RGN_OVERLAY_LIB) $(N2D_LETTERBOX_SO)
 
 poc-lowlevel: $(POC_LOWLEVEL_BINARY)
 	@echo "[PoC] Low-level API PoC ready at $(POC_LOWLEVEL_BINARY)"
@@ -119,10 +128,22 @@ $(HB_MEM_IMPORT_BINARY): $(HB_MEM_IMPORT_OBJECTS) | $(BUILD_DIR)
 $(HB_MEM_DMA_BINARY): $(HB_MEM_DMA_OBJECTS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS_HB_MEM_IMPORT)
 
-# Static library for JPEG encoder (used by Go streaming server via CGO)
+# Static libraries (used by Go streaming server via CGO)
 $(JPEG_ENCODER_LIB): $(JPEG_ENCODER_OBJECTS) | $(BUILD_DIR)
 	ar rcs $@ $^
 	@echo "[Build] JPEG encoder library ready at $@"
+
+$(N2D_COMIC_LIB): $(N2D_COMIC_OBJECTS) | $(BUILD_DIR)
+	ar rcs $@ $^
+	@echo "[Build] nano2D comic library ready at $@"
+
+$(RGN_OVERLAY_LIB): $(RGN_OVERLAY_OBJECTS) | $(BUILD_DIR)
+	ar rcs $@ $^
+	@echo "[Build] RGN overlay library ready at $@"
+
+$(N2D_LETTERBOX_SO): $(N2D_LETTERBOX_SOURCES) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -shared -fPIC $(LDFLAGS) -o $@ $^ -lNano2D -lNano2Dutil -lhbmem
+	@echo "[Build] nano2D letterbox shared library ready at $@"
 
 jpeg-encoder-lib: $(JPEG_ENCODER_LIB)
 	@echo "[Build] JPEG encoder library: $(JPEG_ENCODER_LIB)"

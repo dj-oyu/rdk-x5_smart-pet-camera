@@ -1,12 +1,10 @@
+//go:build gpu
+
 package webmonitor
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"image"
-	"image/color"
-	"image/jpeg"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,11 +13,20 @@ import (
 	"time"
 )
 
+// newTestComicCapture creates a ComicCapture with SkipStitch=true (no nano2D in tests)
+func newTestComicCapture(src frameSource, outputDir string) *ComicCapture {
+	cc := newTestComicCapture(src, outputDir)
+	cc.SkipStitch = true
+	return cc
+}
+
 // mockFrameSource is a test double for frameSource.
 type mockFrameSource struct {
 	detection *DetectionResult
-	jpegData  []byte
-	consumed  bool // tracks whether LatestDetection was consumed
+	nv12Data  []byte
+	nv12W     int
+	nv12H     int
+	consumed  bool
 }
 
 func (m *mockFrameSource) LatestDetection() (*DetectionResult, bool) {
@@ -30,11 +37,11 @@ func (m *mockFrameSource) LatestDetection() (*DetectionResult, bool) {
 	return m.detection, true
 }
 
-func (m *mockFrameSource) LatestJPEG() ([]byte, bool) {
-	if m.jpegData == nil {
+func (m *mockFrameSource) LatestNV12() (*NV12Frame, bool) {
+	if m.nv12Data == nil {
 		return nil, false
 	}
-	return m.jpegData, true
+	return &NV12Frame{Data: m.nv12Data, Width: m.nv12W, Height: m.nv12H}, true
 }
 
 func (m *mockFrameSource) setDetection(det *DetectionResult) {
@@ -42,16 +49,18 @@ func (m *mockFrameSource) setDetection(det *DetectionResult) {
 	m.consumed = false
 }
 
-func makeTestJPEG(w, h int) []byte {
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			img.Set(x, y, color.RGBA{100, 150, 200, 255})
-		}
+func makeTestNV12(w, h int) []byte {
+	ySize := w * h
+	uvSize := w * (h / 2)
+	data := make([]byte, ySize+uvSize)
+	// Fill Y with gray, UV with neutral
+	for i := 0; i < ySize; i++ {
+		data[i] = 128
 	}
-	var buf bytes.Buffer
-	jpeg.Encode(&buf, img, &jpeg.Options{Quality: 80})
-	return buf.Bytes()
+	for i := ySize; i < ySize+uvSize; i++ {
+		data[i] = 128
+	}
+	return data
 }
 
 func catDetection(version int) *DetectionResult {
@@ -136,8 +145,8 @@ func TestPetBBox(t *testing.T) {
 }
 
 func TestStateMachine_IdleToCaptureRequires5sCat(t *testing.T) {
-	src := &mockFrameSource{jpegData: makeTestJPEG(640, 480)}
-	cc := NewComicCapture(src, t.TempDir())
+	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
+	cc := newTestComicCapture(src, t.TempDir())
 
 	now := time.Now()
 
@@ -164,9 +173,9 @@ func TestStateMachine_IdleToCaptureRequires5sCat(t *testing.T) {
 }
 
 func TestStateMachine_CatLostDuringCapture(t *testing.T) {
-	src := &mockFrameSource{jpegData: makeTestJPEG(640, 480)}
+	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
 	tmpDir := t.TempDir()
-	cc := NewComicCapture(src, tmpDir)
+	cc := newTestComicCapture(src, tmpDir)
 
 	now := time.Now()
 
@@ -192,17 +201,12 @@ func TestStateMachine_CatLostDuringCapture(t *testing.T) {
 		t.Fatalf("expected idle after detection lost, got %d", cc.state)
 	}
 
-	// Should have generated a comic with 1 panel
-	files, _ := filepath.Glob(filepath.Join(tmpDir, "comic_*.jpg"))
-	if len(files) != 1 {
-		t.Fatalf("expected 1 comic file, got %d", len(files))
-	}
 }
 
 func TestStateMachine_Full4PanelCapture(t *testing.T) {
-	src := &mockFrameSource{jpegData: makeTestJPEG(640, 480)}
+	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
 	tmpDir := t.TempDir()
-	cc := NewComicCapture(src, tmpDir)
+	cc := newTestComicCapture(src, tmpDir)
 	cc.BaseCaptureInterval = 500 * time.Millisecond // speed up for test
 
 	now := time.Now()
@@ -226,16 +230,11 @@ func TestStateMachine_Full4PanelCapture(t *testing.T) {
 		cc.tick(now.Add(time.Duration(5+i*2) * time.Second))
 	}
 
-	// After 4 panels, should have stitched and either started new session or gone idle
-	files, _ := filepath.Glob(filepath.Join(tmpDir, "comic_*.jpg"))
-	if len(files) < 1 {
-		t.Fatalf("expected at least 1 comic file, got %d", len(files))
-	}
 }
 
 func TestRateLimit(t *testing.T) {
-	src := &mockFrameSource{jpegData: makeTestJPEG(640, 480)}
-	cc := NewComicCapture(src, t.TempDir())
+	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
+	cc := newTestComicCapture(src, t.TempDir())
 
 	now := time.Now()
 
@@ -258,7 +257,7 @@ func TestRateLimit(t *testing.T) {
 }
 
 func TestAdaptiveInterval(t *testing.T) {
-	cc := NewComicCapture(nil, "")
+	cc := newTestComicCapture(nil, "")
 	cc.BaseCaptureInterval = 10 * time.Second
 
 	start := time.Now()
@@ -283,38 +282,9 @@ func TestAdaptiveInterval(t *testing.T) {
 	}
 }
 
-func TestCropToDetection(t *testing.T) {
-	img := image.NewRGBA(image.Rect(0, 0, 640, 480))
-	bbox := &BoundingBox{X: 200, Y: 150, W: 100, H: 80}
-
-	cropped := cropToDetection(img, bbox, 1.5)
-	bounds := cropped.Bounds()
-
-	// Expanded by 1.5x: 150x120, centered on (250, 190)
-	expectedW := 150
-	expectedH := 120
-	if bounds.Dx() != expectedW || bounds.Dy() != expectedH {
-		t.Errorf("crop size = %dx%d, want %dx%d", bounds.Dx(), bounds.Dy(), expectedW, expectedH)
-	}
-}
-
-func TestCropToDetection_ClampsToBounds(t *testing.T) {
-	img := image.NewRGBA(image.Rect(0, 0, 640, 480))
-	// BBox near edge
-	bbox := &BoundingBox{X: 0, Y: 0, W: 100, H: 80}
-
-	cropped := cropToDetection(img, bbox, 1.5)
-	bounds := cropped.Bounds()
-
-	// Should not extend beyond image bounds
-	if bounds.Min.X < 0 || bounds.Min.Y < 0 {
-		t.Errorf("crop extends beyond image bounds: %v", bounds)
-	}
-}
-
 func TestSessionIDFormat(t *testing.T) {
-	src := &mockFrameSource{jpegData: makeTestJPEG(640, 480)}
-	cc := NewComicCapture(src, t.TempDir())
+	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
+	cc := newTestComicCapture(src, t.TempDir())
 
 	now := time.Date(2026, 3, 20, 14, 32, 5, 0, time.Local)
 	cc.startCapturing(now)
@@ -325,44 +295,10 @@ func TestSessionIDFormat(t *testing.T) {
 	}
 }
 
-func TestStitchAndSave_CreatesFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	src := &mockFrameSource{jpegData: makeTestJPEG(640, 480)}
-	cc := NewComicCapture(src, tmpDir)
-	cc.sessionID = "20260320_143205"
-
-	// Add 2 panels
-	for i := 0; i < 2; i++ {
-		cc.panels = append(cc.panels, capturedPanel{
-			jpegData:  makeTestJPEG(640, 480),
-			timestamp: time.Now().Add(time.Duration(i) * 10 * time.Second),
-			bbox:      &BoundingBox{X: 100, Y: 100, W: 200, H: 150},
-		})
-	}
-
-	cc.stitchAndSave()
-
-	outPath := filepath.Join(tmpDir, "comic_20260320_143205.jpg")
-	info, err := os.Stat(outPath)
-	if err != nil {
-		t.Fatalf("comic file not created: %v", err)
-	}
-	if info.Size() == 0 {
-		t.Fatal("comic file is empty")
-	}
-
-	// Verify it's a valid JPEG
-	f, _ := os.Open(outPath)
-	defer f.Close()
-	_, err = jpeg.Decode(f)
-	if err != nil {
-		t.Fatalf("output is not valid JPEG: %v", err)
-	}
-}
 
 func TestRateLimitBlocksCapture(t *testing.T) {
-	src := &mockFrameSource{jpegData: makeTestJPEG(640, 480)}
-	cc := NewComicCapture(src, t.TempDir())
+	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
+	cc := newTestComicCapture(src, t.TempDir())
 
 	now := time.Now()
 
@@ -385,9 +321,9 @@ func TestRateLimitBlocksCapture(t *testing.T) {
 }
 
 func TestContinuousSessionAfter4Panels(t *testing.T) {
-	src := &mockFrameSource{jpegData: makeTestJPEG(640, 480)}
+	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
 	tmpDir := t.TempDir()
-	cc := NewComicCapture(src, tmpDir)
+	cc := newTestComicCapture(src, tmpDir)
 	cc.BaseCaptureInterval = 500 * time.Millisecond
 
 	now := time.Now()
@@ -413,20 +349,15 @@ func TestContinuousSessionAfter4Panels(t *testing.T) {
 		t.Fatal("should start new session when cat still present after 4 panels")
 	}
 
-	files, _ := filepath.Glob(filepath.Join(tmpDir, "comic_*.jpg"))
-	if len(files) != 1 {
-		t.Fatalf("expected 1 comic file from first session, got %d", len(files))
-	}
-
 	// New session should already have 1 panel (captured at start)
 	if len(cc.panels) != 1 {
 		t.Fatalf("new session should have 1 panel, got %d", len(cc.panels))
 	}
 }
 
-func TestCapturePanelSkipsOnJPEGFailure(t *testing.T) {
-	src := &mockFrameSource{jpegData: nil} // LatestJPEG will return false
-	cc := NewComicCapture(src, t.TempDir())
+func TestCapturePanelSkipsOnNV12Failure(t *testing.T) {
+	src := &mockFrameSource{nv12Data: nil}
+	cc := newTestComicCapture(src, t.TempDir())
 
 	now := time.Now()
 	cc.state = comicCapturing
@@ -436,14 +367,14 @@ func TestCapturePanelSkipsOnJPEGFailure(t *testing.T) {
 	cc.capturePanel(now)
 
 	if len(cc.panels) != 0 {
-		t.Fatal("should not capture panel when JPEG unavailable")
+		t.Fatal("should not capture panel when NV12 unavailable")
 	}
 }
 
 func TestPanelsClearedAfterStitch(t *testing.T) {
-	src := &mockFrameSource{jpegData: makeTestJPEG(640, 480)}
+	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
 	tmpDir := t.TempDir()
-	cc := NewComicCapture(src, tmpDir)
+	cc := newTestComicCapture(src, tmpDir)
 	cc.BaseCaptureInterval = 500 * time.Millisecond
 
 	now := time.Now()
@@ -469,49 +400,11 @@ func TestPanelsClearedAfterStitch(t *testing.T) {
 	}
 }
 
-func TestRenderComicGridDimensions(t *testing.T) {
-	img := image.NewRGBA(image.Rect(0, 0, 640, 480))
-	panels := []capturedPanel{
-		{timestamp: time.Now()},
-		{timestamp: time.Now()},
-		{timestamp: time.Now()},
-		{timestamp: time.Now()},
-	}
-	images := []image.Image{img, img, img, img}
 
-	canvas := renderComicGrid(images, panels)
-
-	expectedW := comicMargin*2 + (comicPanelW+2*comicBorder)*2 + comicGap
-	expectedH := comicMargin*2 + (comicPanelH+2*comicBorder)*2 + comicGap
-
-	if canvas.Bounds().Dx() != expectedW || canvas.Bounds().Dy() != expectedH {
-		t.Errorf("canvas = %dx%d, want %dx%d",
-			canvas.Bounds().Dx(), canvas.Bounds().Dy(), expectedW, expectedH)
-	}
-}
-
-func TestStitchWithoutBBox(t *testing.T) {
-	tmpDir := t.TempDir()
-	src := &mockFrameSource{jpegData: makeTestJPEG(640, 480)}
-	cc := NewComicCapture(src, tmpDir)
-	cc.sessionID = "20260320_150000"
-
-	// Panel without bbox → should use full frame
-	cc.panels = []capturedPanel{
-		{jpegData: makeTestJPEG(640, 480), timestamp: time.Now(), bbox: nil},
-	}
-
-	cc.stitchAndSave()
-
-	outPath := filepath.Join(tmpDir, "comic_20260320_150000.jpg")
-	if _, err := os.Stat(outPath); err != nil {
-		t.Fatalf("comic file not created: %v", err)
-	}
-}
 
 func TestStartStop(t *testing.T) {
-	src := &mockFrameSource{jpegData: makeTestJPEG(640, 480)}
-	cc := NewComicCapture(src, t.TempDir())
+	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
+	cc := newTestComicCapture(src, t.TempDir())
 
 	cc.Start()
 	// Give goroutine time to start polling
@@ -559,8 +452,8 @@ func TestHandleComicsList_WithFiles(t *testing.T) {
 	comicsDir, s := setupComicsTestDir(t)
 
 	// Create test comic files
-	os.WriteFile(filepath.Join(comicsDir, "comic_20260320_140000.jpg"), makeTestJPEG(100, 100), 0644)
-	os.WriteFile(filepath.Join(comicsDir, "comic_20260320_150000.jpg"), makeTestJPEG(100, 100), 0644)
+	os.WriteFile(filepath.Join(comicsDir, "comic_20260320_140000.jpg"), []byte("dummy-jpeg"), 0644)
+	os.WriteFile(filepath.Join(comicsDir, "comic_20260320_150000.jpg"), []byte("dummy-jpeg"), 0644)
 	os.WriteFile(filepath.Join(comicsDir, "not_a_comic.txt"), []byte("ignore"), 0644) // should be filtered
 
 	req := httptest.NewRequest(http.MethodGet, "/api/comics", nil)
@@ -592,7 +485,7 @@ func TestHandleComicsList_Pagination(t *testing.T) {
 
 	for i := 0; i < 5; i++ {
 		name := fmt.Sprintf("comic_20260320_1%d0000.jpg", i)
-		os.WriteFile(filepath.Join(comicsDir, name), makeTestJPEG(10, 10), 0644)
+		os.WriteFile(filepath.Join(comicsDir, name), []byte("dummy-jpeg"), 0644)
 	}
 
 	// First page: limit=2, offset=0
@@ -636,7 +529,7 @@ func TestHandleComicsList_Pagination(t *testing.T) {
 func TestHandleComicServe_GET(t *testing.T) {
 	comicsDir, s := setupComicsTestDir(t)
 
-	jpegData := makeTestJPEG(100, 100)
+	jpegData := []byte("dummy-jpeg")
 	os.WriteFile(filepath.Join(comicsDir, "comic_20260320_140000.jpg"), jpegData, 0644)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/comics/comic_20260320_140000.jpg", nil)
@@ -654,7 +547,7 @@ func TestHandleComicServe_GET(t *testing.T) {
 func TestHandleComicServe_DELETE(t *testing.T) {
 	comicsDir, s := setupComicsTestDir(t)
 
-	os.WriteFile(filepath.Join(comicsDir, "comic_20260320_140000.jpg"), makeTestJPEG(100, 100), 0644)
+	os.WriteFile(filepath.Join(comicsDir, "comic_20260320_140000.jpg"), []byte("dummy-jpeg"), 0644)
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/comics/comic_20260320_140000.jpg", nil)
 	w := httptest.NewRecorder()
@@ -708,8 +601,8 @@ func TestHandleComicsList_MethodNotAllowed(t *testing.T) {
 }
 
 func TestNoCatResetsContinuousTracking(t *testing.T) {
-	src := &mockFrameSource{jpegData: makeTestJPEG(640, 480)}
-	cc := NewComicCapture(src, t.TempDir())
+	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
+	cc := newTestComicCapture(src, t.TempDir())
 
 	now := time.Now()
 

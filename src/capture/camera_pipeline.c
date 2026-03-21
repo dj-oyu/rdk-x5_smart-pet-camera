@@ -19,7 +19,8 @@ char Pipeline_log_header[16];
 
 int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
                     int sensor_width, int sensor_height, int output_width,
-                    int output_height, int fps, int bitrate) {
+                    int output_height, int fps, int bitrate,
+                    volatile int *active_camera) {
   int ret = 0;
 
   snprintf(Pipeline_log_header, sizeof(Pipeline_log_header), "Pipeline %d",
@@ -42,26 +43,8 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
            "Creating pipeline for Camera %d (%dx%d@%dfps, %dkbps)",
            camera_index, output_width, output_height, fps, bitrate / 1000);
 
-  // Open CameraControl shared memory (Phase 2: SHM-based activation)
-  // Retry for up to 5 seconds since switcher_daemon may not have created it yet
-  for (int i = 0; i < 50; i++) {
-    pipeline->control_shm = shm_control_open();
-    if (pipeline->control_shm) {
-      break;
-    }
-    if (i == 0) {
-      LOG_INFO(Pipeline_log_header, "Waiting for CameraControl SHM (%s)...",
-               SHM_NAME_CONTROL);
-    }
-    usleep(100000); // 100ms
-  }
-  if (!pipeline->control_shm) {
-    LOG_WARN(Pipeline_log_header,
-             "CameraControl SHM not available, defaulting to inactive");
-  } else {
-    LOG_INFO(Pipeline_log_header, "CameraControl SHM opened: %s",
-             SHM_NAME_CONTROL);
-  }
+  // Active camera pointer (shared variable in same process, no SHM)
+  pipeline->active_camera = active_camera;
 
   // Initialize memory manager
   ret = hb_mem_module_open();
@@ -86,57 +69,45 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
     goto error_cleanup;
   }
 
-  // Active camera H.264 (written only when active)
-  pipeline->shm_active_h264 = shm_frame_buffer_create_named(SHM_NAME_STREAM);
-  if (!pipeline->shm_active_h264) {
+  // H.265 zero-copy SHM (share_id based, no bitstream memcpy)
+  pipeline->shm_h265_zc = shm_h265_zc_create(SHM_NAME_H265_ZC);
+  if (!pipeline->shm_h265_zc) {
     LOG_ERROR(Pipeline_log_header,
-              "Failed to open/create active H.264 shared memory: %s",
-              SHM_NAME_STREAM);
+              "Failed to create H.265 zero-copy SHM: %s", SHM_NAME_H265_ZC);
     ret = -1;
     goto error_cleanup;
   }
 
-  // Lightweight brightness shared memory (updated every brightness check)
-  pipeline->shm_brightness = shm_brightness_create();
-  if (!pipeline->shm_brightness) {
-    LOG_ERROR(Pipeline_log_header,
-              "Failed to open/create brightness shared memory: %s",
-              SHM_NAME_BRIGHTNESS);
-    ret = -1;
-    goto error_cleanup;
-  }
+  // Brightness: read directly from ISP by switcher thread (no SHM needed)
 
   // Zero-copy YOLO input (share_id based, no memcpy)
   // Phase 2: per-camera ZeroCopy SHM (zc_0 for DAY, zc_1 for NIGHT)
-  const char *zerocopy_name = (camera_index == 0)
-                                  ? SHM_NAME_ZEROCOPY_DAY
-                                  : SHM_NAME_ZEROCOPY_NIGHT;
-  pipeline->shm_yolo_zerocopy = shm_zerocopy_create(zerocopy_name);
+  pipeline->shm_yolo_zerocopy = shm_zerocopy_create(SHM_NAME_YOLO_ZC);
   if (!pipeline->shm_yolo_zerocopy) {
     LOG_ERROR(Pipeline_log_header,
               "Failed to create zero-copy shared memory: %s",
-              zerocopy_name);
+              SHM_NAME_YOLO_ZC);
     ret = -1;
     goto error_cleanup;
   }
   LOG_INFO(Pipeline_log_header, "Zero-copy shared memory created: %s",
-           zerocopy_name);
+           SHM_NAME_YOLO_ZC);
 
   // MJPEG input NV12 (768x432 from VSE Channel 2, always written when active, writable by web_monitor)
-  pipeline->shm_mjpeg_frame =
-      shm_frame_buffer_create_named(SHM_NAME_MJPEG_FRAME);
-  if (!pipeline->shm_mjpeg_frame) {
+  pipeline->shm_mjpeg_zc = shm_zerocopy_create(SHM_NAME_MJPEG_ZC);
+  if (!pipeline->shm_mjpeg_zc) {
     LOG_ERROR(Pipeline_log_header,
               "Failed to open/create MJPEG frame shared memory: %s",
-              SHM_NAME_MJPEG_FRAME);
+              SHM_NAME_MJPEG_ZC);
     ret = -1;
     goto error_cleanup;
   }
 
   // Create encoder thread (writes to active H.264 shm)
   ret = encoder_thread_create(&pipeline->encoder_thread, &pipeline->encoder,
-                              pipeline->shm_active_h264, SHM_NAME_STREAM,
-                              output_width, output_height);
+                              pipeline->shm_h265_zc,
+                              output_width, output_height,
+                              pipeline->vio.vse_handle);
   if (ret != 0) {
     LOG_ERROR(Pipeline_log_header, "encoder_thread_create failed: %d", ret);
     goto error_cleanup;
@@ -145,20 +116,7 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
   // Initialize low-light correction state (Phase 2)
   isp_lowlight_state_init(&pipeline->lowlight_state);
 
-  // Night camera: ISP tuning for IR (one-time settings)
-  if (camera_index == 1) {
-    // 3DNR: max temporal noise reduction for IR noise
-    hbn_isp_3dnr_attr_t tnr_attr = {0};
-    tnr_attr.mode = HBN_ISP_MODE_MANUAL;
-    tnr_attr.manual_attr.tnr_strength = 128;  // Max temporal NR
-    int nr_ret = hbn_isp_set_3dnr_attr(pipeline->vio.isp_handle, &tnr_attr);
-    if (nr_ret != 0) {
-      LOG_WARN(Pipeline_log_header, "Failed to set night 3DNR: %d", nr_ret);
-    } else {
-      LOG_INFO(Pipeline_log_header, "Night camera 3DNR set to 128 (max)");
-    }
-
-  }
+  // Night camera 3DNR is set after first frame in pipeline_run
 
   LOG_INFO(Pipeline_log_header, "Pipeline created successfully");
   return 0;
@@ -197,16 +155,18 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
 
   pipeline->running_flag = running_flag;
 
-  int frame_count = 0;
+  uint64_t frame_number = 0; // Per-pipeline frame counter
   struct timespec start_time, current_time, frame_timestamp;
   clock_gettime(CLOCK_MONOTONIC, &start_time);
 
   hbn_vnode_image_t vio_frame = {0};
 
-  // Zero-copy: track pending YOLO frame for deferred release
+  // Zero-copy: track pending frames for deferred release
   // The frame must not be released until consumer finishes processing
   hbn_vnode_image_t pending_yolo_frame = {0};
   bool has_pending_yolo_frame = false;
+  hbn_vnode_image_t pending_mjpeg_frame = {0};
+  bool has_pending_mjpeg_frame = false;
 
   // Night camera AWB flag: set after ISP has processed enough frames to
   // fully initialize its AWB algorithm. Setting too early gets overwritten.
@@ -215,8 +175,20 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
   LOG_INFO(Pipeline_log_header,
            "Starting capture loop (threaded encoder, 30fps NV12+H.264)...");
 
+  // Per-pipeline state (not static — each thread has its own pipeline)
+  isp_brightness_result_t cached_brightness = {.valid = false};
+  bool prev_active = false;
+
   while (*running_flag) {
     int ret;
+
+    // Non-active pipeline: sleep and skip everything
+    bool write_active = pipeline->active_camera &&
+                        *pipeline->active_camera == pipeline->camera_index;
+    if (!write_active) {
+      usleep(100000); // 100ms
+      continue;
+    }
 
     // Get NV12 frame from VIO
     ret = vio_get_frame(&pipeline->vio, &vio_frame, 2000);
@@ -224,8 +196,8 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       // Error -43 (HBN_STATUS_NODE_DEQUE_ERROR) is transient during camera
       // switches - the VIO buffer isn't ready yet. Use DEBUG level to avoid log
       // spam. Non-active cameras may also fail to get frames.
-      bool is_active = pipeline->control_shm &&
-                       shm_control_get_active(pipeline->control_shm) == pipeline->camera_index;
+      bool is_active = pipeline->active_camera &&
+                       *pipeline->active_camera == pipeline->camera_index;
       if (is_active && ret != -43) {
         LOG_WARN(Pipeline_log_header, "vio_get_frame failed: %d", ret);
       } else {
@@ -235,9 +207,27 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       continue;
     }
 
-    // Determine active state from CameraControl SHM (Phase 2)
-    bool write_active = pipeline->control_shm &&
-                        shm_control_get_active(pipeline->control_shm) == pipeline->camera_index;
+    // Night camera: set 3DNR after first frame (ISP needs to be running)
+    if (frame_number == 1 && pipeline->camera_index == 1) {
+      hbn_isp_3dnr_attr_t tnr_attr = {0};
+      tnr_attr.mode = HBN_ISP_MODE_MANUAL;
+      tnr_attr.manual_attr.tnr_strength = 128;
+      int nr_ret = hbn_isp_set_3dnr_attr(pipeline->vio.isp_handle, &tnr_attr);
+      if (nr_ret != 0) {
+        LOG_WARN(Pipeline_log_header, "Night 3DNR setup failed: %d (retrying at frame 30)", nr_ret);
+      } else {
+        LOG_INFO(Pipeline_log_header, "Night camera 3DNR set to 128 (max)");
+      }
+    }
+    // Retry 3DNR at frame 30 if first attempt failed
+    if (frame_number == 30 && pipeline->camera_index == 1) {
+      hbn_isp_3dnr_attr_t tnr_attr = {0};
+      tnr_attr.mode = HBN_ISP_MODE_MANUAL;
+      tnr_attr.manual_attr.tnr_strength = 128;
+      hbn_isp_set_3dnr_attr(pipeline->vio.isp_handle, &tnr_attr);
+    }
+
+    // write_active already checked at loop top
 
     // Get ISP brightness statistics with throttling (using power-of-2 masks for fast bitwise AND)
     // - DAY camera active: every 8 frames (~3.75Hz) for fast DAY→NIGHT detection
@@ -247,8 +237,6 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     #define ISP_BRIGHTNESS_MASK_DAY_ACTIVE 7      // 8 frames when active (2^3 - 1)
     #define ISP_BRIGHTNESS_MASK_DAY_INACTIVE 63   // 64 frames when inactive (2^6 - 1)
     #define ISP_BRIGHTNESS_MASK_NIGHT 127         // 128 frames (~4.3 sec, 2^7 - 1)
-    static isp_brightness_result_t cached_brightness = {.valid = false};
-    static bool prev_active = false;
 
     // Detect camera switch: when this camera becomes active, reset brightness cache
     // and immediately fetch fresh brightness from ISP
@@ -268,7 +256,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     } else {
       brightness_mask = ISP_BRIGHTNESS_MASK_NIGHT;  // NIGHT camera: ~4.3 sec interval
     }
-    bool is_brightness_frame = (frame_count & brightness_mask) == 0;
+    bool is_brightness_frame = (frame_number & brightness_mask) == 0;
 
     // Both DAY and NIGHT cameras retrieve brightness
     // - DAY: used for camera switching decisions
@@ -283,7 +271,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     // Image enhancement is now done via CLAHE preprocessing on the YOLO detector side
 
     // Debug: log flags every 30 frames
-    if (frame_count % 30 == 0) {
+    if (frame_number % 30 == 0) {
       LOG_DEBUG(
           Pipeline_log_header,
           "Flags: is_active=%d, brightness=%.1f lux=%u zone=%d",
@@ -296,50 +284,29 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       clock_gettime(CLOCK_REALTIME, &frame_timestamp);
     }
 
-    // Phase 2: Always update brightness in per-camera ZeroCopy SHM
-    // Ensures switcher can read brightness from any camera's ZeroCopy (Phase 3)
-    if (is_brightness_frame && brightness_result.valid &&
-        pipeline->shm_yolo_zerocopy) {
-      pipeline->shm_yolo_zerocopy->frame.brightness_avg =
-          brightness_result.brightness_avg;
-    }
+    // Brightness: switcher thread reads ISP directly (no SHM write needed)
 
-    // Write brightness to lightweight shared memory
-    // DAY camera (index 0) always writes - used for switching decisions
-    // Frequency: active=~3.75Hz (8 frames), inactive=~0.47Hz (64 frames, ~2.1 sec)
-    if (is_day_camera && is_brightness_frame && brightness_result.valid) {
-      struct timespec now_ts;
-      clock_gettime(CLOCK_REALTIME, &now_ts);
-      CameraBrightness cam_brightness = {
-          .frame_number = frame_count,
-          .timestamp = now_ts,
-          .brightness_avg = brightness_result.brightness_avg,
-          .brightness_lux = brightness_result.brightness_lux,
-          .brightness_zone = (uint8_t)brightness_result.zone,
-          .correction_applied = pipeline->lowlight_state.correction_active ? 1 : 0,
-      };
-      shm_brightness_write(pipeline->shm_brightness, pipeline->camera_index,
-                           &cam_brightness);
-    }
-
-    // Push frame to encoder thread only if camera is active
+    // Push VSE Ch0 frame to encoder thread (zero-copy via phys_addr)
+    // On success, encoder thread owns the VSE buffer and will release it.
+    // On failure (queue full) or inactive camera, we must release it here.
+    bool frame_owned_by_encoder = false;
     if (write_active) {
       ret = encoder_thread_push_frame(
-          &pipeline->encoder_thread,
-          (uint8_t *)vio_frame.buffer.virt_addr[0], // Y plane
-          (uint8_t *)vio_frame.buffer.virt_addr[1], // UV plane
-          vio_frame.buffer.size[0],                 // Y size
-          vio_frame.buffer.size[1],                 // UV size
-          frame_count, pipeline->camera_index, frame_timestamp);
+          &pipeline->encoder_thread, &vio_frame,
+          frame_number, pipeline->camera_index, frame_timestamp);
 
-      if (ret != 0) {
+      if (ret == 0) {
+        frame_owned_by_encoder = true;
+      } else {
         LOG_WARN(Pipeline_log_header, "Encoder queue full, frame %d dropped",
-                 frame_count);
+                 frame_number);
       }
     }
 
-    // Release main VIO frame (always release after use)
-    vio_release_frame(&pipeline->vio, &vio_frame);
+    // Release main VIO frame only if encoder thread did not take ownership
+    if (!frame_owned_by_encoder) {
+      vio_release_frame(&pipeline->vio, &vio_frame);
+    }
 
     // Get YOLO input frame from VSE Channel 1 (1280x720 for ROI detection)
     // Zero-copy: share VIO buffer via share_id, consumer imports via hb_mem
@@ -354,14 +321,12 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
         int yolo_width = (pipeline->camera_index == 1) ? 1280 : 640;
         int yolo_height = (pipeline->camera_index == 1) ? 720 : 360;
         ZeroCopyFrame zc_frame = {0};
-        zc_frame.frame_number = frame_count;
+        zc_frame.frame_number = frame_number;
         zc_frame.timestamp = frame_timestamp;
         zc_frame.camera_id = pipeline->camera_index;
         zc_frame.width = yolo_width;
         zc_frame.height = yolo_height;
-        zc_frame.format = 1;    // NV12
         zc_frame.brightness_avg = brightness_result.brightness_avg;
-        zc_frame.correction_applied = 0;
 
         // Copy share_id and plane info from VIO buffer
         zc_frame.plane_cnt = yolo_frame.buffer.plane_cnt;
@@ -373,7 +338,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
         // Copy full hb_mem_graphic_buf_t as raw bytes for import API
         memcpy(zc_frame.hb_mem_buf_data, &yolo_frame.buffer, sizeof(yolo_frame.buffer));
 
-        // shm_zerocopy_write waits for consumer to signal consumed_sem
+        // shm_zerocopy_write overwrites unconditionally (H.265 pattern)
         // If it succeeds, consumer has finished with the PREVIOUS frame
         int zc_ret = shm_zerocopy_write(pipeline->shm_yolo_zerocopy, &zc_frame);
         if (zc_ret == 0) {
@@ -386,7 +351,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
           pending_yolo_frame = yolo_frame;
           has_pending_yolo_frame = true;
 
-          if (frame_count == 0) {
+          if (frame_number == 0) {
             // === DIAGNOSTIC: Dump ALL fields of hb_mem_graphic_buf_t ===
             // This is critical for diagnosing hb_mem_import failures on the consumer side.
             const hb_mem_graphic_buf_t *gb = &yolo_frame.buffer;
@@ -495,7 +460,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
           // Consumer busy (timeout) - release current frame, keep pending as-is
           vio_release_frame_ch1(&pipeline->vio, &yolo_frame);
         }
-      } else if (frame_count % 30 == 0) {
+      } else if (frame_number % 30 == 0) {
         LOG_DEBUG(Pipeline_log_header, "vio_get_frame_ch1 failed: %d", ret);
       }
     }
@@ -507,64 +472,52 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       ret = vio_get_frame_ch2(&pipeline->vio, &mjpeg_frame, 10);
       if (ret == 0) {
         // Write MJPEG frame to shared memory
-        Frame mjpeg_nv12_frame = {0};
-        // VSE Ch2 is configured for 768x432 (see vio_lowlevel.c:244-256)
-        mjpeg_nv12_frame.width = 768;
-        mjpeg_nv12_frame.height = 432;
-        mjpeg_nv12_frame.format = 1; // NV12
-        mjpeg_nv12_frame.frame_number = frame_count;
-        mjpeg_nv12_frame.camera_id = pipeline->camera_index;
-        mjpeg_nv12_frame.timestamp = frame_timestamp;
-
-        // Apply brightness data from ISP (same for all channels)
-        isp_fill_frame_brightness(&mjpeg_nv12_frame, &brightness_result);
-        mjpeg_nv12_frame.correction_applied = 0;
-
-        // Calculate NV12 size for 768x432
-        size_t mjpeg_size = 0;
+        // Zero-copy: share VSE Ch2 buffer via share_id
+        ZeroCopyFrame mjpeg_zc = {0};
+        mjpeg_zc.frame_number = frame_number;
+        mjpeg_zc.timestamp = frame_timestamp;
+        mjpeg_zc.camera_id = pipeline->camera_index;
+        mjpeg_zc.width = mjpeg_frame.buffer.width;
+        mjpeg_zc.height = mjpeg_frame.buffer.height;
+        mjpeg_zc.brightness_avg = brightness_result.brightness_avg;
+        mjpeg_zc.plane_cnt = mjpeg_frame.buffer.plane_cnt;
         for (int i = 0; i < mjpeg_frame.buffer.plane_cnt; i++) {
-          mjpeg_size += mjpeg_frame.buffer.size[i];
+          mjpeg_zc.share_id[i] = mjpeg_frame.buffer.share_id[i];
+          mjpeg_zc.plane_size[i] = mjpeg_frame.buffer.size[i];
         }
-        mjpeg_nv12_frame.data_size = mjpeg_size;
+        memcpy(mjpeg_zc.hb_mem_buf_data, &mjpeg_frame.buffer,
+               sizeof(mjpeg_frame.buffer));
 
-        // Copy MJPEG NV12 data
-        if (mjpeg_size <= sizeof(mjpeg_nv12_frame.data)) {
-          size_t offset = 0;
-          for (int i = 0; i < mjpeg_frame.buffer.plane_cnt; i++) {
-            memcpy(mjpeg_nv12_frame.data + offset, mjpeg_frame.buffer.virt_addr[i],
-                   mjpeg_frame.buffer.size[i]);
-            offset += mjpeg_frame.buffer.size[i];
+        int write_ret = shm_zerocopy_write(pipeline->shm_mjpeg_zc, &mjpeg_zc);
+        if (write_ret == 0) {
+          if (frame_number == 0) {
+            LOG_INFO(Pipeline_log_header,
+                     "VSE Ch2 output: %dx%d (zero-copy, share_id=%d)",
+                     mjpeg_zc.width, mjpeg_zc.height, mjpeg_zc.share_id[0]);
           }
-
-          int write_ret = shm_frame_buffer_write(pipeline->shm_mjpeg_frame, &mjpeg_nv12_frame);
-          if (write_ret < 0) {
-            LOG_WARN(Pipeline_log_header, "Failed to write MJPEG frame to shm");
-          } else if (frame_count == 0 || frame_count % 30 == 0) {
-            // Log first frame and every 30 frames to verify VSE Ch2 size
-            if (frame_count == 0) {
-              LOG_INFO(Pipeline_log_header,
-                       "VSE Ch2 output: %dx%d, %zu bytes (expected 768x432, ~497KB)",
-                       mjpeg_nv12_frame.width, mjpeg_nv12_frame.height, mjpeg_size);
-            } else {
-              LOG_DEBUG(Pipeline_log_header,
-                        "Wrote MJPEG %dx%d frame#%d to shm (idx=%d)",
-                        mjpeg_nv12_frame.width, mjpeg_nv12_frame.height, frame_count, write_ret);
-            }
+          // Consumer finished with previous frame - safe to release it now
+          if (has_pending_mjpeg_frame) {
+            vio_release_frame_ch2(&pipeline->vio, &pending_mjpeg_frame);
           }
+          pending_mjpeg_frame = mjpeg_frame;
+          has_pending_mjpeg_frame = true;
+        } else {
+          // Consumer busy (timeout) - release current frame, keep pending as-is
+          vio_release_frame_ch2(&pipeline->vio, &mjpeg_frame);
         }
-
-        vio_release_frame_ch2(&pipeline->vio, &mjpeg_frame);
-      } else if (frame_count % 30 == 0) {
+      } else if (frame_number % 30 == 0) {
         LOG_DEBUG(Pipeline_log_header, "vio_get_frame_ch2 failed: %d", ret);
       }
     }
 
-    frame_count++;
+    if (write_active) {
+      frame_number++;
+    }
 
     // Night camera: fix AWB to Manual after ISP has stabilized (~1 sec).
     // Auto AWB cannot converge on IR scenes and causes purple/blue drift.
     // See docs/awb_tuning_report.md for test results and tuning tool usage.
-    if (!night_awb_applied && frame_count == 30) {
+    if (!night_awb_applied && frame_number == 30) {
       hbn_isp_awb_attr_t awb_attr = {0};
       int awb_ret = hbn_isp_get_awb_attr(pipeline->vio.isp_handle, &awb_attr);
       if (awb_ret == 0) {
@@ -578,37 +531,41 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       if (awb_ret != 0) {
         LOG_WARN(Pipeline_log_header, "Failed to set night AWB: %d", awb_ret);
       } else {
-        LOG_INFO(Pipeline_log_header, "Night camera AWB fixed: R=1.8 G=1.8 B=2.34 (frame %d)", frame_count);
+        LOG_INFO(Pipeline_log_header, "Night camera AWB fixed: R=1.8 G=1.8 B=2.34 (frame %d)", frame_number);
       }
       night_awb_applied = true;
     }
 
     // Print FPS every 30 frames
-    if (frame_count % 30 == 0) {
+    if (frame_number % 30 == 0) {
       clock_gettime(CLOCK_MONOTONIC, &current_time);
       double elapsed = (current_time.tv_sec - start_time.tv_sec) +
                        (current_time.tv_nsec - start_time.tv_nsec) / 1e9;
-      double fps = frame_count / elapsed;
+      double fps = frame_number / elapsed;
       LOG_DEBUG(Pipeline_log_header,
                 "Frame %d, FPS: %.2f, H.264 encoded: %lu, dropped: %lu",
-                frame_count, fps, pipeline->encoder_thread.frames_encoded,
+                frame_number, fps, pipeline->encoder_thread.frames_encoded,
                 pipeline->encoder_thread.frames_dropped);
     }
   }
 
-  // Release any pending zero-copy frame on exit
+  // Release any pending zero-copy frames on exit
   if (has_pending_yolo_frame) {
     vio_release_frame_ch1(&pipeline->vio, &pending_yolo_frame);
     has_pending_yolo_frame = false;
+  }
+  if (has_pending_mjpeg_frame) {
+    vio_release_frame_ch2(&pipeline->vio, &pending_mjpeg_frame);
+    has_pending_mjpeg_frame = false;
   }
 
   // Final statistics
   clock_gettime(CLOCK_MONOTONIC, &current_time);
   double total_elapsed = (current_time.tv_sec - start_time.tv_sec) +
                          (current_time.tv_nsec - start_time.tv_nsec) / 1e9;
-  double avg_fps = frame_count / total_elapsed;
+  double avg_fps = frame_number / total_elapsed;
   LOG_INFO(Pipeline_log_header,
-           "Completed: %d frames in %.2f seconds (avg FPS: %.2f)", frame_count,
+           "Completed: %d frames in %.2f seconds (avg FPS: %.2f)", frame_number,
            total_elapsed, avg_fps);
   LOG_INFO(Pipeline_log_header, "H.264 encoded: %lu, dropped: %lu",
            pipeline->encoder_thread.frames_encoded,
@@ -641,21 +598,9 @@ void pipeline_destroy(camera_pipeline_t *pipeline) {
   // Destroy VIO
   vio_destroy(&pipeline->vio);
 
-  // Close CameraControl SHM (do not destroy - owned by camera_switcher_daemon)
-  if (pipeline->control_shm) {
-    shm_control_close(pipeline->control_shm);
-    pipeline->control_shm = NULL;
-  }
-
-  // Close shared memory (do not destroy - owned by camera_switcher_daemon)
-  if (pipeline->shm_active_h264) {
-    shm_frame_buffer_close(pipeline->shm_active_h264);
-    pipeline->shm_active_h264 = NULL;
-  }
-
-  if (pipeline->shm_brightness) {
-    shm_brightness_close(pipeline->shm_brightness);
-    pipeline->shm_brightness = NULL;
+  if (pipeline->shm_h265_zc) {
+    shm_h265_zc_close(pipeline->shm_h265_zc);
+    pipeline->shm_h265_zc = NULL;
   }
 
   if (pipeline->shm_yolo_zerocopy) {
@@ -663,9 +608,9 @@ void pipeline_destroy(camera_pipeline_t *pipeline) {
     pipeline->shm_yolo_zerocopy = NULL;
   }
 
-  if (pipeline->shm_mjpeg_frame) {
-    shm_frame_buffer_close(pipeline->shm_mjpeg_frame);
-    pipeline->shm_mjpeg_frame = NULL;
+  if (pipeline->shm_mjpeg_zc) {
+    shm_zerocopy_close(pipeline->shm_mjpeg_zc);
+    pipeline->shm_mjpeg_zc = NULL;
   }
 
   // Close memory manager
