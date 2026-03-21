@@ -149,6 +149,7 @@ const (
 	FormatNV12 = 1
 	FormatRGB  = 2
 	FormatH264 = 3
+	FormatH265 = 4
 
 	// Buffer constants (must match shm_constants.h)
 	RingBufferSize = C.RING_BUFFER_SIZE
@@ -208,7 +209,7 @@ func (r *Reader) Close() error {
 // ReadLatest reads the latest frame from shared memory
 // NOTE: Duplicate check removed - polling interval ≈ frame interval, duplicates are rare
 // and processing same frame twice has no UX impact
-func (r *Reader) ReadLatest() (*types.H264Frame, error) {
+func (r *Reader) ReadLatest() (*types.VideoFrame, error) {
 	if r.shm == nil {
 		return nil, fmt.Errorf("shared memory not open")
 	}
@@ -229,8 +230,8 @@ func (r *Reader) ReadLatest() (*types.H264Frame, error) {
 		return nil, fmt.Errorf("failed to read frame at index %d", index)
 	}
 
-	// Check if this is an H.264 frame
-	if int(cFrame.format) != FormatH264 {
+	// Check if this is an H.265 frame
+	if int(cFrame.format) != FormatH265 {
 		return nil, nil
 	}
 
@@ -240,8 +241,8 @@ func (r *Reader) ReadLatest() (*types.H264Frame, error) {
 	return frame, nil
 }
 
-// convertFrame converts C Frame to Go H264Frame
-func (r *Reader) convertFrame(cFrame *C.Frame) *types.H264Frame {
+// convertFrame converts C Frame to Go VideoFrame
+func (r *Reader) convertFrame(cFrame *C.Frame) *types.VideoFrame {
 	dataSize := int(cFrame.data_size)
 
 	// Copy frame data from C array to Go slice
@@ -255,7 +256,7 @@ func (r *Reader) convertFrame(cFrame *C.Frame) *types.H264Frame {
 		int64(cFrame.timestamp.tv_nsec),
 	)
 
-	return &types.H264Frame{
+	return &types.VideoFrame{
 		Data:      data,
 		Timestamp: timestamp,
 		FrameNum:  uint64(cFrame.frame_number),
@@ -296,7 +297,7 @@ func (r *Reader) WaitNewFrame(timeout time.Duration) error {
 }
 
 // WaitForFrame waits for a new frame with timeout (deprecated - use WaitNewFrame + ReadLatest)
-func (r *Reader) WaitForFrame(timeout time.Duration) (*types.H264Frame, error) {
+func (r *Reader) WaitForFrame(timeout time.Duration) (*types.VideoFrame, error) {
 	deadline := time.Now().Add(timeout)
 
 	for {

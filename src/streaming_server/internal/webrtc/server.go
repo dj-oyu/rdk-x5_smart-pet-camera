@@ -9,13 +9,13 @@ import (
 
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/logger"
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/pkg/types"
-	"github.com/pion/webrtc/v3"
-	"github.com/pion/webrtc/v3/pkg/media"
+	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v4/pkg/media"
 )
 
 const (
-	// H.264 clock rate (90kHz for video)
-	h264ClockRate = 90000
+	// Video clock rate (90kHz standard for RTP video)
+	videoClockRate = 90000
 )
 
 // Client represents a connected WebRTC client
@@ -23,7 +23,7 @@ type Client struct {
 	id            string
 	peerConn      *webrtc.PeerConnection
 	videoTrack    *webrtc.TrackLocalStaticSample
-	frameChan     chan *types.H264Frame
+	frameChan     chan *types.VideoFrame
 	closeChan     chan struct{}
 	framesSent    uint64
 	framesDropped uint64
@@ -69,7 +69,7 @@ func NewServer(stunServers []string, maxClients int) *Server {
 		webrtc.NetworkTypeUDP6,
 	})
 
-	// Create MediaEngine with H.264 codec optimization
+	// Create MediaEngine with H.265 codec (included in pion/webrtc v4 defaults)
 	mediaEngine := &webrtc.MediaEngine{}
 	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
 		logger.Error("WebRTC", "Failed to register codecs: %v", err)
@@ -114,11 +114,11 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to create peer connection: %w", err)
 	}
 
-	// Create H.264 video track
+	// Create H.265 video track
 	videoTrack, err := webrtc.NewTrackLocalStaticSample(
 		webrtc.RTPCodecCapability{
-			MimeType:  webrtc.MimeTypeH264,
-			ClockRate: h264ClockRate,
+			MimeType:  webrtc.MimeTypeH265,
+			ClockRate: videoClockRate,
 		},
 		"video",
 		"pion",
@@ -150,7 +150,7 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 		id:         generateClientID(),
 		peerConn:   peerConn,
 		videoTrack: videoTrack,
-		frameChan:  make(chan *types.H264Frame, 30), // Buffer 1 second worth
+		frameChan:  make(chan *types.VideoFrame, 30), // Buffer 1 second worth
 		closeChan:  make(chan struct{}),
 	}
 
@@ -232,7 +232,7 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 }
 
 // SendFrame sends a frame to all connected clients
-func (s *Server) SendFrame(frame *types.H264Frame) {
+func (s *Server) SendFrame(frame *types.VideoFrame) {
 	s.clientsMu.RLock()
 	defer s.clientsMu.RUnlock()
 
@@ -262,7 +262,7 @@ func (s *Server) sendFrames(client *Client) {
 			}
 			// Calculate timestamp (assuming 30fps)
 			// timestamp = frame_num * (clock_rate / fps)
-			timestamp := frame.FrameNum * (h264ClockRate / 30)
+			timestamp := frame.FrameNum * (videoClockRate / 30)
 
 			// Write H.264 sample to track
 			if err := client.videoTrack.WriteSample(media.Sample{
@@ -277,7 +277,7 @@ func (s *Server) sendFrames(client *Client) {
 
 			// Log every 30 frames to track frame_number
 			if frame.FrameNum%30 == 0 {
-				logger.Debug("WebRTC", "Sent H.264 frame#%d to client %s (timestamp=%d)",
+				logger.Debug("WebRTC", "Sent H.265 frame#%d to client %s (timestamp=%d)",
 					frame.FrameNum, client.id, timestamp)
 			}
 

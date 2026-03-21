@@ -1,5 +1,5 @@
 /*
- * encoder_lowlevel.c - Low-level H.264 Encoder Implementation
+ * encoder_lowlevel.c - Low-level H.265 Encoder Implementation
  */
 
 #include "encoder_lowlevel.h"
@@ -24,7 +24,7 @@ int encoder_create(encoder_context_t *ctx, int camera_index,
     media_codec_context_t *encoder = &ctx->codec_ctx;
 
     encoder->encoder = 1;
-    encoder->codec_id = MEDIA_CODEC_ID_H264;
+    encoder->codec_id = MEDIA_CODEC_ID_H265;
     encoder->instance_index = camera_index;
 
     // Video encoder parameters
@@ -47,25 +47,25 @@ int encoder_create(encoder_context_t *ctx, int camera_index,
     encoder->video_enc_params.frame_cropping_flag = 0;
     encoder->video_enc_params.enable_user_pts = 1;
 
-    // H.264 CBR rate control
-    encoder->video_enc_params.rc_params.mode = MC_AV_RC_MODE_H264CBR;
-    encoder->video_enc_params.rc_params.h264_cbr_params.intra_period = fps;
-    encoder->video_enc_params.rc_params.h264_cbr_params.intra_qp = 30;
-    encoder->video_enc_params.rc_params.h264_cbr_params.bit_rate = bitrate;
-    encoder->video_enc_params.rc_params.h264_cbr_params.frame_rate = fps;
-    encoder->video_enc_params.rc_params.h264_cbr_params.initial_rc_qp = 20;
-    encoder->video_enc_params.rc_params.h264_cbr_params.vbv_buffer_size = 20;
-    encoder->video_enc_params.rc_params.h264_cbr_params.mb_level_rc_enalbe = 1;
-    encoder->video_enc_params.rc_params.h264_cbr_params.min_qp_I = 8;
-    encoder->video_enc_params.rc_params.h264_cbr_params.max_qp_I = 50;
-    encoder->video_enc_params.rc_params.h264_cbr_params.min_qp_P = 8;
-    encoder->video_enc_params.rc_params.h264_cbr_params.max_qp_P = 50;
-    encoder->video_enc_params.rc_params.h264_cbr_params.min_qp_B = 8;
-    encoder->video_enc_params.rc_params.h264_cbr_params.max_qp_B = 50;
-    encoder->video_enc_params.rc_params.h264_cbr_params.hvs_qp_enable = 1;
-    encoder->video_enc_params.rc_params.h264_cbr_params.hvs_qp_scale = 2;
-    encoder->video_enc_params.rc_params.h264_cbr_params.max_delta_qp = 10;
-    encoder->video_enc_params.rc_params.h264_cbr_params.qp_map_enable = 0;
+    // H.265 CBR rate control
+    encoder->video_enc_params.rc_params.mode = MC_AV_RC_MODE_H265CBR;
+    encoder->video_enc_params.rc_params.h265_cbr_params.intra_period = fps;
+    encoder->video_enc_params.rc_params.h265_cbr_params.intra_qp = 30;
+    encoder->video_enc_params.rc_params.h265_cbr_params.bit_rate = bitrate;
+    encoder->video_enc_params.rc_params.h265_cbr_params.frame_rate = fps;
+    encoder->video_enc_params.rc_params.h265_cbr_params.initial_rc_qp = 20;
+    encoder->video_enc_params.rc_params.h265_cbr_params.vbv_buffer_size = 20;
+    encoder->video_enc_params.rc_params.h265_cbr_params.ctu_level_rc_enalbe = 1;
+    encoder->video_enc_params.rc_params.h265_cbr_params.min_qp_I = 8;
+    encoder->video_enc_params.rc_params.h265_cbr_params.max_qp_I = 50;
+    encoder->video_enc_params.rc_params.h265_cbr_params.min_qp_P = 8;
+    encoder->video_enc_params.rc_params.h265_cbr_params.max_qp_P = 50;
+    encoder->video_enc_params.rc_params.h265_cbr_params.min_qp_B = 8;
+    encoder->video_enc_params.rc_params.h265_cbr_params.max_qp_B = 50;
+    encoder->video_enc_params.rc_params.h265_cbr_params.hvs_qp_enable = 1;
+    encoder->video_enc_params.rc_params.h265_cbr_params.hvs_qp_scale = 2;
+    encoder->video_enc_params.rc_params.h265_cbr_params.max_delta_qp = 10;
+    encoder->video_enc_params.rc_params.h265_cbr_params.qp_map_enable = 0;
 
     ret = hb_mm_mc_initialize(encoder);
     if (ret != 0) {
@@ -88,7 +88,7 @@ int encoder_create(encoder_context_t *ctx, int camera_index,
         return ret;
     }
 
-    LOG_INFO("Encoder", "Created (H.264 CBR %dx%d @ %dfps, %dkbps)",
+    LOG_INFO("Encoder", "Created (H.265 CBR %dx%d @ %dfps, %dkbps)",
              width, height, fps, bitrate / 1000);
 
     return 0;
