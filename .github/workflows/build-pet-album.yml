@@ -1,0 +1,48 @@
+name: Build pet-album (aarch64)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/ai-pyramid/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    defaults:
+      run:
+        working-directory: src/ai-pyramid
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/ai-pyramid/target
+          key: aarch64-cargo-${{ hashFiles('src/ai-pyramid/Cargo.lock') }}
+          restore-keys: aarch64-cargo-
+
+      - name: Test
+        run: cargo test
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Binary info
+        run: |
+          ls -lh target/release/pet-album
+          file target/release/pet-album
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pet-album-aarch64
+          path: src/ai-pyramid/target/release/pet-album
