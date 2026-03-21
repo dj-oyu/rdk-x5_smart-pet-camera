@@ -186,6 +186,10 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
   LOG_INFO(Pipeline_log_header,
            "Starting capture loop (threaded encoder, 30fps NV12+H.264)...");
 
+  // Per-pipeline state (not static — each thread has its own pipeline)
+  isp_brightness_result_t cached_brightness = {.valid = false};
+  bool prev_active = false;
+
   while (*running_flag) {
     int ret;
 
@@ -218,8 +222,6 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     #define ISP_BRIGHTNESS_MASK_DAY_ACTIVE 7      // 8 frames when active (2^3 - 1)
     #define ISP_BRIGHTNESS_MASK_DAY_INACTIVE 63   // 64 frames when inactive (2^6 - 1)
     #define ISP_BRIGHTNESS_MASK_NIGHT 127         // 128 frames (~4.3 sec, 2^7 - 1)
-    static isp_brightness_result_t cached_brightness = {.valid = false};
-    static bool prev_active = false;
 
     // Detect camera switch: when this camera becomes active, reset brightness cache
     // and immediately fetch fresh brightness from ISP
