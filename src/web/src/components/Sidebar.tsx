@@ -137,6 +137,17 @@ export function useSidebar() {
 
 export function SidebarView(props: ReturnType<typeof useSidebar>) {
   const [albumOffline, setAlbumOffline] = useState(false);
+  const [albumHeight, setAlbumHeight] = useState(0);
+
+  useEffect(() => {
+    const handler = (e: MessageEvent) => {
+      if (e.data?.type === 'album-height' && typeof e.data.height === 'number') {
+        setAlbumHeight(e.data.height);
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, []);
 
   return (
     <div class="sidebar">
@@ -170,6 +181,8 @@ export function SidebarView(props: ReturnType<typeof useSidebar>) {
           <iframe
             src={ALBUM_URL}
             class="album-iframe"
+            scrolling="no"
+            style={albumHeight ? { height: `${albumHeight}px` } : undefined}
             onError={() => setAlbumOffline(true)}
           />
         )}
