@@ -2,7 +2,7 @@ package webmonitor
 
 /*
 #cgo CFLAGS: -I../../../capture
-#cgo LDFLAGS: -L../../../../build -ljpeg_encoder -lrt -lpthread -lturbojpeg -lmultimedia -L/usr/hobot/lib
+#cgo LDFLAGS: -L../../../../build -ljpeg_encoder -lrt -lpthread -lturbojpeg -lmultimedia -lhbmem -L/usr/hobot/lib
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,7 +16,9 @@ package webmonitor
 #include <errno.h>
 #include <pthread.h>
 #include <turbojpeg.h>
+#include <hb_mem_mgr.h>
 #include "jpeg_encoder.h"
+#include "shm_constants.h"
 
 // Global hardware JPEG encoder context (singleton for MJPEG streaming)
 static jpeg_encoder_context_t g_hw_jpeg_encoder;
@@ -123,30 +125,7 @@ static int hw_jpeg_encode(const uint8_t* nv12_data, int width, int height,
 // Constants from single source of truth
 #include "shm_constants.h"
 
-typedef struct {
-    uint64_t frame_number;
-    struct timespec timestamp;
-    int camera_id;
-    int width;
-    int height;
-    int format;
-    size_t data_size;
-    float brightness_avg;
-    uint32_t brightness_lux;
-    uint8_t brightness_zone;
-    uint8_t correction_applied;
-    uint8_t _reserved[2];
-    uint8_t data[MAX_FRAME_SIZE];
-} Frame __attribute__((aligned(64)));
-
-typedef struct {
-    volatile uint32_t write_index;
-    char _pad_wridx[60];
-    volatile uint32_t frame_interval_ms;
-    char _pad_interval[60];
-    sem_t new_frame_sem;
-    Frame frames[RING_BUFFER_SIZE];
-} SharedFrameBuffer;
+// Frame/SharedFrameBuffer removed — using ZeroCopyFrameBuffer now
 
 typedef struct {
     int x;
@@ -170,86 +149,72 @@ typedef struct {
     sem_t detection_update_sem;  // Semaphore for event-driven detection updates
 } LatestDetectionResult;
 
-static SharedFrameBuffer* open_frame_shm(const char* name) {
+// ZeroCopy frame buffer for MJPEG (matching shared_memory.h)
+typedef struct {
+    uint64_t frame_number;
+    struct timespec timestamp;
+    int camera_id;
+    int width, height, format;
+    float brightness_avg;
+    uint8_t correction_applied;
+    uint8_t _pad1[3];
+    int32_t share_id[ZEROCOPY_MAX_PLANES];
+    uint64_t plane_size[ZEROCOPY_MAX_PLANES];
+    int32_t plane_cnt;
+    uint8_t hb_mem_buf_data[HB_MEM_GRAPHIC_BUF_SIZE];
+    volatile uint32_t version;
+    volatile uint8_t consumed;
+    uint8_t _pad2[3];
+} ZeroCopyFrame;
+
+typedef struct {
+    uint8_t new_frame_sem[32];
+    uint8_t consumed_sem[32];
+    ZeroCopyFrame frame;
+} ZeroCopyFrameBuffer;
+
+static ZeroCopyFrameBuffer* open_frame_zc(const char* name) {
     int fd = shm_open(name, O_RDWR, 0666);
-    if (fd == -1) {
-        return NULL;
-    }
-
-    SharedFrameBuffer* shm = (SharedFrameBuffer*)mmap(
-        NULL,
-        sizeof(SharedFrameBuffer),
-        PROT_READ | PROT_WRITE,  // Need write permission for sem_wait()
-        MAP_SHARED,
-        fd,
-        0
-    );
-
+    if (fd == -1) return NULL;
+    ZeroCopyFrameBuffer* shm = (ZeroCopyFrameBuffer*)mmap(
+        NULL, sizeof(ZeroCopyFrameBuffer),
+        PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     close(fd);
-
-    if (shm == MAP_FAILED) {
-        return NULL;
-    }
-
-    return shm;
+    return (shm == MAP_FAILED) ? NULL : shm;
 }
 
-static void close_frame_shm(SharedFrameBuffer* shm) {
-    if (shm != NULL) {
-        munmap((void*)shm, sizeof(SharedFrameBuffer));
-    }
+static void close_frame_zc(ZeroCopyFrameBuffer* shm) {
+    if (shm) munmap((void*)shm, sizeof(ZeroCopyFrameBuffer));
 }
 
-static uint32_t frame_write_index(SharedFrameBuffer* shm) {
-    if (shm == NULL) {
-        return 0;
-    }
-    return shm->write_index;  // volatile read - no atomic needed
-}
+// Import NV12 data from zero-copy frame via hb_mem
+static int import_zc_nv12(ZeroCopyFrameBuffer* shm, uint8_t* dst, int dst_size, int* out_w, int* out_h) {
+    if (!shm || !dst) return -1;
+    ZeroCopyFrame* f = (ZeroCopyFrame*)&shm->frame;
+    if (f->plane_cnt < 1 || f->share_id[0] <= 0) return -1;
 
-static int read_latest_frame(SharedFrameBuffer* shm, Frame* out) {
-    if (!shm || !out) {
-        return -1;
-    }
+    int total_size = 0;
+    for (int i = 0; i < f->plane_cnt; i++) total_size += f->plane_size[i];
+    if (total_size > dst_size) return -2;
 
-    uint32_t write_idx = shm->write_index;  // volatile read
-    if (write_idx == 0) {
-        return -1;
-    }
+    // Import via share_id
+    hb_mem_common_buf_t in_buf = {0};
+    in_buf.share_id = f->share_id[0];
+    hb_mem_common_buf_t out_buf = {0};
+    if (hb_mem_import_com_buf(&in_buf, &out_buf) != 0) return -3;
 
-    uint32_t latest_idx = (write_idx - 1) % RING_BUFFER_SIZE;
-    Frame* src = &shm->frames[latest_idx];
+    hb_mem_invalidate_buf_with_vaddr((uint64_t)out_buf.virt_addr, out_buf.size);
+    memcpy(dst, out_buf.virt_addr, total_size);
+    hb_mem_free_buf(out_buf.fd);
 
-    // Copy metadata first
-    out->frame_number = src->frame_number;
-    out->timestamp = src->timestamp;
-    out->camera_id = src->camera_id;
-    out->width = src->width;
-    out->height = src->height;
-    out->format = src->format;
-    out->data_size = src->data_size;
+    *out_w = f->width;
+    *out_h = f->height;
 
-    // Only copy actual data
-    if (out->data_size > 0 && out->data_size <= MAX_FRAME_SIZE) {
-        memcpy(out->data, src->data, out->data_size);
-    }
+    // Signal consumed
+    __atomic_store_n(&f->consumed, 1, __ATOMIC_RELEASE);
+    sem_post((sem_t*)&shm->consumed_sem);
 
-    return 0;
-}
-
-// Zero-copy version: returns pointer to frame data in shared memory (read-only)
-static Frame* get_latest_frame_ptr(SharedFrameBuffer* shm) {
-    if (!shm) {
-        return NULL;
-    }
-
-    uint32_t write_idx = shm->write_index;  // volatile read
-    if (write_idx == 0) {
-        return NULL;
-    }
-
-    uint32_t latest_idx = (write_idx - 1) % RING_BUFFER_SIZE;
-    return &shm->frames[latest_idx];
+    return total_size;
 }
 
 static LatestDetectionResult* open_detection_shm(const char* name) {
@@ -692,36 +657,33 @@ func GetJPEGQuality() int {
 }
 
 type frameSnapshot struct {
-	FrameNumber       uint64
-	Timestamp         time.Time
-	CameraID          int
-	Width             int
-	Height            int
-	Format            int
-	BrightnessAvg     float32 // Y-plane average brightness (0-255)
-	BrightnessLux     uint32  // Environment illuminance from ISP cur_lux
-	BrightnessZone    uint8   // 0=dark, 1=dim, 2=normal, 3=bright
-	CorrectionApplied bool    // true if ISP low-light correction is active
-	Data              []byte
+	FrameNumber uint64
+	Timestamp   time.Time
+	Width       int
+	Height      int
+	Format      int    // formatNV12=1
+	Data        []byte // NV12 pixel data
 }
 
 type shmReader struct {
-	frameShm      *C.SharedFrameBuffer
+	frameShm      *C.ZeroCopyFrameBuffer
+	frameBuf      []byte // Reusable NV12 import buffer
 	detectionShm  *C.LatestDetectionResult
 	detectionName string
 	lastDetVer    uint32
 }
 
 func newSHMReader(frameName, detectionName string) (*shmReader, error) {
-	var frame *C.SharedFrameBuffer
+	var frame *C.ZeroCopyFrameBuffer
 	if frameName != "" {
 		cName := C.CString(frameName)
-		frame = C.open_frame_shm(cName)
+		frame = C.open_frame_zc(cName)
 		C.free(unsafe.Pointer(cName))
 	}
 
 	r := &shmReader{
 		frameShm:      frame,
+		frameBuf:      make([]byte, 768*432*3/2), // 768x432 NV12
 		detectionName: detectionName,
 	}
 
@@ -748,7 +710,7 @@ func (r *shmReader) tryOpenDetection() {
 
 func (r *shmReader) Close() {
 	if r.frameShm != nil {
-		C.close_frame_shm(r.frameShm)
+		C.close_frame_zc(r.frameShm)
 		r.frameShm = nil
 	}
 	if r.detectionShm != nil {
@@ -761,25 +723,23 @@ func (r *shmReader) Close() {
 // NOTE: WaitNewDetection() removed - DetectionBroadcaster uses polling mode
 
 func (r *shmReader) Stats() (SharedMemoryStats, bool) {
-	if r.frameShm == nil {
-		return SharedMemoryStats{}, false
-	}
-
 	if r.detectionShm == nil {
 		r.tryOpenDetection()
 	}
-
-	writeIndex := uint32(C.frame_write_index(r.frameShm))
-	frameCount := min(int(writeIndex), 30)
 
 	detVer := uint32(0)
 	if r.detectionShm != nil {
 		detVer = uint32(C.detection_version(r.detectionShm))
 	}
 
+	frameVer := uint32(0)
+	if r.frameShm != nil {
+		frameVer = uint32(r.frameShm.frame.version)
+	}
+
 	return SharedMemoryStats{
-		FrameCount:         frameCount,
-		TotalFramesWritten: int(writeIndex),
+		FrameCount:         int(frameVer),
+		TotalFramesWritten: int(frameVer),
 		DetectionVersion:   int(detVer),
 		HasDetection:       boolToInt(detVer > 0),
 	}, true
@@ -790,79 +750,30 @@ func (r *shmReader) LatestFrame() (*frameSnapshot, bool) {
 		return nil, false
 	}
 
-	var cFrame C.Frame
-	if C.read_latest_frame(r.frameShm, &cFrame) != 0 {
+	var outW, outH C.int
+	dataSize := int(C.import_zc_nv12(r.frameShm,
+		(*C.uint8_t)(unsafe.Pointer(&r.frameBuf[0])),
+		C.int(len(r.frameBuf)), &outW, &outH))
+	if dataSize <= 0 {
 		return nil, false
 	}
 
-	dataSize := int(cFrame.data_size)
-	if dataSize < 0 || dataSize > maxFrameSize {
-		return nil, false
-	}
-
-	// Copy data to avoid holding C memory reference
 	data := make([]byte, dataSize)
-	cData := (*[maxFrameSize]byte)(unsafe.Pointer(&cFrame.data[0]))[:dataSize:dataSize]
-	copy(data, cData)
+	copy(data, r.frameBuf[:dataSize])
 
+	cFrame := r.frameShm.frame
 	timestamp := time.Unix(
 		int64(cFrame.timestamp.tv_sec),
 		int64(cFrame.timestamp.tv_nsec),
 	)
 
 	return &frameSnapshot{
-		FrameNumber:       uint64(cFrame.frame_number),
-		Timestamp:         timestamp,
-		CameraID:          int(cFrame.camera_id),
-		Width:             int(cFrame.width),
-		Height:            int(cFrame.height),
-		Format:            int(cFrame.format),
-		BrightnessAvg:     float32(cFrame.brightness_avg),
-		BrightnessLux:     uint32(cFrame.brightness_lux),
-		BrightnessZone:    uint8(cFrame.brightness_zone),
-		CorrectionApplied: cFrame.correction_applied != 0,
-		Data:              data,
-	}, true
-}
-
-// LatestFrameZeroCopy returns the latest frame with zero-copy optimization
-// WARNING: The returned data points to shared memory. Caller MUST copy if modifying.
-func (r *shmReader) LatestFrameZeroCopy() (*frameSnapshot, bool) {
-	if r.frameShm == nil {
-		return nil, false
-	}
-
-	// True zero-copy: Get pointer to frame in shared memory (no memcpy in C!)
-	cFramePtr := C.get_latest_frame_ptr(r.frameShm)
-	if cFramePtr == nil {
-		return nil, false
-	}
-
-	dataSize := int(cFramePtr.data_size)
-	if dataSize < 0 || dataSize > maxFrameSize {
-		return nil, false
-	}
-
-	// Zero-copy: Direct reference to shared memory (read-only!)
-	cData := (*[maxFrameSize]byte)(unsafe.Pointer(&cFramePtr.data[0]))[:dataSize:dataSize]
-
-	timestamp := time.Unix(
-		int64(cFramePtr.timestamp.tv_sec),
-		int64(cFramePtr.timestamp.tv_nsec),
-	)
-
-	return &frameSnapshot{
-		FrameNumber:       uint64(cFramePtr.frame_number),
-		Timestamp:         timestamp,
-		CameraID:          int(cFramePtr.camera_id),
-		Width:             int(cFramePtr.width),
-		Height:            int(cFramePtr.height),
-		Format:            int(cFramePtr.format),
-		BrightnessAvg:     float32(cFramePtr.brightness_avg),
-		BrightnessLux:     uint32(cFramePtr.brightness_lux),
-		BrightnessZone:    uint8(cFramePtr.brightness_zone),
-		CorrectionApplied: cFramePtr.correction_applied != 0,
-		Data:              cData, // Zero-copy reference to shared memory
+		FrameNumber: uint64(cFrame.frame_number),
+		Timestamp:   timestamp,
+		Width:       int(outW),
+		Height:      int(outH),
+		Format:      formatNV12,
+		Data:        data,
 	}, true
 }
 

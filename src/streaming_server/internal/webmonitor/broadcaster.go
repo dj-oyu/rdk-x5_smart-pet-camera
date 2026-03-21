@@ -130,7 +130,7 @@ func (fb *FrameBroadcaster) generateOverlay() []byte {
 	}
 
 	// Zero-copy: Get frame reference without copying
-	frame, ok := fb.shm.LatestFrameZeroCopy()
+	frame, ok := fb.shm.LatestFrame()
 	if !ok {
 		return nil
 	}
