@@ -409,12 +409,64 @@ hbn_vnode_getframe(vse_h, 2, 2000, &roi0_output);  // Ch2: 640x640 ROI
 
 | 前処理 | 現状 | HWオフロード | 評価 |
 |--------|------|-------------|------|
-| **夜間ROIクロップ** | Python `_crop_nv12_roi()` 1-2ms×3 | VSE 3チャンネル同時クロップ ~0ms | **推奨** |
+| **夜間ROIクロップ** | Python `_crop_nv12_roi()` 1-2ms×3 | VSE 3チャンネル同時クロップ+リサイズ ~0ms | **推奨** |
 | **ダウンスケール** | VSE Ch1 (実装済み) | — | 済 |
-| **レターボックス (黒帯追加)** | Python `_letterbox_nv12()` ~1ms | VSEにpadding API **なし** | 不可 |
+| **レターボックス (黒帯追加)** | Python `_letterbox_nv12()` ~0.03ms (memcpy) | nano2D: 0.98ms (遅い)、VSE: API無し | **CPU最速** |
 | **CLAHE** | Python OpenCV ~2ms | nano2D/ISPに該当API なし | 不可 |
 
-**レターボックスについて**: VSEは「クロップ→リサイズ」は可能だが、出力フレームに黒帯を追加する機能はない。ただしVSE ROIで720x720を切り出して640x640にリサイズすれば、モデル入力サイズに直接合わせられるため、**レターボックス自体が不要になる**場合がある（正方形ROI → 正方形出力）。
+**注**: 夜間ROIは1280x720フレーム全体を3つの重なりROIでカバーするラウンドロビン方式 (画角を捨てない)。各ROIのクロップ後にもletterbox追加が必要（ROI切り出し結果は正方形とは限らない）。
+
+**レターボックスのHW実装**: VSEには黒帯追加APIがないが、**nano2D (GC820) で実現可能**。
+
+#### nano2D レターボックス ベンチマーク (実測値)
+
+640x360 → 640x640 (上下140px黒帯):
+
+| 方式 | 性能 | 備考 |
+|------|------|------|
+| nano2D `n2d_fill` + `n2d_blit` | **0.98 ms** | fill(黒) + blit(中央) |
+| nano2D `n2d_blit` only | **0.41 ms** | dstを事前ゼロクリア済みの場合 |
+| nano2D フルパイプライン | **1.01 ms** | 1080p→640x360スケール + レターボックス一括 |
+| SW memcpy (現行Python相当) | **0.03 ms** | CPU memset + memcpy |
+
+**分析**:
+- nano2Dレターボックスは0.98ms。CPUの0.03msより**遅い**
+- 理由: 640x640はnano2Dにとって小さすぎ、GPUカーネル起動のオーバーヘッドが支配的
+- **ただし「1080p→スケール→レターボックス」の一括処理なら1.01ms**で、VSE Ch1 (スケール) + Python letterbox (1ms) の合計より高速な場合がある
+
+**推奨**: 単体のレターボックスは**CPU (memcpy) が最速**。ただしVSEを使わずnano2Dで「ダウンスケール+レターボックス」を一括処理する構成も検討可能。
+
+テストコード:
+
+```c
+#include "GC820/nano2D.h"
+
+// ビルド: gcc -O2 -o test test.c -I /usr/include/GC820/ -L /usr/hobot/lib -lNano2Dutil -lNano2D -lm
+
+n2d_open();
+n2d_switch_device(N2D_DEVICE_0);
+n2d_switch_core(N2D_CORE_0);
+
+n2d_buffer_t src, dst;
+n2d_util_allocate_buffer(640, 360, N2D_NV12, N2D_0, N2D_LINEAR, N2D_TSC_DISABLE, &src);
+n2d_util_allocate_buffer(640, 640, N2D_NV12, N2D_0, N2D_LINEAR, N2D_TSC_DISABLE, &dst);
+
+// レターボックス: 黒塗り + 中央ブリット
+n2d_fill(&dst, N2D_NULL, 0x00000000, N2D_BLEND_NONE);       // 全体を黒
+n2d_rectangle_t center = {0, 140, 640, 360};                  // pad_top = 140
+n2d_blit(&dst, &center, &src, N2D_NULL, N2D_BLEND_NONE);     // 中央にブリット
+n2d_commit();
+
+// フルパイプライン: 1080p入力 → スケール+レターボックス一括
+n2d_buffer_t hd_src;
+n2d_util_allocate_buffer(1920, 1080, N2D_NV12, N2D_0, N2D_LINEAR, N2D_TSC_DISABLE, &hd_src);
+n2d_fill(&dst, N2D_NULL, 0x00000000, N2D_BLEND_NONE);
+n2d_rectangle_t dst_rect = {0, 140, 640, 360};
+n2d_blit(&dst, &dst_rect, &hd_src, N2D_NULL, N2D_BLEND_NONE); // 1080p→640x360→中央
+n2d_commit();
+```
+
+**設計方針**: レターボックスはビデオ入力をクロップせず、アスペクト比を維持してYOLOに渡すために必要。正方形ROIクロップは画角が狭まるため代替にはならない。レターボックスの実装は現行CPU memcpy (0.03ms) が最適。
 
 ## YOLO検出: Python→C移行分析
 
