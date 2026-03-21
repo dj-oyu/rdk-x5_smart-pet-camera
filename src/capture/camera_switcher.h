@@ -111,8 +111,6 @@ camera_switcher_record_brightness(CameraSwitchController *ctrl,
                                   CameraMode camera, double brightness);
 
 /**
- * Calculate mean luma (0-255) from a Frame.
-/**
  * Convenience: process a frame, record brightness, and (optionally) publish if
  * active.
  *
