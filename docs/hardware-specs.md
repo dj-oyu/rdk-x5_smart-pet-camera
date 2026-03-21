@@ -499,11 +499,37 @@ VSE 4チャンネル出力 → nano2D letterbox → 640x640 NV12:
 | VSE + nano2D letterbox (4ch) | **24.80 ms/frame** (40 fps) | hbmem→n2dコピー含む |
 | VSE + CPU letterbox (4ch) | **182.13 ms/frame** (5.5 fps) | CPUスケーリング+letterbox |
 
+**ゼロコピーパターン検証結果** (60フレーム × 4ch):
+
+| パイプライン | 性能 | CPU負荷 |
+|-------------|------|---------|
+| VSE only (4ch) | **3.75 ms** (267 fps) | HWのみ |
+| VSE + **ゼロコピー** n2d letterbox | **8.50 ms** (118 fps) | **最小** (n2d_wrap + GPU) |
+| VSE + memcpy + n2d letterbox | **8.71 ms** (115 fps) | memcpy分のCPU消費 |
+| VSE + CPU letterbox (参考) | 182.13 ms (5.5 fps) | **CPU飽和** |
+
+**ゼロコピーの仕組み**: `n2d_wrap()` でhbmemの物理アドレスを直接nano2Dバッファとして登録。memcpyを完全排除:
+
+```c
+// SDK提供のwrapper: create_n2d_buffer_wraper.c
+// hbmem physical address → n2d_buffer_t (コピーなし)
+n2d_user_memory_desc_t desc;
+desc.flag = N2D_WRAP_FROM_USERMEMORY;
+desc.logical = 0;                               // 必ず0
+desc.physical = (n2d_uintptr_t)hb->phys_addr[0]; // hbmem物理アドレス直接
+desc.size = stride * height * 3 / 2;
+n2d_wrap(&desc, &handle);
+n2d_buffer->handle = handle;
+n2d_map(n2d_buffer);  // GPUアドレス空間にマップ
+```
+
+リファレンス実装: `/app/multimedia_samples/sample_pipeline/common/create_n2d_buffer_wraper.c`
+
 **分析**:
-- VSE→nano2D間の `hbmem→n2d_buffer_t` メモリコピーが支配的 (~5ms/ch)
-- nano2D letterbox自体は高速 (fill+blit ~1ms) だが、バッファ間コピーがボトルネック
-- CPUスケーリング+letterboxの182msと比較すると**7.3倍高速**
-- **改善策**: hbmem物理アドレスから直接n2dバッファをwrapできれば、コピー不要で高速化可能
+- ゼロコピー (8.50ms) vs memcpy (8.71ms): 差は0.21msのみ
+- **ボトルネックはコピーではなくGPU letterbox処理自体** (~1ms × 4ch + n2d_wrap/free ~0.2ms × 4ch)
+- n2d_wrap/n2d_free の繰り返しコスト (VSEバッファアドレスがフレーム毎に変わるため毎回wrap必要)
+- それでも**CPUはletterbox処理に一切使われない** — 8.50msはすべてGPU/HW上の処理
 
 **出力ファイル検証**: `/tmp/vse_n2d_test/11_lb_ch*.yuv` (640x640 NV12) — YUVビューアで黒帯+映像が正しく配置されていることを確認済み
 
