@@ -11,7 +11,6 @@ import (
 	_ "net/http/pprof" // Enable pprof
 	"os"
 	"os/signal"
-	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -199,22 +198,45 @@ func (s *Server) Start() error {
 func (s *Server) readFrames() {
 	defer s.wg.Done()
 
-	logger.Info("Reader", "Starting frame reading (zero-copy, tight loop)")
+	// Measure camera frame interval and sync to frame boundary
+	interval := s.shmReader.MeasureFrameInterval(5)
+	logger.Info("Reader", "Frame interval: %v (zero-copy)", interval)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	missCount := 0
+	lastVer := s.shmReader.Version()
 
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		default:
+		case <-ticker.C:
 		}
 
 		// Skip reading if no clients and not recording
-		hasClients := s.webrtc.GetClientCount() > 0
-		isRecording := s.recorder.IsRecording()
-		if !hasClients && !isRecording {
-			time.Sleep(100 * time.Millisecond)
+		if s.webrtc.GetClientCount() == 0 && !s.recorder.IsRecording() {
+			lastVer = s.shmReader.Version()
 			continue
 		}
+
+		// Check for new frame
+		ver := s.shmReader.Version()
+		if ver == lastVer {
+			missCount++
+			// Camera switch or stall — re-sync after 5 consecutive misses
+			if missCount > 5 {
+				interval = s.shmReader.MeasureFrameInterval(3)
+				ticker.Reset(interval)
+				lastVer = s.shmReader.Version()
+				missCount = 0
+				logger.Debug("Reader", "Re-synced frame interval: %v", interval)
+			}
+			continue
+		}
+		lastVer = ver
+		missCount = 0
 
 		// Read latest frame (zero-copy: Data points to VPU memory)
 		frame, err := s.shmReader.ReadLatest()
@@ -223,16 +245,13 @@ func (s *Server) readFrames() {
 			logger.Warn("Reader", "Read error: %v", err)
 			continue
 		}
-
 		if frame == nil {
-			runtime.Gosched()
 			continue
 		}
 
 		s.metrics.FramesRead.Add(1)
 		s.metrics.UpdateFrameLatency(frame.Timestamp)
 
-		// Send to processor (non-blocking)
 		select {
 		case s.processChan <- frame:
 		default:

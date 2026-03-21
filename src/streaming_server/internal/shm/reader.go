@@ -137,6 +137,51 @@ type Reader struct {
 	shmName     string
 	prevHandle  C.h265_import_handle_t // Previous frame's import (freed on next read)
 	hasPrev     bool
+	lastVersion uint32
+}
+
+// Version returns the current SHM frame version (atomic read)
+func (r *Reader) Version() uint32 {
+	if r.shm == nil {
+		return 0
+	}
+	return uint32(r.shm.frame.version)
+}
+
+// MeasureFrameInterval observes version changes to determine camera frame interval.
+// Returns measured interval and syncs to the frame boundary.
+func (r *Reader) MeasureFrameInterval(samples int) time.Duration {
+	if r.shm == nil || samples < 2 {
+		return 33 * time.Millisecond // fallback 30fps
+	}
+
+	ver := r.Version()
+
+	// Wait for first version change (sync to frame boundary)
+	for r.Version() == ver {
+		time.Sleep(100 * time.Microsecond)
+	}
+
+	// Measure intervals between subsequent version changes
+	start := time.Now()
+	ver = r.Version()
+	for i := 0; i < samples; i++ {
+		for r.Version() == ver {
+			time.Sleep(100 * time.Microsecond)
+		}
+		ver = r.Version()
+	}
+	interval := time.Since(start) / time.Duration(samples)
+
+	// Clamp to sane range (15-60fps)
+	if interval < 16*time.Millisecond {
+		interval = 16 * time.Millisecond
+	}
+	if interval > 66*time.Millisecond {
+		interval = 66 * time.Millisecond
+	}
+
+	return interval
 }
 
 // NewReader creates a new H.265 zero-copy reader
