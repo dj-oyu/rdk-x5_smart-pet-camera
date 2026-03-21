@@ -85,11 +85,9 @@ typedef struct {
  * Encode result — holds VPU output buffer for zero-copy sharing
  */
 typedef struct {
-    int32_t share_id;          // hb_mem share_id for Go import
     uint8_t *vir_ptr;          // Virtual address of H.265 bitstream
-    uint64_t phy_ptr;          // Physical address
     uint32_t data_size;        // Actual H.265 frame size (bytes)
-    uint32_t buf_size;         // Total buffer size
+    uint8_t com_buf_data[48];  // Full hb_mem_common_buf_t for cross-process import
     media_codec_buffer_t output_buffer;  // VPU buffer (for release)
     encoder_stats_t stats;     // VPU encoder statistics
 } encoder_output_t;

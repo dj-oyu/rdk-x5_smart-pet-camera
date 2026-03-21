@@ -13,6 +13,7 @@ package shm
 #include <string.h>
 #include <semaphore.h>
 #include <errno.h>
+#include <stdio.h>
 #include <hb_mem_mgr.h>
 
 #include "shm_constants.h"
@@ -20,7 +21,8 @@ package shm
 static int g_hb_mem_initialized = 0;
 static void ensure_hb_mem_init(void) {
     if (!g_hb_mem_initialized) {
-        hb_mem_module_open();
+        int ret = hb_mem_module_open();
+        fprintf(stderr, "[shm/reader] hb_mem_module_open: ret=%d\n", ret);
         g_hb_mem_initialized = 1;
     }
 }
@@ -35,13 +37,9 @@ typedef struct {
     struct timespec timestamp;
     int camera_id;
     int width, height;
-    int32_t share_id;
     uint32_t data_size;
-    uint32_t buf_size;
-    uint64_t phy_ptr;
+    uint8_t hb_mem_buf_data[48];  // Full hb_mem_common_buf_t
     volatile uint32_t version;
-    volatile uint8_t consumed;
-    uint8_t _pad[3];
 } H265ZeroCopyFrame;
 
 typedef struct {
@@ -91,72 +89,32 @@ int read_h265_frame(H265ZeroCopyBuffer* shm, H265ZeroCopyFrame* out) {
     return 0;
 }
 
-// Cache for imported VPU buffers (VPU rotates 3 output buffers)
-#define IMPORT_CACHE_SIZE 4
-typedef struct {
-    int32_t share_id;
-    hb_mem_common_buf_t buf;
-} import_cache_entry_t;
-
-static import_cache_entry_t g_import_cache[IMPORT_CACHE_SIZE] = {0};
-
-// Import VPU buffer via share_id (cached)
-int import_h265_data(int32_t share_id, uint32_t data_size,
+// Import VPU buffer using full descriptor (same pattern as Python hb_mem_import_graph_buf)
+int import_h265_data(const uint8_t* com_buf_data, uint32_t data_size,
                      uint8_t* dst, uint32_t dst_size) {
-    if (share_id < 0 || data_size == 0 || !dst || data_size > dst_size) return -1;
+    if (!com_buf_data || data_size == 0 || !dst || data_size > dst_size) return -1;
     ensure_hb_mem_init();
 
-    // Check cache
-    hb_mem_common_buf_t *cached = NULL;
-    for (int i = 0; i < IMPORT_CACHE_SIZE; i++) {
-        if (g_import_cache[i].share_id == share_id && g_import_cache[i].buf.virt_addr) {
-            cached = &g_import_cache[i].buf;
-            break;
-        }
-    }
+    // Pass full hb_mem_common_buf_t descriptor for import
+    hb_mem_common_buf_t in_buf;
+    memcpy(&in_buf, com_buf_data, sizeof(hb_mem_common_buf_t));
 
-    // Cache miss: import and cache
-    if (!cached) {
-        // Find empty slot or evict oldest
-        int slot = -1;
-        for (int i = 0; i < IMPORT_CACHE_SIZE; i++) {
-            if (g_import_cache[i].share_id == 0) { slot = i; break; }
-        }
-        if (slot == -1) {
-            // Evict slot 0 (FIFO)
-            if (g_import_cache[0].buf.fd > 0)
-                hb_mem_free_buf(g_import_cache[0].buf.fd);
-            memmove(&g_import_cache[0], &g_import_cache[1],
-                    (IMPORT_CACHE_SIZE-1) * sizeof(import_cache_entry_t));
-            slot = IMPORT_CACHE_SIZE - 1;
-            memset(&g_import_cache[slot], 0, sizeof(import_cache_entry_t));
-        }
+    hb_mem_common_buf_t out_buf = {0};
+    int ret = hb_mem_import_com_buf(&in_buf, &out_buf);
+    if (ret != 0) return ret;
 
-        hb_mem_common_buf_t in_buf = {0};
-        in_buf.share_id = share_id;
-        hb_mem_common_buf_t out_buf = {0};
-        int ret = hb_mem_import_com_buf(&in_buf, &out_buf);
-        if (ret != 0) return ret;
+    // Invalidate cache before reading
+    hb_mem_invalidate_buf_with_vaddr((uint64_t)out_buf.virt_addr, out_buf.size);
 
-        g_import_cache[slot].share_id = share_id;
-        g_import_cache[slot].buf = out_buf;
-        cached = &g_import_cache[slot].buf;
-    }
+    // Read H.265 data directly from VPU physical memory
+    memcpy(dst, out_buf.virt_addr, data_size);
 
-    // Invalidate cache before reading (required for DMA coherence)
-    hb_mem_invalidate_buf_with_vaddr((uint64_t)cached->virt_addr, cached->size);
+    // Release imported mapping
+    hb_mem_free_buf(out_buf.fd);
 
-    // Read H.265 data directly from mapped VPU buffer
-    memcpy(dst, cached->virt_addr, data_size);
     return 0;
 }
 
-// Signal consumed (encoder can release VPU buffer)
-void mark_h265_consumed(H265ZeroCopyBuffer* shm) {
-    if (!shm) return;
-    __atomic_store_n(&shm->frame.consumed, 1, __ATOMIC_RELEASE);
-    sem_post((sem_t*)&shm->consumed_sem);
-}
 
 */
 import "C"
@@ -243,7 +201,7 @@ func (r *Reader) ReadLatest() (*types.VideoFrame, error) {
 		return nil, nil
 	}
 
-	if cFrame.share_id < 0 || cFrame.data_size == 0 {
+	if cFrame.data_size == 0 {
 		return nil, nil
 	}
 
@@ -254,18 +212,16 @@ func (r *Reader) ReadLatest() (*types.VideoFrame, error) {
 		r.buf = make([]byte, dataSize)
 	}
 
-	// Import VPU buffer and copy H.265 data
+	// Import VPU buffer using full descriptor (same as Python)
 	ret := C.import_h265_data(
-		cFrame.share_id,
+		(*C.uint8_t)(unsafe.Pointer(&cFrame.hb_mem_buf_data[0])),
 		cFrame.data_size,
 		(*C.uint8_t)(unsafe.Pointer(&r.buf[0])),
 		C.uint32_t(len(r.buf)),
 	)
 
-	// No consumed signal needed — encoder releases previous buffer on next frame
-
 	if ret != 0 {
-		return nil, fmt.Errorf("import_h265_data failed: %d (share_id=%d)", ret, cFrame.share_id)
+		return nil, fmt.Errorf("import_h265_data failed: %d", ret)
 	}
 
 	// Build frame
