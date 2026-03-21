@@ -112,11 +112,6 @@ camera_switcher_record_brightness(CameraSwitchController *ctrl,
 
 /**
  * Calculate mean luma (0-255) from a Frame.
- * Supports JPEG (format=0), NV12 (format=1), and RGB (format=2).
- * Returns negative value on error.
- */
-double frame_calculate_mean_luma(const Frame *frame);
-
 /**
  * Convenience: process a frame, record brightness, and (optionally) publish if
  * active.

@@ -53,8 +53,8 @@ LDLIBS_DAEMON_OLD := $(LDLIBS_COMMON) -lpthread -lspcdev -lcam -lvpf -lhbmem
 LDLIBS_POC_LOWLEVEL := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lmultimedia
 LDLIBS_ISP_LOWLIGHT := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lm
 LDLIBS_AWB_TUNING := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem
-LDLIBS_SWITCHER_DEMO := $(LDLIBS_COMMON) -ljpeg
-LDLIBS_SWITCHER_DAEMON := $(LDLIBS_COMMON) -lpthread -ljpeg
+LDLIBS_SWITCHER_DEMO := $(LDLIBS_COMMON)
+LDLIBS_SWITCHER_DAEMON := $(LDLIBS_COMMON) -lpthread
 LDLIBS_HB_MEM_IMPORT := $(LDLIBS_COMMON) -lpthread -lhbmem
 
 DAEMON_ARGS ?= -C 0 -P 1
