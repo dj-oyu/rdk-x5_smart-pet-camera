@@ -41,14 +41,7 @@ static void *encoder_thread_worker(void *arg) {
 
     encoder_frame_t *frame = &ctx->queue[read_idx % ENCODER_QUEUE_SIZE];
 
-    // Release previous VPU output buffer (held for Go to import)
-    // Go has had one full frame interval (33ms) to read it
-    if (ctx->prev_enc_out.vir_ptr) {
-      encoder_release_output(ctx->encoder, &ctx->prev_enc_out, 2000);
-      memset(&ctx->prev_enc_out, 0, sizeof(ctx->prev_enc_out));
-    }
-
-    // Encode: VSE virt_addr → VPU (memcpy input only, output is zero-copy)
+    // Encode FIRST, then release prev (so SHM always has valid share_id)
     encoder_output_t enc_out = {0};
     int ret = encoder_encode_frame_zerocopy(
         ctx->encoder,
@@ -80,8 +73,10 @@ static void *encoder_thread_worker(void *arg) {
         shm_h265_zc_write(ctx->shm_h265_zc, &zc);
       }
 
-      // Hold VPU buffer — released at start of NEXT frame
-      // Go has 33ms (one frame interval) to import via share_id
+      // NOW release previous VPU buffer (SHM has new share_id, prev is safe to free)
+      if (ctx->prev_enc_out.vir_ptr) {
+        encoder_release_output(ctx->encoder, &ctx->prev_enc_out, 2000);
+      }
       ctx->prev_enc_out = enc_out;
       __atomic_fetch_add(&ctx->frames_encoded, 1, __ATOMIC_RELAXED);
     } else {
