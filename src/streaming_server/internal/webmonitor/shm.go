@@ -191,7 +191,7 @@ static void close_frame_zc(ZeroCopyFrameBuffer* shm) {
 static int import_zc_nv12(ZeroCopyFrameBuffer* shm, uint8_t* dst, int dst_size, int* out_w, int* out_h) {
     if (!shm || !dst) return -1;
     ZeroCopyFrame* f = (ZeroCopyFrame*)&shm->frame;
-    if (f->plane_cnt < 1 || f->share_id[0] <= 0) return -1;
+    if (f->plane_cnt < 1) return -1;
 
     int total_size = 0;
     for (int i = 0; i < f->plane_cnt; i++) total_size += f->plane_size[i];
@@ -203,15 +203,25 @@ static int import_zc_nv12(ZeroCopyFrameBuffer* shm, uint8_t* dst, int dst_size, 
         if (!hb_mem_init_done) { hb_mem_module_open(); hb_mem_init_done = 1; }
     }
 
-    // Import via share_id
-    hb_mem_common_buf_t in_buf = {0};
-    in_buf.share_id = f->share_id[0];
-    hb_mem_common_buf_t out_buf = {0};
-    if (hb_mem_import_com_buf(&in_buf, &out_buf) != 0) return -3;
+    // Import via full graphic buffer descriptor (same as Python)
+    hb_mem_graphic_buf_t in_gbuf;
+    memcpy(&in_gbuf, f->hb_mem_buf_data, sizeof(hb_mem_graphic_buf_t));
 
-    hb_mem_invalidate_buf_with_vaddr((uint64_t)out_buf.virt_addr, out_buf.size);
-    memcpy(dst, out_buf.virt_addr, total_size);
-    hb_mem_free_buf(out_buf.fd);
+    hb_mem_graphic_buf_t out_gbuf = {0};
+    if (hb_mem_import_graph_buf(&in_gbuf, &out_gbuf) != 0) return -3;
+
+    // Copy plane data
+    int offset = 0;
+    for (int i = 0; i < f->plane_cnt && i < out_gbuf.plane_cnt; i++) {
+        hb_mem_invalidate_buf_with_vaddr((uint64_t)out_gbuf.virt_addr[i], out_gbuf.size[i]);
+        memcpy(dst + offset, out_gbuf.virt_addr[i], f->plane_size[i]);
+        offset += f->plane_size[i];
+    }
+
+    // Release imported mapping
+    for (int i = 0; i < out_gbuf.plane_cnt; i++) {
+        if (out_gbuf.fd[i] > 0) hb_mem_free_buf(out_gbuf.fd[i]);
+    }
 
     *out_w = f->width;
     *out_h = f->height;
