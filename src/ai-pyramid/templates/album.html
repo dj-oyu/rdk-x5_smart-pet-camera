@@ -49,17 +49,17 @@
     color: var(--accent);
   }
 
-  /* Gallery — horizontal scroll strip */
+  /* Gallery — horizontal carousel */
   .gallery {
     display: flex;
     overflow-x: scroll;
     gap: 8px;
     padding-bottom: 8px;
-    overscroll-behavior: contain;
+    overscroll-behavior-x: contain;
     -webkit-overflow-scrolling: touch;
-    margin-right: -12px;
-    padding-right: 12px;
+    padding-inline: calc(50% - 110px);
     scrollbar-width: none;
+    scroll-snap-type: x mandatory;
   }
   .gallery::-webkit-scrollbar { display: none; }
 
@@ -68,14 +68,14 @@
   .card {
     position: relative;
     flex-shrink: 0;
-    width: 200px;
-    border-radius: 8px;
+    width: 220px;
+    border-radius: 10px;
     overflow: hidden;
     background: rgba(0,0,0,0.28);
     border: 1px solid rgba(255,255,255,0.08);
     cursor: pointer;
-    transition: transform 0.15s ease, box-shadow 0.15s ease;
-    scroll-snap-align: start;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    scroll-snap-align: center;
   }
   .card:hover {
     transform: scale(1.02);
@@ -111,15 +111,24 @@
   .badge.chatora { background: rgba(255,183,77,0.3); color: #ffb74d; }
   .badge.other-badge { background: rgba(110,231,255,0.2); color: var(--accent); }
 
-  /* Footer — date + info, always visible */
+  /* Footer — hidden by default, shown on active (center) card */
   .card-footer {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 5px 8px;
+    max-height: 0;
+    padding: 0 8px;
+    overflow: hidden;
+    opacity: 0;
     background: rgba(0,0,0,0.4);
     font-size: 11px;
     color: var(--text-muted);
+    transition: max-height 0.25s ease, padding 0.25s ease, opacity 0.25s ease;
+  }
+  .card.active .card-footer {
+    max-height: 40px;
+    padding: 5px 8px;
+    opacity: 1;
   }
   .card-footer .behavior { font-size: 10px; opacity: 0.7; }
 
@@ -175,7 +184,7 @@
     left: 0; top: 0; bottom: 0;
     width: 200px;
     background: linear-gradient(to right, var(--bg-deep), transparent);
-    z-index: 2;
+    z-index: 1;
     pointer-events: none;
   }
   /* Right edge glow — elliptical bloom at the newest edge */
@@ -187,9 +196,9 @@
     transform: translateY(-50%);
     width: 120px;
     height: 160%;
-    background: radial-gradient(ellipse at center, rgba(110,231,255,0.7) 0%, rgba(110,231,255,0.2) 35%, transparent 65%);
+    background: radial-gradient(ellipse at center, rgba(110,231,255,0.35) 0%, rgba(110,231,255,0.08) 35%, transparent 65%);
     filter: blur(12px);
-    z-index: 2;
+    z-index: 1;
     pointer-events: none;
     opacity: 0;
     transition: opacity 0.4s;
@@ -206,8 +215,15 @@
     .gallery {
       flex-wrap: wrap;
       overflow-x: visible;
+      padding-inline: 0;
+      scroll-snap-type: none;
     }
     .card { width: calc(50% - 4px); }
+    .card-footer {
+      max-height: none;
+      padding: 5px 8px;
+      opacity: 1;
+    }
     .gallery-wrap::before, .gallery-wrap::after { display: none; }
   }
   @media (max-width: 480px) {
@@ -302,6 +318,32 @@ document.addEventListener('keydown', function(e) {
   g.scrollLeft = g.scrollWidth;
   updateEdge();
   g.addEventListener('scroll', updateEdge);
+})();
+
+// Center-card detection — only the center card shows its footer
+(function() {
+  var g = document.getElementById('gallery');
+  if (!g || window.innerWidth <= 960) return;
+
+  var activeCard = null;
+  function updateActive() {
+    var cards = g.querySelectorAll('.card');
+    var center = g.scrollLeft + g.clientWidth / 2;
+    var best = null, bestDist = Infinity;
+    cards.forEach(function(c) {
+      var mid = c.offsetLeft + c.offsetWidth / 2;
+      var dist = Math.abs(mid - center);
+      if (dist < bestDist) { bestDist = dist; best = c; }
+    });
+    if (best !== activeCard) {
+      if (activeCard) activeCard.classList.remove('active');
+      if (best) best.classList.add('active');
+      activeCard = best;
+    }
+  }
+  g.addEventListener('scroll', updateActive);
+  // Initial
+  requestAnimationFrame(updateActive);
 })();
 
 // Incremental loading — older images load as user scrolls left
