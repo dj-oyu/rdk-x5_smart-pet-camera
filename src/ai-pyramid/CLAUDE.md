@@ -1,18 +1,23 @@
-# ai-pyramid — Album & VLM Service (M5Stack AI Pyramid / AX8850)
+# ai-pyramid — Album & VLM Service (M5Stack AI Pyramid Pro / AX8850)
 
 ## Overview
-AI Pyramid (AX8850) 上で動作するアルバム管理・VLM行動解析サービス。
+AI Pyramid Pro (Axera AX8850 / 内部: AX650C) 上で動作するアルバム管理・VLM行動解析サービス。
 RDK X5のPreact SPAからiframeで埋め込まれる独立Webアプリ。
 
-## Device Specs
-- NPU: 24 TOPS (INT8)
-- Memory: 8GB LPDDR4x
-- Storage: eMMC 32GB
+## Device Specs (実機計測値)
+- SoC: Axera AX8850 (AX650C_CHIP), Board: AX650N_M5stack_8G
+- CPU: 8× Cortex-A55 @ 1500MHz (ARMv8.2-A, NEON/FP16/DotProd)
+- NPU: 24 TOPS (INT8), 第5世代 Transformer最適化, AX_ENGINE v2.12.0s
+- Memory: 8GB LPDDR4x → **System 2GB + CMM 6GB** (HWアクセラレーション用)
+- Storage: eMMC 32GB + microSD
 - Network: Tailscale (HTTPS, `m5stack-ai-pyramid.tail848eb5.ts.net`)
+- SDK: Axera SDK V3.6.4, Pulsar2 v4.1+
+- Python: Python 3, PyAXEngine (cffi, ONNXRuntime互換)
+- LLM/VLM: ax-llm (OpenAI API互換), axmodel形式
 
 ## Architecture
 ```
-RDK X5                              AI Pyramid
+RDK X5                              AI Pyramid Pro
 Preact SPA                          Album Web App (:8090 HTTPS)
   └─ <iframe src=".../album">  ──→    ├─ 写真一覧・フィルタ・キャプション
                                        ├─ 行動履歴タイムライン
@@ -20,6 +25,8 @@ Preact SPA                          Album Web App (:8090 HTTPS)
 
 inotify+rsync ─────────────────→  data/photos/ (eMMC)
                                   data/pet-album.db (SQLite)
+
+ax-llm (:8091, OpenAI API互換)  ←  VLM推論 (Qwen3-VL-2B → Qwen3.5目標)
 ```
 
 ## Data Paths
@@ -27,6 +34,10 @@ inotify+rsync ─────────────────→  data/photo
 - DB: `data/pet-album.db` (SQLite on eMMC)
 - Thumbnails: `data/thumbnails/`
 - All under `/data/` — gitignored
+
+## VLM Model Strategy
+1. **現行**: Qwen3-VL-2B-Instruct (GPTQ-Int4) — AXERA公式axmodel提供済み
+2. **目標**: Qwen3.5-2B (Early-Fusion VLM) — axmodel変換検証中
 
 ## Planned Features
 1. **Album UI**: iframe配信、写真一覧、is_validフィルタ、ライトボックス
