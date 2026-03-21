@@ -66,7 +66,9 @@ static void *switcher_thread(void *arg) {
     while (g_running) {
         // Read brightness directly from DAY camera ISP handle
         isp_brightness_result_t brightness = {.valid = false};
-        isp_get_brightness(g_pipelines[0].vio.isp_handle, &brightness);
+        if (g_pipelines[0].vio.isp_handle > 0) {
+            isp_get_brightness(g_pipelines[0].vio.isp_handle, &brightness);
+        }
 
         if (brightness.valid) {
             CameraSwitchDecision decision = camera_switcher_record_brightness(
