@@ -42,6 +42,30 @@ CATEGORIES = {
         "Dog types",
         "Canis lupus familiaris",
     ],
+    # --- is_valid boundary conditions ---
+    "edge_partial": [
+        "Cat tails",
+        "Cat paws and claws",
+    ],
+    "edge_far": [
+        "Cats in gardens",
+    ],
+    "edge_dark": [
+        "Cats at night",
+    ],
+    "edge_multi": [
+        "Groups of cats",
+    ],
+    "edge_fake": [
+        "Cat toys",
+        "Maneki-neko",
+        "Gat de Botero (El Raval)",
+        "Carreras Cigarette Factory Cat Statues",
+    ],
+    "edge_empty": [
+        "Interior design",
+        "Living rooms",
+    ],
 }
 
 # Expected VLM ground truth for each category
@@ -50,6 +74,12 @@ GROUND_TRUTH = {
     "tabby": {"is_valid": True, "pet_id": "chatora"},
     "other_cat": {"is_valid": True, "pet_id": None},
     "non_cat": {"is_valid": False, "pet_id": None},
+    "edge_partial": {"is_valid": True, "pet_id": None},
+    "edge_far": {"is_valid": True, "pet_id": None},
+    "edge_dark": {"is_valid": True, "pet_id": None},
+    "edge_multi": {"is_valid": True, "pet_id": None},
+    "edge_fake": {"is_valid": False, "pet_id": None},
+    "edge_empty": {"is_valid": False, "pet_id": None},
 }
 
 API_URL = "https://commons.wikimedia.org/w/api.php"

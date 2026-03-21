@@ -24,4 +24,4 @@ go test ./...
 - Recording: H.265 NAL → .hevc → ffmpeg `-f hevc -c copy` → .mp4, heartbeat 3s timeout, max 30min
 
 ## Docs
-→ `docs/streaming-server.md`, `docs/recording-design.md`, `docs/pet-album-spec-DRAFT.md`
+→ `docs/streaming-server.md`, `docs/recording-design.md`, `docs/pet-album-spec.md`

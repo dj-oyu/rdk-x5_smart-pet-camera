@@ -26,7 +26,7 @@
 | `streaming-server.md` | Go server, WebRTC, API |
 | `shared-memory.md` | 9 SHM regions, zero-copy, IPC |
 | `performance.md` | CPU optimization, idle throttling |
-| `pet-album-spec-DRAFT.md` | Album feature (iframe, AI Pyramid, rsync) |
+| `pet-album-spec.md` | Album feature (iframe, AI Pyramid, rsync) |
 | `vlm_integration_spec.md` | VLM behavior analysis spec |
 | `hardware-specs.md` | GPU/VPU/BPU specs, nano2D/VSE/hbn_vflow benchmarks |
 | `hw-offload-roadmap.md` | H.265移行 + HWオフロード実装計画 |
