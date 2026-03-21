@@ -15,7 +15,7 @@ import (
 
 // newTestComicCapture creates a ComicCapture with SkipStitch=true (no nano2D in tests)
 func newTestComicCapture(src frameSource, outputDir string) *ComicCapture {
-	cc := newTestComicCapture(src, outputDir)
+	cc := NewComicCapture(src, outputDir)
 	cc.SkipStitch = true
 	return cc
 }
@@ -127,7 +127,7 @@ func TestHasPet(t *testing.T) {
 	}
 }
 
-func TestPetBBox(t *testing.T) {
+func TestPetDetection(t *testing.T) {
 	det := &DetectionResult{
 		Detections: []Detection{
 			{ClassName: "cat", Confidence: 0.5, BBox: BoundingBox{X: 10, Y: 10, W: 50, H: 50}},
@@ -135,12 +135,15 @@ func TestPetBBox(t *testing.T) {
 		},
 	}
 
-	bbox := petBBox(det)
+	bbox, class := petDetection(det)
 	if bbox == nil {
 		t.Fatal("expected non-nil bbox")
 	}
 	if bbox.X != 100 || bbox.Y != 100 {
 		t.Errorf("expected highest-confidence pet bbox, got %+v", bbox)
+	}
+	if class != "dog" {
+		t.Errorf("expected class 'dog', got %q", class)
 	}
 }
 
