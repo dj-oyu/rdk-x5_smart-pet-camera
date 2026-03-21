@@ -1,4 +1,4 @@
-use crate::db::{PhotoFilter, PhotoStore, Stats};
+use crate::db::{PhotoFilter, PhotoStore};
 use askama::Template;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -99,7 +99,6 @@ struct AlbumTemplate {
     total: i64,
     filter_valid: String,
     filter_pet_id: String,
-    stats: Stats,
 }
 
 async fn handle_album_page(
@@ -110,17 +109,23 @@ async fn handle_album_page(
     let filter_valid = q.is_valid.unwrap_or_default();
     let filter_pet_id = q.pet_id.unwrap_or_default();
 
+    // Initial page: newest 20, reversed so oldest is first (left→right = old→new)
+    let page_filter = PhotoFilter {
+        limit: Some(20),
+        ..filter
+    };
     let store = state.store.lock().unwrap();
-    let (photos, total) = store.list(&filter).unwrap_or_default();
-    let stats = store.stats().unwrap_or(Stats { total: 0, valid: 0, invalid: 0, pending: 0 });
+    let (photos, total) = store.list(&page_filter).unwrap_or_default();
     drop(store);
 
+    let mut photos: Vec<PhotoJson> = photos.into_iter().map(PhotoJson::from).collect();
+    photos.reverse(); // oldest first → left=old, right=new
+
     let template = AlbumTemplate {
-        photos: photos.into_iter().map(PhotoJson::from).collect(),
+        photos,
         total,
         filter_valid,
         filter_pet_id,
-        stats,
     };
     Html(template.render().unwrap_or_else(|e| format!("Template error: {e}")))
 }
