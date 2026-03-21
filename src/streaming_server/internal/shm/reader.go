@@ -91,29 +91,63 @@ int read_h265_frame(H265ZeroCopyBuffer* shm, H265ZeroCopyFrame* out) {
     return 0;
 }
 
-// Import VPU buffer via share_id and copy H.265 data to Go buffer
+// Cache for imported VPU buffers (VPU rotates 3 output buffers)
+#define IMPORT_CACHE_SIZE 4
+typedef struct {
+    int32_t share_id;
+    hb_mem_common_buf_t buf;
+} import_cache_entry_t;
+
+static import_cache_entry_t g_import_cache[IMPORT_CACHE_SIZE] = {0};
+
+// Import VPU buffer via share_id (cached)
 int import_h265_data(int32_t share_id, uint32_t data_size,
                      uint8_t* dst, uint32_t dst_size) {
     if (share_id < 0 || data_size == 0 || !dst || data_size > dst_size) return -1;
     ensure_hb_mem_init();
 
-    // Set up import request with share_id
-    hb_mem_common_buf_t in_buf = {0};
-    in_buf.share_id = share_id;
+    // Check cache
+    hb_mem_common_buf_t *cached = NULL;
+    for (int i = 0; i < IMPORT_CACHE_SIZE; i++) {
+        if (g_import_cache[i].share_id == share_id && g_import_cache[i].buf.virt_addr) {
+            cached = &g_import_cache[i].buf;
+            break;
+        }
+    }
 
-    hb_mem_common_buf_t out_buf = {0};
-    int ret = hb_mem_import_com_buf(&in_buf, &out_buf);
-    if (ret != 0) return ret;
+    // Cache miss: import and cache
+    if (!cached) {
+        // Find empty slot or evict oldest
+        int slot = -1;
+        for (int i = 0; i < IMPORT_CACHE_SIZE; i++) {
+            if (g_import_cache[i].share_id == 0) { slot = i; break; }
+        }
+        if (slot == -1) {
+            // Evict slot 0 (FIFO)
+            if (g_import_cache[0].buf.fd > 0)
+                hb_mem_free_buf(g_import_cache[0].buf.fd);
+            memmove(&g_import_cache[0], &g_import_cache[1],
+                    (IMPORT_CACHE_SIZE-1) * sizeof(import_cache_entry_t));
+            slot = IMPORT_CACHE_SIZE - 1;
+            memset(&g_import_cache[slot], 0, sizeof(import_cache_entry_t));
+        }
 
-    // Invalidate cache before reading
-    hb_mem_invalidate_buf_with_vaddr((uint64_t)out_buf.virt_addr, out_buf.size);
+        hb_mem_common_buf_t in_buf = {0};
+        in_buf.share_id = share_id;
+        hb_mem_common_buf_t out_buf = {0};
+        int ret = hb_mem_import_com_buf(&in_buf, &out_buf);
+        if (ret != 0) return ret;
 
-    // Copy H.265 data to Go-managed buffer
-    memcpy(dst, out_buf.virt_addr, data_size);
+        g_import_cache[slot].share_id = share_id;
+        g_import_cache[slot].buf = out_buf;
+        cached = &g_import_cache[slot].buf;
+    }
 
-    // Release imported mapping (does NOT free the original — encoder still owns it)
-    hb_mem_free_buf(out_buf.fd);
+    // Invalidate cache before reading (required for DMA coherence)
+    hb_mem_invalidate_buf_with_vaddr((uint64_t)cached->virt_addr, cached->size);
 
+    // Read H.265 data directly from mapped VPU buffer
+    memcpy(dst, cached->virt_addr, data_size);
     return 0;
 }
 
@@ -148,10 +182,10 @@ const (
 
 // Reader reads H.265 frames from zero-copy shared memory
 type Reader struct {
-	shm      *C.H265ZeroCopyBuffer
-	shmName  string
-	buf      []byte // Reusable buffer for imported data
-	signaled bool   // True after first ready signal sent
+	shm         *C.H265ZeroCopyBuffer
+	shmName     string
+	buf         []byte // Reusable buffer for imported data
+	lastVersion uint32 // Track frame version to avoid duplicates
 }
 
 // NewReader creates a new H.265 zero-copy reader
@@ -212,6 +246,7 @@ func (r *Reader) ReadLatest() (*types.VideoFrame, error) {
 	if cFrame.share_id < 0 || cFrame.data_size == 0 {
 		return nil, nil
 	}
+
 
 	dataSize := uint32(cFrame.data_size)
 	if dataSize > MaxH265FrameSize {
