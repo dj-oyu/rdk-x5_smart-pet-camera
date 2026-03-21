@@ -569,30 +569,153 @@ ax-llm の OpenAI API互換エンドポイントを利用:
 
 #### 4.5 アルバムWebアプリ（AI Pyramid Pro側）
 
-AI Pyramid Proが完全なHTMLを配信する独立Webアプリ:
-- `https://m5stack-ai-pyramid:8090/album` でアクセス
+AI Pyramid Proが完全なHTMLを配信する独立Webアプリ（Rust / axum / askama SSR）:
+- `https://m5stack-ai-pyramid.tail848eb5.ts.net:8082/album` でアクセス
 - AI Pyramid Pro単体でブラウザアクセスしても完全なUIが見える
-- 技術選択は自由（Go + html/template + HTMX、またはSPA等）
+- RDK X5のPreact SPAからiframeで埋め込み
 
-**RDK X5側の変更（最小限）:**
+**実装済み（`src/ai-pyramid/`）:**
+- Rust axum HTTPSサーバー（Tailscale cert自動検出）
+- SQLite DB + fsnotify監視 + VLMパイプライン
+- 横スクロールカードギャラリー（wheelイベントで横変換）
+- ホバーでキャプションオーバーレイ、pet_idバッジ
+- 左フェードグラデーション、右端グローエフェクト
+- IntersectionObserverによるインクリメンタルロード
+- RSS 20MB（2GB制約に対して1%）
+
+#### 4.6 iframe統合（RDK X5 Preact SPA側）
+
+**変更対象:** `src/web/src/components/Sidebar.tsx`
+
+**現在の構造（置き換え対象）:**
 ```tsx
-// Sidebar.tsx: アルバムセクションをiframeに置き換え
-<iframe
-  src="https://m5stack-ai-pyramid.tail848eb5.ts.net:8090/album"
-  style="width:100%;border:none;"
-/>
-// 読み込み失敗時 → 「アルバムサービスに接続できません」表示
+// Sidebar.tsx L247-L277
+<div class="panel">
+  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+    <h2>アルバム</h2>
+  </div>
+  <div class="comic-gallery" ref={galleryRef}>
+    {/* comic-card の横スクロールリスト — これをiframeに置き換え */}
+  </div>
+</div>
 ```
 
-- Go Serverからcomic API削除可能（Proxy不要）
-- Go Serverの責務: 映像配信 + YOLO検出 に専念
+**置き換え後:**
+```tsx
+<div class="panel">
+  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+    <h2>アルバム</h2>
+    <a href="https://m5stack-ai-pyramid.tail848eb5.ts.net:8082/album"
+       target="_blank" class="album-link" title="Open in new tab">↗</a>
+  </div>
+  <AlbumIframe />
+</div>
+```
+
+**AlbumIframeコンポーネント:**
+```tsx
+const ALBUM_URL = 'https://m5stack-ai-pyramid.tail848eb5.ts.net:8082/album';
+
+function AlbumIframe() {
+  const [status, setStatus] = useState<'loading' | 'ok' | 'error'>('loading');
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+
+  useEffect(() => {
+    // ヘルスチェックでAI Pyramid Proの可用性を確認
+    fetch(ALBUM_URL.replace('/album', '/health'), { mode: 'no-cors' })
+      .then(() => setStatus('ok'))
+      .catch(() => setStatus('error'));
+  }, []);
+
+  if (status === 'error') {
+    return (
+      <div class="album-offline">
+        <span class="muted">アルバムサービスに接続できません</span>
+      </div>
+    );
+  }
+
+  return (
+    <iframe
+      ref={iframeRef}
+      src={ALBUM_URL}
+      class="album-iframe"
+      onLoad={() => setStatus('ok')}
+      onError={() => setStatus('error')}
+    />
+  );
+}
+```
+
+**CSS（monitor.css に追加）:**
+```css
+/* Album iframe — replaces .comic-gallery */
+.album-iframe {
+  width: 100%;
+  height: 200px;  /* カード高さ + フィルタ行 + padding */
+  border: none;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.album-offline {
+  padding: 20px 0;
+  text-align: center;
+}
+
+.album-link {
+  font-size: 14px;
+  color: var(--text-muted);
+  text-decoration: none;
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+.album-link:hover {
+  opacity: 1;
+  color: var(--accent);
+}
+```
+
+**iframeコンテンツ（album.html）のデザイン制約:**
+
+| 項目 | 値 | 根拠 |
+|------|-----|------|
+| 背景色 | `#070a12` (--bg-deep) | 親SPAと統一、iframe境界を目立たせない |
+| body padding | 8px | .panel の padding: 16px に内包される |
+| フォント | Space Grotesk, Noto Sans JP | 親SPAと同一フォントスタック |
+| カード幅 | 200px (desktop), 160px (960px), 140px (480px) | 既存 .comic-card と同一 |
+| カード背景 | `rgba(0,0,0,0.28)` + 1px border `rgba(255,255,255,0.08)` | 既存 .comic-card と同一 |
+| カードhover | `scale(1.02)` + `box-shadow: 0 8px 24px rgba(110,231,255,0.2)` | シアングロー |
+| スクロールバー | 非表示 (scrollbar-width: none) | wheelイベントで横スクロール |
+| バッジ | pet_id色: mike=赤系, chatora=オレンジ系, other=シアン系 | 既存UIのカラーパレット |
+| アクセントカラー | `#6ee7ff` (--accent) | 右端グロー、フィルタactive |
+| フッター背景 | `rgba(0,0,0,0.4)` | 既存 .comic-card-footer と同一 |
+
+**レスポンシブ対応:**
+
+| ビューポート | iframe表示 | カード | 備考 |
+|-------------|-----------|--------|------|
+| >960px | サイドバー内 (280px幅) | 200px | 横スクロール |
+| 960px以下 | フル幅 (1カラム) | 160px | 横スクロール |
+| 480px以下 | フル幅 | 140px | 横スクロール |
+
+**スクロール操作:**
+- マウスホイール → 横スクロール（gallery要素に `wheel` イベントリスナー）
+- タッチ → ネイティブ横スワイプ
+- 右端（最新）: シアン楕円グロー + バウンスエフェクト
+- 左端（古い）: フェードグラデーション + IntersectionObserverで追加読み込み
+
+**削除する既存コード:**
+- `useSidebar` 内の comics fetch/pagination ロジック（L148-L219）
+- `SidebarView` 内の comic-gallery JSX（L253-L276）
+- Go Server の `/api/comics`, `/api/comics/{filename}` エンドポイント（将来的に）
 
 ### Phase 3: ギャラリー強化
 
-- キャプション表示（VLM付与テキスト）
-- is_validフィルタリング（デフォルト: 良い写真のみ、トグルで全表示）
-- 個体別フィルタ（三毛猫 / 茶トラ）
-- 時系列ビュー / カレンダービュー
+- 個体別フィルタ（三毛猫 / 茶トラ） — 実装済み
+- is_validフィルタリング（デフォルト: 良い写真のみ） — 実装済み
+- キャプション表示（VLM付与テキスト） — 実装済み（ホバーオーバーレイ）
+- 時系列ビュー / カレンダービュー — 将来
 
 ### 将来: MCP拡張
 

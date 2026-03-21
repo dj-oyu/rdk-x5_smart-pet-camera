@@ -462,7 +462,7 @@ if (shm_fd == -1 && errno == EEXIST) {
 - IoUベースの重なり判定
 
 ### アルバム機能拡張
-- 詳細は `pet-album-spec-DRAFT.md` 参照
+- 詳細は `pet-album-spec.md` 参照
 
 ---
 

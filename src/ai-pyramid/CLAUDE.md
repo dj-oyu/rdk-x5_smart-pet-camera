@@ -48,4 +48,4 @@ src/ai-pyramid/
 - **Concurrency**: VLM worker = 1 (NPU exclusive resource)
 
 ## Docs
-→ `docs/pet-album-spec-DRAFT.md`, `docs/vlm_integration_spec.md`
+→ `docs/pet-album-spec.md`, `docs/vlm_integration_spec.md`
