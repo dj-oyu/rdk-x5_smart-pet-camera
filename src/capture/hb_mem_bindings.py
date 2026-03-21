@@ -574,6 +574,7 @@ class HbMemGraphicBuffer:
 
         self._fd = list(struct_mod.unpack_from("<3i", out_bytes, L["fd"]))
         self._virt_addr = list(struct_mod.unpack_from("<3Q", out_bytes, L["virt_addr"]))
+        self._phys_addr = list(struct_mod.unpack_from("<3Q", out_bytes, L["phys_addr"]))
         self._size = list(struct_mod.unpack_from("<3Q", out_bytes, L["size"]))
         self._plane_cnt = struct_mod.unpack_from("<i", out_bytes, L["plane_cnt"])[0]
 
@@ -586,6 +587,19 @@ class HbMemGraphicBuffer:
             f"vaddr=[0x{self._virt_addr[0]:x}, 0x{self._virt_addr[1]:x}], "
             f"size={self._size[:self._plane_cnt]}, planes={self._plane_cnt}"
         )
+
+    @property
+    def phys_addr(self) -> list[int]:
+        """Physical addresses for each plane."""
+        return self._phys_addr[:self._plane_cnt]
+
+    @property
+    def stride(self) -> int:
+        """Buffer stride (from raw descriptor)."""
+        import struct as struct_mod
+        if self._out_buf:
+            return struct_mod.unpack_from("<i", bytes(self._out_buf), _GRAPH_BUF_LAYOUT["stride"])[0]
+        return 0
 
     def invalidate_cache(self, plane: int = -1) -> None:
         """
