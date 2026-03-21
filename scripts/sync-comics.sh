@@ -6,7 +6,7 @@
 set -euo pipefail
 
 WATCH_DIR="${RECORDING_PATH:-./recordings}/comics"
-REMOTE_HOST="m5stack-ai-pyramid"
+REMOTE_HOST="ai-pyramid"
 REMOTE_DIR="/app/smart-pet-camera/src/ai-pyramid/data/photos"
 LOG_TAG="comic-sync"
 
