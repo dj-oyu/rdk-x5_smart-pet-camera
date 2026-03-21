@@ -489,6 +489,55 @@ CPU:                                 [後処理 N]      [後処理 N+1] ...
 
 **結論**: 単体ベンチマーク上はCPUが速いが、**システム全体のCPU飽和を防ぐためにnano2Dオフロードは有効**。特に夜間3ROI + ストリーミング同時動作時にメリットが大きい。nano2Dレターボックス (0.98ms) は30fpsのフレーム間隔 (33ms) に対して十分高速。
 
+#### VSE → nano2D 連携パイプライン ベンチマーク (実測値)
+
+VSE 4チャンネル出力 → nano2D letterbox → 640x640 NV12:
+
+| パイプライン | 性能 (60フレーム) | 備考 |
+|-------------|-------------------|------|
+| VSE only (4ch) | **3.66 ms/frame** (273 fps) | スケール+ROIクロップのみ |
+| VSE + nano2D letterbox (4ch) | **24.80 ms/frame** (40 fps) | hbmem→n2dコピー含む |
+| VSE + CPU letterbox (4ch) | **182.13 ms/frame** (5.5 fps) | CPUスケーリング+letterbox |
+
+**分析**:
+- VSE→nano2D間の `hbmem→n2d_buffer_t` メモリコピーが支配的 (~5ms/ch)
+- nano2D letterbox自体は高速 (fill+blit ~1ms) だが、バッファ間コピーがボトルネック
+- CPUスケーリング+letterboxの182msと比較すると**7.3倍高速**
+- **改善策**: hbmem物理アドレスから直接n2dバッファをwrapできれば、コピー不要で高速化可能
+
+**出力ファイル検証**: `/tmp/vse_n2d_test/11_lb_ch*.yuv` (640x640 NV12) — YUVビューアで黒帯+映像が正しく配置されていることを確認済み
+
+テストコード（バッファ事前確保パターン）:
+
+```c
+#include "GC820/nano2D.h"
+#include "hbn_api.h"
+#include "vse_cfg.h"
+
+// ビルド: gcc -O2 -o test test.c -lNano2Dutil -lNano2D -lcam -lvpf -lhbmem -lalog -lpthread -ldl -lm
+
+// バッファ事前確保 (ホットループ外)
+n2d_buffer_t n2d_src, n2d_dst;
+n2d_util_allocate_buffer(640, 360, N2D_NV12, ..., &n2d_src);
+n2d_util_allocate_buffer(640, 640, N2D_NV12, ..., &n2d_dst);
+
+// ホットループ
+while (running) {
+    hbn_vnode_getframe(vse_h, ch, 2000, &out);
+
+    // hbmem → n2d コピー (TODO: 物理アドレスwrapで高速化)
+    copy_hbmem_to_n2d(&out.buffer, &n2d_src, w, h);
+
+    // nano2D letterbox (GPU実行、CPUフリー)
+    n2d_fill(&n2d_dst, NULL, 0x00108080, N2D_BLEND_NONE);    // 黒帯
+    n2d_rectangle_t r = {0, pad_top, 640, scaled_h};
+    n2d_blit(&n2d_dst, &r, &n2d_src, NULL, N2D_BLEND_NONE);  // 中央配置
+    n2d_commit();
+
+    hbn_vnode_releaseframe(vse_h, ch, &out);
+}
+```
+
 ## YOLO検出: Python→C移行分析
 
 ### 現行パイプライン性能
