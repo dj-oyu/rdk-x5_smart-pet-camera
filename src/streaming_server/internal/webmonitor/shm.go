@@ -2,7 +2,7 @@ package webmonitor
 
 /*
 #cgo CFLAGS: -I../../../capture
-#cgo LDFLAGS: -L../../../../build -ljpeg_encoder -lrt -lpthread -lturbojpeg -lmultimedia -L/usr/hobot/lib
+#cgo LDFLAGS: -L../../../../build -ljpeg_encoder -lrgn_overlay -lrt -lpthread -lturbojpeg -lmultimedia -lhbmem -L/usr/hobot/lib
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,7 +16,10 @@ package webmonitor
 #include <errno.h>
 #include <pthread.h>
 #include <turbojpeg.h>
+#include <hb_mem_mgr.h>
 #include "jpeg_encoder.h"
+#include "rgn_overlay.h"
+#include "shm_constants.h"
 
 // Global hardware JPEG encoder context (singleton for MJPEG streaming)
 static jpeg_encoder_context_t g_hw_jpeg_encoder;
@@ -123,30 +126,7 @@ static int hw_jpeg_encode(const uint8_t* nv12_data, int width, int height,
 // Constants from single source of truth
 #include "shm_constants.h"
 
-typedef struct {
-    uint64_t frame_number;
-    struct timespec timestamp;
-    int camera_id;
-    int width;
-    int height;
-    int format;
-    size_t data_size;
-    float brightness_avg;
-    uint32_t brightness_lux;
-    uint8_t brightness_zone;
-    uint8_t correction_applied;
-    uint8_t _reserved[2];
-    uint8_t data[MAX_FRAME_SIZE];
-} Frame __attribute__((aligned(64)));
-
-typedef struct {
-    volatile uint32_t write_index;
-    char _pad_wridx[60];
-    volatile uint32_t frame_interval_ms;
-    char _pad_interval[60];
-    sem_t new_frame_sem;
-    Frame frames[RING_BUFFER_SIZE];
-} SharedFrameBuffer;
+// Frame/SharedFrameBuffer removed — using ZeroCopyFrameBuffer now
 
 typedef struct {
     int x;
@@ -163,93 +143,92 @@ typedef struct {
 
 typedef struct {
     uint64_t frame_number;
-    struct timespec timestamp;
+    double timestamp;
     int num_detections;
     Detection detections[MAX_DETECTIONS];
     volatile uint32_t version;
-    sem_t detection_update_sem;  // Semaphore for event-driven detection updates
+    sem_t detection_update_sem;
 } LatestDetectionResult;
 
-static SharedFrameBuffer* open_frame_shm(const char* name) {
+// ZeroCopy frame buffer for MJPEG (matching shared_memory.h)
+typedef struct {
+    uint64_t frame_number;
+    struct timespec timestamp;
+    int camera_id;
+    int width, height;
+    float brightness_avg;
+    int32_t share_id[ZEROCOPY_MAX_PLANES];
+    uint64_t plane_size[ZEROCOPY_MAX_PLANES];
+    int32_t plane_cnt;
+    uint8_t hb_mem_buf_data[HB_MEM_GRAPHIC_BUF_SIZE];
+    volatile uint32_t version;
+} ZeroCopyFrame;
+
+typedef struct {
+    uint8_t new_frame_sem[32];
+    ZeroCopyFrame frame;
+} ZeroCopyFrameBuffer;
+
+static ZeroCopyFrameBuffer* open_frame_zc(const char* name) {
     int fd = shm_open(name, O_RDWR, 0666);
-    if (fd == -1) {
-        return NULL;
-    }
-
-    SharedFrameBuffer* shm = (SharedFrameBuffer*)mmap(
-        NULL,
-        sizeof(SharedFrameBuffer),
-        PROT_READ | PROT_WRITE,  // Need write permission for sem_wait()
-        MAP_SHARED,
-        fd,
-        0
-    );
-
+    if (fd == -1) return NULL;
+    ZeroCopyFrameBuffer* shm = (ZeroCopyFrameBuffer*)mmap(
+        NULL, sizeof(ZeroCopyFrameBuffer),
+        PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     close(fd);
-
-    if (shm == MAP_FAILED) {
-        return NULL;
-    }
-
-    return shm;
+    return (shm == MAP_FAILED) ? NULL : shm;
 }
 
-static void close_frame_shm(SharedFrameBuffer* shm) {
-    if (shm != NULL) {
-        munmap((void*)shm, sizeof(SharedFrameBuffer));
-    }
+static void close_frame_zc(ZeroCopyFrameBuffer* shm) {
+    if (shm) munmap((void*)shm, sizeof(ZeroCopyFrameBuffer));
 }
 
-static uint32_t frame_write_index(SharedFrameBuffer* shm) {
-    if (shm == NULL) {
-        return 0;
-    }
-    return shm->write_index;  // volatile read - no atomic needed
-}
-
-static int read_latest_frame(SharedFrameBuffer* shm, Frame* out) {
-    if (!shm || !out) {
-        return -1;
-    }
-
-    uint32_t write_idx = shm->write_index;  // volatile read
-    if (write_idx == 0) {
-        return -1;
-    }
-
-    uint32_t latest_idx = (write_idx - 1) % RING_BUFFER_SIZE;
-    Frame* src = &shm->frames[latest_idx];
-
-    // Copy metadata first
-    out->frame_number = src->frame_number;
-    out->timestamp = src->timestamp;
-    out->camera_id = src->camera_id;
-    out->width = src->width;
-    out->height = src->height;
-    out->format = src->format;
-    out->data_size = src->data_size;
-
-    // Only copy actual data
-    if (out->data_size > 0 && out->data_size <= MAX_FRAME_SIZE) {
-        memcpy(out->data, src->data, out->data_size);
-    }
-
+// Read frame metadata snapshot (local copy to avoid torn reads)
+static int read_zc_frame(ZeroCopyFrameBuffer* shm, ZeroCopyFrame* out) {
+    if (!shm || !out) return -1;
+    memcpy(out, (void*)&shm->frame, sizeof(ZeroCopyFrame));
     return 0;
 }
 
-// Zero-copy version: returns pointer to frame data in shared memory (read-only)
-static Frame* get_latest_frame_ptr(SharedFrameBuffer* shm) {
-    if (!shm) {
-        return NULL;
+// Import NV12 data from zero-copy frame via hb_mem (H.265 pattern: local copy, no consumed handshake)
+static int import_zc_nv12(ZeroCopyFrame* f, uint8_t* dst, int dst_size, int* out_w, int* out_h) {
+    if (!f || !dst) return -1;
+    if (f->plane_cnt < 1) return -1;
+
+    int total_size = 0;
+    for (int i = 0; i < f->plane_cnt; i++) total_size += f->plane_size[i];
+    if (total_size > dst_size) return -2;
+
+    // Ensure hb_mem is initialized in this process
+    {
+        static int hb_mem_init_done = 0;
+        if (!hb_mem_init_done) { hb_mem_module_open(); hb_mem_init_done = 1; }
     }
 
-    uint32_t write_idx = shm->write_index;  // volatile read
-    if (write_idx == 0) {
-        return NULL;
+    // Import via full graphic buffer descriptor (same as Python)
+    hb_mem_graphic_buf_t in_gbuf;
+    memcpy(&in_gbuf, f->hb_mem_buf_data, sizeof(hb_mem_graphic_buf_t));
+
+    hb_mem_graphic_buf_t out_gbuf = {0};
+    if (hb_mem_import_graph_buf(&in_gbuf, &out_gbuf) != 0) return -3;
+
+    // Copy plane data
+    int offset = 0;
+    for (int i = 0; i < f->plane_cnt && i < out_gbuf.plane_cnt; i++) {
+        hb_mem_invalidate_buf_with_vaddr((uint64_t)out_gbuf.virt_addr[i], out_gbuf.size[i]);
+        memcpy(dst + offset, out_gbuf.virt_addr[i], f->plane_size[i]);
+        offset += f->plane_size[i];
     }
 
-    uint32_t latest_idx = (write_idx - 1) % RING_BUFFER_SIZE;
-    return &shm->frames[latest_idx];
+    // Release imported mapping
+    for (int i = 0; i < out_gbuf.plane_cnt; i++) {
+        if (out_gbuf.fd[i] > 0) hb_mem_free_buf(out_gbuf.fd[i]);
+    }
+
+    *out_w = f->width;
+    *out_h = f->height;
+
+    return total_size;
 }
 
 static LatestDetectionResult* open_detection_shm(const char* name) {
@@ -301,349 +280,7 @@ static int read_detection_snapshot(LatestDetectionResult* shm, LatestDetectionRe
 
 // NOTE: wait_new_frame() removed - FrameBroadcaster uses polling mode
 // NOTE: wait_new_detection() removed - DetectionBroadcaster uses polling mode
-
-// 5x7 Bitmap Font - expanded with all necessary characters
-static const uint8_t font5x7[][5] = {
-    {0x3E, 0x51, 0x49, 0x45, 0x3E}, // '0' = 0
-    {0x00, 0x42, 0x7F, 0x40, 0x00}, // '1' = 1
-    {0x42, 0x61, 0x51, 0x49, 0x46}, // '2' = 2
-    {0x21, 0x41, 0x45, 0x4B, 0x31}, // '3' = 3
-    {0x18, 0x14, 0x12, 0x7F, 0x10}, // '4' = 4
-    {0x27, 0x45, 0x45, 0x45, 0x39}, // '5' = 5
-    {0x3C, 0x4A, 0x49, 0x49, 0x30}, // '6' = 6
-    {0x01, 0x71, 0x09, 0x05, 0x03}, // '7' = 7
-    {0x36, 0x49, 0x49, 0x49, 0x36}, // '8' = 8
-    {0x06, 0x49, 0x49, 0x29, 0x1E}, // '9' = 9
-    {0x00, 0x36, 0x36, 0x00, 0x00}, // ':' = 10
-    {0x08, 0x08, 0x08, 0x08, 0x08}, // '-' = 11
-    {0x00, 0x60, 0x60, 0x00, 0x00}, // '.' = 12
-    {0x20, 0x10, 0x08, 0x04, 0x02}, // '/' = 13
-    {0x00, 0x00, 0x00, 0x00, 0x00}, // ' ' = 14
-    {0x7E, 0x11, 0x11, 0x11, 0x7E}, // 'A' = 15
-    {0x7F, 0x49, 0x49, 0x49, 0x36}, // 'B' = 16
-    {0x3E, 0x41, 0x41, 0x41, 0x22}, // 'C' = 17
-    {0x7F, 0x41, 0x41, 0x22, 0x1C}, // 'D' = 18
-    {0x7F, 0x49, 0x49, 0x49, 0x41}, // 'E' = 19
-    {0x7F, 0x09, 0x09, 0x09, 0x01}, // 'F' = 20
-    {0x3E, 0x41, 0x49, 0x49, 0x7A}, // 'G' = 21
-    {0x7F, 0x08, 0x08, 0x08, 0x7F}, // 'H' = 22
-    {0x00, 0x41, 0x7F, 0x41, 0x00}, // 'I' = 23
-    {0x7F, 0x02, 0x0C, 0x02, 0x7F}, // 'M' = 24
-    {0x7F, 0x04, 0x08, 0x10, 0x7F}, // 'N' = 25
-    {0x3E, 0x41, 0x41, 0x41, 0x3E}, // 'O' = 26
-    {0x01, 0x01, 0x7F, 0x01, 0x01}, // 'T' = 27
-    {0x20, 0x54, 0x54, 0x54, 0x78}, // 'a' = 28
-    {0x7F, 0x48, 0x44, 0x44, 0x38}, // 'b' = 29
-    {0x38, 0x44, 0x44, 0x44, 0x20}, // 'c' = 30
-    {0x38, 0x44, 0x44, 0x48, 0x7F}, // 'd' = 31
-    {0x38, 0x54, 0x54, 0x54, 0x18}, // 'e' = 32
-    {0x00, 0x44, 0x7D, 0x40, 0x00}, // 'i' = 33
-    {0x7C, 0x04, 0x18, 0x04, 0x78}, // 'm' = 34
-    {0x7C, 0x08, 0x04, 0x04, 0x78}, // 'n' = 35
-    {0x38, 0x44, 0x44, 0x44, 0x38}, // 'o' = 36
-    {0x7C, 0x14, 0x14, 0x14, 0x08}, // 'p' = 37
-    {0x7C, 0x08, 0x04, 0x04, 0x08}, // 'r' = 38
-    {0x48, 0x54, 0x54, 0x54, 0x20}, // 's' = 39
-    {0x04, 0x3F, 0x44, 0x40, 0x20}, // 't' = 40
-};
-
-// Map character to font index
-static int get_font_index(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c == ':') return 10;
-    if (c == '-') return 11;
-    if (c == '.') return 12;
-    if (c == '/') return 13;
-    if (c == ' ') return 14;
-    if (c >= 'A' && c <= 'I') return 15 + (c - 'A');
-    if (c == 'M') return 24;
-    if (c == 'N') return 25;
-    if (c == 'O') return 26;
-    if (c == 'T') return 27;
-    if (c >= 'a' && c <= 'e') return 28 + (c - 'a');
-    if (c == 'i') return 33;
-    if (c == 'm') return 34;
-    if (c == 'n') return 35;
-    if (c == 'o') return 36;
-    if (c == 'p') return 37;
-    if (c == 'r') return 38;
-    if (c == 's') return 39;
-    if (c == 't') return 40;
-    return 14; // space
-}
-
-// Draw filled rectangle on NV12 frame (for text background)
-static void draw_filled_rect_nv12(uint8_t* nv12, int width, int height,
-                                  int x, int y, int w, int h, uint8_t y_color) {
-    uint8_t* y_plane = nv12;
-
-    // Clamp coordinates
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x + w > width) w = width - x;
-    if (y + h > height) h = height - y;
-    if (w <= 0 || h <= 0) return;
-
-    // Fill rectangle row by row (cache-friendly)
-    for (int py = y; py < y + h; py++) {
-        if (py < 0 || py >= height) continue;
-        uint8_t* row_ptr = y_plane + py * width;
-        for (int px = x; px < x + w; px++) {
-            if (px >= 0 && px < width) {
-                row_ptr[px] = y_color;
-            }
-        }
-    }
-}
-
-// Draw text on NV12 frame (Y plane only)
-// Cache-friendly: outer loop is y-direction, inner loop is x-direction for sequential memory access
-static void draw_text_nv12(uint8_t* nv12, int width, int height,
-                          int x, int y, const char* text, uint8_t y_color, int scale) {
-    uint8_t* y_plane = nv12;
-
-    // Calculate text bounds
-    int text_len = 0;
-    while (text[text_len] != '\0') text_len++;
-    int text_width = text_len * 6 * scale;
-    int text_height = 7 * scale;
-
-    // Clamp to frame bounds
-    int start_y = y < 0 ? 0 : y;
-    int end_y = (y + text_height) > height ? height : (y + text_height);
-
-    // Outer loop: y-direction (rows)
-    for (int py = start_y; py < end_y; py++) {
-        int local_y = py - y;
-        int row = local_y / scale;
-        int sy = local_y % scale;
-
-        if (row < 0 || row >= 7) continue;
-
-        uint8_t* row_ptr = y_plane + py * width;
-        int cur_x = x;
-
-        // Inner loop: x-direction (columns) - sequential memory access
-        for (int i = 0; i < text_len; i++) {
-            int font_idx = get_font_index(text[i]);
-            if (font_idx < 0) {
-                cur_x += 6 * scale;
-                continue;
-            }
-
-            const uint8_t* bitmap = font5x7[font_idx];
-            for (int col = 0; col < 5; col++) {
-                uint8_t byte = bitmap[col];
-                if ((byte >> row) & 1) {
-                    for (int sx = 0; sx < scale; sx++) {
-                        int px = cur_x + col * scale + sx;
-                        if (px >= 0 && px < width) {
-                            row_ptr[px] = y_color;
-                        }
-                    }
-                }
-            }
-            cur_x += 6 * scale;
-        }
-    }
-}
-
-// Draw a colored rectangle on NV12 frame (Y and UV planes for true color)
-// Cache-friendly: outer loop is y-direction, inner loop is x-direction for sequential memory access
-static void draw_rect_nv12_color(uint8_t* nv12, int width, int height,
-                                 int x, int y, int w, int h,
-                                 uint8_t y_val, uint8_t u_val, uint8_t v_val, int thickness) {
-    uint8_t* y_plane = nv12;
-    int y_size = width * height;
-    uint8_t* uv_plane = nv12 + y_size;
-
-    // Clamp coordinates
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x + w > width) w = width - x;
-    if (y + h > height) h = height - y;
-    if (w <= 0 || h <= 0) return;
-
-    // Clamp thickness
-    int eff_thickness = thickness;
-    if (eff_thickness > h / 2) eff_thickness = h / 2;
-    if (eff_thickness > w / 2) eff_thickness = w / 2;
-    if (eff_thickness <= 0) eff_thickness = 1;
-
-    // Draw Y plane (luminance)
-    for (int py = y; py < y + h; py++) {
-        if (py < 0 || py >= height) continue;
-
-        uint8_t* y_row_ptr = y_plane + py * width;
-        int local_y = py - y;
-
-        int is_top_edge = (local_y < eff_thickness);
-        int is_bottom_edge = (local_y >= h - eff_thickness);
-
-        if (is_top_edge || is_bottom_edge) {
-            for (int px = x; px < x + w; px++) {
-                if (px >= 0 && px < width) {
-                    y_row_ptr[px] = y_val;
-                }
-            }
-        } else {
-            for (int t = 0; t < eff_thickness; t++) {
-                int px = x + t;
-                if (px >= 0 && px < width) {
-                    y_row_ptr[px] = y_val;
-                }
-            }
-            for (int t = 0; t < eff_thickness; t++) {
-                int px = x + w - 1 - t;
-                if (px >= 0 && px < width) {
-                    y_row_ptr[px] = y_val;
-                }
-            }
-        }
-    }
-
-    // Draw UV plane (chrominance) - NV12 format: U and V are interleaved
-    // UV plane is half resolution (2x2 pixels share same UV)
-    int uv_y_start = y / 2;
-    int uv_y_end = (y + h + 1) / 2;
-    int uv_x_start = x / 2;
-    int uv_x_end = (x + w + 1) / 2;
-    int uv_thickness = (eff_thickness + 1) / 2;
-
-    for (int uv_y = uv_y_start; uv_y < uv_y_end; uv_y++) {
-        if (uv_y < 0 || uv_y >= height / 2) continue;
-
-        uint8_t* uv_row_ptr = uv_plane + uv_y * width;
-        int local_uv_y = uv_y - uv_y_start;
-        int uv_h = uv_y_end - uv_y_start;
-
-        int is_top_edge = (local_uv_y < uv_thickness);
-        int is_bottom_edge = (local_uv_y >= uv_h - uv_thickness);
-
-        if (is_top_edge || is_bottom_edge) {
-            for (int uv_x = uv_x_start; uv_x < uv_x_end; uv_x++) {
-                if (uv_x >= 0 && uv_x < width / 2) {
-                    uv_row_ptr[uv_x * 2] = u_val;
-                    uv_row_ptr[uv_x * 2 + 1] = v_val;
-                }
-            }
-        } else {
-            for (int t = 0; t < uv_thickness; t++) {
-                int uv_x = uv_x_start + t;
-                if (uv_x >= 0 && uv_x < width / 2) {
-                    uv_row_ptr[uv_x * 2] = u_val;
-                    uv_row_ptr[uv_x * 2 + 1] = v_val;
-                }
-            }
-            for (int t = 0; t < uv_thickness; t++) {
-                int uv_x = uv_x_end - 1 - t;
-                if (uv_x >= 0 && uv_x < width / 2) {
-                    uv_row_ptr[uv_x * 2] = u_val;
-                    uv_row_ptr[uv_x * 2 + 1] = v_val;
-                }
-            }
-        }
-    }
-}
-
-// Draw a rectangle on NV12 frame (Y plane only for simplicity)
-// Cache-friendly: outer loop is y-direction, inner loop is x-direction for sequential memory access
-// Color: Y value (0=black, 255=white, ~76=green, ~150=yellow, ~29=blue, ~225=red)
-static void draw_rect_nv12(uint8_t* nv12, int width, int height,
-                           int x, int y, int w, int h, uint8_t y_color, int thickness) {
-    uint8_t* y_plane = nv12;
-
-    // Clamp coordinates
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x + w > width) w = width - x;
-    if (y + h > height) h = height - y;
-    if (w <= 0 || h <= 0) return;
-
-    // Clamp thickness
-    int eff_thickness = thickness;
-    if (eff_thickness > h / 2) eff_thickness = h / 2;
-    if (eff_thickness > w / 2) eff_thickness = w / 2;
-    if (eff_thickness <= 0) eff_thickness = 1;
-
-    // Outer loop: y-direction (rows)
-    for (int py = y; py < y + h; py++) {
-        if (py < 0 || py >= height) continue;
-
-        uint8_t* row_ptr = y_plane + py * width;
-        int local_y = py - y;
-
-        // Determine if this row is part of top/bottom edge
-        int is_top_edge = (local_y < eff_thickness);
-        int is_bottom_edge = (local_y >= h - eff_thickness);
-
-        if (is_top_edge || is_bottom_edge) {
-            // Fill entire width for top/bottom edges (horizontal lines)
-            for (int px = x; px < x + w; px++) {
-                if (px >= 0 && px < width) {
-                    row_ptr[px] = y_color;
-                }
-            }
-        } else {
-            // Fill only left and right edges (vertical lines)
-            // Left edge
-            for (int t = 0; t < eff_thickness; t++) {
-                int px = x + t;
-                if (px >= 0 && px < width) {
-                    row_ptr[px] = y_color;
-                }
-            }
-            // Right edge
-            for (int t = 0; t < eff_thickness; t++) {
-                int px = x + w - 1 - t;
-                if (px >= 0 && px < width) {
-                    row_ptr[px] = y_color;
-                }
-            }
-        }
-    }
-}
-
-// NV12 to RGBA conversion (fallback, not used with TurboJPEG optimization)
-// Cache-friendly: processes row by row with sequential memory access
-static void nv12_to_rgba(const uint8_t* nv12, int width, int height, uint8_t* rgba) {
-    int y_size = width * height;
-    const uint8_t* y_plane = nv12;
-    const uint8_t* uv_plane = nv12 + y_size;
-
-    // Outer loop: y-direction (rows)
-    for (int y = 0; y < height; y++) {
-        const uint8_t* y_row = y_plane + y * width;
-        const uint8_t* uv_row = uv_plane + (y / 2) * width;
-        uint8_t* rgba_row = rgba + y * width * 4;
-
-        // Inner loop: x-direction (columns) - sequential memory access
-        for (int x = 0; x < width; x++) {
-            int y_val = y_row[x];
-            int uv_index = (x / 2) * 2;
-            int u_val = uv_row[uv_index];
-            int v_val = uv_row[uv_index + 1];
-
-            int c = y_val - 16;
-            int d = u_val - 128;
-            int e = v_val - 128;
-
-            int r = (298 * c + 409 * e + 128) >> 8;
-            int g = (298 * c - 100 * d - 208 * e + 128) >> 8;
-            int b = (298 * c + 516 * d + 128) >> 8;
-
-            r = r < 0 ? 0 : (r > 255 ? 255 : r);
-            g = g < 0 ? 0 : (g > 255 ? 255 : g);
-            b = b < 0 ? 0 : (b > 255 ? 255 : b);
-
-            int rgba_index = x * 4;
-            rgba_row[rgba_index] = (uint8_t)r;
-            rgba_row[rgba_index + 1] = (uint8_t)g;
-            rgba_row[rgba_index + 2] = (uint8_t)b;
-            rgba_row[rgba_index + 3] = 255;
-        }
-    }
-}
+// NOTE: CPU bitmap font and draw_*_nv12 functions removed - using hbn_rgn HW overlay
 
 // NV12 to JPEG using TurboJPEG (optimized, avoids RGBA conversion)
 // Returns allocated JPEG buffer and size (caller must free)
@@ -700,8 +337,6 @@ import "C"
 import (
 	"bytes"
 	"fmt"
-	"image"
-	"image/jpeg"
 	time "time"
 	"unsafe"
 )
@@ -735,36 +370,33 @@ func GetJPEGQuality() int {
 }
 
 type frameSnapshot struct {
-	FrameNumber       uint64
-	Timestamp         time.Time
-	CameraID          int
-	Width             int
-	Height            int
-	Format            int
-	BrightnessAvg     float32 // Y-plane average brightness (0-255)
-	BrightnessLux     uint32  // Environment illuminance from ISP cur_lux
-	BrightnessZone    uint8   // 0=dark, 1=dim, 2=normal, 3=bright
-	CorrectionApplied bool    // true if ISP low-light correction is active
-	Data              []byte
+	FrameNumber uint64
+	Timestamp   time.Time
+	Width       int
+	Height      int
+	Format      int    // formatNV12=1
+	Data        []byte // NV12 pixel data
 }
 
 type shmReader struct {
-	frameShm      *C.SharedFrameBuffer
+	frameShm      *C.ZeroCopyFrameBuffer
+	frameBuf      []byte // Reusable NV12 import buffer
 	detectionShm  *C.LatestDetectionResult
 	detectionName string
 	lastDetVer    uint32
 }
 
 func newSHMReader(frameName, detectionName string) (*shmReader, error) {
-	var frame *C.SharedFrameBuffer
+	var frame *C.ZeroCopyFrameBuffer
 	if frameName != "" {
 		cName := C.CString(frameName)
-		frame = C.open_frame_shm(cName)
+		frame = C.open_frame_zc(cName)
 		C.free(unsafe.Pointer(cName))
 	}
 
 	r := &shmReader{
 		frameShm:      frame,
+		frameBuf:      make([]byte, 768*432*3/2), // 768x432 NV12
 		detectionName: detectionName,
 	}
 
@@ -791,7 +423,7 @@ func (r *shmReader) tryOpenDetection() {
 
 func (r *shmReader) Close() {
 	if r.frameShm != nil {
-		C.close_frame_shm(r.frameShm)
+		C.close_frame_zc(r.frameShm)
 		r.frameShm = nil
 	}
 	if r.detectionShm != nil {
@@ -804,25 +436,23 @@ func (r *shmReader) Close() {
 // NOTE: WaitNewDetection() removed - DetectionBroadcaster uses polling mode
 
 func (r *shmReader) Stats() (SharedMemoryStats, bool) {
-	if r.frameShm == nil {
-		return SharedMemoryStats{}, false
-	}
-
 	if r.detectionShm == nil {
 		r.tryOpenDetection()
 	}
-
-	writeIndex := uint32(C.frame_write_index(r.frameShm))
-	frameCount := min(int(writeIndex), 30)
 
 	detVer := uint32(0)
 	if r.detectionShm != nil {
 		detVer = uint32(C.detection_version(r.detectionShm))
 	}
 
+	frameVer := uint32(0)
+	if r.frameShm != nil {
+		frameVer = uint32(r.frameShm.frame.version)
+	}
+
 	return SharedMemoryStats{
-		FrameCount:         frameCount,
-		TotalFramesWritten: int(writeIndex),
+		FrameCount:         int(frameVer),
+		TotalFramesWritten: int(frameVer),
 		DetectionVersion:   int(detVer),
 		HasDetection:       boolToInt(detVer > 0),
 	}, true
@@ -833,20 +463,25 @@ func (r *shmReader) LatestFrame() (*frameSnapshot, bool) {
 		return nil, false
 	}
 
-	var cFrame C.Frame
-	if C.read_latest_frame(r.frameShm, &cFrame) != 0 {
+	// Local copy to avoid torn reads (same as H.265 pattern)
+	var cFrame C.ZeroCopyFrame
+	if C.read_zc_frame(r.frameShm, &cFrame) != 0 {
+		return nil, false
+	}
+	if cFrame.version == 0 || cFrame.plane_cnt < 1 {
 		return nil, false
 	}
 
-	dataSize := int(cFrame.data_size)
-	if dataSize < 0 || dataSize > maxFrameSize {
+	var outW, outH C.int
+	dataSize := int(C.import_zc_nv12(&cFrame,
+		(*C.uint8_t)(unsafe.Pointer(&r.frameBuf[0])),
+		C.int(len(r.frameBuf)), &outW, &outH))
+	if dataSize <= 0 {
 		return nil, false
 	}
 
-	// Copy data to avoid holding C memory reference
 	data := make([]byte, dataSize)
-	cData := (*[maxFrameSize]byte)(unsafe.Pointer(&cFrame.data[0]))[:dataSize:dataSize]
-	copy(data, cData)
+	copy(data, r.frameBuf[:dataSize])
 
 	timestamp := time.Unix(
 		int64(cFrame.timestamp.tv_sec),
@@ -854,58 +489,12 @@ func (r *shmReader) LatestFrame() (*frameSnapshot, bool) {
 	)
 
 	return &frameSnapshot{
-		FrameNumber:       uint64(cFrame.frame_number),
-		Timestamp:         timestamp,
-		CameraID:          int(cFrame.camera_id),
-		Width:             int(cFrame.width),
-		Height:            int(cFrame.height),
-		Format:            int(cFrame.format),
-		BrightnessAvg:     float32(cFrame.brightness_avg),
-		BrightnessLux:     uint32(cFrame.brightness_lux),
-		BrightnessZone:    uint8(cFrame.brightness_zone),
-		CorrectionApplied: cFrame.correction_applied != 0,
-		Data:              data,
-	}, true
-}
-
-// LatestFrameZeroCopy returns the latest frame with zero-copy optimization
-// WARNING: The returned data points to shared memory. Caller MUST copy if modifying.
-func (r *shmReader) LatestFrameZeroCopy() (*frameSnapshot, bool) {
-	if r.frameShm == nil {
-		return nil, false
-	}
-
-	// True zero-copy: Get pointer to frame in shared memory (no memcpy in C!)
-	cFramePtr := C.get_latest_frame_ptr(r.frameShm)
-	if cFramePtr == nil {
-		return nil, false
-	}
-
-	dataSize := int(cFramePtr.data_size)
-	if dataSize < 0 || dataSize > maxFrameSize {
-		return nil, false
-	}
-
-	// Zero-copy: Direct reference to shared memory (read-only!)
-	cData := (*[maxFrameSize]byte)(unsafe.Pointer(&cFramePtr.data[0]))[:dataSize:dataSize]
-
-	timestamp := time.Unix(
-		int64(cFramePtr.timestamp.tv_sec),
-		int64(cFramePtr.timestamp.tv_nsec),
-	)
-
-	return &frameSnapshot{
-		FrameNumber:       uint64(cFramePtr.frame_number),
-		Timestamp:         timestamp,
-		CameraID:          int(cFramePtr.camera_id),
-		Width:             int(cFramePtr.width),
-		Height:            int(cFramePtr.height),
-		Format:            int(cFramePtr.format),
-		BrightnessAvg:     float32(cFramePtr.brightness_avg),
-		BrightnessLux:     uint32(cFramePtr.brightness_lux),
-		BrightnessZone:    uint8(cFramePtr.brightness_zone),
-		CorrectionApplied: cFramePtr.correction_applied != 0,
-		Data:              cData, // Zero-copy reference to shared memory
+		FrameNumber: uint64(cFrame.frame_number),
+		Timestamp:   timestamp,
+		Width:       int(outW),
+		Height:      int(outH),
+		Format:      formatNV12,
+		Data:        data,
 	}, true
 }
 
@@ -933,8 +522,7 @@ func (r *shmReader) LatestDetection() (*DetectionResult, bool) {
 
 	result := DetectionResult{
 		FrameNumber: int(snapshot.frame_number),
-		Timestamp: float64(snapshot.timestamp.tv_sec) +
-			float64(snapshot.timestamp.tv_nsec)/1e9,
+		Timestamp: float64(snapshot.timestamp),
 		NumDetections: int(snapshot.num_detections),
 		Version:       int(version),
 	}
@@ -959,6 +547,18 @@ func (r *shmReader) LatestDetection() (*DetectionResult, bool) {
 	}
 
 	return &result, true
+}
+
+func (r *shmReader) LatestNV12() (*NV12Frame, bool) {
+	frame, ok := r.LatestFrame()
+	if !ok || frame.Format != formatNV12 || len(frame.Data) == 0 {
+		return nil, false
+	}
+	return &NV12Frame{
+		Data:   frame.Data,
+		Width:  frame.Width,
+		Height: frame.Height,
+	}, true
 }
 
 func (r *shmReader) LatestJPEG() ([]byte, bool) {
@@ -986,14 +586,7 @@ func (r *shmReader) LatestJPEG() ([]byte, bool) {
 
 // nv12ToJPEG converts NV12 format to JPEG using hardware encoder with software fallback
 func nv12ToJPEG(nv12Data []byte, width, height int) ([]byte, error) {
-	// Try hardware encoder first (fast path: ~5ms vs ~55ms for software)
-	jpegData, err := nv12ToJPEGHardware(nv12Data, width, height)
-	if err == nil {
-		return jpegData, nil
-	}
-
-	// Fallback to software encoding if hardware fails
-	return nv12ToJPEGSoftware(nv12Data, width, height)
+	return nv12ToJPEGHardware(nv12Data, width, height)
 }
 
 // nv12ToJPEGHardware converts NV12 to JPEG using D-Robotics hardware encoder
@@ -1024,115 +617,74 @@ func nv12ToJPEGHardware(nv12Data []byte, width, height int) ([]byte, error) {
 	return jpegData, nil
 }
 
-// nv12ToJPEGSoftware converts NV12 to JPEG using software encoding (fallback)
-func nv12ToJPEGSoftware(nv12Data []byte, width, height int) ([]byte, error) {
-	// Convert NV12 to RGBA in C
-	img := nv12ToRGBAImg(nv12Data, width, height)
-
-	// Encode to JPEG with configurable quality
-	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: jpegQuality}); err != nil {
-		return nil, err
-	}
-
-	return buf.Bytes(), nil
+type overlayRect struct {
+	X, Y, W, H       int
+	YVal, UVal, VVal  uint8
+	Thickness         int // 0 = filled, >0 = outline
 }
 
-// nv12ToRGBAImg converts NV12 format to RGBA image using C
-func nv12ToRGBAImg(nv12Data []byte, width, height int) *image.RGBA {
-	img := image.NewRGBA(image.Rect(0, 0, width, height))
-	C.nv12_to_rgba(
-		(*C.uint8_t)(unsafe.Pointer(&nv12Data[0])),
-		C.int(width),
-		C.int(height),
-		(*C.uint8_t)(unsafe.Pointer(&img.Pix[0])),
-	)
-	return img
+type overlayText struct {
+	x, y  int
+	text  string
+	textY uint8 // Y luminance for text (235=white)
+	bgY   uint8 // Y luminance for background (16=black)
+	scale int   // Font scale (1=small, 2=medium)
 }
 
-// drawRectOnNV12 draws a rectangle on NV12 frame data (in-place modification)
-func drawRectOnNV12(nv12Data []byte, width, height, x, y, w, h int, yColor uint8, thickness int) {
+func drawOverlay(nv12Data []byte, width, height int, rects []overlayRect, texts []overlayText) {
 	if len(nv12Data) < width*height*3/2 {
 		return
 	}
-	C.draw_rect_nv12(
-		(*C.uint8_t)(unsafe.Pointer(&nv12Data[0])),
-		C.int(width),
-		C.int(height),
-		C.int(x),
-		C.int(y),
-		C.int(w),
-		C.int(h),
-		C.uint8_t(yColor),
-		C.int(thickness),
-	)
-}
 
-// drawRectColorNV12 draws a colored rectangle on NV12 frame (Y and UV planes)
-func drawRectColorNV12(nv12Data []byte, width, height, x, y, w, h int, yVal, uVal, vVal uint8, thickness int) {
-	if len(nv12Data) < width*height*3/2 {
-		return
+	cRects := make([]C.overlay_rect_t, len(rects))
+	for i, r := range rects {
+		cRects[i] = C.overlay_rect_t{
+			x: C.int(r.X), y: C.int(r.Y), w: C.int(r.W), h: C.int(r.H),
+			y_val: C.uint8_t(r.YVal), u_val: C.uint8_t(r.UVal), v_val: C.uint8_t(r.VVal),
+			thickness: C.int(r.Thickness),
+		}
 	}
-	C.draw_rect_nv12_color(
-		(*C.uint8_t)(unsafe.Pointer(&nv12Data[0])),
-		C.int(width),
-		C.int(height),
-		C.int(x),
-		C.int(y),
-		C.int(w),
-		C.int(h),
-		C.uint8_t(yVal),
-		C.uint8_t(uVal),
-		C.uint8_t(vVal),
-		C.int(thickness),
-	)
-}
 
-// drawTextOnNV12 draws text on NV12 frame data (in-place modification)
-func drawTextOnNV12(nv12Data []byte, width, height, x, y int, text string, yColor uint8, scale int) {
-	if len(nv12Data) < width*height*3/2 {
-		return
+	cTexts := make([]C.overlay_text_t, len(texts))
+	cStrings := make([]*C.char, len(texts))
+	for i, t := range texts {
+		cStrings[i] = C.CString(t.text)
+		cTexts[i] = C.overlay_text_t{
+			x:      C.int(t.x),
+			y:      C.int(t.y),
+			text:   cStrings[i],
+			text_y: C.uint8_t(t.textY),
+			bg_y:   C.uint8_t(t.bgY),
+			scale:  C.int(t.scale),
+		}
 	}
-	cText := C.CString(text)
-	defer C.free(unsafe.Pointer(cText))
 
-	C.draw_text_nv12(
+	var rectsPtr *C.overlay_rect_t
+	if len(cRects) > 0 {
+		rectsPtr = &cRects[0]
+	}
+	var textsPtr *C.overlay_text_t
+	if len(cTexts) > 0 {
+		textsPtr = &cTexts[0]
+	}
+
+	C.rgn_overlay_draw(
 		(*C.uint8_t)(unsafe.Pointer(&nv12Data[0])),
-		C.int(width),
-		C.int(height),
-		C.int(x),
-		C.int(y),
-		cText,
-		C.uint8_t(yColor),
-		C.int(scale),
+		C.int(width), C.int(height),
+		rectsPtr, C.int(len(cRects)),
+		textsPtr, C.int(len(cTexts)),
 	)
+
+	for _, s := range cStrings {
+		C.free(unsafe.Pointer(s))
+	}
 }
 
-// drawTextWithBackgroundNV12 draws text with a background rectangle
+// drawTextWithBackgroundNV12 is a compatibility wrapper used by comic_capture.go
 func drawTextWithBackgroundNV12(nv12Data []byte, width, height, x, y int, text string, textColor, bgColor uint8, scale int) {
-	if len(nv12Data) < width*height*3/2 {
-		return
-	}
-
-	// Calculate text dimensions
-	textWidth := len(text) * 6 * scale
-	textHeight := 7 * scale
-	padding := 4
-
-	// Draw background rectangle
-	C.draw_filled_rect_nv12(
-		(*C.uint8_t)(unsafe.Pointer(&nv12Data[0])),
-		C.int(width),
-		C.int(height),
-		C.int(x-padding),
-		C.int(y-padding),
-		C.int(textWidth+padding*2),
-		C.int(textHeight+padding*2),
-		C.uint8_t(bgColor),
-	)
-
-	// Draw text on top
-	drawTextOnNV12(nv12Data, width, height, x, y, text, textColor, scale)
+	drawOverlay(nv12Data, width, height, nil, []overlayText{
+		{x: x, y: y, text: text, textY: textColor, bgY: bgColor, scale: scale},
+	})
 }
 
 // CleanupHardwareJPEGEncoder releases hardware JPEG encoder resources

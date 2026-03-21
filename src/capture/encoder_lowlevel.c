@@ -5,6 +5,7 @@
 #include "encoder_lowlevel.h"
 #include <stdio.h>
 #include <string.h>
+#include <hb_mem_mgr.h>
 #include "logger.h"
 
 int encoder_create(encoder_context_t *ctx, int camera_index,
@@ -94,18 +95,20 @@ int encoder_create(encoder_context_t *ctx, int camera_index,
     return 0;
 }
 
-int encoder_encode_frame(encoder_context_t *ctx,
-                         const uint8_t *nv12_y, const uint8_t *nv12_uv,
-                         uint8_t *h264_data_out, size_t *h264_size_out,
-                         size_t max_size, int timeout_ms) {
+int encoder_encode_frame_zerocopy(encoder_context_t *ctx,
+                                  const uint8_t *nv12_y, const uint8_t *nv12_uv,
+                                  size_t y_size, size_t uv_size,
+                                  int timeout_ms,
+                                  encoder_output_t *out) {
     int ret = 0;
 
-    if (!ctx || !nv12_y || !nv12_uv || !h264_data_out || !h264_size_out) {
+    if (!ctx || !nv12_y || !nv12_uv || !out) {
         return -1;
     }
 
+    memset(out, 0, sizeof(encoder_output_t));
+
     media_codec_buffer_t input_buffer = {0};
-    media_codec_buffer_t output_buffer = {0};
     media_codec_output_buffer_info_t output_info = {0};
 
     // Dequeue encoder input buffer
@@ -122,17 +125,13 @@ int encoder_encode_frame(encoder_context_t *ctx,
     input_buffer.vframe_buf.pix_fmt = MC_PIXEL_FORMAT_NV12;
     input_buffer.vframe_buf.size = ctx->width * ctx->height * 3 / 2;
 
-    // Copy NV12 data to input buffer
-    size_t y_size = ctx->width * ctx->height;
-    size_t uv_size = ctx->width * ctx->height / 2;
-
+    // memcpy NV12 to VPU input buffer (unavoidable — VPU owns input buffers)
     if (input_buffer.vframe_buf.vir_ptr[0]) {
         memcpy(input_buffer.vframe_buf.vir_ptr[0], nv12_y, y_size);
     } else {
         LOG_ERROR("Encoder", "Input buffer Y plane is NULL");
         return -1;
     }
-
     if (input_buffer.vframe_buf.vir_ptr[1]) {
         memcpy(input_buffer.vframe_buf.vir_ptr[1], nv12_uv, uv_size);
     } else {
@@ -147,37 +146,40 @@ int encoder_encode_frame(encoder_context_t *ctx,
         return ret;
     }
 
-    // Dequeue encoder output buffer
-    ret = hb_mm_mc_dequeue_output_buffer(&ctx->codec_ctx, &output_buffer, &output_info, timeout_ms);
+    // Dequeue encoder output buffer (DO NOT release — caller owns it)
+    ret = hb_mm_mc_dequeue_output_buffer(&ctx->codec_ctx, &out->output_buffer,
+                                          &output_info, timeout_ms);
     if (ret != 0) {
         LOG_ERROR("Encoder", "hb_mm_mc_dequeue_output_buffer failed: %d", ret);
         return ret;
     }
 
-    // Copy H.264 data to output buffer
-    if (output_buffer.vstream_buf.vir_ptr && output_buffer.vstream_buf.size > 0) {
-        if (output_buffer.vstream_buf.size <= max_size) {
-            memcpy(h264_data_out, output_buffer.vstream_buf.vir_ptr, output_buffer.vstream_buf.size);
-            *h264_size_out = output_buffer.vstream_buf.size;
-        } else {
-            LOG_ERROR("Encoder", "H.264 output size (%u) exceeds buffer size (%zu)",
-                      output_buffer.vstream_buf.size, max_size);
-            ret = -1;
+    // Fill output info
+    out->vir_ptr = out->output_buffer.vstream_buf.vir_ptr;
+    out->data_size = out->output_buffer.vstream_buf.size;
+
+    // Get full buffer descriptor for cross-process import (same pattern as Python)
+    if (out->vir_ptr) {
+        hb_mem_common_buf_t com_buf = {0};
+        if (hb_mem_get_com_buf_with_vaddr((uint64_t)out->vir_ptr, &com_buf) == 0) {
+            memcpy(out->com_buf_data, &com_buf, sizeof(com_buf));
         }
-    } else {
-        LOG_ERROR("Encoder", "Invalid output buffer");
-        ret = -1;
     }
 
-    // Release encoder output buffer
-    int release_ret = hb_mm_mc_queue_output_buffer(&ctx->codec_ctx, &output_buffer, timeout_ms);
-    if (release_ret != 0) {
-        LOG_ERROR("Encoder", "hb_mm_mc_queue_output_buffer failed: %d", release_ret);
-        // Don't override previous error if there was one
-        if (ret == 0) ret = release_ret;
-    }
+    // Extract VPU encoder statistics
+    out->stats.intra_block_num = output_info.video_stream_info.intra_block_num;
+    out->stats.skip_block_num = output_info.video_stream_info.skip_block_num;
+    out->stats.avg_mb_qp = output_info.video_stream_info.avg_mb_qp;
+    out->stats.enc_pic_byte = output_info.video_stream_info.enc_pic_byte;
 
-    return ret;
+    return 0;
+}
+
+int encoder_release_output(encoder_context_t *ctx,
+                           encoder_output_t *out,
+                           int timeout_ms) {
+    if (!ctx || !out) return -1;
+    return hb_mm_mc_queue_output_buffer(&ctx->codec_ctx, &out->output_buffer, timeout_ms);
 }
 
 void encoder_stop(encoder_context_t *ctx) {

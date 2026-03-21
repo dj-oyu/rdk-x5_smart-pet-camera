@@ -2,7 +2,7 @@ package shm
 
 /*
 #cgo CFLAGS: -I../../../capture
-#cgo LDFLAGS: -lrt -lpthread
+#cgo LDFLAGS: -lrt -lpthread -lhbmem -L/usr/hobot/lib
 
 #include <stdlib.h>
 #include <stdint.h>
@@ -13,125 +13,123 @@ package shm
 #include <string.h>
 #include <semaphore.h>
 #include <errno.h>
+#include <stdio.h>
+#include <hb_mem_mgr.h>
 
-// Constants from single source of truth
 #include "shm_constants.h"
+
+static int g_hb_mem_initialized = 0;
+static void ensure_hb_mem_init(void) {
+    if (!g_hb_mem_initialized) {
+        int ret = hb_mem_module_open();
+        fprintf(stderr, "[shm/reader] hb_mem_module_open: ret=%d\n", ret);
+        g_hb_mem_initialized = 1;
+    }
+}
 
 #ifndef EINVAL
 #define EINVAL 22
 #endif
 
-// Frame structure matching shared_memory.h
+// H265ZeroCopyFrame matching shared_memory.h
 typedef struct {
     uint64_t frame_number;
     struct timespec timestamp;
     int camera_id;
-    int width;
-    int height;
-    int format;
-    size_t data_size;
-    float brightness_avg;
-    uint32_t brightness_lux;
-    uint8_t brightness_zone;
-    uint8_t correction_applied;
-    uint8_t _reserved[2];
-    uint8_t data[MAX_FRAME_SIZE];
-} Frame __attribute__((aligned(64)));
+    int width, height;
+    uint32_t data_size;
+    uint8_t hb_mem_buf_data[48];  // Full hb_mem_common_buf_t
+    volatile uint32_t version;
+} H265ZeroCopyFrame;
 
-// SharedFrameBuffer structure matching shared_memory.h
 typedef struct {
-    volatile uint32_t write_index;
-    char _pad_wridx[60];
-    volatile uint32_t frame_interval_ms;
-    char _pad_interval[60];
-    uint8_t new_frame_sem[32];  // sem_t (32 bytes on Linux)
-    Frame frames[RING_BUFFER_SIZE];
-} SharedFrameBuffer;
+    uint8_t new_frame_sem[32];   // sem_t
+    uint8_t consumed_sem[32];    // sem_t (also acts as ready signal)
+    H265ZeroCopyFrame frame;
+} H265ZeroCopyBuffer;
 
-// Open shared memory for reading (RDWR needed for sem_wait)
-SharedFrameBuffer* open_shm(const char* name) {
+// Open H265 zero-copy SHM
+H265ZeroCopyBuffer* open_h265_zc(const char* name) {
     int fd = shm_open(name, O_RDWR, 0666);
-    if (fd == -1) {
-        return NULL;
-    }
+    if (fd == -1) return NULL;
 
-    SharedFrameBuffer* shm = (SharedFrameBuffer*)mmap(
-        NULL,
-        sizeof(SharedFrameBuffer),
-        PROT_READ | PROT_WRITE,  // WRITE needed for sem_wait
-        MAP_SHARED,
-        fd,
-        0
-    );
-
+    H265ZeroCopyBuffer* shm = (H265ZeroCopyBuffer*)mmap(
+        NULL, sizeof(H265ZeroCopyBuffer),
+        PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     close(fd);
 
-    if (shm == MAP_FAILED) {
-        return NULL;
-    }
-
+    if (shm == MAP_FAILED) return NULL;
     return shm;
 }
 
-// Wait for new frame notification with timeout
-// Returns: 0 on success, -1 on timeout, negative errno on error
-int wait_new_frame(SharedFrameBuffer* shm, int timeout_ms) {
-    if (shm == NULL) {
-        return -EINVAL;
-    }
+void close_h265_zc(H265ZeroCopyBuffer* shm) {
+    if (shm) munmap((void*)shm, sizeof(H265ZeroCopyBuffer));
+}
 
-    if (timeout_ms <= 0) {
-        // No timeout, block indefinitely
-        if (sem_wait((sem_t*)&shm->new_frame_sem) != 0) {
-            return -errno;  // Return negative errno
-        }
-        return 0;
-    }
-
-    // With timeout
-    struct timespec ts;
-    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
-        return -errno;
-    }
-
-    // Add timeout
-    ts.tv_sec += timeout_ms / 1000;
-    ts.tv_nsec += (timeout_ms % 1000) * 1000000;
-    if (ts.tv_nsec >= 1000000000) {
-        ts.tv_sec += 1;
-        ts.tv_nsec -= 1000000000;
-    }
-
-    int ret = sem_timedwait((sem_t*)&shm->new_frame_sem, &ts);
-    if (ret == -1) {
-        return -errno;  // Return negative errno (including ETIMEDOUT)
-    }
-
+// Read frame metadata (non-blocking)
+int read_h265_frame(H265ZeroCopyBuffer* shm, H265ZeroCopyFrame* out) {
+    if (!shm || !out) return -1;
+    memcpy(out, (void*)&shm->frame, sizeof(H265ZeroCopyFrame));
     return 0;
 }
 
-// Close shared memory
-void close_shm(SharedFrameBuffer* shm) {
-    if (shm != NULL) {
-        munmap((void*)shm, sizeof(SharedFrameBuffer));
-    }
-}
+// Import + copy in one call (safe for recorder — no VPU buffer lifetime issues)
+int import_h265_copy(const uint8_t* com_buf_data, uint32_t data_size,
+                     uint8_t* dst, uint32_t dst_size) {
+    if (!com_buf_data || data_size == 0 || !dst || data_size > dst_size) return -1;
+    ensure_hb_mem_init();
 
-// Get current write index (volatile read - no atomic needed for 32-bit on x86/ARM64)
-uint32_t get_write_index(SharedFrameBuffer* shm) {
-    return shm->write_index;
-}
+    hb_mem_common_buf_t in_buf;
+    memcpy(&in_buf, com_buf_data, sizeof(hb_mem_common_buf_t));
 
-// Read frame at specific index
-int read_frame(SharedFrameBuffer* shm, uint32_t index, Frame* out) {
-    if (index >= RING_BUFFER_SIZE) {
-        return -1;
-    }
+    hb_mem_common_buf_t out_buf = {0};
+    int ret = hb_mem_import_com_buf(&in_buf, &out_buf);
+    if (ret != 0) return ret;
 
-    // Copy frame data (memcpy is safe for reading from shared memory)
-    memcpy(out, &shm->frames[index], sizeof(Frame));
+    hb_mem_invalidate_buf_with_vaddr((uint64_t)out_buf.virt_addr, out_buf.size);
+    memcpy(dst, out_buf.virt_addr, data_size);
+    hb_mem_free_buf(out_buf.fd);
     return 0;
 }
+
+// Zero-copy import handle — holds VPU buffer mapping until explicitly closed
+typedef struct {
+    void *virt_addr;
+    uint32_t data_size;
+    int fd;
+} h265_import_handle_t;
+
+// Import VPU buffer — returns virt_addr for zero-copy access (no memcpy)
+int import_h265_open(const uint8_t* com_buf_data, uint32_t data_size,
+                     h265_import_handle_t* out) {
+    if (!com_buf_data || data_size == 0 || !out) return -1;
+    ensure_hb_mem_init();
+
+    hb_mem_common_buf_t in_buf;
+    memcpy(&in_buf, com_buf_data, sizeof(hb_mem_common_buf_t));
+
+    hb_mem_common_buf_t out_buf = {0};
+    int ret = hb_mem_import_com_buf(&in_buf, &out_buf);
+    if (ret != 0) return ret;
+
+    hb_mem_invalidate_buf_with_vaddr((uint64_t)out_buf.virt_addr, out_buf.size);
+
+    out->virt_addr = out_buf.virt_addr;
+    out->data_size = data_size;
+    out->fd = out_buf.fd;
+    return 0;
+}
+
+// Release imported VPU buffer mapping
+void import_h265_close(h265_import_handle_t* handle) {
+    if (handle && handle->fd > 0) {
+        hb_mem_free_buf(handle->fd);
+        handle->fd = 0;
+        handle->virt_addr = NULL;
+    }
+}
+
+
 */
 import "C"
 import (
@@ -144,52 +142,93 @@ import (
 )
 
 const (
-	// Format constants matching shared_memory.h
 	FormatJPEG = 0
 	FormatNV12 = 1
 	FormatRGB  = 2
 	FormatH264 = 3
 	FormatH265 = 4
 
-	// Buffer constants (must match shm_constants.h)
-	RingBufferSize = C.RING_BUFFER_SIZE
-	MaxFrameSize   = C.MAX_FRAME_SIZE
 )
 
-// Reader reads H.264 frames from shared memory
+// Reader reads H.265 frames from zero-copy shared memory
 type Reader struct {
-	shm     *C.SharedFrameBuffer
-	shmName string
+	shm         *C.H265ZeroCopyBuffer
+	shmName     string
+	lastVersion uint32
+	prevHandle  C.h265_import_handle_t
+	hasPrev     bool
 }
 
-// NewReader creates a new shared memory reader
+// Version returns the current SHM frame version (atomic read)
+func (r *Reader) Version() uint32 {
+	if r.shm == nil {
+		return 0
+	}
+	return uint32(r.shm.frame.version)
+}
+
+// MeasureFrameInterval observes version changes to determine camera frame interval.
+// Returns measured interval and syncs to the frame boundary.
+func (r *Reader) MeasureFrameInterval(samples int) time.Duration {
+	if r.shm == nil || samples < 2 {
+		return 33 * time.Millisecond // fallback 30fps
+	}
+
+	ver := r.Version()
+
+	// Wait for first version change (sync to frame boundary)
+	for r.Version() == ver {
+		time.Sleep(100 * time.Microsecond)
+	}
+
+	// Measure intervals between subsequent version changes
+	start := time.Now()
+	ver = r.Version()
+	for i := 0; i < samples; i++ {
+		for r.Version() == ver {
+			time.Sleep(100 * time.Microsecond)
+		}
+		ver = r.Version()
+	}
+	interval := time.Since(start) / time.Duration(samples)
+
+	// Clamp to sane range (15-60fps)
+	if interval < 16*time.Millisecond {
+		interval = 16 * time.Millisecond
+	}
+	if interval > 66*time.Millisecond {
+		interval = 66 * time.Millisecond
+	}
+
+	return interval
+}
+
+// NewReader creates a new H.265 zero-copy reader
 func NewReader(shmName string) (*Reader, error) {
 	if shmName == "" {
-		shmName = "/pet_camera_stream"
+		shmName = "/pet_camera_h265_zc"
 	}
 
 	cName := C.CString(shmName)
 	defer C.free(unsafe.Pointer(cName))
 
-	var shm *C.SharedFrameBuffer
-	// Retry for up to 30 seconds
+	var shm *C.H265ZeroCopyBuffer
 	for i := 0; i < 30; i++ {
-		shm = C.open_shm(cName)
+		shm = C.open_h265_zc(cName)
 		if shm != nil {
 			break
 		}
-		// Log waiting status (only every 5 seconds to reduce noise)
 		if i%5 == 0 {
-			logger.Info("Reader", "Waiting for shared memory %s to appear... (%d/30)", shmName, i+1)
+			logger.Info("Reader", "Waiting for %s... (%d/30)", shmName, i+1)
 		}
 		time.Sleep(1 * time.Second)
 	}
 
 	if shm == nil {
-		return nil, fmt.Errorf("failed to open shared memory: %s (timeout after 30s)", shmName)
+		return nil, fmt.Errorf("failed to open %s (timeout 30s)", shmName)
 	}
 
-	logger.Info("Reader", "Successfully opened shared memory: %s", shmName)
+	logger.Info("Reader", "Opened H.265 zero-copy SHM: %s", shmName)
 
 	return &Reader{
 		shm:     shm,
@@ -197,124 +236,110 @@ func NewReader(shmName string) (*Reader, error) {
 	}, nil
 }
 
-// Close closes the shared memory reader
+// Close closes the reader
 func (r *Reader) Close() error {
+	if r.hasPrev {
+		C.import_h265_close(&r.prevHandle)
+		r.hasPrev = false
+	}
 	if r.shm != nil {
-		C.close_shm(r.shm)
+		C.close_h265_zc(r.shm)
 		r.shm = nil
 	}
 	return nil
 }
 
-// ReadLatest reads the latest frame from shared memory
-// NOTE: Duplicate check removed - polling interval ≈ frame interval, duplicates are rare
-// and processing same frame twice has no UX impact
+// ReadLatest reads the latest H.265 frame via zero-copy.
+// Data points directly to VPU physical memory. Valid until next ReadLatest.
+// Caller must ensure all synchronous consumers (SendFrame) finish before next call.
 func (r *Reader) ReadLatest() (*types.VideoFrame, error) {
 	if r.shm == nil {
 		return nil, fmt.Errorf("shared memory not open")
 	}
 
-	// Get current write index
-	writeIndex := uint32(C.get_write_index(r.shm))
-	if writeIndex == 0 {
-		return nil, nil // No frames written yet
+	var cFrame C.H265ZeroCopyFrame
+	if C.read_h265_frame(r.shm, &cFrame) != 0 {
+		return nil, nil
 	}
-
-	// Read the latest frame
-	latestIndex := writeIndex - 1
-	index := latestIndex % RingBufferSize
-
-	// Read frame from shared memory
-	var cFrame C.Frame
-	if C.read_frame(r.shm, C.uint32_t(index), &cFrame) != 0 {
-		return nil, fmt.Errorf("failed to read frame at index %d", index)
-	}
-
-	// Check if this is an H.265 frame
-	if int(cFrame.format) != FormatH265 {
+	if cFrame.data_size == 0 {
 		return nil, nil
 	}
 
-	// Convert C frame to Go frame
-	frame := r.convertFrame(&cFrame)
+	// Release previous VPU buffer (SendFrame already consumed it synchronously)
+	if r.hasPrev {
+		C.import_h265_close(&r.prevHandle)
+		r.hasPrev = false
+	}
 
-	return frame, nil
-}
+	// Import VPU buffer — zero-copy
+	var handle C.h265_import_handle_t
+	ret := C.import_h265_open(
+		(*C.uint8_t)(unsafe.Pointer(&cFrame.hb_mem_buf_data[0])),
+		cFrame.data_size,
+		&handle,
+	)
+	if ret != 0 {
+		return nil, fmt.Errorf("import_h265_open failed: %d", ret)
+	}
 
-// convertFrame converts C Frame to Go VideoFrame
-func (r *Reader) convertFrame(cFrame *C.Frame) *types.VideoFrame {
-	dataSize := int(cFrame.data_size)
+	data := unsafe.Slice((*byte)(handle.virt_addr), handle.data_size)
+	r.prevHandle = handle
+	r.hasPrev = true
 
-	// Copy frame data from C array to Go slice
-	data := make([]byte, dataSize)
-	cData := (*[MaxFrameSize]byte)(unsafe.Pointer(&cFrame.data[0]))[:dataSize:dataSize]
-	copy(data, cData)
-
-	// Convert timespec to time.Time
 	timestamp := time.Unix(
 		int64(cFrame.timestamp.tv_sec),
 		int64(cFrame.timestamp.tv_nsec),
 	)
 
 	return &types.VideoFrame{
-		Data:      data,
-		Timestamp: timestamp,
-		FrameNum:  uint64(cFrame.frame_number),
-		Width:     int(cFrame.width),
-		Height:    int(cFrame.height),
-		IsIDR:     false, // Will be determined by H264 processor
-	}
+		Data:        data,
+		Timestamp:   timestamp,
+		FrameNumber: uint64(cFrame.frame_number),
+		Width:       int(cFrame.width),
+		Height:      int(cFrame.height),
+		IsIDR:       false,
+	}, nil
 }
 
-// WaitNewFrame waits for new frame notification via semaphore
-// Returns error on timeout or failure
-func (r *Reader) WaitNewFrame(timeout time.Duration) error {
+// ReadLatestCopy reads the latest H.265 frame with import+copy+free in one call.
+// Safe for async consumers (recorder). No VPU buffer lifetime dependency.
+func (r *Reader) ReadLatestCopy() (*types.VideoFrame, error) {
 	if r.shm == nil {
-		return fmt.Errorf("shared memory not open")
+		return nil, fmt.Errorf("shared memory not open")
 	}
 
-	timeoutMs := int(timeout.Milliseconds())
-	result := int(C.wait_new_frame(r.shm, C.int(timeoutMs)))
-
-	if result == 0 {
-		return nil // Success
+	var cFrame C.H265ZeroCopyFrame
+	if C.read_h265_frame(r.shm, &cFrame) != 0 {
+		return nil, nil
+	}
+	if cFrame.data_size == 0 {
+		return nil, nil
 	}
 
-	// Result is negative errno
-	errNum := -result
+	dataSize := int(cFrame.data_size)
+	buf := make([]byte, dataSize)
 
-	// Map common errno values
-	switch errNum {
-	case 110: // ETIMEDOUT
-		return fmt.Errorf("timeout")
-	case 22: // EINVAL
-		return fmt.Errorf("invalid argument (errno %d)", errNum)
-	case 4: // EINTR
-		return fmt.Errorf("interrupted (errno %d)", errNum)
-	default:
-		return fmt.Errorf("semaphore wait failed (errno %d)", errNum)
+	ret := C.import_h265_copy(
+		(*C.uint8_t)(unsafe.Pointer(&cFrame.hb_mem_buf_data[0])),
+		cFrame.data_size,
+		(*C.uint8_t)(unsafe.Pointer(&buf[0])),
+		C.uint32_t(dataSize),
+	)
+	if ret != 0 {
+		return nil, fmt.Errorf("import_h265_copy failed: %d", ret)
 	}
-}
 
-// WaitForFrame waits for a new frame with timeout (deprecated - use WaitNewFrame + ReadLatest)
-func (r *Reader) WaitForFrame(timeout time.Duration) (*types.VideoFrame, error) {
-	deadline := time.Now().Add(timeout)
+	timestamp := time.Unix(
+		int64(cFrame.timestamp.tv_sec),
+		int64(cFrame.timestamp.tv_nsec),
+	)
 
-	for {
-		frame, err := r.ReadLatest()
-		if err != nil {
-			return nil, err
-		}
-
-		if frame != nil {
-			return frame, nil
-		}
-
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("timeout waiting for frame")
-		}
-
-		// Sleep briefly to avoid busy-waiting
-		time.Sleep(10 * time.Millisecond)
-	}
+	return &types.VideoFrame{
+		Data:        buf,
+		Timestamp:   timestamp,
+		FrameNumber: uint64(cFrame.frame_number),
+		Width:       int(cFrame.width),
+		Height:      int(cFrame.height),
+		IsIDR:       false,
+	}, nil
 }

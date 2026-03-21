@@ -6,7 +6,7 @@ import "time"
 type VideoFrame struct {
 	Data      []byte    // Raw video data (NAL units)
 	Timestamp time.Time // Frame capture timestamp
-	FrameNum  uint64    // Sequential frame number
+	FrameNumber  uint64    // Sequential frame number
 	IsIDR     bool      // True if this frame contains an IDR
 	Width     int       // Frame width
 	Height    int       // Frame height

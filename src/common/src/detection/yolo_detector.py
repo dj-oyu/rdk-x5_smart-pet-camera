@@ -8,12 +8,111 @@ MockDetectorと同じインターフェースを提供
 
 import os
 import sys
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
 import logging
 
 import cv2
 import numpy as np
+
+
+class Preprocessor(ABC):
+    """Abstract base class for YOLO input preprocessing."""
+
+    @abstractmethod
+    def letterbox(self, nv12_array: np.ndarray, width: int, height: int,
+                  pad_top: int, pad_bottom: int) -> np.ndarray:
+        """Add letterbox padding to NV12 frame. Returns padded NV12."""
+
+    @abstractmethod
+    def crop_roi(self, nv12_array: np.ndarray, width: int, height: int,
+                 roi_x: int, roi_y: int, roi_w: int, roi_h: int) -> np.ndarray:
+        """Crop ROI from NV12 frame. Returns cropped NV12."""
+
+
+class HWPreprocessor(Preprocessor):
+    """GPU-based letterbox using nano2D (GC820). CPU fallback for crop_roi.
+
+    Usage:
+        hw = HWPreprocessor(detector)
+        hw.set_hb_mem_buffer(hb_mem_buffer)  # call before each letterbox
+        result = hw.letterbox(nv12, w, h, pad_top, pad_bottom)
+    """
+
+    def __init__(self, detector: "YoloDetector", lib_path: str = "") -> None:
+        import ctypes
+        self._detector = detector
+        self._ctx = None
+        self._lib = None
+        self._hb_buf = None  # Current frame's HbMemGraphicBuffer
+
+        if not lib_path:
+            lib_path = str(Path(__file__).parents[4] / "build" / "libn2d_letterbox.so")
+
+        try:
+            self._lib = ctypes.CDLL(lib_path)
+            self._lib.n2d_letterbox_create.restype = ctypes.c_void_p
+            self._lib.n2d_letterbox_create.argtypes = [
+                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+            self._lib.n2d_letterbox_process.restype = ctypes.c_int
+            self._lib.n2d_letterbox_process.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint64,
+                ctypes.c_int, ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_size_t)]
+            self._lib.n2d_letterbox_destroy.restype = None
+            self._lib.n2d_letterbox_destroy.argtypes = [ctypes.c_void_p]
+            logging.getLogger(__name__).info("HWPreprocessor: loaded %s", lib_path)
+        except OSError as e:
+            logging.getLogger(__name__).warning("HWPreprocessor: failed to load %s: %s", lib_path, e)
+
+    def set_hb_mem_buffer(self, buf) -> None:
+        """Set the current frame's HbMemGraphicBuffer for GPU letterbox."""
+        self._hb_buf = buf
+
+    def _ensure_ctx(self, src_w: int, src_h: int, dst_w: int, dst_h: int) -> bool:
+        if self._lib is None:
+            return False
+        if self._ctx is None:
+            self._ctx = self._lib.n2d_letterbox_create(src_w, src_h, dst_w, dst_h)
+            if not self._ctx:
+                logging.getLogger(__name__).error("HWPreprocessor: n2d_letterbox_create failed")
+                return False
+        return True
+
+    def letterbox(self, nv12_array: np.ndarray, width: int, height: int,
+                  pad_top: int, pad_bottom: int) -> np.ndarray:
+        import ctypes
+
+        dst_h = height + pad_top + pad_bottom
+        buf = self._hb_buf
+
+        if buf and hasattr(buf, 'phys_addr') and buf.phys_addr:
+            phys = buf.phys_addr
+            stride = buf.stride if hasattr(buf, 'stride') and buf.stride else width
+            phys_y = phys[0]
+            phys_uv = phys[1] if len(phys) > 1 else 0
+
+            if phys_y and self._ensure_ctx(width, height, width, dst_h):
+                out_ptr = ctypes.c_void_p()
+                out_size = ctypes.c_size_t()
+                ret = self._lib.n2d_letterbox_process(
+                    self._ctx, phys_y, phys_uv, stride,
+                    ctypes.byref(out_ptr), ctypes.byref(out_size))
+                if ret == 0 and out_ptr.value:
+                    arr_type = ctypes.c_uint8 * out_size.value
+                    return np.ctypeslib.as_array(arr_type.from_address(out_ptr.value))
+
+        raise RuntimeError("HWPreprocessor: nano2D letterbox failed")
+
+    def crop_roi(self, nv12_array: np.ndarray, width: int, height: int,
+                 roi_x: int, roi_y: int, roi_w: int, roi_h: int) -> np.ndarray:
+        return self._detector._crop_nv12_roi(nv12_array, width, height, roi_x, roi_y, roi_w, roi_h)
+
+    def __del__(self) -> None:
+        if self._ctx and self._lib:
+            self._lib.n2d_letterbox_destroy(self._ctx)
+            self._ctx = None
 
 
 def _fast_softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
@@ -211,8 +310,7 @@ class YoloDetector:
         strides: list[int] = [8, 16, 32],
         input_size: tuple[int, int] = (640, 640),
         auto_download: bool = True,
-        clahe_enabled: bool = True,
-        clahe_brightness_threshold: float = 80.0,
+        clahe_enabled: bool = False,
         clahe_clip_limit: float = 3.0,
     ) -> None:
         """
@@ -230,8 +328,7 @@ class YoloDetector:
             strides: ストライド値
             input_size: 入力画像サイズ (height, width)
             auto_download: モデルが存在しない場合に自動ダウンロード
-            clahe_enabled: CLAHE前処理を有効化
-            clahe_brightness_threshold: この輝度以下でCLAHE適用 (0-255)
+            clahe_enabled: CLAHE前処理を有効化 (nightカメラ専用、daemon側で制御)
             clahe_clip_limit: CLAHEのコントラスト制限値 (大きいほど強調)
         """
         self.model_path = model_path
@@ -248,11 +345,12 @@ class YoloDetector:
             self.model_type = model_type
         logger.debug(f"Model type: {self.model_type}")
 
-        # CLAHE前処理設定 (ISP補正の代替)
-        # 実測brightness_avgは最大80程度。IR LED環境(brightness ~60-75)でもCLAHE適用するため閾値80
+        # CLAHE前処理設定 (nightカメラのIR映像用、daemon側でclahe_enabledを制御)
         self.clahe_enabled = clahe_enabled
-        self.clahe_brightness_threshold = clahe_brightness_threshold
         self.clahe = cv2.createCLAHE(clipLimit=clahe_clip_limit, tileGridSize=(8, 8))
+
+        # Preprocessor (set by detector daemon — HWPreprocessor for real HW)
+        self.preprocessor: Optional[Preprocessor] = None
 
         # モデルの自動ダウンロード
         if auto_download and not os.path.exists(model_path):
@@ -367,53 +465,6 @@ class YoloDetector:
             logger.debug(
                 f"YOLO26 grid stride={stride}: shape={self.grids_yolo26[stride].shape}"
             )
-
-    def detect(self, frame_data: bytes) -> list[Detection]:
-        """
-        物体検出を実行
-
-        Args:
-            frame_data: JPEGエンコードされたフレームデータ
-
-        Returns:
-            検出結果のリスト
-        """
-        import time
-
-        start_total = time.perf_counter()
-        self._total_calls += 1
-
-        # 1. JPEGデコード + 前処理（YUV420SP変換、letterbox）
-        start_prep = time.perf_counter()
-        img = self._decode_jpeg(frame_data)
-        if img is None:
-            logger.warning("Failed to decode JPEG frame")
-            return []
-
-        input_tensor, scale, shift = self._preprocess_yuv420sp(img)
-        end_prep = time.perf_counter()
-        self._last_timing["preprocessing"] = end_prep - start_prep
-
-        # 2. BPU推論
-        start_infer = time.perf_counter()
-        outputs = self._forward(input_tensor)
-        end_infer = time.perf_counter()
-        self._last_timing["inference"] = end_infer - start_infer
-
-        # 3. 後処理（NMS、座標変換）
-        start_post = time.perf_counter()
-        detections = self._postprocess(outputs, scale, shift, img.shape[:2])
-        end_post = time.perf_counter()
-        self._last_timing["postprocessing"] = end_post - start_post
-
-        end_total = time.perf_counter()
-        self._last_timing["total"] = end_total - start_total
-
-        # 統計情報の更新
-        self._total_detections += len(detections)
-        self._total_inference_time += self._last_timing["total"]
-
-        return detections
 
     def get_roi_regions(
         self, width: int, height: int
@@ -619,18 +670,14 @@ class YoloDetector:
         # 1. ROIクロップ → CLAHE（crop後に適用で処理量削減）
         start_prep = time.perf_counter()
 
-        # CLAHE適用判定
-        # brightness_avg=0.0 (夜カメラ等) や -1 (未設定) でも常に適用
-        need_clahe = self.clahe_enabled and (
-            brightness_avg < 0 or brightness_avg < self.clahe_brightness_threshold
-        )
+        need_clahe = self.clahe_enabled
 
         # NV12データをnumpy配列に変換（read-only、cropが新バッファを作る）
         nv12_array = np.frombuffer(nv12_data, dtype=np.uint8)
 
         # ROIクロップ（先にクロップしてからCLAHE適用 = 処理ピクセル数削減）
         if roi_w == self.input_w and roi_h == self.input_h:
-            cropped = self._crop_nv12_roi(
+            cropped = self.preprocessor.crop_roi(
                 nv12_array, width, height, roi_x, roi_y, roi_w, roi_h
             )
             # CLAHE + UV=128 をcrop後の小さいデータに適用
@@ -646,20 +693,10 @@ class YoloDetector:
             scale = (1.0, 1.0)
             shift = (0.0, 0.0)
         else:
-            # ROIサイズが異なる場合はリサイズが必要
-            logger.warning(
-                f"ROI size {roi_w}x{roi_h} differs from model input {self.input_w}x{self.input_h}"
+            logger.error(
+                f"ROI size {roi_w}x{roi_h} must match model input {self.input_w}x{self.input_h}"
             )
-            cropped = self._crop_nv12_roi(
-                nv12_array, width, height, roi_x, roi_y, roi_w, roi_h
-            )
-            if need_clahe:
-                cropped = self._apply_clahe_nv12(cropped, roi_w, roi_h)
-            # NV12→BGR→リサイズ→NV12 (遅いパス)
-            img = self._decode_nv12(cropped.tobytes(), roi_w, roi_h)
-            if img is None:
-                return []
-            input_tensor, scale, shift = self._preprocess_yuv420sp(img)
+            return []
 
         end_prep = time.perf_counter()
         self._last_timing["preprocessing"] = end_prep - start_prep
@@ -733,11 +770,7 @@ class YoloDetector:
         # 1. 前処理（CLAHE適用 + サイズ調整）
         start_prep = time.perf_counter()
 
-        # CLAHE適用判定（コピー要否を先に決定）
-        # brightness_avg=0.0 (夜カメラ等) や -1 (未設定) でも常に適用
-        need_clahe = self.clahe_enabled and (
-            brightness_avg < 0 or brightness_avg < self.clahe_brightness_threshold
-        )
+        need_clahe = self.clahe_enabled
 
         # NV12データをnumpy配列に変換
         # CLAHE適用時のみコピー（元データを変更するため）
@@ -747,21 +780,18 @@ class YoloDetector:
         else:
             nv12_array = np.frombuffer(nv12_data, dtype=np.uint8)
 
-        # CLAHE適用（低照度時のみ）
+        # CLAHE適用 (nightカメラ時のみ、daemon側でclahe_enabledを制御)
         clahe_applied = False
         if brightness_avg >= 0:
             self._brightness_stats["last_brightness_avg"] = brightness_avg
-            if need_clahe:
-                start_clahe = time.perf_counter()
-                nv12_array = self._apply_clahe_nv12(nv12_array, width, height)
-                clahe_time = (time.perf_counter() - start_clahe) * 1000
-                self._brightness_stats["clahe_time_total_ms"] += clahe_time
-                self._brightness_stats["frames_clahe_applied"] += 1
-                clahe_applied = True
-            else:
-                self._brightness_stats["frames_clahe_skipped"] += 1
+        if need_clahe:
+            start_clahe = time.perf_counter()
+            nv12_array = self._apply_clahe_nv12(nv12_array, width, height)
+            clahe_time = (time.perf_counter() - start_clahe) * 1000
+            self._brightness_stats["clahe_time_total_ms"] += clahe_time
+            self._brightness_stats["frames_clahe_applied"] += 1
+            clahe_applied = True
         else:
-            # 輝度情報なし → CLAHEスキップ
             self._brightness_stats["frames_clahe_skipped"] += 1
 
         self._brightness_stats["last_clahe_applied"] = clahe_applied
@@ -798,7 +828,7 @@ class YoloDetector:
             pad_top = pad_total // 2
             pad_bottom = pad_total - pad_top
 
-            input_tensor = self._letterbox_nv12(
+            input_tensor = self.preprocessor.letterbox(
                 nv12_array, width, height, pad_top, pad_bottom
             )
             scale = (1.0, 1.0)  # スケールは既にVSEで適用済み
@@ -809,17 +839,10 @@ class YoloDetector:
                     f"NV12 letterbox path: {width}x{height} -> {self.input_w}x{self.input_h} (pad_top={pad_top})"
                 )
         else:
-            # サイズが異なる場合：NV12→BGR→前処理
-            if not self._nv12_path_debug_logged:
-                logger.debug(
-                    f"NV12 resize path: {width}x{height} -> {self.input_w}x{self.input_h}"
-                )
-            img = self._decode_nv12(nv12_array.tobytes(), width, height)
-            if img is None:
-                logger.warning("Failed to decode NV12 frame")
-                return []
-            input_tensor, scale, shift = self._preprocess_yuv420sp(img)
-            original_shape = (height, width)
+            logger.error(
+                f"NV12 {width}x{height} must be {self.input_w}x{self.input_w} (direct) or {self.input_w}x* (letterbox)"
+            )
+            return []
 
         end_prep = time.perf_counter()
         self._last_timing["preprocessing"] = end_prep - start_prep
@@ -848,44 +871,6 @@ class YoloDetector:
         self._total_inference_time += self._last_timing["total"]
 
         return detections
-
-    def _decode_jpeg(self, frame_data: bytes) -> Optional[np.ndarray]:
-        """JPEGデータをデコードしてBGR画像に変換"""
-        try:
-            img_array = np.frombuffer(frame_data, dtype=np.uint8)
-            img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-            return img
-        except Exception as e:
-            logger.error(f"JPEG decode failed: {e}")
-            return None
-
-    def _decode_nv12(
-        self, nv12_data: bytes | memoryview, width: int, height: int
-    ) -> Optional[np.ndarray]:
-        """NV12データをデコードしてBGR画像に変換"""
-        try:
-            y_size = width * height
-            uv_size = y_size // 2
-
-            if len(nv12_data) < y_size + uv_size:
-                logger.error(
-                    f"NV12 data too small: {len(nv12_data)} < {y_size + uv_size}"
-                )
-                return None
-
-            # NV12を1次元配列として準備
-            yuv_data = np.frombuffer(nv12_data[: y_size + uv_size], dtype=np.uint8)
-
-            # NV12形式: [Y: height x width] [UV: height/2 x width (interleaved)]
-            yuv_img = yuv_data.reshape((height * 3 // 2, width))
-
-            # NV12 → BGR変換
-            bgr_img = cv2.cvtColor(yuv_img, cv2.COLOR_YUV2BGR_NV12)
-
-            return bgr_img
-        except Exception as e:
-            logger.error(f"NV12 decode failed: {e}")
-            return None
 
     def _apply_clahe_nv12(
         self, nv12_array: np.ndarray, width: int, height: int
@@ -998,70 +983,6 @@ class YoloDetector:
         self._lb_uv_dst[:] = uv_in
 
         return self._lb_buf
-
-    def _preprocess_yuv420sp(
-        self, img: np.ndarray
-    ) -> tuple[np.ndarray, tuple[float, float], tuple[float, float]]:
-        """
-        前処理: BGR → YUV420SP (NV12) 変換 + letterbox
-
-        Returns:
-            (input_tensor, (y_scale, x_scale), (y_shift, x_shift))
-        """
-        img_h, img_w = img.shape[:2]
-
-        # letterboxのスケール計算
-        scale = min(self.input_h / img_h, self.input_w / img_w)
-        new_h, new_w = int(img_h * scale), int(img_w * scale)
-
-        # リサイズ
-        img_resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-
-        # パディング（中央配置）
-        pad_h = (self.input_h - new_h) // 2
-        pad_w = (self.input_w - new_w) // 2
-
-        img_padded = np.full((self.input_h, self.input_w, 3), 114, dtype=np.uint8)
-        img_padded[pad_h : pad_h + new_h, pad_w : pad_w + new_w] = img_resized
-
-        # BGR → YUV420SP (NV12)
-        img_yuv = cv2.cvtColor(img_padded, cv2.COLOR_BGR2YUV_I420)
-        img_nv12 = self._yuv_i420_to_nv12(img_yuv, self.input_h, self.input_w)
-
-        # スケールとシフト情報を返す（ピクセル単位）
-        y_scale = x_scale = scale
-        y_shift = float(pad_h)
-        x_shift = float(pad_w)
-
-        return img_nv12, (y_scale, x_scale), (y_shift, x_shift)
-
-    def _yuv_i420_to_nv12(
-        self, yuv_i420: np.ndarray, height: int, width: int
-    ) -> np.ndarray:
-        """
-        YUV I420 → NV12 変換
-
-        I420形式: YYYYYYYY UU VV (planar)
-        NV12形式: YYYYYYYY UVUVUVUV (semi-planar)
-        """
-        area = height * width
-
-        # I420を1次元配列に変換
-        yuv420p = yuv_i420.reshape((area * 3 // 2,))
-
-        # Y平面を取得
-        y = yuv420p[:area]
-
-        # UV平面を取得してインターリーブ
-        uv_planar = yuv420p[area:].reshape((2, area // 4))
-        uv_packed = uv_planar.transpose((1, 0)).reshape((area // 2,))
-
-        # NV12形式で結合
-        nv12 = np.zeros_like(yuv420p)
-        nv12[:area] = y
-        nv12[area:] = uv_packed
-
-        return nv12
 
     def _forward(self, input_tensor: np.ndarray) -> list[np.ndarray]:
         """BPU推論を実行"""
@@ -1503,21 +1424,6 @@ if __name__ == "__main__":
         nms_threshold=0.7,
         auto_download=True,
     )
-
-    # ダミーJPEGフレーム（実際のカメラ画像を使用する場合は置き換え）
-    test_img_path = "/app/github/rdk_model_zoo/demos/Vision/ultralytics_YOLO/source/reference_yamls/bus.jpg"
-    if os.path.exists(test_img_path):
-        with open(test_img_path, "rb") as f:
-            frame_data = f.read()
-
-        detections = detector.detect(frame_data)
-        print(f"Detected {len(detections)} objects")
-        for det in detections:
-            print(
-                f"  - {det.class_name.value}: "
-                f"confidence={det.confidence:.2f}, "
-                f"bbox=({det.bbox.x}, {det.bbox.y}, {det.bbox.w}, {det.bbox.h})"
-            )
 
     print(f"\n{detector}")
     print(f"Stats: {detector.get_stats()}")

@@ -130,7 +130,7 @@ func (fb *FrameBroadcaster) generateOverlay() []byte {
 	}
 
 	// Zero-copy: Get frame reference without copying
-	frame, ok := fb.shm.LatestFrameZeroCopy()
+	frame, ok := fb.shm.LatestFrame()
 	if !ok {
 		return nil
 	}
@@ -148,55 +148,53 @@ func (fb *FrameBroadcaster) generateOverlay() []byte {
 	}
 	fb.monitor.mu.Unlock()
 
-	// Handle different frame formats
-	switch frame.Format {
-	case 1: // NV12 - draw overlay on shared memory, then encode
-		// Draw stats text with background (white text on black background)
-		timeStr := frame.Timestamp.In(jstTimezone).Format("2006/01/02 15:04:05")
-		stats := fmt.Sprintf("Frame: %d  Time: %s", frame.FrameNumber, timeStr)
-		drawTextWithBackgroundNV12(frame.Data, frame.Width, frame.Height,
-			10, 10, stats, 255, 16, 2)
-
-		// Draw bounding boxes and labels
-		// Detection coords are in H.264 space (1280x720), scale to MJPEG frame
-		for _, det := range detections {
-			bx := det.BBox.X * frame.Width / 1280
-			by := det.BBox.Y * frame.Height / 720
-			bw := det.BBox.W * frame.Width / 1280
-			bh := det.BBox.H * frame.Height / 720
-			drawRectColorNV12(frame.Data, frame.Width, frame.Height,
-				bx, by, bw, bh,
-				200, 44, 21, 3)
-
-			label := fmt.Sprintf("%.2f", det.Confidence)
-			labelY := by - 20
-			labelX := bx
-			if labelY < 5 {
-				labelY = by + bh + 5
-			}
-			if labelY > frame.Height-20 {
-				labelY = frame.Height - 20
-			}
-			if labelX < 4 {
-				labelX = 4
-			}
-			drawTextWithBackgroundNV12(frame.Data, frame.Width, frame.Height,
-				labelX, labelY, label, 200, 16, 2)
-		}
-
-		// Convert NV12 to JPEG
-		jpegData, err := nv12ToJPEG(frame.Data, frame.Width, frame.Height)
-		if err != nil {
-			return nil
-		}
-		return jpegData
-
-	case 0: // JPEG - fallback: return as-is (no overlay)
+	// NV12: draw overlay then HW JPEG encode
+	if frame.Format != formatNV12 {
 		return frame.Data
+	}
 
-	default:
+	var rects []overlayRect
+	var texts []overlayText
+
+	// Stats text (white on black)
+	timeStr := frame.Timestamp.In(jstTimezone).Format("2006/01/02 15:04:05")
+	stats := fmt.Sprintf("Frame: %d  Time: %s", frame.FrameNumber, timeStr)
+	texts = append(texts, overlayText{x: 10, y: 10, text: stats, textY: 235, bgY: 16, scale: 2})
+
+	// Detection bboxes + labels
+	for _, det := range detections {
+		bx := det.BBox.X * frame.Width / 1280
+		by := det.BBox.Y * frame.Height / 720
+		bw := det.BBox.W * frame.Width / 1280
+		bh := det.BBox.H * frame.Height / 720
+		rects = append(rects, overlayRect{
+			X: bx, Y: by, W: bw, H: bh,
+			YVal: 200, UVal: 44, VVal: 21,
+			Thickness: 3,
+		})
+
+		label := fmt.Sprintf("%.2f", det.Confidence)
+		labelY := by - 20
+		labelX := bx
+		if labelY < 5 {
+			labelY = by + bh + 5
+		}
+		if labelY > frame.Height-20 {
+			labelY = frame.Height - 20
+		}
+		if labelX < 4 {
+			labelX = 4
+		}
+		texts = append(texts, overlayText{x: labelX, y: labelY, text: label, textY: 200, bgY: 16, scale: 2})
+	}
+
+	drawOverlay(frame.Data, frame.Width, frame.Height, rects, texts)
+
+	jpegData, err := nv12ToJPEG(frame.Data, frame.Width, frame.Height)
+	if err != nil {
 		return nil
 	}
+	return jpegData
 }
 
 func (fb *FrameBroadcaster) broadcast(data []byte) {

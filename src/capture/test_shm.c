@@ -188,7 +188,7 @@ void test_camera_control_create_destroy(void) {
 
     // Check initial state (should be DAY camera)
     assert(ctrl->active_camera_index == 0);
-    assert(ctrl->version == 0);
+    assert(ctrl->switch_version == 0);
 
     shm_control_destroy(ctrl);
     TEST_PASSED();

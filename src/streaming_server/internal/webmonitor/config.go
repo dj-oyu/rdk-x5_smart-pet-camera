@@ -11,7 +11,7 @@ type Config struct {
 	AssetsDir           string
 	BuildAssetsDir      string
 	FrameShmName        string        // NV12 frame SHM for MJPEG streaming
-	H264ShmName         string        // H.264 stream SHM for recording
+	StreamShmName         string        // H.265 zero-copy SHM for recording
 	DetectionShmName    string
 	WebRTCBaseURL       string
 	TargetFPS           int
@@ -30,8 +30,8 @@ func DefaultConfig() Config {
 		Addr:                ":8080",
 		AssetsDir:           filepath.Clean("../web"),
 		BuildAssetsDir:      filepath.Clean("../../build/web"),
-		FrameShmName:        "/pet_camera_mjpeg_frame",
-		H264ShmName:         "/pet_camera_stream",
+		FrameShmName:        "/pet_camera_mjpeg_zc",
+		StreamShmName:         "/pet_camera_h265_zc",
 		DetectionShmName:    "/pet_camera_detections",
 		WebRTCBaseURL:       "http://localhost:8081",
 		TargetFPS:           30,

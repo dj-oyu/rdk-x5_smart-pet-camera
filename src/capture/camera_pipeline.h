@@ -35,15 +35,15 @@ typedef struct {
     encoder_thread_t encoder_thread;
 
     // Shared memory output
-    SharedFrameBuffer *shm_active_h264;   // Active camera H.264 (only when active)
-    SharedBrightnessData *shm_brightness; // Lightweight brightness data (always updated)
-    SharedFrameBuffer *shm_mjpeg_frame;   // MJPEG 640x480 NV12 input (VSE Ch2, always active, writable)
+    // SHM output (only 2 remain)
+    H265ZeroCopyBuffer *shm_h265_zc;        // H.265 stream zero-copy (Go streaming)
+    ZeroCopyFrameBuffer *shm_yolo_zerocopy; // YOLO zero-copy (Python detector)
 
-    // Zero-copy shared memory (share_id based, no memcpy)
-    ZeroCopyFrameBuffer *shm_yolo_zerocopy; // YOLO 1280x720 zero-copy (VSE Ch1, always active)
+    // MJPEG NV12 zero-copy (Go web_monitor)
+    ZeroCopyFrameBuffer *shm_mjpeg_zc;
 
-    // Camera control (Phase 2: SHM-based instead of signal-based)
-    CameraControl *control_shm;           // CameraControl shared memory (active camera index)
+    // Shared state (same process, no SHM needed)
+    volatile int *active_camera;
 
     // Runtime control
     volatile bool *running_flag;           // External running flag
@@ -84,15 +84,14 @@ typedef struct {
  *   0 on success, negative error code on failure
  *
  * Note:
- *   - Shared memory names are fixed: SHM_NAME_STREAM, SHM_NAME_MJPEG_FRAME, SHM_NAME_BRIGHTNESS
- *   - Active state is determined by CameraControl SHM (Phase 2)
+ *   - Each pipeline maintains its own frame_number counter
  *   - Frames are written conditionally based on active camera index
- *   - Brightness is always written to lightweight shared memory
  */
 int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
                     int sensor_width, int sensor_height,
                     int output_width, int output_height,
-                    int fps, int bitrate);
+                    int fps, int bitrate,
+                    volatile int *active_camera);
 
 /**
  * Start camera pipeline
