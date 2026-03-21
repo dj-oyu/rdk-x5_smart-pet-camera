@@ -918,6 +918,18 @@ func (r *shmReader) LatestDetection() (*DetectionResult, bool) {
 	return &result, true
 }
 
+func (r *shmReader) LatestNV12() (*NV12Frame, bool) {
+	frame, ok := r.LatestFrame()
+	if !ok || frame.Format != formatNV12 || len(frame.Data) == 0 {
+		return nil, false
+	}
+	return &NV12Frame{
+		Data:   frame.Data,
+		Width:  frame.Width,
+		Height: frame.Height,
+	}, true
+}
+
 func (r *shmReader) LatestJPEG() ([]byte, bool) {
 	frame, ok := r.LatestFrame()
 	if !ok {
