@@ -5,35 +5,9 @@
 #include "camera_switcher.h"
 #include "logger.h"
 
-#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#include <jpeglib.h>
-/**
- * Custom JPEG error manager that uses setjmp/longjmp for error handling
- * instead of exit() to gracefully handle JPEG errors.
- */
-struct jpeg_error_mgr_ext {
-  struct jpeg_error_mgr pub; /* "public" fields */
-  jmp_buf setjmp_buffer;     /* for return to caller */
-};
-
-/**
- * Custom error_exit function that replaces the default libjpeg error handler.
- * Instead of calling exit(), it longjmps back to the setjmp point.
- */
-static void jpeg_error_exit(j_common_ptr cinfo) {
-  /* cinfo->err really points to a jpeg_error_mgr_ext struct */
-  struct jpeg_error_mgr_ext *myerr = (struct jpeg_error_mgr_ext *)cinfo->err;
-
-  /* Always display the message (optional, can be removed for silent errors) */
-  (*cinfo->err->output_message)(cinfo);
-
-  /* Return control to the setjmp point */
-  longjmp(myerr->setjmp_buffer, 1);
-}
 
 static double now_seconds(void) {
   struct timespec ts;
@@ -180,111 +154,6 @@ camera_switcher_record_brightness(CameraSwitchController *ctrl,
   return decision;
 }
 
-double frame_calculate_mean_luma(const Frame *frame) {
-  if (!frame || frame->data_size == 0) {
-    return -1.0;
-  }
-
-  if (frame->format == 1) { // NV12: Y plane first
-    size_t expected = (size_t)frame->width * (size_t)frame->height * 3 / 2;
-    if (frame->data_size < expected) {
-      return -1.0;
-    }
-    const uint8_t *y_plane = frame->data;
-    size_t y_size = (size_t)frame->width * (size_t)frame->height;
-    double sum = 0.0;
-    for (size_t i = 0; i < y_size; ++i) {
-      sum += y_plane[i];
-    }
-    return sum / (double)y_size;
-  } else if (frame->format == 2) { // RGB
-    size_t expected = (size_t)frame->width * (size_t)frame->height * 3;
-    if (frame->data_size < expected) {
-      return -1.0;
-    }
-    const uint8_t *rgb = frame->data;
-    size_t pixels = (size_t)frame->width * (size_t)frame->height;
-    double sum = 0.0;
-    for (size_t i = 0; i < pixels; ++i) {
-      uint8_t r = rgb[i * 3 + 0];
-      uint8_t g = rgb[i * 3 + 1];
-      uint8_t b = rgb[i * 3 + 2];
-      sum += 0.299 * r + 0.587 * g + 0.114 * b;
-    }
-    return sum / (double)pixels;
-  } else if (frame->format == 0) { // JPEG
-    struct jpeg_decompress_struct cinfo;
-    struct jpeg_error_mgr_ext jerr;
-
-    /* Set up the custom error handler */
-    cinfo.err = jpeg_std_error(&jerr.pub);
-    jerr.pub.error_exit = jpeg_error_exit;
-
-    /* Initialize the JPEG decompress object before setjmp */
-    jpeg_create_decompress(&cinfo);
-
-    /* Establish the setjmp return context for jpeg_error_exit to use */
-    if (setjmp(jerr.setjmp_buffer)) {
-      /* If we get here, the JPEG code has signaled an error.
-       * We need to clean up the JPEG object and return error. */
-      jpeg_destroy_decompress(&cinfo);
-      return -1.0;
-    }
-
-    jpeg_mem_src(&cinfo, frame->data, frame->data_size);
-    /* jpeg_read_header will trigger error handler (longjmp) on failure */
-    jpeg_read_header(&cinfo, TRUE);
-
-    jpeg_start_decompress(&cinfo);
-
-    /* Verify the JPEG is in RGB format (3 components) */
-    if (cinfo.output_components != 3) {
-      /* Not in the middle of reading scanlines, so just destroy */
-      jpeg_destroy_decompress(&cinfo);
-      return -1.0;
-    }
-
-    size_t row_stride = cinfo.output_width * cinfo.output_components;
-    JSAMPARRAY buffer = (*cinfo.mem->alloc_sarray)((j_common_ptr)&cinfo,
-                                                   JPOOL_IMAGE, row_stride, 1);
-
-    double sum = 0.0;
-    size_t pixels = (size_t)cinfo.output_width * (size_t)cinfo.output_height;
-
-    while (cinfo.output_scanline < cinfo.output_height) {
-      jpeg_read_scanlines(&cinfo, buffer, 1);
-      for (size_t x = 0; x < cinfo.output_width; ++x) {
-        size_t idx = x * cinfo.output_components;
-
-        if (cinfo.output_components == 1) {
-          /* Grayscale JPEG: single component is already luminance. */
-          uint8_t y = buffer[0][idx];
-          sum += (double)y;
-        } else if (cinfo.output_components >= 3) {
-          /* Assume first three components correspond to RGB. */
-          uint8_t r = buffer[0][idx + 0];
-          uint8_t g = buffer[0][idx + 1];
-          uint8_t b = buffer[0][idx + 2];
-          sum += 0.299 * r + 0.587 * g + 0.114 * b;
-        } else {
-          /* Fallback for unexpected component counts. */
-          uint8_t y = buffer[0][idx];
-          sum += (double)y;
-        }
-      }
-    }
-
-    jpeg_finish_decompress(&cinfo);
-    jpeg_destroy_decompress(&cinfo);
-
-    if (pixels == 0) {
-      return -1.0;
-    }
-    return sum / (double)pixels;
-  }
-
-  return -1.0;
-}
 
 CameraSwitchDecision
 camera_switcher_handle_frame(CameraSwitchController *ctrl, Frame const *frame,
@@ -294,15 +163,8 @@ camera_switcher_handle_frame(CameraSwitchController *ctrl, Frame const *frame,
     return CAMERA_SWITCH_DECISION_NONE;
   }
 
-  // Use ISP-computed brightness if available (Phase 1.4: CPU offload)
-  // Fallback to CPU calculation if ISP value is invalid (-1.0)
-  // Note: brightness_avg = 0.0 is valid (completely dark), only -1.0 indicates failure
-  double brightness;
-  if (frame->brightness_avg >= 0.0f) {
-    brightness = (double)frame->brightness_avg;
-  } else {
-    brightness = frame_calculate_mean_luma(frame);
-  }
+  // ISP brightness (from AE statistics, written by camera_pipeline)
+  double brightness = (double)frame->brightness_avg;
 
   CameraSwitchDecision decision = CAMERA_SWITCH_DECISION_NONE;
   if (brightness >= 0) {
