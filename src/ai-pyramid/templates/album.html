@@ -49,21 +49,19 @@
     color: var(--accent);
   }
 
-  /* Gallery — horizontal scroll strip, matches existing comic-gallery pattern */
+  /* Gallery — horizontal scroll strip */
   .gallery {
     display: flex;
-    overflow-x: auto;
+    overflow-x: scroll;
     gap: 8px;
     padding-bottom: 8px;
-    scroll-snap-type: x mandatory;
+    overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
     margin-right: -12px;
     padding-right: 12px;
+    scrollbar-width: none;
   }
-  .gallery::-webkit-scrollbar { height: 5px; }
-  .gallery::-webkit-scrollbar-track { background: rgba(255,255,255,0.04); border-radius: 3px; }
-  .gallery::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
-  .gallery::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
+  .gallery::-webkit-scrollbar { display: none; }
 
   .load-sentinel { flex-shrink: 0; width: 1px; }
 
@@ -166,9 +164,44 @@
     border-radius: 8px;
   }
 
+  /* Gallery wrapper for fade effect */
+  .gallery-wrap {
+    position: relative;
+  }
+  /* Left fade — old photos dissolve into darkness */
+  .gallery-wrap::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 200px;
+    background: linear-gradient(to right, var(--bg-deep), transparent);
+    z-index: 2;
+    pointer-events: none;
+  }
+  /* Right edge glow — elliptical bloom at the newest edge */
+  .gallery-wrap::after {
+    content: "";
+    position: absolute;
+    right: -40px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 120px;
+    height: 160%;
+    background: radial-gradient(ellipse at center, rgba(110,231,255,0.7) 0%, rgba(110,231,255,0.2) 35%, transparent 65%);
+    filter: blur(12px);
+    z-index: 2;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.4s;
+  }
+  .gallery-wrap.at-end::after { opacity: 1; }
+
   /* Responsive card sizes — matches existing comic-gallery breakpoints */
   @media (max-width: 960px) { .card { width: 160px; } }
-  @media (max-width: 480px) { .card { width: 140px; } }
+  @media (max-width: 480px) {
+    .card { width: 140px; }
+    .gallery-wrap::before { width: 60px; }
+  }
 
   @media (hover: none) { .card-overlay { opacity: 1; } }
 </style>
@@ -184,7 +217,9 @@
 {% if total == 0 %}
 <div class="empty">No photos</div>
 {% else %}
+<div class="gallery-wrap">
 <div class="gallery" id="gallery">
+  <div class="load-sentinel" id="load-sentinel"></div>
   {% for photo in photos %}
   <div class="card {{ photo.status_class() }}" onclick="showLightbox('/api/photos/{{ photo.filename }}')" data-id="{{ photo.id }}">
     <img src="/api/photos/{{ photo.filename }}" alt="{{ photo.filename }}" loading="lazy">
@@ -204,7 +239,7 @@
     </div>
   </div>
   {% endfor %}
-  <div class="load-sentinel" id="load-sentinel"></div>
+</div>
 </div>
 {% endif %}
 
@@ -225,13 +260,40 @@ document.addEventListener('keydown', function(e) {
 (function() {
   var g = document.getElementById('gallery');
   if (!g) return;
+  var wrap = document.querySelector('.gallery-wrap');
+  var bounceTimer = null;
+
+  function updateEdge() {
+    var atEnd = g.scrollLeft >= g.scrollWidth - g.clientWidth - 2;
+    if (wrap) wrap.classList.toggle('at-end', atEnd);
+  }
+
   g.addEventListener('wheel', function(e) {
     e.preventDefault();
+    var before = g.scrollLeft;
     g.scrollLeft += e.deltaY;
+    updateEdge();
+    // Bounce effect when hitting the wall
+    var atRight = g.scrollLeft >= g.scrollWidth - g.clientWidth - 2 && e.deltaY > 0;
+    var atLeft = g.scrollLeft <= 0 && e.deltaY < 0;
+    if (atRight || atLeft) {
+      if (bounceTimer) return;
+      g.style.transition = 'transform 0.15s';
+      g.style.transform = atRight ? 'translateX(-8px)' : 'translateX(8px)';
+      bounceTimer = setTimeout(function() {
+        g.style.transform = '';
+        setTimeout(function() { g.style.transition = ''; bounceTimer = null; }, 150);
+      }, 150);
+    }
   }, { passive: false });
+
+  // Start at right (newest)
+  g.scrollLeft = g.scrollWidth;
+  updateEdge();
+  g.addEventListener('scroll', updateEdge);
 })();
 
-// Incremental loading — older images load as user scrolls right
+// Incremental loading — older images load as user scrolls left
 (function() {
   var gallery = document.getElementById('gallery');
   var sentinel = document.getElementById('load-sentinel');
@@ -274,21 +336,29 @@ document.addEventListener('keydown', function(e) {
   function loadMore() {
     if (loading || loaded >= total) return;
     loading = true;
+    var prevScrollWidth = gallery.scrollWidth;
+    var prevScrollLeft = gallery.scrollLeft;
     fetch(buildUrl(loaded, 20))
       .then(function(r) { return r.json(); })
       .then(function(data) {
+        // Insert after sentinel (left side) — these are older photos
+        var ref = sentinel.nextSibling;
         (data.photos || []).forEach(function(p) {
-          gallery.insertBefore(createCard(p), sentinel);
+          gallery.insertBefore(createCard(p), ref);
         });
         loaded += (data.photos || []).length;
+        // Maintain scroll position (new cards added to left push content right)
+        var added = gallery.scrollWidth - prevScrollWidth;
+        gallery.scrollLeft = prevScrollLeft + added;
         loading = false;
       })
       .catch(function() { loading = false; });
   }
 
+  // Observe sentinel at left edge — load more when user scrolls left
   var obs = new IntersectionObserver(function(entries) {
     if (entries[0].isIntersecting) loadMore();
-  }, { root: gallery, rootMargin: '0px 200px 0px 0px' });
+  }, { root: gallery, rootMargin: '0px 0px 0px 300px' });
   obs.observe(sentinel);
 })();
 </script>
