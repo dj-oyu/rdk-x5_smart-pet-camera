@@ -362,19 +362,49 @@ document.addEventListener('keydown', function(e) {
   obs.observe(sentinel);
 })();
 
-// Auto-refresh: poll /api/stats every 10s, reload if total changes
+// SSE: live photo updates — new card slides in from right
 (function() {
-  var knownTotal = {{ total }};
-  setInterval(function() {
-    fetch('/api/stats')
-      .then(function(r) { return r.json(); })
-      .then(function(s) {
-        if (s.total > knownTotal) {
-          window.location.reload();
-        }
-      })
-      .catch(function() {});
-  }, 10000);
+  var gallery = document.getElementById('gallery');
+  if (!gallery) return;
+
+  var es = new EventSource('/api/events');
+  es.addEventListener('photo', function(e) {
+    var p;
+    try { p = JSON.parse(e.data); } catch(_) { return; }
+    if (!p.is_valid) return; // only show valid photos
+
+    // Check for duplicate
+    if (gallery.querySelector('[data-filename="' + p.filename + '"]')) return;
+
+    var div = document.createElement('div');
+    div.className = 'card';
+    div.setAttribute('data-filename', p.filename);
+    div.onclick = function() { showLightbox('/api/photos/' + p.filename); };
+    var pid = p.pet_id || '';
+    var pidBadge = pid ? '<span class="badge ' + pid + (pid === 'other' ? ' other-badge' : '') + '">' + pid + '</span>' : '';
+    var cap = p.caption ? p.caption.replace(/</g, '&lt;') : '';
+    var beh = p.behavior ? '<span class="behavior">' + p.behavior + '</span>' : '';
+    div.innerHTML =
+      '<img src="/api/photos/' + p.filename + '" loading="lazy">' +
+      '<div class="card-badges">' + pidBadge + '</div>' +
+      '<div class="card-overlay"><div class="card-overlay-bg">' + cap + '</div></div>' +
+      '<div class="card-footer"><span>' + (p.filename.match(/\d{8}_\d{6}/)||[''])[0].replace(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/,'$1/$2/$3 $4:$5') + '</span>' + beh + '</div>';
+
+    // Slide-in animation
+    div.style.opacity = '0';
+    div.style.transform = 'translateX(40px) scale(0.95)';
+    div.style.transition = 'opacity 0.4s, transform 0.4s';
+    gallery.appendChild(div);
+
+    // Scroll to new card, then animate in
+    requestAnimationFrame(function() {
+      gallery.scrollLeft = gallery.scrollWidth;
+      requestAnimationFrame(function() {
+        div.style.opacity = '1';
+        div.style.transform = 'translateX(0) scale(1)';
+      });
+    });
+  });
 })();
 </script>
 </body>
