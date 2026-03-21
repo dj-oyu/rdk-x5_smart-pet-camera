@@ -56,18 +56,16 @@ void shm_zerocopy_mark_consumed(ZeroCopyFrameBuffer* shm);
 // Used by: h265_zc
 // ============================================================================
 
+#define HB_MEM_COM_BUF_SIZE 48  // sizeof(hb_mem_common_buf_t)
+
 typedef struct {
     uint64_t frame_number;
     struct timespec timestamp;
     int camera_id;
     int width, height;
-    int32_t share_id;
     uint32_t data_size;
-    uint32_t buf_size;
-    uint64_t phy_ptr;
+    uint8_t hb_mem_buf_data[HB_MEM_COM_BUF_SIZE]; // Full hb_mem_common_buf_t for import
     volatile uint32_t version;
-    volatile uint8_t consumed;
-    uint8_t _pad[3];
 } H265ZeroCopyFrame;
 
 typedef struct {
@@ -81,7 +79,6 @@ H265ZeroCopyBuffer* shm_h265_zc_open(const char* name);
 void shm_h265_zc_close(H265ZeroCopyBuffer* shm);
 void shm_h265_zc_destroy(H265ZeroCopyBuffer* shm, const char* name);
 int shm_h265_zc_write(H265ZeroCopyBuffer* shm, const H265ZeroCopyFrame* frame);
-void shm_h265_zc_mark_consumed(H265ZeroCopyBuffer* shm);
 
 // ============================================================================
 // Detection Results

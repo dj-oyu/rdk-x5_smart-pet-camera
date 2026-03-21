@@ -156,18 +156,13 @@ int encoder_encode_frame_zerocopy(encoder_context_t *ctx,
 
     // Fill output info
     out->vir_ptr = out->output_buffer.vstream_buf.vir_ptr;
-    out->phy_ptr = out->output_buffer.vstream_buf.phy_ptr;
     out->data_size = out->output_buffer.vstream_buf.size;
 
-    // Get share_id for zero-copy sharing with Go
+    // Get full buffer descriptor for cross-process import (same pattern as Python)
     if (out->vir_ptr) {
         hb_mem_common_buf_t com_buf = {0};
         if (hb_mem_get_com_buf_with_vaddr((uint64_t)out->vir_ptr, &com_buf) == 0) {
-            out->share_id = com_buf.share_id;
-            out->buf_size = (uint32_t)com_buf.size;
-        } else {
-            LOG_WARN("Encoder", "Failed to get share_id for VPU output buffer");
-            out->share_id = -1;
+            memcpy(out->com_buf_data, &com_buf, sizeof(com_buf));
         }
     }
 

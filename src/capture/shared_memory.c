@@ -169,9 +169,8 @@ H265ZeroCopyBuffer* shm_h265_zc_create(const char* name) {
         name, sizeof(H265ZeroCopyBuffer), true, &created_new);
     if (shm && created_new) {
         sem_init(&shm->new_frame_sem, 1, 0);
-        sem_init(&shm->consumed_sem, 1, 0);  // 0: skip until Go signals ready
+        sem_init(&shm->consumed_sem, 1, 0);
         shm->frame.version = 0;
-        shm->frame.consumed = 1;
         LOG_INFO("SharedMemory", "H.265 zero-copy SHM created: %s (%zu bytes)",
                  name, sizeof(H265ZeroCopyBuffer));
     }
@@ -200,14 +199,7 @@ int shm_h265_zc_write(H265ZeroCopyBuffer* shm, const H265ZeroCopyFrame* frame) {
     if (!shm || !frame) return -1;
     uint32_t ver = __atomic_load_n(&shm->frame.version, __ATOMIC_ACQUIRE);
     memcpy(&shm->frame, frame, sizeof(H265ZeroCopyFrame));
-    __atomic_store_n(&shm->frame.consumed, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&shm->frame.version, ver + 1, __ATOMIC_RELEASE);
     sem_post(&shm->new_frame_sem);
     return 0;
-}
-
-void shm_h265_zc_mark_consumed(H265ZeroCopyBuffer* shm) {
-    if (!shm) return;
-    __atomic_store_n(&shm->frame.consumed, 1, __ATOMIC_RELEASE);
-    sem_post(&shm->consumed_sem);
 }

@@ -54,10 +54,7 @@ static void *encoder_thread_worker(void *arg) {
     // Release VSE frame (input side, always release)
     hbn_vnode_releaseframe(ctx->vse_handle, 0, &frame->vse_frame);
 
-    if (ret == 0 && enc_out.data_size > 0 && enc_out.share_id >= 0) {
-      // Check if consumer (Go) is ready to receive
-      // If not ready, skip zero-copy and just release VPU buffer
-      // Write share_id to SHM (non-blocking, no semaphore wait)
+    if (ret == 0 && enc_out.data_size > 0) {
       if (ctx->shm_h265_zc) {
         H265ZeroCopyFrame zc = {
             .frame_number = frame->frame_number,
@@ -65,11 +62,9 @@ static void *encoder_thread_worker(void *arg) {
             .camera_id = frame->camera_id,
             .width = ctx->output_width,
             .height = ctx->output_height,
-            .share_id = enc_out.share_id,
             .data_size = enc_out.data_size,
-            .buf_size = enc_out.buf_size,
-            .phy_ptr = enc_out.phy_ptr,
         };
+        memcpy(zc.hb_mem_buf_data, enc_out.com_buf_data, HB_MEM_COM_BUF_SIZE);
         shm_h265_zc_write(ctx->shm_h265_zc, &zc);
       }
 
