@@ -300,10 +300,6 @@ class YoloDetectorDaemon:
 
                     continue
 
-                # Update active camera from frame and set CLAHE
-                self.active_camera = zc_frame.camera_id
-                self.detector.clahe_enabled = (self.active_camera == 1)
-
                 # Detect camera switch from frame camera_id
                 camera_id = zc_frame.camera_id
                 if camera_id != self.active_camera:
@@ -333,6 +329,10 @@ class YoloDetectorDaemon:
                         # Lower score_threshold for night camera (darker images = lower confidence)
                         self.detector.score_threshold = max(0.25, self.score_threshold - 0.15)
                         logger.debug(f"Camera switched to {camera_id} [night ROI mode: {len(self.night_roi_regions)} regions, score_th={self.detector.score_threshold:.2f}]")
+
+                    # Update active camera after processing switch
+                    self.active_camera = camera_id
+                    self.detector.clahe_enabled = (self.active_camera == 1)
 
                 # Initialize scale factors on first frame (before any switch)
                 if self.scale_x is None or self.scale_y is None:
