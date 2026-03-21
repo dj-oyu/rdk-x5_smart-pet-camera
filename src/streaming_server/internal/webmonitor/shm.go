@@ -197,6 +197,12 @@ static int import_zc_nv12(ZeroCopyFrameBuffer* shm, uint8_t* dst, int dst_size, 
     for (int i = 0; i < f->plane_cnt; i++) total_size += f->plane_size[i];
     if (total_size > dst_size) return -2;
 
+    // Ensure hb_mem is initialized in this process
+    {
+        static int hb_mem_init_done = 0;
+        if (!hb_mem_init_done) { hb_mem_module_open(); hb_mem_init_done = 1; }
+    }
+
     // Import via share_id
     hb_mem_common_buf_t in_buf = {0};
     in_buf.share_id = f->share_id[0];
