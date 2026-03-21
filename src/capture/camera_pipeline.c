@@ -82,19 +82,16 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
 
   // Zero-copy YOLO input (share_id based, no memcpy)
   // Phase 2: per-camera ZeroCopy SHM (zc_0 for DAY, zc_1 for NIGHT)
-  const char *zerocopy_name = (camera_index == 0)
-                                  ? SHM_NAME_ZEROCOPY_DAY
-                                  : SHM_NAME_ZEROCOPY_NIGHT;
-  pipeline->shm_yolo_zerocopy = shm_zerocopy_create(zerocopy_name);
+  pipeline->shm_yolo_zerocopy = shm_zerocopy_create(SHM_NAME_YOLO_ZC);
   if (!pipeline->shm_yolo_zerocopy) {
     LOG_ERROR(Pipeline_log_header,
               "Failed to create zero-copy shared memory: %s",
-              zerocopy_name);
+              SHM_NAME_YOLO_ZC);
     ret = -1;
     goto error_cleanup;
   }
   LOG_INFO(Pipeline_log_header, "Zero-copy shared memory created: %s",
-           zerocopy_name);
+           SHM_NAME_YOLO_ZC);
 
   // MJPEG input NV12 (768x432 from VSE Channel 2, always written when active, writable by web_monitor)
   pipeline->shm_mjpeg_frame =
