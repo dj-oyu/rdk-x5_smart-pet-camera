@@ -142,11 +142,11 @@ typedef struct {
 
 typedef struct {
     uint64_t frame_number;
-    struct timespec timestamp;
+    double timestamp;
     int num_detections;
     Detection detections[MAX_DETECTIONS];
     volatile uint32_t version;
-    sem_t detection_update_sem;  // Semaphore for event-driven detection updates
+    sem_t detection_update_sem;
 } LatestDetectionResult;
 
 // ZeroCopy frame buffer for MJPEG (matching shared_memory.h)
@@ -817,8 +817,7 @@ func (r *shmReader) LatestDetection() (*DetectionResult, bool) {
 
 	result := DetectionResult{
 		FrameNumber: int(snapshot.frame_number),
-		Timestamp: float64(snapshot.timestamp.tv_sec) +
-			float64(snapshot.timestamp.tv_nsec)/1e9,
+		Timestamp: float64(snapshot.timestamp),
 		NumDetections: int(snapshot.num_detections),
 		Version:       int(version),
 	}
