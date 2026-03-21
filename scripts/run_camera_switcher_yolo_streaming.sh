@@ -324,7 +324,7 @@ if [[ "${SKIP_BUILD}" -ne 1 ]]; then
   # (git checkout changes .c timestamps but not .o, confusing make)
   rm -f "${CAPTURE_DIR}"/*.o 2>/dev/null
   make -C "${CAPTURE_DIR}" >/dev/null
-  make -C "${CAPTURE_DIR}" switcher-daemon-build >/dev/null
+  # switcher is now integrated into camera_daemon_drobotics
 
   echo "[build] Building web assets (Bun)..."
   (cd "${REPO_ROOT}/src/web" && bun install --frozen-lockfile 2>/dev/null; true)
@@ -351,15 +351,15 @@ if [[ "${RUN_STREAMING}" -eq 1 ]]; then
   mkdir -p "${RECORDING_PATH}"
 fi
 
-echo "[start] Launching camera_switcher_daemon..."
+echo "[start] Launching camera daemon (unified)..."
 (
   cd "${REPO_ROOT}"
-  "${BUILD_DIR}/camera_switcher_daemon" 2>&1 | tee -a /tmp/camera_switcher.log
+  "${BUILD_DIR}/camera_daemon_drobotics" -W 1280 -H 720 2>&1 | tee -a /tmp/camera_switcher.log
 ) &
 PIDS+=("$!")
 
 echo "[wait] Waiting for shared memory..."
-if ! wait_for_shm "pet_camera_stream" 10; then
+if ! wait_for_shm "pet_camera_h265_zc" 10; then
   echo "[error] SHM not found. camera_daemon may have failed." >&2
   exit 1
 fi
@@ -369,7 +369,7 @@ if [[ "${RUN_MONITOR}" -eq 1 ]]; then
 fi
 
 if [[ "${RUN_STREAMING}" -eq 1 ]]; then
-  wait_for_shm "pet_camera_stream" 10 || echo "[warn] H.264 SHM not found" >&2
+  wait_for_shm "pet_camera_h265_zc" 10 || echo "[warn] H.264 SHM not found" >&2
 fi
 
 if [[ "${RUN_DETECTOR}" -eq 1 ]]; then

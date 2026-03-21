@@ -92,7 +92,8 @@ typedef struct {
 int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
                     int sensor_width, int sensor_height,
                     int output_width, int output_height,
-                    int fps, int bitrate);
+                    int fps, int bitrate,
+                    volatile int *active_camera);
 
 /**
  * Start camera pipeline
