@@ -217,7 +217,6 @@ func (r *Recorder) recordLoop() {
 		processor := r.h264Processor
 		r.mu.RUnlock()
 
-		// ReadLatest may block on hb_mem_import — run in goroutine with timeout
 		type readResult struct {
 			frame *types.VideoFrame
 			err   error
@@ -258,22 +257,22 @@ func (r *Recorder) recordLoop() {
 			return
 		}
 
-		// Copy frame data — VPU buffer is freed on next ReadLatest
-		frameCopy := make([]byte, len(frame.Data))
-		copy(frameCopy, frame.Data)
+		// ReadLatestCopy already copied data to Go heap — safe to use directly
 
-		var dataToWrite []byte
-		if frame.IsIDR && !firstIDRWritten {
-			headers, _ := processor.PrependHeaders(frameCopy)
-			if len(headers) > len(frameCopy) {
-				dataToWrite = headers
-				firstIDRWritten = true
-			} else {
-				dataToWrite = frameCopy
+		// Wait for first IDR before writing anything
+		if !firstIDRWritten {
+			if !frame.IsIDR {
+				r.mu.Unlock()
+				continue
 			}
-		} else {
-			dataToWrite = frameCopy
+			// Prepend VPS/SPS/PPS headers
+			headers, _ := processor.PrependHeaders(frame.Data)
+			if len(headers) > len(frame.Data) {
+				frame.Data = headers
+			}
+			firstIDRWritten = true
 		}
+		dataToWrite := frame.Data
 
 		n, err := r.file.Write(dataToWrite)
 		if err != nil {
