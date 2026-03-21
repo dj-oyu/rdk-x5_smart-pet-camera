@@ -55,8 +55,14 @@ static void *encoder_thread_worker(void *arg) {
     hbn_vnode_releaseframe(ctx->vse_handle, 0, &frame->vse_frame);
 
     if (ret == 0 && enc_out.data_size > 0 && enc_out.share_id >= 0) {
-      // Write share_id + metadata to H.265 zero-copy SHM
-      if (ctx->shm_h265_zc) {
+      // Check if consumer (Go) is ready to receive
+      // If not ready, skip zero-copy and just release VPU buffer
+      // Only do zero-copy if consumer has signaled consumed (or ready)
+      // consumed_sem starts at 0: skips until Go posts first consumed
+      bool consumer_ready = ctx->shm_h265_zc &&
+                            sem_trywait(&ctx->shm_h265_zc->consumed_sem) == 0;
+
+      if (consumer_ready) {
         H265ZeroCopyFrame zc = {
             .frame_number = frame->frame_number,
             .timestamp = frame->timestamp,
@@ -70,28 +76,19 @@ static void *encoder_thread_worker(void *arg) {
         };
 
         if (shm_h265_zc_write(ctx->shm_h265_zc, &zc) == 0) {
-          // Wait for Go to consume before releasing VPU output buffer
-          // Timeout: 100ms (3 frames at 30fps)
+          // Hold VPU buffer until Go signals consumed
+          // Go is actively reading (it posted consumed_sem), so this is fast
           struct timespec deadline;
           clock_gettime(CLOCK_REALTIME, &deadline);
-          deadline.tv_nsec += 100 * 1000000;
+          deadline.tv_nsec += 50 * 1000000; // 50ms max
           if (deadline.tv_nsec >= 1000000000) {
             deadline.tv_sec++;
             deadline.tv_nsec -= 1000000000;
           }
-
-          // Wait for consumed signal (or timeout)
-          int wait_ret = sem_timedwait(&ctx->shm_h265_zc->consumed_sem, &deadline);
-          if (wait_ret != 0) {
-            // Timeout or error — consumer too slow, release anyway
-            static int timeout_logged = 0;
-            if (!timeout_logged) {
-              LOG_WARN("EncoderThread", "H.265 zero-copy consumer timeout, releasing VPU buffer");
-              timeout_logged = 1;
-            }
-          }
-          // Re-post consumed_sem for next frame
-          sem_post(&ctx->shm_h265_zc->consumed_sem);
+          // Wait for Go to import + post consumed_sem
+          // On timeout: Go stopped reading, consumed_sem stays 0, next trywait fails → skip
+          // On success: Go consumed, it posted consumed_sem for next frame
+          sem_timedwait(&ctx->shm_h265_zc->consumed_sem, &deadline);
         }
       }
 

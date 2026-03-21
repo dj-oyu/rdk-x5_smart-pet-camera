@@ -46,7 +46,7 @@ typedef struct {
 
 typedef struct {
     uint8_t new_frame_sem[32];   // sem_t
-    uint8_t consumed_sem[32];    // sem_t
+    uint8_t consumed_sem[32];    // sem_t (also acts as ready signal)
     H265ZeroCopyFrame frame;
 } H265ZeroCopyBuffer;
 
@@ -123,6 +123,7 @@ void mark_h265_consumed(H265ZeroCopyBuffer* shm) {
     __atomic_store_n(&shm->frame.consumed, 1, __ATOMIC_RELEASE);
     sem_post((sem_t*)&shm->consumed_sem);
 }
+
 */
 import "C"
 import (
@@ -147,9 +148,10 @@ const (
 
 // Reader reads H.265 frames from zero-copy shared memory
 type Reader struct {
-	shm     *C.H265ZeroCopyBuffer
-	shmName string
-	buf     []byte // Reusable buffer for imported data
+	shm      *C.H265ZeroCopyBuffer
+	shmName  string
+	buf      []byte // Reusable buffer for imported data
+	signaled bool   // True after first ready signal sent
 }
 
 // NewReader creates a new H.265 zero-copy reader
@@ -201,10 +203,22 @@ func (r *Reader) ReadLatest() (*types.VideoFrame, error) {
 		return nil, fmt.Errorf("shared memory not open")
 	}
 
+	// First call: signal ready by posting consumed_sem
+	// (consumed_sem starts at 0, encoder skips until we post)
+	if !r.signaled {
+		C.mark_h265_consumed(r.shm)
+		r.signaled = true
+	}
+
+	// Wait for encoder to write a frame
+	if err := r.WaitNewFrame(50 * time.Millisecond); err != nil {
+		return nil, nil // No frame yet
+	}
+
 	// Read frame metadata
 	var cFrame C.H265ZeroCopyFrame
 	if C.read_h265_frame(r.shm, &cFrame) != 0 {
-		return nil, fmt.Errorf("failed to read frame metadata")
+		return nil, nil
 	}
 
 	if cFrame.share_id < 0 || cFrame.data_size == 0 {
