@@ -236,7 +236,7 @@ func (r *Reader) ReadLatest() (*types.VideoFrame, error) {
 	return &types.VideoFrame{
 		Data:      data,
 		Timestamp: timestamp,
-		FrameNum:  uint64(cFrame.frame_number),
+		FrameNumber:  uint64(cFrame.frame_number),
 		Width:     int(cFrame.width),
 		Height:    int(cFrame.height),
 		IsIDR:     false,

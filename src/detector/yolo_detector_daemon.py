@@ -270,7 +270,7 @@ class YoloDetectorDaemon:
                         logger.warning(
                             f"Unexpected plane_cnt={zc_frame.plane_cnt}, skipping"
                         )
-                    active_zc.mark_consumed()
+
                     continue
 
                 try:
@@ -285,7 +285,7 @@ class YoloDetectorDaemon:
                     logger.error(f"Zero-copy import failed: {e}")
                     if hb_mem_buffer:
                         hb_mem_buffer.release()
-                    active_zc.mark_consumed()
+
                     continue
 
                 # Update active camera from frame and set CLAHE
@@ -433,7 +433,7 @@ class YoloDetectorDaemon:
 
                     # Release buffer
                     hb_mem_buffer.release()
-                    active_zc.mark_consumed()
+
 
                     if run_yolo:
                         # Convert YOLO detections to dicts
@@ -554,9 +554,8 @@ class YoloDetectorDaemon:
                     current_roi = -1
                     cycle_complete = True
 
-                # Release zero-copy buffer and signal consumed
+                # Release zero-copy buffer
                 hb_mem_buffer.release()
-                active_zc.mark_consumed()
 
                 timing = self.detector.get_last_timing()
 

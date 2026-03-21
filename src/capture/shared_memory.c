@@ -113,9 +113,7 @@ ZeroCopyFrameBuffer* shm_zerocopy_create(const char* name) {
         name, sizeof(ZeroCopyFrameBuffer), true, &created_new);
     if (shm && created_new) {
         sem_init(&shm->new_frame_sem, 1, 0);
-        sem_init(&shm->consumed_sem, 1, 1);
         shm->frame.version = 0;
-        shm->frame.consumed = 1;
         LOG_INFO("SharedMemory", "Zero-copy SHM created: %s (%zu bytes)",
                  name, sizeof(ZeroCopyFrameBuffer));
     }
@@ -136,7 +134,6 @@ void shm_zerocopy_close(ZeroCopyFrameBuffer* shm) {
 void shm_zerocopy_destroy(ZeroCopyFrameBuffer* shm, const char* name) {
     if (shm) {
         sem_destroy(&shm->new_frame_sem);
-        sem_destroy(&shm->consumed_sem);
         munmap(shm, sizeof(ZeroCopyFrameBuffer));
         shm_unlink(name);
     }
@@ -144,19 +141,11 @@ void shm_zerocopy_destroy(ZeroCopyFrameBuffer* shm, const char* name) {
 
 int shm_zerocopy_write(ZeroCopyFrameBuffer* shm, const ZeroCopyFrame* frame) {
     if (!shm || !frame) return -1;
-    if (sem_trywait(&shm->consumed_sem) != 0) return -1;
     uint32_t ver = __atomic_load_n(&shm->frame.version, __ATOMIC_ACQUIRE);
     memcpy(&shm->frame, frame, sizeof(ZeroCopyFrame));
-    __atomic_store_n(&shm->frame.consumed, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&shm->frame.version, ver + 1, __ATOMIC_RELEASE);
     sem_post(&shm->new_frame_sem);
     return 0;
-}
-
-void shm_zerocopy_mark_consumed(ZeroCopyFrameBuffer* shm) {
-    if (!shm) return;
-    __atomic_store_n(&shm->frame.consumed, 1, __ATOMIC_RELEASE);
-    sem_post(&shm->consumed_sem);
 }
 
 // ============================================================================

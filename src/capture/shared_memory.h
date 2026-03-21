@@ -34,13 +34,10 @@ typedef struct {
     int32_t plane_cnt;
     uint8_t hb_mem_buf_data[HB_MEM_GRAPHIC_BUF_SIZE];
     volatile uint32_t version;
-    volatile uint8_t consumed;
-    uint8_t _pad[3];
 } ZeroCopyFrame;
 
 typedef struct {
     sem_t new_frame_sem;
-    sem_t consumed_sem;
     ZeroCopyFrame frame;
 } ZeroCopyFrameBuffer;
 
@@ -49,7 +46,6 @@ ZeroCopyFrameBuffer* shm_zerocopy_open(const char* name);
 void shm_zerocopy_close(ZeroCopyFrameBuffer* shm);
 void shm_zerocopy_destroy(ZeroCopyFrameBuffer* shm, const char* name);
 int shm_zerocopy_write(ZeroCopyFrameBuffer* shm, const ZeroCopyFrame* frame);
-void shm_zerocopy_mark_consumed(ZeroCopyFrameBuffer* shm);
 
 // ============================================================================
 // H.265 Zero-Copy (bitstream, shared via hb_mem share_id)

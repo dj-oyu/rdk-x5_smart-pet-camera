@@ -44,7 +44,6 @@ typedef struct {
 
     // Shared state (same process, no SHM needed)
     volatile int *active_camera;
-    uint64_t *frame_counter;                // Global frame counter (atomic increment)
 
     // Runtime control
     volatile bool *running_flag;           // External running flag
@@ -85,17 +84,14 @@ typedef struct {
  *   0 on success, negative error code on failure
  *
  * Note:
- *   - Shared memory names are fixed: SHM_NAME_STREAM, SHM_NAME_MJPEG_FRAME, SHM_NAME_BRIGHTNESS
- *   - Active state is determined by CameraControl SHM (Phase 2)
+ *   - Each pipeline maintains its own frame_number counter
  *   - Frames are written conditionally based on active camera index
- *   - Brightness is always written to lightweight shared memory
  */
 int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
                     int sensor_width, int sensor_height,
                     int output_width, int output_height,
                     int fps, int bitrate,
-                    volatile int *active_camera,
-                    uint64_t *frame_counter);
+                    volatile int *active_camera);
 
 /**
  * Start camera pipeline

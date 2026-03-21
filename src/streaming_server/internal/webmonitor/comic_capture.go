@@ -75,6 +75,7 @@ type ComicCapture struct {
 	MaxPanels           int
 	RateLimitWindow     time.Duration
 	RateLimitMax        int
+	SkipStitch          bool          // Skip nano2D composition (for testing)
 }
 
 func NewComicCapture(src frameSource, outputDir string) *ComicCapture {
@@ -206,7 +207,7 @@ func (cc *ComicCapture) finishCapturing() {
 	if n := len(cc.panels); n > 0 && n < cc.MaxPanels {
 		cc.fillMissingPanels(time.Now())
 	}
-	if len(cc.panels) > 0 {
+	if len(cc.panels) > 0 && !cc.SkipStitch {
 		cc.stitchAndSave()
 	}
 	cc.state = comicIdle
@@ -264,12 +265,15 @@ func (cc *ComicCapture) capturePanel(now time.Time) {
 }
 
 // Layout constants for the comic grid.
+// Canvas must be 16-aligned width, 8-aligned height for HW JPEG encoder.
+// outW = margin*2 + (panelW + border*2)*2 + gap = 24 + 408*2 + 8 = 848 (848/16=53)
+// outH = margin*2 + (panelH + border*2)*2 + gap = 24 + 232*2 + 8 = 496 (496/8=62)
 const (
 	comicMargin  = 12
-	comicGap     = 12
+	comicGap     = 8
 	comicBorder  = 2
-	comicPanelW  = 400
-	comicPanelH  = 225
+	comicPanelW  = 404
+	comicPanelH  = 228
 	comicQuality = 85
 )
 

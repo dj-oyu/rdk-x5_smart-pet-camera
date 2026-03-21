@@ -81,15 +81,12 @@ class CZeroCopyFrame(Structure):
         ("plane_cnt", c_int32),
         ("hb_mem_buf_data", c_uint8 * HB_MEM_GRAPHIC_BUF_SIZE),
         ("version", c_uint32),
-        ("consumed", c_uint8),
-        ("_pad", c_uint8 * 3),
     ]
 
 
 class CZeroCopyFrameBuffer(Structure):
     _fields_ = [
         ("new_frame_sem", c_uint8 * 32),  # sem_t
-        ("consumed_sem", c_uint8 * 32),   # sem_t
         ("frame", CZeroCopyFrame),
     ]
 
@@ -182,7 +179,7 @@ class ZeroCopySharedMemory:
         buf = CZeroCopyFrameBuffer.from_buffer_copy(data)
         f = buf.frame
 
-        if f.version == 0 or f.consumed == 1:
+        if f.version == 0:
             return None
 
         ts = f.timestamp.tv_sec + f.timestamp.tv_nsec / 1e9
@@ -200,18 +197,6 @@ class ZeroCopySharedMemory:
             hb_mem_buf_data=bytes(f.hb_mem_buf_data),
             version=f.version,
         )
-
-    def mark_consumed(self) -> None:
-        if not self.mmap_obj or librt is None:
-            return
-        # Set consumed=1 in frame
-        frame_offset = CZeroCopyFrameBuffer.frame.offset
-        consumed_offset = frame_offset + CZeroCopyFrame.consumed.offset
-        self.mmap_obj[consumed_offset] = 1
-        # Post consumed_sem
-        sem_offset = CZeroCopyFrameBuffer.consumed_sem.offset
-        sem_buf = (c_uint8 * 32).from_buffer(self.mmap_obj, sem_offset)
-        librt.sem_post(addressof(sem_buf))
 
     def wait_for_frame(self, timeout_sec: float = 0.1) -> bool:
         if not self.mmap_obj or librt is None:

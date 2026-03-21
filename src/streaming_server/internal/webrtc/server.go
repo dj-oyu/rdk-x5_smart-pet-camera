@@ -262,7 +262,7 @@ func (s *Server) sendFrames(client *Client) {
 			}
 			// Calculate timestamp (assuming 30fps)
 			// timestamp = frame_num * (clock_rate / fps)
-			timestamp := frame.FrameNum * (videoClockRate / 30)
+			timestamp := frame.FrameNumber * (videoClockRate / 30)
 
 			// Write H.264 sample to track
 			if err := client.videoTrack.WriteSample(media.Sample{
@@ -276,9 +276,9 @@ func (s *Server) sendFrames(client *Client) {
 			}
 
 			// Log every 30 frames to track frame_number
-			if frame.FrameNum%30 == 0 {
+			if frame.FrameNumber%30 == 0 {
 				logger.Debug("WebRTC", "Sent H.265 frame#%d to client %s (timestamp=%d)",
-					frame.FrameNum, client.id, timestamp)
+					frame.FrameNumber, client.id, timestamp)
 			}
 
 			_ = timestamp // Timestamp is handled by pion internally
