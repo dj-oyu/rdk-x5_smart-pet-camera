@@ -67,13 +67,6 @@ impl PhotoJson {
             None => "pending",
         }
     }
-    fn status_label(&self) -> &str {
-        match self.is_valid {
-            Some(true) => "valid",
-            Some(false) => "filtered",
-            None => "pending",
-        }
-    }
 }
 
 impl From<crate::db::Photo> for PhotoJson {
