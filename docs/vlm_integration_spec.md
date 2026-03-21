@@ -11,7 +11,7 @@
 ### 1.1 目的
 
 本仕様書は、既存のスマートペットカメラシステム（RDK X5）と、
-新規に構築するVLM行動解析システム（M5Stack AI Pyramid / Axera AX8850）間の
+新規に構築するVLM行動解析システム（M5Stack AI Pyramid Pro / Axera AX8850）間の
 連携インターフェースを定義する。
 
 ### 1.2 ネットワーク構成
@@ -434,37 +434,60 @@ GET http://m5stack-ai-pyramid:8090/health
 
 VLMに対するプロンプトで個体識別を行う。
 
-#### プロンプト設計（例）
+#### プロンプト設計
+
+**重要**: 実機テスト（2026-03-21）により、**英語プロンプトが最も安定**することを確認。
+日本語プロンプトではプロンプト文がcaptionに混入する問題あり。中国語は一部エッジケースでエラー。
+
+**行動解析プロンプト（確定版）:**
 
 ```
-この画像にはペットの猫が写っています。
-この家には2匹の猫がいます:
-- 三毛猫 (ID: mike): 白・黒・茶の三色の柄を持つ猫
-- 茶トラ (ID: chatora): 茶色の縞模様（タビー柄）の猫
+Analyze this pet camera image. This house has two cats:
+- "mike": calico/tricolor cat (white, black, brown patches)
+- "chatora": tabby/orange cat (brown striped pattern)
 
-以下のJSON形式で回答してください:
-{
-  "pets": [
-    {
-      "pet_id": "mike または chatora",
-      "behavior": "eating/drinking/playing/sleeping/grooming/moving/resting/other",
-      "description": "具体的な行動の日本語記述"
-    }
-  ],
-  "scene_description": "全体的な状況の日本語記述"
-}
+Respond with valid JSON only, no markdown.
+{"pets": [{"pet_id": "mike" or "chatora" or null, "behavior": "eating/drinking/playing/sleeping/grooming/moving/resting/other", "description": "brief English description of action"}], "scene_description": "brief English description of the scene"}
 
-YOLO検出結果:
+YOLO detection context:
 - cat: bbox(100, 150, 200, 180) confidence=0.92
 - cat: bbox(400, 300, 180, 160) confidence=0.87
-- food_bowl: bbox(80, 280, 100, 60) confidence=0.95
 ```
 
-#### 識別の信頼性について
+**アルバムフィルタリング プロンプト（v2 — pet_id判定をVLMから分離）:**
 
-- VLMによる個体識別は100%正確ではない
-- 各ログに `confidence` フィールドを持たせ、不確実な場合は `pet_id: null` とする
-- カメラ角度・照明条件により精度が変動する可能性がある
+```
+Analyze this photo of a pet camera feed. Respond with valid JSON only, no markdown.
+{"is_valid": true if a cat is clearly visible else false,
+ "caption": "one sentence describing the cat's appearance and action",
+ "behavior": one of "eating","sleeping","playing","resting","moving","grooming","other"}
+```
+
+> **変更 (2026-03-21)**: `pet_id` フィールドをVLMプロンプトから削除。
+> VLM（Qwen3-VL-2B）はmike/chatoraの個体識別に強いchatoraバイアスがあり、
+> 入力比率に関わらず応答の60-85%がchatoraとなる。is_valid/caption/behaviorは
+> 高精度で信頼可能。pet_idはRDK X5のGo側でYOLO bbox色分析により判定し、
+> comicファイル名に埋め込む方式に変更。
+> 詳細: `pet-album-spec-DRAFT.md` 2.6節
+
+**API呼び出し:**
+```
+POST http://localhost:8000/v1/chat/completions
+model: "qwen3-vl-2B-Int4-ax650"
+max_tokens: 100
+画像: base64エンコードJPEG in image_url field
+```
+
+**応答のパース**: VLMは ` ```json ``` ` マークダウンラッパーを付けることがあるため、
+正規表現 `\{.*\}` (DOTALL) で抽出してからJSONパース。
+
+#### 個体識別 (pet_id) について
+
+- **VLMによるpet_id判定は採用しない**（2026-03-21テスト結果に基づく）
+- pet_idはRDK X5のGo側でbbox領域のHSV色分析により判定
+- comicファイル名に埋め込み: `comic_YYYYMMDD_HHMMSS_{pet_id}.jpg`
+- AI Pyramid Pro側はファイル名からパースしてDB格納
+- 行動解析ログの `pet_id` も同様にGo側から伝達（将来: rsyncメタデータまたはAPI）
 
 ### 4.3 SQLiteスキーマ（AX8850側）
 
@@ -564,20 +587,30 @@ CREATE TABLE daily_summary (
 |------|------|
 | 入力 | 画像 (JPEG) + テキストプロンプト |
 | 出力 | 構造化JSON（行動タイプ、個体ID、自然言語記述） |
-| 量子化 | INT4 or INT8（NPU互換） |
-| メモリ | モデルウェイト < 4GB（8GBメモリの50%以下） |
+| 量子化 | GPTQ-Int4 (w4a16) or INT8 (w8a16) |
+| メモリ | モデルウェイトはCMM 6GBに収容、System RAM 2GB内でtokenizer/前処理を実行 |
 | 推論時間 | < 5秒/フレーム（目標） |
-| AX8850 NPU互換 | Pulsar2ツールチェインでコンパイル可能 |
+| NPU互換 | Pulsar2 v4.1+ でaxmodelにコンパイル、ax-llmで推論 |
+| デプロイ | ax-llm OpenAI API互換サーバー経由 |
 
 #### モデル候補
 
-| モデル | サイズ | 特徴 | NPU互換性 |
-|--------|--------|------|----------|
-| InternVL2-1B | ~2GB (INT4) | 小型・高性能 | 要検証 |
-| Qwen2-VL-2B | ~2GB (INT4) | 多言語対応 | 要検証 |
-| MobileVLM V2 | ~1.5GB | モバイル最適化 | 要検証 |
+**現行（axmodel提供済み）:**
 
-**注意**: AX8850のPulsar2ツールチェインで変換可能かどうかの検証が最優先事項。
+| モデル | 量子化 | サイズ目安 | NPU互換性 |
+|--------|--------|-----------|----------|
+| **Qwen3-VL-2B-Instruct** | GPTQ-Int4 (w4a16) | ~1.5GB | AXERA公式axmodel提供済み |
+| **Qwen3-VL-4B-Instruct** | GPTQ-Int4 (w4a16) | ~2.5GB | AXERA公式axmodel提供済み |
+| InternVL3.5-1B | GPTQ-Int4 | ~1GB | AXERA公式axmodel提供済み |
+
+**目標（Qwen3.5世代）:**
+
+| モデル | パラメータ | 特徴 | NPU互換性 |
+|--------|-----------|------|----------|
+| **Qwen3.5-0.8B** | 0.8B | Early-Fusion VLM、最軽量 | axmodel未提供、Pulsar2変換を検証予定 |
+| **Qwen3.5-2B** | 2B | Early-Fusion VLM、本命候補 | axmodel未提供、AXERA対応待ち |
+
+→ 詳細は `pet-album-spec-DRAFT.md` §2.4 を参照。
 
 ### 5.3 設定ファイル
 
@@ -590,7 +623,9 @@ camera:
   sse_port: 8080
 
 vlm:
-  model_path: "/opt/models/vlm_int4.axmodel"
+  # ax-llm OpenAI API互換サーバー経由で推論
+  # モデル: Qwen3-VL-2B-Instruct (GPTQ-Int4) → Qwen3.5世代へ移行予定
+  ax_llm_endpoint: "http://localhost:8091/v1/chat/completions"
   max_inference_sec: 5
   prompt_template_path: "/opt/config/prompt.txt"
 

@@ -76,6 +76,8 @@ models/
 
 # Test pictures (binary test data)
 test_pic/
+tests/vlm/images/
+tests/vlm/results/
 
 # Data directories
 /data/
