@@ -49,18 +49,22 @@
     color: var(--accent);
   }
 
-  /* Gallery — horizontal carousel */
-  .gallery {
-    display: flex;
-    overflow-x: scroll;
-    gap: 8px;
-    padding-bottom: 8px;
+  /* Gallery — horizontal scroll (wrap = scroll container) */
+  .gallery-wrap {
+    overflow-x: auto;
+    overflow-y: hidden;
     overscroll-behavior-x: contain;
     -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
     scroll-snap-type: x mandatory;
+    scrollbar-width: none;
   }
-  .gallery::-webkit-scrollbar { display: none; }
+  .gallery-wrap::-webkit-scrollbar { display: none; }
+  .gallery {
+    display: flex;
+    width: max-content;
+    gap: 8px;
+    padding-bottom: 8px;
+  }
 
   .load-sentinel { flex-shrink: 0; width: 1px; }
   .gallery-spacer {
@@ -208,14 +212,17 @@
   }
   .gallery-wrap.at-end::after { opacity: 1; }
 
-  /* Carousel mode (narrow sidebar iframe): no vertical overflow */
-  body.carousel { overflow-y: hidden; }
+  /* Carousel mode (narrow sidebar iframe): no body overflow */
+  body.carousel { overflow: hidden; }
 
   /* Grid mode (standalone OR wide iframe on mobile) */
-  body.grid-mode .gallery {
-    flex-wrap: wrap;
+  body.grid-mode .gallery-wrap {
     overflow-x: visible;
     scroll-snap-type: none;
+  }
+  body.grid-mode .gallery {
+    flex-wrap: wrap;
+    width: auto;
   }
   body.grid-mode .gallery-spacer { display: none; }
   body.grid-mode .card { width: calc(50% - 4px); }
@@ -284,9 +291,8 @@
 <script>
 // Layout mode: carousel (narrow sidebar iframe) vs grid (mobile/standalone)
 (function() {
-  var inIframe = window.self !== window.top;
-  var narrow = document.documentElement.clientWidth <= 320;
-  document.body.classList.add(inIframe && narrow ? 'carousel' : 'grid-mode');
+  var w = document.documentElement.clientWidth;
+  document.body.classList.add(w <= 360 ? 'carousel' : 'grid-mode');
 })();
 
 var inIframe = window.self !== window.top;
@@ -304,26 +310,25 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') document.getElementById('lightbox').classList.remove('show');
 });
 
-// Mouse wheel → horizontal scroll on gallery
+// Mouse wheel → horizontal scroll on gallery-wrap (scroll container)
 (function() {
-  var g = document.getElementById('gallery');
-  if (!g) return;
   var wrap = document.querySelector('.gallery-wrap');
+  if (!wrap) return;
+  var g = document.getElementById('gallery');
   var bounceTimer = null;
 
   function updateEdge() {
-    var atEnd = g.scrollLeft >= g.scrollWidth - g.clientWidth - 2;
-    if (wrap) wrap.classList.toggle('at-end', atEnd);
+    var atEnd = wrap.scrollLeft >= wrap.scrollWidth - wrap.clientWidth - 2;
+    wrap.classList.toggle('at-end', atEnd);
   }
 
-  g.addEventListener('wheel', function(e) {
+  wrap.addEventListener('wheel', function(e) {
     e.preventDefault();
-    var before = g.scrollLeft;
-    g.scrollLeft += e.deltaY;
+    wrap.scrollLeft += e.deltaY;
     updateEdge();
     // Bounce effect when hitting the wall
-    var atRight = g.scrollLeft >= g.scrollWidth - g.clientWidth - 2 && e.deltaY > 0;
-    var atLeft = g.scrollLeft <= 0 && e.deltaY < 0;
+    var atRight = wrap.scrollLeft >= wrap.scrollWidth - wrap.clientWidth - 2 && e.deltaY > 0;
+    var atLeft = wrap.scrollLeft <= 0 && e.deltaY < 0;
     if (atRight || atLeft) {
       if (bounceTimer) return;
       g.style.transition = 'transform 0.15s';
@@ -336,20 +341,20 @@ document.addEventListener('keydown', function(e) {
   }, { passive: false });
 
   // Start at right (newest)
-  g.scrollLeft = g.scrollWidth;
+  wrap.scrollLeft = wrap.scrollWidth;
   updateEdge();
-  g.addEventListener('scroll', updateEdge);
+  wrap.addEventListener('scroll', updateEdge);
 })();
 
 // Center-card detection — only the center card shows its footer
 (function() {
-  var g = document.getElementById('gallery');
-  if (!g || document.body.classList.contains('grid-mode')) return;
+  var wrap = document.querySelector('.gallery-wrap');
+  if (!wrap || document.body.classList.contains('grid-mode')) return;
 
   var activeCard = null;
   function updateActive() {
-    var cards = g.querySelectorAll('.card');
-    var center = g.scrollLeft + g.clientWidth / 2;
+    var cards = wrap.querySelectorAll('.card');
+    var center = wrap.scrollLeft + wrap.clientWidth / 2;
     var best = null, bestDist = Infinity;
     cards.forEach(function(c) {
       var mid = c.offsetLeft + c.offsetWidth / 2;
@@ -362,7 +367,7 @@ document.addEventListener('keydown', function(e) {
       activeCard = best;
     }
   }
-  g.addEventListener('scroll', updateActive);
+  wrap.addEventListener('scroll', updateActive);
   // Initial
   requestAnimationFrame(updateActive);
 })();
@@ -414,8 +419,9 @@ document.addEventListener('keydown', function(e) {
   function loadMore() {
     if (loading || loaded >= total) return;
     loading = true;
-    var prevScrollWidth = gallery.scrollWidth;
-    var prevScrollLeft = gallery.scrollLeft;
+    var scrollWrap = document.querySelector('.gallery-wrap');
+    var prevScrollWidth = scrollWrap.scrollWidth;
+    var prevScrollLeft = scrollWrap.scrollLeft;
     fetch(buildUrl(loaded, 20))
       .then(function(r) { return r.json(); })
       .then(function(data) {
@@ -426,17 +432,18 @@ document.addEventListener('keydown', function(e) {
         });
         loaded += (data.photos || []).length;
         // Maintain scroll position (new cards added to left push content right)
-        var added = gallery.scrollWidth - prevScrollWidth;
-        gallery.scrollLeft = prevScrollLeft + added;
+        var added = scrollWrap.scrollWidth - prevScrollWidth;
+        scrollWrap.scrollLeft = prevScrollLeft + added;
         loading = false;
       })
       .catch(function() { loading = false; });
   }
 
   // Observe sentinel at left edge — load more when user scrolls left
+  var wrap = document.querySelector('.gallery-wrap');
   var obs = new IntersectionObserver(function(entries) {
     if (entries[0].isIntersecting) loadMore();
-  }, { root: gallery, rootMargin: '0px 0px 0px 300px' });
+  }, { root: wrap, rootMargin: '0px 0px 0px 300px' });
   obs.observe(sentinel);
 })();
 
@@ -492,8 +499,9 @@ document.addEventListener('keydown', function(e) {
     gallery.appendChild(div);
 
     // Scroll to new card, then animate in
+    var sseWrap = document.querySelector('.gallery-wrap');
     requestAnimationFrame(function() {
-      gallery.scrollLeft = gallery.scrollWidth;
+      if (sseWrap) sseWrap.scrollLeft = sseWrap.scrollWidth;
       requestAnimationFrame(function() {
         div.style.opacity = '1';
         div.style.transform = 'translateX(0) scale(1)';
