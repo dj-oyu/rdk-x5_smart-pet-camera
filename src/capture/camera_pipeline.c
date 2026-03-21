@@ -309,9 +309,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
         zc_frame.camera_id = pipeline->camera_index;
         zc_frame.width = yolo_width;
         zc_frame.height = yolo_height;
-        zc_frame.format = 1;    // NV12
         zc_frame.brightness_avg = brightness_result.brightness_avg;
-        zc_frame.correction_applied = 0;
 
         // Copy share_id and plane info from VIO buffer
         zc_frame.plane_cnt = yolo_frame.buffer.plane_cnt;
@@ -464,7 +462,6 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
         mjpeg_zc.camera_id = pipeline->camera_index;
         mjpeg_zc.width = mjpeg_frame.buffer.width;
         mjpeg_zc.height = mjpeg_frame.buffer.height;
-        mjpeg_zc.format = 1; // NV12
         mjpeg_zc.brightness_avg = brightness_result.brightness_avg;
         mjpeg_zc.plane_cnt = mjpeg_frame.buffer.plane_cnt;
         for (int i = 0; i < mjpeg_frame.buffer.plane_cnt; i++) {
