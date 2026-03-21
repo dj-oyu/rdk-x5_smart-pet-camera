@@ -73,6 +73,25 @@ int read_h265_frame(H265ZeroCopyBuffer* shm, H265ZeroCopyFrame* out) {
     return 0;
 }
 
+// Import + copy in one call (safe for recorder — no VPU buffer lifetime issues)
+int import_h265_copy(const uint8_t* com_buf_data, uint32_t data_size,
+                     uint8_t* dst, uint32_t dst_size) {
+    if (!com_buf_data || data_size == 0 || !dst || data_size > dst_size) return -1;
+    ensure_hb_mem_init();
+
+    hb_mem_common_buf_t in_buf;
+    memcpy(&in_buf, com_buf_data, sizeof(hb_mem_common_buf_t));
+
+    hb_mem_common_buf_t out_buf = {0};
+    int ret = hb_mem_import_com_buf(&in_buf, &out_buf);
+    if (ret != 0) return ret;
+
+    hb_mem_invalidate_buf_with_vaddr((uint64_t)out_buf.virt_addr, out_buf.size);
+    memcpy(dst, out_buf.virt_addr, data_size);
+    hb_mem_free_buf(out_buf.fd);
+    return 0;
+}
+
 // Zero-copy import handle — holds VPU buffer mapping until explicitly closed
 typedef struct {
     void *virt_addr;
@@ -274,6 +293,49 @@ func (r *Reader) ReadLatest() (*types.VideoFrame, error) {
 
 	return &types.VideoFrame{
 		Data:        data,
+		Timestamp:   timestamp,
+		FrameNumber: uint64(cFrame.frame_number),
+		Width:       int(cFrame.width),
+		Height:      int(cFrame.height),
+		IsIDR:       false,
+	}, nil
+}
+
+// ReadLatestCopy reads the latest H.265 frame with import+copy+free in one call.
+// Safe for async consumers (recorder). No VPU buffer lifetime dependency.
+func (r *Reader) ReadLatestCopy() (*types.VideoFrame, error) {
+	if r.shm == nil {
+		return nil, fmt.Errorf("shared memory not open")
+	}
+
+	var cFrame C.H265ZeroCopyFrame
+	if C.read_h265_frame(r.shm, &cFrame) != 0 {
+		return nil, nil
+	}
+	if cFrame.data_size == 0 {
+		return nil, nil
+	}
+
+	dataSize := int(cFrame.data_size)
+	buf := make([]byte, dataSize)
+
+	ret := C.import_h265_copy(
+		(*C.uint8_t)(unsafe.Pointer(&cFrame.hb_mem_buf_data[0])),
+		cFrame.data_size,
+		(*C.uint8_t)(unsafe.Pointer(&buf[0])),
+		C.uint32_t(dataSize),
+	)
+	if ret != 0 {
+		return nil, fmt.Errorf("import_h265_copy failed: %d", ret)
+	}
+
+	timestamp := time.Unix(
+		int64(cFrame.timestamp.tv_sec),
+		int64(cFrame.timestamp.tv_nsec),
+	)
+
+	return &types.VideoFrame{
+		Data:        buf,
 		Timestamp:   timestamp,
 		FrameNumber: uint64(cFrame.frame_number),
 		Width:       int(cFrame.width),
