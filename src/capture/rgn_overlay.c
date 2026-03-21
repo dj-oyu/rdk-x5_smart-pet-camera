@@ -36,17 +36,25 @@ static const uint8_t font5x7[][5] = {
 
 static int font_idx(char c) {
     if (c >= '0' && c <= '9') return c - '0';
-    if (c == ':') return 10; if (c == '-') return 11;
-    if (c == '.') return 12; if (c == '/') return 13;
+    if (c == ':') return 10;
+    if (c == '-') return 11;
+    if (c == '.') return 12;
+    if (c == '/') return 13;
     if (c == ' ') return 14;
     if (c >= 'A' && c <= 'I') return 15 + (c - 'A');
-    if (c == 'M') return 24; if (c == 'N') return 25;
-    if (c == 'O') return 26; if (c == 'T') return 27;
+    if (c == 'M') return 24;
+    if (c == 'N') return 25;
+    if (c == 'O') return 26;
+    if (c == 'T') return 27;
     if (c >= 'a' && c <= 'e') return 28 + (c - 'a');
-    if (c == 'i') return 33; if (c == 'm') return 34;
-    if (c == 'n') return 35; if (c == 'o') return 36;
-    if (c == 'p') return 37; if (c == 'r') return 38;
-    if (c == 's') return 39; if (c == 't') return 40;
+    if (c == 'i') return 33;
+    if (c == 'm') return 34;
+    if (c == 'n') return 35;
+    if (c == 'o') return 36;
+    if (c == 'p') return 37;
+    if (c == 'r') return 38;
+    if (c == 's') return 39;
+    if (c == 't') return 40;
     return 14;
 }
 
