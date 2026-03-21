@@ -11,6 +11,7 @@ import (
 	_ "net/http/pprof" // Enable pprof
 	"os"
 	"os/signal"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -198,60 +199,44 @@ func (s *Server) Start() error {
 func (s *Server) readFrames() {
 	defer s.wg.Done()
 
-	logger.Info("Reader", "Starting frame reading (polling at 30fps)")
-
-	// Poll at 30fps (33.3ms interval)
-	ticker := time.NewTicker(33 * time.Millisecond)
-	defer ticker.Stop()
-
-	idleCount := 0
+	logger.Info("Reader", "Starting frame reading (zero-copy, tight loop)")
 
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-ticker.C:
-			// OPTIMIZATION: Skip reading if no clients and not recording
-			// This reduces CPU usage when server is idle
-			hasClients := s.webrtc.GetClientCount() > 0
-			isRecording := s.recorder.IsRecording()
+		default:
+		}
 
-			if !hasClients && !isRecording {
-				idleCount++
-				if idleCount%30 == 0 {
-					logger.Debug("Reader", "No clients and not recording, idle (count=%d)", idleCount)
-				}
-				continue // Skip reading to reduce CPU usage
-			}
+		// Skip reading if no clients and not recording
+		hasClients := s.webrtc.GetClientCount() > 0
+		isRecording := s.recorder.IsRecording()
+		if !hasClients && !isRecording {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
 
-			// Reset idle counter when active
-			if idleCount > 0 {
-				logger.Info("Reader", "Resuming frame reading (clients=%d, recording=%v)",
-					s.webrtc.GetClientCount(), isRecording)
-				idleCount = 0
-			}
+		// Read latest frame (zero-copy: Data points to VPU memory)
+		frame, err := s.shmReader.ReadLatest()
+		if err != nil {
+			s.metrics.ReadErrors.Add(1)
+			logger.Warn("Reader", "Read error: %v", err)
+			continue
+		}
 
-			// Read latest frame
-			frame, err := s.shmReader.ReadLatest()
-			if err != nil {
-				s.metrics.ReadErrors.Add(1)
-				logger.Warn("Reader", "Read error: %v", err)
-				continue
-			}
+		if frame == nil {
+			runtime.Gosched()
+			continue
+		}
 
-			if frame == nil {
-				continue // No new frame
-			}
+		s.metrics.FramesRead.Add(1)
+		s.metrics.UpdateFrameLatency(frame.Timestamp)
 
-			s.metrics.FramesRead.Add(1)
-			s.metrics.UpdateFrameLatency(frame.Timestamp)
-
-			// Send to processor (non-blocking)
-			select {
-			case s.processChan <- frame:
-			default:
-				s.metrics.FramesDropped.Add(1)
-			}
+		// Send to processor (non-blocking)
+		select {
+		case s.processChan <- frame:
+		default:
+			s.metrics.FramesDropped.Add(1)
 		}
 	}
 }
@@ -333,7 +318,12 @@ func (s *Server) distributeRecorder() {
 		case <-s.ctx.Done():
 			return
 		case frame := <-s.recorderChan:
-			if s.recorder.SendFrame(frame) {
+			// Copy frame data — original points to VPU memory freed on next ReadLatest
+			dataCopy := make([]byte, len(frame.Data))
+			copy(dataCopy, frame.Data)
+			recFrame := *frame
+			recFrame.Data = dataCopy
+			if s.recorder.SendFrame(&recFrame) {
 				s.metrics.RecorderFramesSent.Add(1)
 			}
 

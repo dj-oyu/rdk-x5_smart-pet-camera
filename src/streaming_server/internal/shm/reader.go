@@ -66,22 +66,6 @@ void close_h265_zc(H265ZeroCopyBuffer* shm) {
     if (shm) munmap((void*)shm, sizeof(H265ZeroCopyBuffer));
 }
 
-// Wait for new frame with timeout
-int wait_h265_frame(H265ZeroCopyBuffer* shm, int timeout_ms) {
-    if (!shm) return -EINVAL;
-
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_sec += timeout_ms / 1000;
-    ts.tv_nsec += (timeout_ms % 1000) * 1000000;
-    if (ts.tv_nsec >= 1000000000) {
-        ts.tv_sec++;
-        ts.tv_nsec -= 1000000000;
-    }
-
-    return sem_timedwait((sem_t*)&shm->new_frame_sem, &ts) == 0 ? 0 : -errno;
-}
-
 // Read frame metadata (non-blocking)
 int read_h265_frame(H265ZeroCopyBuffer* shm, H265ZeroCopyFrame* out) {
     if (!shm || !out) return -1;
@@ -89,13 +73,19 @@ int read_h265_frame(H265ZeroCopyBuffer* shm, H265ZeroCopyFrame* out) {
     return 0;
 }
 
-// Import VPU buffer using full descriptor (same pattern as Python hb_mem_import_graph_buf)
-int import_h265_data(const uint8_t* com_buf_data, uint32_t data_size,
-                     uint8_t* dst, uint32_t dst_size) {
-    if (!com_buf_data || data_size == 0 || !dst || data_size > dst_size) return -1;
+// Zero-copy import handle — holds VPU buffer mapping until explicitly closed
+typedef struct {
+    void *virt_addr;
+    uint32_t data_size;
+    int fd;
+} h265_import_handle_t;
+
+// Import VPU buffer — returns virt_addr for zero-copy access (no memcpy)
+int import_h265_open(const uint8_t* com_buf_data, uint32_t data_size,
+                     h265_import_handle_t* out) {
+    if (!com_buf_data || data_size == 0 || !out) return -1;
     ensure_hb_mem_init();
 
-    // Pass full hb_mem_common_buf_t descriptor for import
     hb_mem_common_buf_t in_buf;
     memcpy(&in_buf, com_buf_data, sizeof(hb_mem_common_buf_t));
 
@@ -103,16 +93,21 @@ int import_h265_data(const uint8_t* com_buf_data, uint32_t data_size,
     int ret = hb_mem_import_com_buf(&in_buf, &out_buf);
     if (ret != 0) return ret;
 
-    // Invalidate cache before reading
     hb_mem_invalidate_buf_with_vaddr((uint64_t)out_buf.virt_addr, out_buf.size);
 
-    // Read H.265 data directly from VPU physical memory
-    memcpy(dst, out_buf.virt_addr, data_size);
-
-    // Release imported mapping
-    hb_mem_free_buf(out_buf.fd);
-
+    out->virt_addr = out_buf.virt_addr;
+    out->data_size = data_size;
+    out->fd = out_buf.fd;
     return 0;
+}
+
+// Release imported VPU buffer mapping
+void import_h265_close(h265_import_handle_t* handle) {
+    if (handle && handle->fd > 0) {
+        hb_mem_free_buf(handle->fd);
+        handle->fd = 0;
+        handle->virt_addr = NULL;
+    }
 }
 
 
@@ -134,16 +129,14 @@ const (
 	FormatH264 = 3
 	FormatH265 = 4
 
-	// Max H.265 frame size for buffer allocation (1080p bitstream)
-	MaxH265FrameSize = 512 * 1024 // 512KB should be enough for one frame
 )
 
 // Reader reads H.265 frames from zero-copy shared memory
 type Reader struct {
 	shm         *C.H265ZeroCopyBuffer
 	shmName     string
-	buf         []byte // Reusable buffer for imported data
-	lastVersion uint32 // Track frame version to avoid duplicates
+	prevHandle  C.h265_import_handle_t // Previous frame's import (freed on next read)
+	hasPrev     bool
 }
 
 // NewReader creates a new H.265 zero-copy reader
@@ -176,12 +169,15 @@ func NewReader(shmName string) (*Reader, error) {
 	return &Reader{
 		shm:     shm,
 		shmName: shmName,
-		buf:     make([]byte, MaxH265FrameSize),
 	}, nil
 }
 
 // Close closes the reader
 func (r *Reader) Close() error {
+	if r.hasPrev {
+		C.import_h265_close(&r.prevHandle)
+		r.hasPrev = false
+	}
 	if r.shm != nil {
 		C.close_h265_zc(r.shm)
 		r.shm = nil
@@ -189,13 +185,15 @@ func (r *Reader) Close() error {
 	return nil
 }
 
-// ReadLatest reads the latest H.265 frame via zero-copy import
+// ReadLatest reads the latest H.265 frame via zero-copy import.
+// The returned frame.Data points directly to VPU physical memory (no memcpy).
+// Data is valid until the next call to ReadLatest (delayed release pattern).
 func (r *Reader) ReadLatest() (*types.VideoFrame, error) {
 	if r.shm == nil {
 		return nil, fmt.Errorf("shared memory not open")
 	}
 
-	// Read frame metadata (polling — encoder writes every 33ms)
+	// Read frame metadata to local copy (avoid torn reads)
 	var cFrame C.H265ZeroCopyFrame
 	if C.read_h265_frame(r.shm, &cFrame) != 0 {
 		return nil, nil
@@ -205,28 +203,29 @@ func (r *Reader) ReadLatest() (*types.VideoFrame, error) {
 		return nil, nil
 	}
 
-
-	dataSize := uint32(cFrame.data_size)
-	if dataSize > MaxH265FrameSize {
-		// Reallocate if frame is larger than expected
-		r.buf = make([]byte, dataSize)
+	// Release previous frame's VPU buffer (consumer is done with it)
+	if r.hasPrev {
+		C.import_h265_close(&r.prevHandle)
+		r.hasPrev = false
 	}
 
-	// Import VPU buffer using full descriptor (same as Python)
-	ret := C.import_h265_data(
+	// Import VPU buffer — zero-copy, returns virt_addr directly
+	var handle C.h265_import_handle_t
+	ret := C.import_h265_open(
 		(*C.uint8_t)(unsafe.Pointer(&cFrame.hb_mem_buf_data[0])),
 		cFrame.data_size,
-		(*C.uint8_t)(unsafe.Pointer(&r.buf[0])),
-		C.uint32_t(len(r.buf)),
+		&handle,
 	)
-
 	if ret != 0 {
-		return nil, fmt.Errorf("import_h265_data failed: %d", ret)
+		return nil, fmt.Errorf("import_h265_open failed: %d", ret)
 	}
 
-	// Build frame
-	data := make([]byte, dataSize)
-	copy(data, r.buf[:dataSize])
+	// Zero-copy: create Go slice backed by VPU physical memory
+	data := unsafe.Slice((*byte)(handle.virt_addr), handle.data_size)
+
+	// Hold handle for delayed release (freed on next ReadLatest or Close)
+	r.prevHandle = handle
+	r.hasPrev = true
 
 	timestamp := time.Unix(
 		int64(cFrame.timestamp.tv_sec),
@@ -241,44 +240,4 @@ func (r *Reader) ReadLatest() (*types.VideoFrame, error) {
 		Height:    int(cFrame.height),
 		IsIDR:     false,
 	}, nil
-}
-
-// WaitNewFrame waits for a new frame notification via semaphore
-func (r *Reader) WaitNewFrame(timeout time.Duration) error {
-	if r.shm == nil {
-		return fmt.Errorf("shared memory not open")
-	}
-
-	timeoutMs := int(timeout.Milliseconds())
-	result := int(C.wait_h265_frame(r.shm, C.int(timeoutMs)))
-
-	if result == 0 {
-		return nil
-	}
-
-	errNum := -result
-	switch errNum {
-	case 110: // ETIMEDOUT
-		return fmt.Errorf("timeout")
-	default:
-		return fmt.Errorf("sem wait failed (errno %d)", errNum)
-	}
-}
-
-// WaitForFrame waits for a frame with timeout (compatibility)
-func (r *Reader) WaitForFrame(timeout time.Duration) (*types.VideoFrame, error) {
-	deadline := time.Now().Add(timeout)
-	for {
-		frame, err := r.ReadLatest()
-		if err != nil {
-			return nil, err
-		}
-		if frame != nil {
-			return frame, nil
-		}
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("timeout waiting for frame")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 }
