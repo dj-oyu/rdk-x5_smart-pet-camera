@@ -1,11 +1,13 @@
 #!/bin/bash
 # Usage:
-#   ./run_album          # release build + run
-#   ./run_album --debug  # debug build + run (test data)
+#   ./run_album              # download latest artifact + run
+#   ./run_album --debug      # cargo build (debug) + run with test data
+#   ./run_album --local      # cargo build --release + run
 set -e
 cd "$(dirname "$0")"
 
-CARGO_ARGS=("--release")
+BIN="./target/release/pet-album"
+MODE="artifact"
 PHOTOS_DIR="data/photos"
 DB_PATH="data/pet-album.db"
 VLM_URL="http://localhost:8000"
@@ -14,17 +16,41 @@ EXTRA=()
 for arg in "$@"; do
   case $arg in
     --debug)
-      CARGO_ARGS=()
+      MODE="debug"
       PHOTOS_DIR="/tmp/test-ui-photos"
       DB_PATH="/tmp/test-ui.db"
       VLM_URL="http://localhost:19999"
       ;;
+    --local) MODE="local" ;;
     *) EXTRA+=("$arg") ;;
   esac
 done
 
 pkill -f 'pet-album --' 2>/dev/null && sleep 1 || true
-exec cargo run "${CARGO_ARGS[@]}" -- \
+
+case $MODE in
+  artifact)
+    echo "[deploy] Downloading latest artifact from GitHub Actions..."
+    rm -rf /tmp/pet-album-dl
+    gh run download --name pet-album-aarch64 --dir /tmp/pet-album-dl
+    mkdir -p target/release
+    cp /tmp/pet-album-dl/pet-album "$BIN"
+    chmod +x "$BIN"
+    echo "[deploy] $(ls -lh "$BIN" | awk '{print $5}') downloaded"
+    ;;
+  local)
+    echo "[build] cargo build --release"
+    cargo build --release
+    ;;
+  debug)
+    echo "[build] cargo build (debug)"
+    cargo build
+    BIN="./target/debug/pet-album"
+    ;;
+esac
+
+echo "[run] $BIN (mode=$MODE)"
+exec "$BIN" \
   --photos-dir "$PHOTOS_DIR" \
   --db-path "$DB_PATH" \
   --vlm-url "$VLM_URL" \
