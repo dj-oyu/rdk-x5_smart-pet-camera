@@ -1,0 +1,14 @@
+{
+  "v1_original": {
+    "description": "Original prompt with null pet_id (deprecated — null bias)",
+    "text": "Analyze this photo of a pet camera feed. Respond with valid JSON only, no markdown.\n{\"is_valid\": true if a cat is clearly visible else false,\n \"caption\": \"one sentence describing the cat's appearance and action\",\n \"pet_id\": \"mike\" if calico/tricolor cat or \"chatora\" if tabby/orange cat or null,\n \"behavior\": one of \"eating\",\"sleeping\",\"playing\",\"resting\",\"moving\",\"grooming\",\"other\"}"
+  },
+  "v2_no_petid": {
+    "description": "Production prompt v2 — pet_id removed from VLM (use bbox color instead)",
+    "text": "Analyze this photo of a pet camera feed. Respond with valid JSON only, no markdown.\n{\"is_valid\": true if a cat is clearly visible else false,\n \"caption\": \"one sentence describing the cat's appearance and action\",\n \"behavior\": one of \"eating\",\"sleeping\",\"playing\",\"resting\",\"moving\",\"grooming\",\"other\"}"
+  },
+  "v1_other": {
+    "description": "Prompt with 'other' string instead of null for pet_id",
+    "text": "Analyze this photo of a pet camera feed. Respond with valid JSON only, no markdown.\n{\"is_valid\": true if a cat is clearly visible else false,\n \"caption\": \"one sentence describing the cat's appearance and action\",\n \"pet_id\": \"mike\" if calico/tricolor cat, \"chatora\" if tabby/orange cat, \"other\" if different cat or not a cat,\n \"behavior\": one of \"eating\",\"sleeping\",\"playing\",\"resting\",\"moving\",\"grooming\",\"other\"}"
+  }
+}

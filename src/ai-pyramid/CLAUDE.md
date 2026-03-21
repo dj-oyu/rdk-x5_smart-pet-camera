@@ -2,7 +2,20 @@
 
 ## Overview
 AI Pyramid Pro (Axera AX8850 / 内部: AX650C) 上で動作するアルバム管理・VLM行動解析サービス。
-RDK X5のPreact SPAからiframeで埋め込まれる独立Webアプリ。
+RDK X5のPreact SPAからiframeで埋め込まれる独立Webアプリ。**Rust実装** (axum + rusqlite)。
+
+## Build & Test
+```bash
+cd src/ai-pyramid
+cargo test          # 29 tests (filename, DB, VLM, server)
+cargo build         # dev build
+cargo build --release  # optimized (opt-level=z, LTO, strip)
+```
+
+## Run
+```bash
+cargo run -- --photos-dir data/photos --db-path data/pet-album.db --vlm-url http://localhost:8000
+```
 
 ## Device Specs (実機計測値)
 - SoC: Axera AX8850 (AX650C_CHIP), Board: AX650N_M5stack_8G
@@ -10,40 +23,29 @@ RDK X5のPreact SPAからiframeで埋め込まれる独立Webアプリ。
 - NPU: 24 TOPS (INT8), 第5世代 Transformer最適化, AX_ENGINE v2.12.0s
 - Memory: 8GB LPDDR4x → **System 2GB + CMM 6GB** (HWアクセラレーション用)
 - Storage: eMMC 32GB + microSD
-- Network: Tailscale (HTTPS, `m5stack-ai-pyramid.tail848eb5.ts.net`)
-- SDK: Axera SDK V3.6.4, Pulsar2 v4.1+
-- Python: Python 3, PyAXEngine (cffi, ONNXRuntime互換)
-- LLM/VLM: ax-llm (OpenAI API互換), axmodel形式
 
 ## Architecture
 ```
-RDK X5                              AI Pyramid Pro
-Preact SPA                          Album Web App (:8090 HTTPS)
-  └─ <iframe src=".../album">  ──→    ├─ 写真一覧・フィルタ・キャプション
-                                       ├─ 行動履歴タイムライン
-                                       └─ 統計ダッシュボード
-
-inotify+rsync ─────────────────→  data/photos/ (eMMC)
-                                  data/pet-album.db (SQLite)
-
-ax-llm (:8091, OpenAI API互換)  ←  VLM推論 (Qwen3-VL-2B → Qwen3.5目標)
+src/ai-pyramid/
+  src/
+    main.rs           # CLI entry point (clap), tokio runtime
+    lib.rs            # module exports
+    ingest/
+      filename.rs     # parse comic_YYYYMMDD_HHMMSS_{pet_id}.jpg
+      watcher.rs      # fsnotify watch + VLM processing queue
+    db/mod.rs         # SQLite PhotoStore (rusqlite, in-memory for tests)
+    vlm/mod.rs        # OpenAI API client, prompt, JSON parser
+    server/mod.rs     # axum HTTP server, REST API, album template
+  templates/
+    album.html        # askama server-rendered photo grid
 ```
 
-## Data Paths
-- Photos: `data/photos/` (rsyncで届くcomic JPEG)
-- DB: `data/pet-album.db` (SQLite on eMMC)
-- Thumbnails: `data/thumbnails/`
-- All under `/data/` — gitignored
-
-## VLM Model Strategy
-1. **現行**: Qwen3-VL-2B-Instruct (GPTQ-Int4) — AXERA公式axmodel提供済み
-2. **目標**: Qwen3.5-2B (Early-Fusion VLM) — axmodel変換検証中
-
-## Planned Features
-1. **Album UI**: iframe配信、写真一覧、is_validフィルタ、ライトボックス
-2. **VLM Filtering**: comic判定 (is_valid/caption付与)
-3. **Behavior Analysis**: MJPEG+SSE監視、行動ログ、個体識別
-4. **MCP Extension**: ツールとして公開 (get_pet_album, get_behavior_summary)
+## Key Design Decisions
+- **pet_id**: NOT from VLM (chatora bias). From Go bbox color analysis → filename
+- **VLM**: is_valid (100%), caption, behavior only
+- **Memory**: ~35-50MB RSS target (2GB system RAM constraint)
+- **SQLite**: modernc.org/sqlite equivalent (rusqlite bundled)
+- **Concurrency**: VLM worker = 1 (NPU exclusive resource)
 
 ## Docs
-→ `docs/pet-album-spec-DRAFT.md`, `docs/vlm_integration_spec.md`
+→ `docs/pet-album-spec.md`, `docs/vlm_integration_spec.md`

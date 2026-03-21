@@ -1,0 +1,31 @@
+#!/bin/bash
+# Usage:
+#   ./run_album          # release build + run
+#   ./run_album --debug  # debug build + run (test data)
+set -e
+cd "$(dirname "$0")"
+
+CARGO_ARGS=("--release")
+PHOTOS_DIR="data/photos"
+DB_PATH="data/pet-album.db"
+VLM_URL="http://localhost:8000"
+EXTRA=()
+
+for arg in "$@"; do
+  case $arg in
+    --debug)
+      CARGO_ARGS=()
+      PHOTOS_DIR="/tmp/test-ui-photos"
+      DB_PATH="/tmp/test-ui.db"
+      VLM_URL="http://localhost:19999"
+      ;;
+    *) EXTRA+=("$arg") ;;
+  esac
+done
+
+pkill -f 'pet-album --' 2>/dev/null && sleep 1 || true
+exec cargo run "${CARGO_ARGS[@]}" -- \
+  --photos-dir "$PHOTOS_DIR" \
+  --db-path "$DB_PATH" \
+  --vlm-url "$VLM_URL" \
+  "${EXTRA[@]}"

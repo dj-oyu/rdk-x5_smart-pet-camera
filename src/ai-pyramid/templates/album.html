@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pet Album</title>
+<style>
+  :root {
+    --bg-deep: #070a12;
+    --panel: rgba(10, 14, 28, 0.72);
+    --panel-edge: rgba(255, 255, 255, 0.08);
+    --text-main: #f0f3ff;
+    --text-muted: #99a6c7;
+    --accent: #6ee7ff;
+    --accent-strong: #32a9ff;
+    --good: #7fe08e;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Space Grotesk", "Noto Sans JP", "Hiragino Kaku Gothic ProN", sans-serif;
+    background: var(--bg-deep);
+    color: var(--text-main);
+    padding: 8px;
+  }
+  a { color: inherit; }
+
+  /* Filters */
+  .filters {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+    padding: 8px 0 6px;
+  }
+  .filters a {
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    text-decoration: none;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.08);
+    color: var(--text-muted);
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .filters a:hover { background: rgba(255,255,255,0.12); color: var(--text-main); }
+  .filters a.active {
+    background: rgba(110,231,255,0.15);
+    border-color: rgba(110,231,255,0.3);
+    color: var(--accent);
+  }
+
+  /* Gallery — horizontal scroll strip */
+  .gallery {
+    display: flex;
+    overflow-x: scroll;
+    gap: 8px;
+    padding-bottom: 8px;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    margin-right: -12px;
+    padding-right: 12px;
+    scrollbar-width: none;
+  }
+  .gallery::-webkit-scrollbar { display: none; }
+
+  .load-sentinel { flex-shrink: 0; width: 1px; }
+
+  .card {
+    position: relative;
+    flex-shrink: 0;
+    width: 200px;
+    border-radius: 8px;
+    overflow: hidden;
+    background: rgba(0,0,0,0.28);
+    border: 1px solid rgba(255,255,255,0.08);
+    cursor: pointer;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    scroll-snap-align: start;
+  }
+  .card:hover {
+    transform: scale(1.02);
+    box-shadow: 0 8px 24px rgba(110,231,255,0.2);
+    z-index: 3;
+  }
+  .card.invalid { opacity: 0.35; }
+  .card.pending { border-style: dashed; }
+  .card img {
+    width: 100%;
+    display: block;
+    aspect-ratio: 836/494;
+    object-fit: cover;
+  }
+
+  /* Badges — always visible on card */
+  .card-badges {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    display: flex;
+    gap: 3px;
+  }
+  .badge {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: rgba(0,0,0,0.55);
+    backdrop-filter: blur(4px);
+    color: var(--text-muted);
+  }
+  .badge.mike { background: rgba(255,138,128,0.3); color: #ff8a80; }
+  .badge.chatora { background: rgba(255,183,77,0.3); color: #ffb74d; }
+  .badge.other-badge { background: rgba(110,231,255,0.2); color: var(--accent); }
+
+  /* Footer — date + info, always visible */
+  .card-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 5px 8px;
+    background: rgba(0,0,0,0.4);
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .card-footer .behavior { font-size: 10px; opacity: 0.7; }
+
+  /* Overlay caption on hover */
+  .card-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    opacity: 0;
+    transition: opacity 0.2s;
+    pointer-events: none;
+  }
+  .card:hover .card-overlay { opacity: 1; }
+  .card-overlay-bg {
+    padding: 24px 8px 6px;
+    background: linear-gradient(transparent, rgba(0,0,0,0.85) 40%);
+    font-size: 11px;
+    color: rgba(255,255,255,0.85);
+    line-height: 1.3;
+  }
+
+  .empty { padding: 20px 0; color: var(--text-muted); font-size: 13px; }
+
+  /* Lightbox */
+  .lightbox {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.92);
+    z-index: 100;
+    justify-content: center;
+    align-items: center;
+    backdrop-filter: blur(8px);
+  }
+  .lightbox.show { display: flex; }
+  .lightbox img {
+    max-width: 95%;
+    max-height: 92vh;
+    object-fit: contain;
+    border-radius: 8px;
+  }
+
+  /* Gallery wrapper for fade effect */
+  .gallery-wrap {
+    position: relative;
+  }
+  /* Left fade — old photos dissolve into darkness */
+  .gallery-wrap::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 200px;
+    background: linear-gradient(to right, var(--bg-deep), transparent);
+    z-index: 2;
+    pointer-events: none;
+  }
+  /* Right edge glow — elliptical bloom at the newest edge */
+  .gallery-wrap::after {
+    content: "";
+    position: absolute;
+    right: -40px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 120px;
+    height: 160%;
+    background: radial-gradient(ellipse at center, rgba(110,231,255,0.7) 0%, rgba(110,231,255,0.2) 35%, transparent 65%);
+    filter: blur(12px);
+    z-index: 2;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.4s;
+  }
+  .gallery-wrap.at-end::after { opacity: 1; }
+
+  /* Responsive card sizes — matches existing comic-gallery breakpoints */
+  @media (max-width: 960px) { .card { width: 160px; } }
+  @media (max-width: 480px) {
+    .card { width: 140px; }
+    .gallery-wrap::before { width: 60px; }
+  }
+
+  @media (hover: none) { .card-overlay { opacity: 1; } }
+</style>
+</head>
+<body>
+<div class="filters">
+  <a href="/album"{% if filter_valid.is_empty() && filter_pet_id.is_empty() %} class="active"{% endif %}>All</a>
+  <a href="/album?is_valid=true"{% if filter_valid == "true" && filter_pet_id.is_empty() %} class="active"{% endif %}>Valid</a>
+  <a href="/album?pet_id=chatora"{% if filter_pet_id == "chatora" %} class="active"{% endif %}>Chatora</a>
+  <a href="/album?pet_id=mike"{% if filter_pet_id == "mike" %} class="active"{% endif %}>Mike</a>
+</div>
+
+{% if total == 0 %}
+<div class="empty">No photos</div>
+{% else %}
+<div class="gallery-wrap">
+<div class="gallery" id="gallery">
+  <div class="load-sentinel" id="load-sentinel"></div>
+  {% for photo in photos %}
+  <div class="card {{ photo.status_class() }}" onclick="showLightbox('/api/photos/{{ photo.filename }}')" data-id="{{ photo.id }}">
+    <img src="/api/photos/{{ photo.filename }}" alt="{{ photo.filename }}" loading="lazy">
+    <div class="card-badges">
+      {% if !photo.pet_id_display().is_empty() %}
+      <span class="badge {{ photo.pet_id_display() }}{% if photo.pet_id_display() == "other" %} other-badge{% endif %}">{{ photo.pet_id_display() }}</span>
+      {% endif %}
+    </div>
+    <div class="card-overlay">
+      <div class="card-overlay-bg">{{ photo.caption_display() }}</div>
+    </div>
+    <div class="card-footer">
+      <span>{{ photo.captured_at }}</span>
+      {% if !photo.behavior_display().is_empty() %}
+      <span class="behavior">{{ photo.behavior_display() }}</span>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+</div>
+{% endif %}
+
+<div class="lightbox" id="lightbox" onclick="this.classList.remove('show')">
+  <img id="lb-img" src="" alt="Full size">
+</div>
+
+<script>
+function showLightbox(src) {
+  document.getElementById('lb-img').src = src;
+  document.getElementById('lightbox').classList.add('show');
+}
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') document.getElementById('lightbox').classList.remove('show');
+});
+
+// Mouse wheel → horizontal scroll on gallery
+(function() {
+  var g = document.getElementById('gallery');
+  if (!g) return;
+  var wrap = document.querySelector('.gallery-wrap');
+  var bounceTimer = null;
+
+  function updateEdge() {
+    var atEnd = g.scrollLeft >= g.scrollWidth - g.clientWidth - 2;
+    if (wrap) wrap.classList.toggle('at-end', atEnd);
+  }
+
+  g.addEventListener('wheel', function(e) {
+    e.preventDefault();
+    var before = g.scrollLeft;
+    g.scrollLeft += e.deltaY;
+    updateEdge();
+    // Bounce effect when hitting the wall
+    var atRight = g.scrollLeft >= g.scrollWidth - g.clientWidth - 2 && e.deltaY > 0;
+    var atLeft = g.scrollLeft <= 0 && e.deltaY < 0;
+    if (atRight || atLeft) {
+      if (bounceTimer) return;
+      g.style.transition = 'transform 0.15s';
+      g.style.transform = atRight ? 'translateX(-8px)' : 'translateX(8px)';
+      bounceTimer = setTimeout(function() {
+        g.style.transform = '';
+        setTimeout(function() { g.style.transition = ''; bounceTimer = null; }, 150);
+      }, 150);
+    }
+  }, { passive: false });
+
+  // Start at right (newest)
+  g.scrollLeft = g.scrollWidth;
+  updateEdge();
+  g.addEventListener('scroll', updateEdge);
+})();
+
+// Incremental loading — older images load as user scrolls left
+(function() {
+  var gallery = document.getElementById('gallery');
+  var sentinel = document.getElementById('load-sentinel');
+  if (!gallery || !sentinel) return;
+
+  var total = {{ total }};
+  var loaded = {{ photos.len() }};
+  var loading = false;
+  var params = new URLSearchParams(window.location.search);
+
+  function buildUrl(offset, limit) {
+    var url = '/api/photos?limit=' + limit + '&offset=' + offset;
+    if (params.get('is_valid')) url += '&is_valid=' + params.get('is_valid');
+    if (params.get('pet_id')) url += '&pet_id=' + params.get('pet_id');
+    return url;
+  }
+
+  function statusClass(v) {
+    if (v === true) return 'valid';
+    if (v === false) return 'invalid';
+    return 'pending';
+  }
+
+  function createCard(p) {
+    var div = document.createElement('div');
+    div.className = 'card ' + statusClass(p.is_valid);
+    div.onclick = function() { showLightbox('/api/photos/' + p.filename); };
+    var pid = p.pet_id || '';
+    var pidBadge = pid ? '<span class="badge ' + pid + (pid === 'other' ? ' other-badge' : '') + '">' + pid + '</span>' : '';
+    var cap = p.caption ? p.caption.replace(/</g, '&lt;') : '';
+    var beh = p.behavior ? '<span class="behavior">' + p.behavior + '</span>' : '';
+    div.innerHTML =
+      '<img src="/api/photos/' + p.filename + '" loading="lazy">' +
+      '<div class="card-badges">' + pidBadge + '</div>' +
+      '<div class="card-overlay"><div class="card-overlay-bg">' + cap + '</div></div>' +
+      '<div class="card-footer"><span>' + (p.captured_at||'') + '</span>' + beh + '</div>';
+    return div;
+  }
+
+  function loadMore() {
+    if (loading || loaded >= total) return;
+    loading = true;
+    var prevScrollWidth = gallery.scrollWidth;
+    var prevScrollLeft = gallery.scrollLeft;
+    fetch(buildUrl(loaded, 20))
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        // Insert after sentinel (left side) — these are older photos
+        var ref = sentinel.nextSibling;
+        (data.photos || []).forEach(function(p) {
+          gallery.insertBefore(createCard(p), ref);
+        });
+        loaded += (data.photos || []).length;
+        // Maintain scroll position (new cards added to left push content right)
+        var added = gallery.scrollWidth - prevScrollWidth;
+        gallery.scrollLeft = prevScrollLeft + added;
+        loading = false;
+      })
+      .catch(function() { loading = false; });
+  }
+
+  // Observe sentinel at left edge — load more when user scrolls left
+  var obs = new IntersectionObserver(function(entries) {
+    if (entries[0].isIntersecting) loadMore();
+  }, { root: gallery, rootMargin: '0px 0px 0px 300px' });
+  obs.observe(sentinel);
+})();
+</script>
+</body>
+</html>
