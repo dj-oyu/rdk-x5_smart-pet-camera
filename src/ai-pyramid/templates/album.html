@@ -201,10 +201,18 @@
   }
   body.carousel::-webkit-scrollbar { display: none; }
   body.carousel .filters {
-    position: sticky;
+    position: fixed;
+    top: 0;
     left: 0;
-    z-index: 2;
+    right: 0;
+    padding: 8px 8px 6px;
+    background: var(--bg-deep);
+    z-index: 10;
   }
+  body.carousel .gallery-wrap {
+    margin-top: 32px;
+  }
+  body.carousel .gallery-spacer { display: none; }
   body.carousel .gallery-wrap::after { display: none; }
 
   /* ── Grid mode (standalone / wide iframe on mobile) ── */
