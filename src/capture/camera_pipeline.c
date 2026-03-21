@@ -94,12 +94,11 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
            SHM_NAME_YOLO_ZC);
 
   // MJPEG input NV12 (768x432 from VSE Channel 2, always written when active, writable by web_monitor)
-  pipeline->shm_mjpeg_frame =
-      shm_frame_buffer_create_named(SHM_NAME_MJPEG_FRAME);
-  if (!pipeline->shm_mjpeg_frame) {
+  pipeline->shm_mjpeg_zc = shm_zerocopy_create(SHM_NAME_MJPEG_ZC);
+  if (!pipeline->shm_mjpeg_zc) {
     LOG_ERROR(Pipeline_log_header,
               "Failed to open/create MJPEG frame shared memory: %s",
-              SHM_NAME_MJPEG_FRAME);
+              SHM_NAME_MJPEG_ZC);
     ret = -1;
     goto error_cleanup;
   }
@@ -458,50 +457,40 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       ret = vio_get_frame_ch2(&pipeline->vio, &mjpeg_frame, 10);
       if (ret == 0) {
         // Write MJPEG frame to shared memory
-        Frame mjpeg_nv12_frame = {0};
-        // VSE Ch2 is configured for 768x432 (see vio_lowlevel.c:244-256)
-        mjpeg_nv12_frame.width = 768;
-        mjpeg_nv12_frame.height = 432;
-        mjpeg_nv12_frame.format = 1; // NV12
-        mjpeg_nv12_frame.frame_number = frame_count;
-        mjpeg_nv12_frame.camera_id = pipeline->camera_index;
-        mjpeg_nv12_frame.timestamp = frame_timestamp;
-
-        // Apply brightness data from ISP (same for all channels)
-        isp_fill_frame_brightness(&mjpeg_nv12_frame, &brightness_result);
-        mjpeg_nv12_frame.correction_applied = 0;
-
-        // Calculate NV12 size for 768x432
-        size_t mjpeg_size = 0;
+        // Zero-copy: share VSE Ch2 buffer via share_id
+        ZeroCopyFrame mjpeg_zc = {0};
+        mjpeg_zc.frame_number = frame_count;
+        mjpeg_zc.timestamp = frame_timestamp;
+        mjpeg_zc.camera_id = pipeline->camera_index;
+        mjpeg_zc.width = mjpeg_frame.buffer.width;
+        mjpeg_zc.height = mjpeg_frame.buffer.height;
+        mjpeg_zc.format = 1; // NV12
+        mjpeg_zc.brightness_avg = brightness_result.brightness_avg;
+        mjpeg_zc.plane_cnt = mjpeg_frame.buffer.plane_cnt;
         for (int i = 0; i < mjpeg_frame.buffer.plane_cnt; i++) {
-          mjpeg_size += mjpeg_frame.buffer.size[i];
+          mjpeg_zc.share_id[i] = mjpeg_frame.buffer.share_id[i];
+          mjpeg_zc.plane_size[i] = mjpeg_frame.buffer.size[i];
         }
-        mjpeg_nv12_frame.data_size = mjpeg_size;
+        memcpy(mjpeg_zc.hb_mem_buf_data, &mjpeg_frame.buffer,
+               sizeof(mjpeg_frame.buffer));
 
-        // Copy MJPEG NV12 data
-        if (mjpeg_size <= sizeof(mjpeg_nv12_frame.data)) {
-          size_t offset = 0;
-          for (int i = 0; i < mjpeg_frame.buffer.plane_cnt; i++) {
-            memcpy(mjpeg_nv12_frame.data + offset, mjpeg_frame.buffer.virt_addr[i],
-                   mjpeg_frame.buffer.size[i]);
-            offset += mjpeg_frame.buffer.size[i];
+        int write_ret = shm_zerocopy_write(pipeline->shm_mjpeg_zc, &mjpeg_zc);
+        if (write_ret == 0) {
+          if (frame_count == 0) {
+            LOG_INFO(Pipeline_log_header,
+                     "VSE Ch2 output: %dx%d (zero-copy, share_id=%d)",
+                     mjpeg_zc.width, mjpeg_zc.height, mjpeg_zc.share_id[0]);
           }
-
-          int write_ret = shm_frame_buffer_write(pipeline->shm_mjpeg_frame, &mjpeg_nv12_frame);
-          if (write_ret < 0) {
-            LOG_WARN(Pipeline_log_header, "Failed to write MJPEG frame to shm");
-          } else if (frame_count == 0 || frame_count % 30 == 0) {
-            // Log first frame and every 30 frames to verify VSE Ch2 size
-            if (frame_count == 0) {
-              LOG_INFO(Pipeline_log_header,
-                       "VSE Ch2 output: %dx%d, %zu bytes (expected 768x432, ~497KB)",
-                       mjpeg_nv12_frame.width, mjpeg_nv12_frame.height, mjpeg_size);
-            } else {
-              LOG_DEBUG(Pipeline_log_header,
-                        "Wrote MJPEG %dx%d frame#%d to shm (idx=%d)",
-                        mjpeg_nv12_frame.width, mjpeg_nv12_frame.height, frame_count, write_ret);
-            }
+          // Wait for consumer before releasing VSE buffer
+          struct timespec deadline;
+          clock_gettime(CLOCK_REALTIME, &deadline);
+          deadline.tv_nsec += 50 * 1000000; // 50ms timeout
+          if (deadline.tv_nsec >= 1000000000) {
+            deadline.tv_sec++;
+            deadline.tv_nsec -= 1000000000;
           }
+          sem_timedwait(&pipeline->shm_mjpeg_zc->consumed_sem, &deadline);
+          sem_post(&pipeline->shm_mjpeg_zc->consumed_sem);
         }
 
         vio_release_frame_ch2(&pipeline->vio, &mjpeg_frame);
@@ -602,9 +591,9 @@ void pipeline_destroy(camera_pipeline_t *pipeline) {
     pipeline->shm_yolo_zerocopy = NULL;
   }
 
-  if (pipeline->shm_mjpeg_frame) {
-    shm_frame_buffer_close(pipeline->shm_mjpeg_frame);
-    pipeline->shm_mjpeg_frame = NULL;
+  if (pipeline->shm_mjpeg_zc) {
+    shm_zerocopy_close(pipeline->shm_mjpeg_zc);
+    pipeline->shm_mjpeg_zc = NULL;
   }
 
   // Close memory manager

@@ -365,7 +365,7 @@ if ! wait_for_shm "pet_camera_h265_zc" 10; then
 fi
 
 if [[ "${RUN_MONITOR}" -eq 1 ]]; then
-  wait_for_shm "pet_camera_mjpeg_frame" 10 || echo "[warn] MJPEG SHM not found" >&2
+  wait_for_shm "pet_camera_mjpeg_zc" 10 || echo "[warn] MJPEG SHM not found" >&2
 fi
 
 if [[ "${RUN_STREAMING}" -eq 1 ]]; then
@@ -404,7 +404,7 @@ if [[ "${RUN_MONITOR}" -eq 1 ]]; then
       -http "${MONITOR_HOST}:${MONITOR_PORT}" \
       -assets "${REPO_ROOT}/src/web" \
       -assets-build "${BUILD_DIR}/web" \
-      -frame-shm "/pet_camera_mjpeg_frame" \
+      -frame-shm "/pet_camera_mjpeg_zc" \
       -detection-shm "/pet_camera_detections" \
       -webrtc-base "http://localhost:${STREAMING_PORT}" \
       -fps 30 \

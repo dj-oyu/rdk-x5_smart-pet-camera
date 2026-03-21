@@ -30,7 +30,7 @@ func DefaultConfig() Config {
 		Addr:                ":8080",
 		AssetsDir:           filepath.Clean("../web"),
 		BuildAssetsDir:      filepath.Clean("../../build/web"),
-		FrameShmName:        "/pet_camera_mjpeg_frame",
+		FrameShmName:        "/pet_camera_mjpeg_zc",
 		StreamShmName:         "/pet_camera_h265_zc",
 		DetectionShmName:    "/pet_camera_detections",
 		WebRTCBaseURL:       "http://localhost:8081",

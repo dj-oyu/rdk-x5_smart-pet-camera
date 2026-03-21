@@ -39,8 +39,8 @@ typedef struct {
     H265ZeroCopyBuffer *shm_h265_zc;        // H.265 stream zero-copy (Go streaming)
     ZeroCopyFrameBuffer *shm_yolo_zerocopy; // YOLO zero-copy (Python detector)
 
-    // MJPEG (TODO: migrate to zero-copy like YOLO)
-    SharedFrameBuffer *shm_mjpeg_frame;
+    // MJPEG NV12 zero-copy (Go web_monitor)
+    ZeroCopyFrameBuffer *shm_mjpeg_zc;
 
     // Active camera (shared variable, no SHM — same process)
     volatile int *active_camera;            // Points to g_active_camera in main
