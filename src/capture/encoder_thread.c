@@ -61,13 +61,14 @@ static void *encoder_thread_worker(void *arg) {
 
     // Encode frame — single memcpy from VSE virt_addr to VPU input buffer
     size_t h265_size = 0;
+    encoder_stats_t enc_stats = {0};
     int ret = encoder_encode_frame_vaddr(
         ctx->encoder,
         (const uint8_t *)frame->vse_frame.buffer.virt_addr[0],
         (const uint8_t *)frame->vse_frame.buffer.virt_addr[1],
         frame->vse_frame.buffer.size[0],
         frame->vse_frame.buffer.size[1],
-        h265_buffer, &h265_size, h265_buffer_size, 2000);
+        h265_buffer, &h265_size, h265_buffer_size, 2000, &enc_stats);
 
     if (ret == 0 && h265_size > 0) {
       // Write to shared memory
@@ -89,8 +90,10 @@ static void *encoder_thread_worker(void *arg) {
           } else {
             uint64_t encoded = __atomic_load_n(&ctx->frames_encoded, __ATOMIC_RELAXED);
             if (encoded % 30 == 0) {
-              LOG_DEBUG("EncoderThread", "Encoded camera%d frame#%lu to H.265 shm",
-                        frame->camera_id, frame->frame_number);
+              LOG_INFO("EncoderThread", "VPU stats frame#%lu: intra=%u skip=%u qp=%u bytes=%u",
+                       frame->frame_number,
+                       enc_stats.intra_block_num, enc_stats.skip_block_num,
+                       enc_stats.avg_mb_qp, enc_stats.enc_pic_byte);
             }
           }
         } else {

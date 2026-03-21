@@ -98,7 +98,8 @@ int encoder_encode_frame_vaddr(encoder_context_t *ctx,
                                const uint8_t *nv12_y, const uint8_t *nv12_uv,
                                size_t y_size, size_t uv_size,
                                uint8_t *h265_data_out, size_t *h265_size_out,
-                               size_t max_size, int timeout_ms) {
+                               size_t max_size, int timeout_ms,
+                               encoder_stats_t *stats_out) {
     int ret = 0;
 
     if (!ctx || !nv12_y || !nv12_uv || !h265_data_out || !h265_size_out) {
@@ -150,6 +151,14 @@ int encoder_encode_frame_vaddr(encoder_context_t *ctx,
     if (ret != 0) {
         LOG_ERROR("Encoder", "hb_mm_mc_dequeue_output_buffer failed: %d", ret);
         return ret;
+    }
+
+    // Extract VPU encoder statistics
+    if (stats_out) {
+        stats_out->intra_block_num = output_info.video_stream_info.intra_block_num;
+        stats_out->skip_block_num = output_info.video_stream_info.skip_block_num;
+        stats_out->avg_mb_qp = output_info.video_stream_info.avg_mb_qp;
+        stats_out->enc_pic_byte = output_info.video_stream_info.enc_pic_byte;
     }
 
     // Copy H.265 data to output buffer
