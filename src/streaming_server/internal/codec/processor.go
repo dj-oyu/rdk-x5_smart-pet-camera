@@ -1,4 +1,4 @@
-package h264
+package codec
 
 import (
 	"bytes"
@@ -13,23 +13,30 @@ var (
 	startCode4 = []byte{0x00, 0x00, 0x00, 0x01}
 )
 
-// Processor handles H.264 NAL unit processing
+// Processor handles H.265 NAL unit processing
 type Processor struct {
+	vpsCache   []byte // Cached VPS NAL unit
 	spsCache   []byte // Cached SPS NAL unit
 	ppsCache   []byte // Cached PPS NAL unit
-	hasHeaders bool   // True if SPS/PPS are cached
+	hasHeaders bool   // True if VPS/SPS/PPS are cached
 }
 
-// NewProcessor creates a new H.264 processor
+// NewProcessor creates a new H.265 NAL processor
 func NewProcessor() *Processor {
 	return &Processor{
 		hasHeaders: false,
 	}
 }
 
-// Process processes a raw H.264 frame and extracts/caches headers
-// Optimized: only copies data for SPS/PPS (rare), avoids allocation for P-frames
-func (p *Processor) Process(frame *types.H264Frame) error {
+// extractNALType extracts the H.265 NAL unit type from the byte after start code.
+// H.265 NAL header is 2 bytes: (nalType << 1) in first byte.
+func extractNALType(headerByte byte) uint8 {
+	return (headerByte >> 1) & 0x3F
+}
+
+// Process processes a raw H.265 frame and extracts/caches headers
+// Optimized: only copies data for VPS/SPS/PPS (rare), avoids allocation for trail frames
+func (p *Processor) Process(frame *types.VideoFrame) error {
 	data := frame.Data
 	if len(data) == 0 {
 		return nil
@@ -54,7 +61,7 @@ func (p *Processor) Process(frame *types.H264Frame) error {
 			break
 		}
 
-		nalType := data[nalHeaderOffset] & 0x1F
+		nalType := extractNALType(data[nalHeaderOffset])
 
 		// Find next start code to determine NAL end
 		nextStart := p.findNextStartCode(data, nalHeaderOffset+1)
@@ -63,16 +70,18 @@ func (p *Processor) Process(frame *types.H264Frame) error {
 			nalEnd = len(data)
 		}
 
-		// Only copy for SPS/PPS (rare - typically once per GOP)
+		// Only copy for VPS/SPS/PPS (rare - typically once per GOP)
 		switch nalType {
-		case types.NALTypeSPS:
+		case types.NALTypeH265VPS:
+			p.vpsCache = append([]byte(nil), data[nalStart:nalEnd]...)
+		case types.NALTypeH265SPS:
 			p.spsCache = append([]byte(nil), data[nalStart:nalEnd]...)
-		case types.NALTypePPS:
+		case types.NALTypeH265PPS:
 			p.ppsCache = append([]byte(nil), data[nalStart:nalEnd]...)
-			if len(p.spsCache) > 0 {
+			if len(p.vpsCache) > 0 && len(p.spsCache) > 0 {
 				p.hasHeaders = true
 			}
-		case types.NALTypeIDR:
+		case types.NALTypeH265IDRWRADL, types.NALTypeH265IDRNLP:
 			frame.IsIDR = true
 		}
 
@@ -82,14 +91,14 @@ func (p *Processor) Process(frame *types.H264Frame) error {
 	return nil
 }
 
-// PrependHeaders prepends SPS/PPS headers to IDR frames
+// PrependHeaders prepends VPS/SPS/PPS headers to IDR frames
 // This is necessary for recording mid-stream
 func (p *Processor) PrependHeaders(data []byte) ([]byte, error) {
 	if !p.hasHeaders {
 		return data, nil // No headers to prepend
 	}
 
-	// Check if this frame starts with IDR
+	// Check if this frame contains IDR
 	nalUnits, err := p.parseNALUnits(data)
 	if err != nil {
 		return data, nil
@@ -97,7 +106,8 @@ func (p *Processor) PrependHeaders(data []byte) ([]byte, error) {
 
 	hasIDR := false
 	for _, nal := range nalUnits {
-		if (nal.Type & 0x1F) == types.NALTypeIDR {
+		nalType := extractNALType(nal.Type)
+		if nalType == types.NALTypeH265IDRWRADL || nalType == types.NALTypeH265IDRNLP {
 			hasIDR = true
 			break
 		}
@@ -107,8 +117,9 @@ func (p *Processor) PrependHeaders(data []byte) ([]byte, error) {
 		return data, nil // Not an IDR frame, no need to prepend
 	}
 
-	// Prepend SPS and PPS to the frame data
-	result := make([]byte, 0, len(p.spsCache)+len(p.ppsCache)+len(data))
+	// Prepend VPS, SPS, and PPS to the frame data
+	result := make([]byte, 0, len(p.vpsCache)+len(p.spsCache)+len(p.ppsCache)+len(data))
+	result = append(result, p.vpsCache...)
 	result = append(result, p.spsCache...)
 	result = append(result, p.ppsCache...)
 	result = append(result, data...)
@@ -116,9 +127,14 @@ func (p *Processor) PrependHeaders(data []byte) ([]byte, error) {
 	return result, nil
 }
 
-// HasHeaders returns true if SPS/PPS headers are cached
+// HasHeaders returns true if VPS/SPS/PPS headers are cached
 func (p *Processor) HasHeaders() bool {
 	return p.hasHeaders
+}
+
+// GetVPS returns the cached VPS NAL unit
+func (p *Processor) GetVPS() []byte {
+	return p.vpsCache
 }
 
 // GetSPS returns the cached SPS NAL unit
@@ -131,7 +147,7 @@ func (p *Processor) GetPPS() []byte {
 	return p.ppsCache
 }
 
-// parseNALUnits parses raw H.264 data into NAL units
+// parseNALUnits parses raw H.265 data into NAL units
 func (p *Processor) parseNALUnits(data []byte) ([]types.NALUnit, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("empty data")
@@ -161,7 +177,6 @@ func (p *Processor) parseNALUnits(data []byte) ([]types.NALUnit, error) {
 		}
 
 		nalHeaderByte := data[offset]
-		nalType := nalHeaderByte & 0x1F
 
 		// Find next start code
 		nextStart := p.findNextStartCode(data, offset+1)
@@ -175,7 +190,7 @@ func (p *Processor) parseNALUnits(data []byte) ([]types.NALUnit, error) {
 		copy(nalData, data[nalStart:nalEnd])
 
 		nalUnits = append(nalUnits, types.NALUnit{
-			Type: nalType,
+			Type: nalHeaderByte, // Store raw header byte; caller uses extractNALType()
 			Data: nalData,
 		})
 
@@ -200,20 +215,20 @@ func (p *Processor) findNextStartCode(data []byte, offset int) int {
 	return -1 // No start code found
 }
 
-// ExtractNALType extracts the NAL unit type from raw data
+// ExtractNALType extracts the H.265 NAL unit type from raw data
 func ExtractNALType(data []byte) uint8 {
 	// Find first NAL header byte after start code
-	if len(data) >= 4 && bytes.Equal(data[0:4], startCode4) {
-		return data[4] & 0x1F
+	if len(data) >= 5 && bytes.Equal(data[0:4], startCode4) {
+		return extractNALType(data[4])
 	}
-	if len(data) >= 3 && bytes.Equal(data[0:3], startCode3) {
-		return data[3] & 0x1F
+	if len(data) >= 4 && bytes.Equal(data[0:3], startCode3) {
+		return extractNALType(data[3])
 	}
 	return 0
 }
 
-// IsIDRFrame checks if data contains an IDR frame
+// IsIDRFrame checks if data contains an H.265 IDR frame
 func IsIDRFrame(data []byte) bool {
 	nalType := ExtractNALType(data)
-	return nalType == types.NALTypeIDR
+	return nalType == types.NALTypeH265IDRWRADL || nalType == types.NALTypeH265IDRNLP
 }
