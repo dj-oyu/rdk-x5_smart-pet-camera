@@ -57,13 +57,16 @@
     padding-bottom: 8px;
     overscroll-behavior-x: contain;
     -webkit-overflow-scrolling: touch;
-    padding-inline: calc(50% - 110px);
     scrollbar-width: none;
     scroll-snap-type: x mandatory;
   }
   .gallery::-webkit-scrollbar { display: none; }
 
   .load-sentinel { flex-shrink: 0; width: 1px; }
+  .gallery-spacer {
+    flex-shrink: 0;
+    width: calc(50% - 110px);
+  }
 
   .card {
     position: relative;
@@ -205,29 +208,26 @@
   }
   .gallery-wrap.at-end::after { opacity: 1; }
 
-  /* Desktop sidebar: single row, no vertical overflow */
-  @media (min-width: 961px) {
-    body { overflow-y: hidden; }
-  }
+  /* Carousel mode (narrow sidebar iframe): no vertical overflow */
+  body.carousel { overflow-y: hidden; }
 
-  /* Mobile: vertical grid, no horizontal scroll */
-  @media (max-width: 960px) {
-    .gallery {
-      flex-wrap: wrap;
-      overflow-x: visible;
-      padding-inline: 0;
-      scroll-snap-type: none;
-    }
-    .card { width: calc(50% - 4px); }
-    .card-footer {
-      max-height: none;
-      padding: 5px 8px;
-      opacity: 1;
-    }
-    .gallery-wrap::before, .gallery-wrap::after { display: none; }
+  /* Grid mode (standalone OR wide iframe on mobile) */
+  body.grid-mode .gallery {
+    flex-wrap: wrap;
+    overflow-x: visible;
+    scroll-snap-type: none;
   }
+  body.grid-mode .gallery-spacer { display: none; }
+  body.grid-mode .card { width: calc(50% - 4px); }
+  body.grid-mode .card-footer {
+    max-height: none;
+    padding: 5px 8px;
+    opacity: 1;
+  }
+  body.grid-mode .gallery-wrap::before,
+  body.grid-mode .gallery-wrap::after { display: none; }
   @media (max-width: 480px) {
-    .card { width: 100%; }
+    body.grid-mode .card { width: 100%; }
   }
 
   @media (hover: none) { .card-overlay { opacity: 1; } }
@@ -246,9 +246,15 @@
 {% else %}
 <div class="gallery-wrap">
 <div class="gallery" id="gallery">
+  <div class="gallery-spacer"></div>
   <div class="load-sentinel" id="load-sentinel"></div>
   {% for photo in photos %}
-  <div class="card {{ photo.status_class() }}" onclick="showLightbox('/api/photos/{{ photo.filename }}')" data-id="{{ photo.id }}">
+  <div class="card {{ photo.status_class() }}" data-id="{{ photo.id }}"
+       data-date="{{ photo.captured_at }}"
+       data-pet="{{ photo.pet_id_display() }}"
+       data-behavior="{{ photo.behavior_display() }}"
+       data-caption="{{ photo.caption_display() }}"
+       onclick="showLightbox('/api/photos/{{ photo.filename }}', this.dataset)">
     <img src="/api/photos/{{ photo.filename }}" alt="{{ photo.filename }}" loading="lazy">
     <div class="card-badges">
       {% if !photo.pet_id_display().is_empty() %}
@@ -266,6 +272,7 @@
     </div>
   </div>
   {% endfor %}
+  <div class="gallery-spacer"></div>
 </div>
 </div>
 {% endif %}
@@ -275,9 +282,22 @@
 </div>
 
 <script>
-function showLightbox(src) {
-  document.getElementById('lb-img').src = src;
-  document.getElementById('lightbox').classList.add('show');
+// Layout mode: carousel (narrow sidebar iframe) vs grid (mobile/standalone)
+(function() {
+  var inIframe = window.self !== window.top;
+  var narrow = document.documentElement.clientWidth <= 320;
+  document.body.classList.add(inIframe && narrow ? 'carousel' : 'grid-mode');
+})();
+
+var inIframe = window.self !== window.top;
+function showLightbox(src, meta) {
+  var info = meta ? { date: meta.date, pet: meta.pet, behavior: meta.behavior, caption: meta.caption } : {};
+  if (inIframe) {
+    window.parent.postMessage({ type: 'album-lightbox', src: src, meta: info }, '*');
+  } else {
+    document.getElementById('lb-img').src = src;
+    document.getElementById('lightbox').classList.add('show');
+  }
 }
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') document.getElementById('lightbox').classList.remove('show');
@@ -323,7 +343,7 @@ document.addEventListener('keydown', function(e) {
 // Center-card detection — only the center card shows its footer
 (function() {
   var g = document.getElementById('gallery');
-  if (!g || window.innerWidth <= 960) return;
+  if (!g || document.body.classList.contains('grid-mode')) return;
 
   var activeCard = null;
   function updateActive() {
@@ -373,7 +393,11 @@ document.addEventListener('keydown', function(e) {
   function createCard(p) {
     var div = document.createElement('div');
     div.className = 'card ' + statusClass(p.is_valid);
-    div.onclick = function() { showLightbox('/api/photos/' + p.filename); };
+    div.dataset.date = p.captured_at || '';
+    div.dataset.pet = p.pet_id || '';
+    div.dataset.behavior = p.behavior || '';
+    div.dataset.caption = p.caption || '';
+    div.onclick = function() { showLightbox('/api/photos/' + p.filename, div.dataset); };
     var pid = p.pet_id || '';
     var pidBadge = pid ? '<span class="badge ' + pid + (pid === 'other' ? ' other-badge' : '') + '">' + pid + '</span>' : '';
     var cap = p.caption ? p.caption.replace(/</g, '&lt;') : '';
@@ -446,7 +470,10 @@ document.addEventListener('keydown', function(e) {
     var div = document.createElement('div');
     div.className = 'card';
     div.setAttribute('data-filename', p.filename);
-    div.onclick = function() { showLightbox('/api/photos/' + p.filename); };
+    div.dataset.pet = p.pet_id || '';
+    div.dataset.behavior = p.behavior || '';
+    div.dataset.caption = p.caption || '';
+    div.onclick = function() { showLightbox('/api/photos/' + p.filename, div.dataset); };
     var pid = p.pet_id || '';
     var pidBadge = pid ? '<span class="badge ' + pid + (pid === 'other' ? ' other-badge' : '') + '">' + pid + '</span>' : '';
     var cap = p.caption ? p.caption.replace(/</g, '&lt;') : '';
