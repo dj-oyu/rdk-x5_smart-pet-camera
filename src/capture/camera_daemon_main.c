@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/mman.h>
 
 #define DEFAULT_FPS 30
 #define DEFAULT_BITRATE 600000
