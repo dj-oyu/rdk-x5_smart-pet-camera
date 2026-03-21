@@ -258,17 +258,21 @@ func (r *Recorder) recordLoop() {
 			return
 		}
 
+		// Copy frame data — VPU buffer is freed on next ReadLatest
+		frameCopy := make([]byte, len(frame.Data))
+		copy(frameCopy, frame.Data)
+
 		var dataToWrite []byte
 		if frame.IsIDR && !firstIDRWritten {
-			headers, _ := processor.PrependHeaders(frame.Data)
-			if len(headers) > len(frame.Data) {
+			headers, _ := processor.PrependHeaders(frameCopy)
+			if len(headers) > len(frameCopy) {
 				dataToWrite = headers
 				firstIDRWritten = true
 			} else {
-				dataToWrite = frame.Data
+				dataToWrite = frameCopy
 			}
 		} else {
-			dataToWrite = frame.Data
+			dataToWrite = frameCopy
 		}
 
 		n, err := r.file.Write(dataToWrite)
