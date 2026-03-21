@@ -361,6 +361,21 @@ document.addEventListener('keydown', function(e) {
   }, { root: gallery, rootMargin: '0px 0px 0px 300px' });
   obs.observe(sentinel);
 })();
+
+// Auto-refresh: poll /api/stats every 10s, reload if total changes
+(function() {
+  var knownTotal = {{ total }};
+  setInterval(function() {
+    fetch('/api/stats')
+      .then(function(r) { return r.json(); })
+      .then(function(s) {
+        if (s.total > knownTotal) {
+          window.location.reload();
+        }
+      })
+      .catch(function() {});
+  }, 10000);
+})();
 </script>
 </body>
 </html>
