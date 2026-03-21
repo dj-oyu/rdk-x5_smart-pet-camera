@@ -61,7 +61,7 @@ DAEMON_ARGS ?= -C 0 -P 1
 
 .PHONY: all clean test switcher-demo switcher-daemon switcher-daemon-build run run-daemon cleanup kill-processes help poc-lowlevel poc-vse-dual isp-lowlight awb-tuning test-hb-mem-import test-hb-mem-dma jpeg-encoder-lib
 
-all: $(DAEMON_BINARY) $(SHM_TEST_BINARY) $(SWITCHER_DAEMON_BINARY) $(JPEG_ENCODER_LIB)
+all: $(DAEMON_BINARY) $(JPEG_ENCODER_LIB)
 
 poc-lowlevel: $(POC_LOWLEVEL_BINARY)
 	@echo "[PoC] Low-level API PoC ready at $(POC_LOWLEVEL_BINARY)"
