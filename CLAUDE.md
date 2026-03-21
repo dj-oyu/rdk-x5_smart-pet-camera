@@ -30,6 +30,7 @@
 | `vlm_integration_spec.md` | VLM behavior analysis spec |
 | `hardware-specs.md` | GPU/VPU/BPU specs, nano2D/VSE/hbn_vflow benchmarks |
 | `hw-offload-roadmap.md` | H.265移行 + HWオフロード実装計画 |
+| `axmodel-conversion-guide.md` | Pulsar2 axmodel変換手順書 (Qwen3-VL/Qwen3.5) |
 
 ## Future Tasks
 - [ ] JSON event recording (schema defined, not coded)
