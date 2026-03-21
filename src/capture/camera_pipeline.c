@@ -136,7 +136,8 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
   // Create encoder thread (writes to active H.264 shm)
   ret = encoder_thread_create(&pipeline->encoder_thread, &pipeline->encoder,
                               pipeline->shm_active_h264, SHM_NAME_STREAM,
-                              output_width, output_height);
+                              output_width, output_height,
+                              pipeline->vio.vse_handle);
   if (ret != 0) {
     LOG_ERROR(Pipeline_log_header, "encoder_thread_create failed: %d", ret);
     goto error_cleanup;
@@ -322,24 +323,27 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
                            &cam_brightness);
     }
 
-    // Push frame to encoder thread only if camera is active
+    // Push VSE Ch0 frame to encoder thread (zero-copy via phys_addr)
+    // On success, encoder thread owns the VSE buffer and will release it.
+    // On failure (queue full) or inactive camera, we must release it here.
+    bool frame_owned_by_encoder = false;
     if (write_active) {
       ret = encoder_thread_push_frame(
-          &pipeline->encoder_thread,
-          (uint8_t *)vio_frame.buffer.virt_addr[0], // Y plane
-          (uint8_t *)vio_frame.buffer.virt_addr[1], // UV plane
-          vio_frame.buffer.size[0],                 // Y size
-          vio_frame.buffer.size[1],                 // UV size
+          &pipeline->encoder_thread, &vio_frame,
           frame_count, pipeline->camera_index, frame_timestamp);
 
-      if (ret != 0) {
+      if (ret == 0) {
+        frame_owned_by_encoder = true;
+      } else {
         LOG_WARN(Pipeline_log_header, "Encoder queue full, frame %d dropped",
                  frame_count);
       }
     }
 
-    // Release main VIO frame (always release after use)
-    vio_release_frame(&pipeline->vio, &vio_frame);
+    // Release main VIO frame only if encoder thread did not take ownership
+    if (!frame_owned_by_encoder) {
+      vio_release_frame(&pipeline->vio, &vio_frame);
+    }
 
     // Get YOLO input frame from VSE Channel 1 (1280x720 for ROI detection)
     // Zero-copy: share VIO buffer via share_id, consumer imports via hb_mem

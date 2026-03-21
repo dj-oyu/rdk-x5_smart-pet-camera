@@ -94,13 +94,14 @@ int encoder_create(encoder_context_t *ctx, int camera_index,
     return 0;
 }
 
-int encoder_encode_frame(encoder_context_t *ctx,
-                         const uint8_t *nv12_y, const uint8_t *nv12_uv,
-                         uint8_t *h264_data_out, size_t *h264_size_out,
-                         size_t max_size, int timeout_ms) {
+int encoder_encode_frame_vaddr(encoder_context_t *ctx,
+                               const uint8_t *nv12_y, const uint8_t *nv12_uv,
+                               size_t y_size, size_t uv_size,
+                               uint8_t *h265_data_out, size_t *h265_size_out,
+                               size_t max_size, int timeout_ms) {
     int ret = 0;
 
-    if (!ctx || !nv12_y || !nv12_uv || !h264_data_out || !h264_size_out) {
+    if (!ctx || !nv12_y || !nv12_uv || !h265_data_out || !h265_size_out) {
         return -1;
     }
 
@@ -122,17 +123,14 @@ int encoder_encode_frame(encoder_context_t *ctx,
     input_buffer.vframe_buf.pix_fmt = MC_PIXEL_FORMAT_NV12;
     input_buffer.vframe_buf.size = ctx->width * ctx->height * 3 / 2;
 
-    // Copy NV12 data to input buffer
-    size_t y_size = ctx->width * ctx->height;
-    size_t uv_size = ctx->width * ctx->height / 2;
-
+    // Single memcpy from VSE virt_addr directly to VPU input buffer
+    // (eliminates the intermediate pool buffer copy in encoder_thread)
     if (input_buffer.vframe_buf.vir_ptr[0]) {
         memcpy(input_buffer.vframe_buf.vir_ptr[0], nv12_y, y_size);
     } else {
         LOG_ERROR("Encoder", "Input buffer Y plane is NULL");
         return -1;
     }
-
     if (input_buffer.vframe_buf.vir_ptr[1]) {
         memcpy(input_buffer.vframe_buf.vir_ptr[1], nv12_uv, uv_size);
     } else {
@@ -154,13 +152,13 @@ int encoder_encode_frame(encoder_context_t *ctx,
         return ret;
     }
 
-    // Copy H.264 data to output buffer
+    // Copy H.265 data to output buffer
     if (output_buffer.vstream_buf.vir_ptr && output_buffer.vstream_buf.size > 0) {
         if (output_buffer.vstream_buf.size <= max_size) {
-            memcpy(h264_data_out, output_buffer.vstream_buf.vir_ptr, output_buffer.vstream_buf.size);
-            *h264_size_out = output_buffer.vstream_buf.size;
+            memcpy(h265_data_out, output_buffer.vstream_buf.vir_ptr, output_buffer.vstream_buf.size);
+            *h265_size_out = output_buffer.vstream_buf.size;
         } else {
-            LOG_ERROR("Encoder", "H.264 output size (%u) exceeds buffer size (%zu)",
+            LOG_ERROR("Encoder", "H.265 output size (%u) exceeds buffer size (%zu)",
                       output_buffer.vstream_buf.size, max_size);
             ret = -1;
         }

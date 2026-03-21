@@ -54,33 +54,28 @@ int encoder_create(encoder_context_t *ctx, int camera_index,
                    int width, int height, int fps, int bitrate);
 
 /**
- * Encode one NV12 frame to H.265
+ * Encode one NV12 frame to H.265 (zero-copy, physical address input)
  *
- * Takes NV12 frame data and produces H.265 bitstream.
- * Blocks until encoding is complete or timeout occurs.
+ * Takes physical addresses of NV12 planes and produces H.265 bitstream.
+ * The VPU reads directly from the physical addresses — no memcpy required.
  *
  * Args:
  *   ctx: Encoder context
- *   nv12_y: Pointer to Y plane data (width * height bytes)
- *   nv12_uv: Pointer to UV plane data (width * height / 2 bytes)
- *   h264_data_out: Output buffer for H.265 bitstream
- *   h264_size_out: Output size of H.265 data (bytes)
+ *   phys_addr_y: Physical address of Y plane
+ *   phys_addr_uv: Physical address of UV plane
+ *   h265_data_out: Output buffer for H.265 bitstream
+ *   h265_size_out: Output size of H.265 data (bytes)
  *   max_size: Maximum size of output buffer
  *   timeout_ms: Timeout in milliseconds
  *
  * Returns:
  *   0 on success, negative error code on failure/timeout
- *
- * Note:
- *   - Input must be NV12 format (Y plane + interleaved UV)
- *   - Output buffer must be large enough for one frame
- *   - Recommended buffer size: width * height * 3 / 2
- *   - This function handles all buffer management internally
  */
-int encoder_encode_frame(encoder_context_t *ctx,
-                         const uint8_t *nv12_y, const uint8_t *nv12_uv,
-                         uint8_t *h264_data_out, size_t *h264_size_out,
-                         size_t max_size, int timeout_ms);
+int encoder_encode_frame_vaddr(encoder_context_t *ctx,
+                               const uint8_t *nv12_y, const uint8_t *nv12_uv,
+                               size_t y_size, size_t uv_size,
+                               uint8_t *h265_data_out, size_t *h265_size_out,
+                               size_t max_size, int timeout_ms);
 
 /**
  * Stop encoder

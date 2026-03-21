@@ -1,5 +1,8 @@
 /*
- * encoder_thread.c - Threaded H.264 Encoder Implementation
+ * encoder_thread.c - Threaded H.265 Encoder (Zero-Copy)
+ *
+ * Receives VSE frames via phys_addr, encodes with VPU (no memcpy),
+ * and releases VSE buffers after encoding completes.
  */
 
 #include "encoder_thread.h"
@@ -14,14 +17,14 @@
 static void *encoder_thread_worker(void *arg) {
   encoder_thread_t *ctx = (encoder_thread_t *)arg;
 
-  uint8_t *h264_buffer = malloc(ctx->output_width * ctx->output_height * 3 / 2);
-  if (!h264_buffer) {
-    LOG_ERROR("EncoderThread", "Failed to allocate H.264 buffer");
+  uint8_t *h265_buffer = malloc(ctx->output_width * ctx->output_height * 3 / 2);
+  if (!h265_buffer) {
+    LOG_ERROR("EncoderThread", "Failed to allocate H.265 buffer");
     return NULL;
   }
-  size_t h264_buffer_size = ctx->output_width * ctx->output_height * 3 / 2;
+  size_t h265_buffer_size = ctx->output_width * ctx->output_height * 3 / 2;
 
-  LOG_INFO("EncoderThread", "Worker started");
+  LOG_INFO("EncoderThread", "Worker started (zero-copy phys_addr mode)");
 
   while (ctx->running) {
     // Check if queue has data
@@ -56,58 +59,60 @@ static void *encoder_thread_worker(void *arg) {
                 frame->camera_id, frame->frame_number, write_idx - read_idx);
     }
 
-    // Encode frame
-    size_t h264_size = 0;
-    int ret =
-        encoder_encode_frame(ctx->encoder, frame->y_data, frame->uv_data,
-                             h264_buffer, &h264_size, h264_buffer_size, 2000);
+    // Encode frame — single memcpy from VSE virt_addr to VPU input buffer
+    size_t h265_size = 0;
+    int ret = encoder_encode_frame_vaddr(
+        ctx->encoder,
+        (const uint8_t *)frame->vse_frame.buffer.virt_addr[0],
+        (const uint8_t *)frame->vse_frame.buffer.virt_addr[1],
+        frame->vse_frame.buffer.size[0],
+        frame->vse_frame.buffer.size[1],
+        h265_buffer, &h265_size, h265_buffer_size, 2000);
 
-    if (ret == 0 && h264_size > 0) {
+    if (ret == 0 && h265_size > 0) {
       // Write to shared memory
       if (ctx->shm_h264) {
-        Frame h264_frame = {0};
-        h264_frame.width = ctx->output_width;
-        h264_frame.height = ctx->output_height;
-        h264_frame.format = 4; // H.265
-        h264_frame.data_size = h264_size;
-        h264_frame.frame_number = frame->frame_number;
-        h264_frame.camera_id = frame->camera_id;
-        h264_frame.timestamp = frame->timestamp;
+        Frame h265_frame = {0};
+        h265_frame.width = ctx->output_width;
+        h265_frame.height = ctx->output_height;
+        h265_frame.format = 4; // H.265
+        h265_frame.data_size = h265_size;
+        h265_frame.frame_number = frame->frame_number;
+        h265_frame.camera_id = frame->camera_id;
+        h265_frame.timestamp = frame->timestamp;
 
-        if (h264_size <= sizeof(h264_frame.data)) {
-          memcpy(h264_frame.data, h264_buffer, h264_size);
-          if (shm_frame_buffer_write(ctx->shm_h264, &h264_frame) < 0) {
-            LOG_WARN("EncoderThread", "Failed to write H.264 to %s",
+        if (h265_size <= sizeof(h265_frame.data)) {
+          memcpy(h265_frame.data, h265_buffer, h265_size);
+          if (shm_frame_buffer_write(ctx->shm_h264, &h265_frame) < 0) {
+            LOG_WARN("EncoderThread", "Failed to write H.265 to %s",
                      ctx->shm_h264_name);
           } else {
-            // Log every 30 frames to track frame_number
             uint64_t encoded = __atomic_load_n(&ctx->frames_encoded, __ATOMIC_RELAXED);
             if (encoded % 30 == 0) {
-              LOG_DEBUG("EncoderThread", "Encoded camera%d frame#%lu to H.264 shm",
+              LOG_DEBUG("EncoderThread", "Encoded camera%d frame#%lu to H.265 shm",
                         frame->camera_id, frame->frame_number);
             }
           }
         } else {
-          LOG_WARN("EncoderThread", "H.264 frame too large (%zu bytes)",
-                   h264_size);
+          LOG_WARN("EncoderThread", "H.265 frame too large (%zu bytes)",
+                   h265_size);
         }
       }
 
       __atomic_fetch_add(&ctx->frames_encoded, 1, __ATOMIC_RELAXED);
     } else {
       LOG_WARN("EncoderThread", "Encoding failed: ret=%d, size=%zu", ret,
-               h264_size);
+               h265_size);
     }
 
-    // Pool buffers stay allocated — no free needed
-    frame->y_data = NULL;
-    frame->uv_data = NULL;
+    // Release VSE frame back to VIO buffer pool
+    hbn_vnode_releaseframe(ctx->vse_handle, 0, &frame->vse_frame);
 
     // Advance read index
     __atomic_store_n(&ctx->read_index, read_idx + 1, __ATOMIC_RELEASE);
   }
 
-  free(h264_buffer);
+  free(h265_buffer);
   LOG_INFO("EncoderThread", "Worker stopped (encoded=%lu, dropped=%lu)",
            ctx->frames_encoded, ctx->frames_dropped);
 
@@ -117,7 +122,7 @@ static void *encoder_thread_worker(void *arg) {
 int encoder_thread_create(encoder_thread_t *ctx, encoder_context_t *encoder,
                           SharedFrameBuffer *shm_h264,
                           const char *shm_h264_name, int output_width,
-                          int output_height) {
+                          int output_height, hbn_vnode_handle_t vse_handle) {
   if (!ctx || !encoder || !shm_h264)
     return -1;
 
@@ -128,38 +133,19 @@ int encoder_thread_create(encoder_thread_t *ctx, encoder_context_t *encoder,
   snprintf(ctx->shm_h264_name, sizeof(ctx->shm_h264_name), "%s", shm_h264_name);
   ctx->output_width = output_width;
   ctx->output_height = output_height;
+  ctx->vse_handle = vse_handle;
 
   ctx->write_index = 0;
   ctx->read_index = 0;
   ctx->frames_encoded = 0;
   ctx->frames_dropped = 0;
 
-  // Pre-allocate frame buffer pool
-  size_t y_cap = (size_t)output_width * output_height;
-  size_t uv_cap = y_cap / 2; // NV12: UV is half of Y
-  ctx->pool_y_capacity = y_cap;
-  ctx->pool_uv_capacity = uv_cap;
-
-  for (int i = 0; i < ENCODER_QUEUE_SIZE; i++) {
-    ctx->pool_y[i] = malloc(y_cap);
-    ctx->pool_uv[i] = malloc(uv_cap);
-    if (!ctx->pool_y[i] || !ctx->pool_uv[i]) {
-      LOG_ERROR("EncoderThread", "Failed to pre-allocate frame pool slot %d", i);
-      // Clean up already allocated
-      for (int j = 0; j <= i; j++) {
-        free(ctx->pool_y[j]);
-        free(ctx->pool_uv[j]);
-      }
-      return -1;
-    }
-  }
-
   // Initialize condition variable
   pthread_mutex_init(&ctx->queue_mutex, NULL);
   pthread_cond_init(&ctx->queue_cond, NULL);
 
-  LOG_INFO("EncoderThread", "Created (queue_size=%d, pool: %zuKB Y + %zuKB UV per slot)",
-           ENCODER_QUEUE_SIZE, y_cap / 1024, uv_cap / 1024);
+  LOG_INFO("EncoderThread", "Created (queue_size=%d, zero-copy phys_addr mode)",
+           ENCODER_QUEUE_SIZE);
   return 0;
 }
 
@@ -180,11 +166,12 @@ int encoder_thread_start(encoder_thread_t *ctx) {
   return 0;
 }
 
-int encoder_thread_push_frame(encoder_thread_t *ctx, const uint8_t *y_data,
-                              const uint8_t *uv_data, size_t y_size,
-                              size_t uv_size, uint64_t frame_number,
-                              int camera_id, struct timespec timestamp) {
-  if (!ctx || !y_data || !uv_data)
+int encoder_thread_push_frame(encoder_thread_t *ctx,
+                              hbn_vnode_image_t *vse_frame,
+                              uint64_t frame_number,
+                              int camera_id,
+                              struct timespec timestamp) {
+  if (!ctx || !vse_frame)
     return -1;
 
   // Check if queue is full
@@ -192,29 +179,16 @@ int encoder_thread_push_frame(encoder_thread_t *ctx, const uint8_t *y_data,
   uint32_t read_idx = __atomic_load_n(&ctx->read_index, __ATOMIC_ACQUIRE);
 
   if (write_idx - read_idx >= ENCODER_QUEUE_SIZE) {
-    // Queue full, drop frame
+    // Queue full, drop frame (caller must release vse_frame)
     __atomic_fetch_add(&ctx->frames_dropped, 1, __ATOMIC_RELAXED);
     return -1;
   }
 
-  // Use pre-allocated pool buffers instead of malloc
+  // Store VSE frame in queue (zero-copy: no data memcpy)
   uint32_t slot = write_idx % ENCODER_QUEUE_SIZE;
-
-  if (y_size > ctx->pool_y_capacity || uv_size > ctx->pool_uv_capacity) {
-    LOG_ERROR("EncoderThread", "Frame too large for pool: y=%zu/%zu uv=%zu/%zu",
-              y_size, ctx->pool_y_capacity, uv_size, ctx->pool_uv_capacity);
-    return -1;
-  }
-
-  memcpy(ctx->pool_y[slot], y_data, y_size);
-  memcpy(ctx->pool_uv[slot], uv_data, uv_size);
-
-  // Add to queue
   encoder_frame_t *frame = &ctx->queue[slot];
-  frame->y_data = ctx->pool_y[slot];
-  frame->uv_data = ctx->pool_uv[slot];
-  frame->y_size = y_size;
-  frame->uv_size = uv_size;
+
+  frame->vse_frame = *vse_frame;  // Copy frame handle (virt_addr used for encoding)
   frame->frame_number = frame_number;
   frame->camera_id = camera_id;
   frame->timestamp = timestamp;
@@ -246,14 +220,6 @@ void encoder_thread_stop(encoder_thread_t *ctx) {
 void encoder_thread_destroy(encoder_thread_t *ctx) {
   if (!ctx)
     return;
-
-  // Free pre-allocated pool
-  for (int i = 0; i < ENCODER_QUEUE_SIZE; i++) {
-    free(ctx->pool_y[i]);
-    free(ctx->pool_uv[i]);
-    ctx->pool_y[i] = NULL;
-    ctx->pool_uv[i] = NULL;
-  }
 
   pthread_mutex_destroy(&ctx->queue_mutex);
   pthread_cond_destroy(&ctx->queue_cond);
