@@ -120,9 +120,12 @@ func (cc *ComicCapture) tick(now time.Time) {
 			if cc.catFirstSeen.IsZero() {
 				cc.catFirstSeen = now
 			}
+		} else if det.NumDetections > 0 {
+			// Detection is active but no pet found — reset immediately.
+			cc.catFirstSeen = time.Time{}
 		}
-		// Don't reset catFirstSeen on a single miss — use timeout instead.
-		// YOLO may miss a frame or two while the pet is still present.
+		// If NumDetections == 0 (empty frame), don't reset — YOLO may
+		// miss a frame or two while the pet is still present.
 	}
 
 	catGone := !cc.lastCatSeen.IsZero() && now.Sub(cc.lastCatSeen) > cc.DetectionLost
@@ -254,7 +257,7 @@ const (
 	comicGap     = 12
 	comicBorder  = 2
 	comicPanelW  = 400
-	comicPanelH  = 300
+	comicPanelH  = 225
 	comicQuality = 85
 )
 

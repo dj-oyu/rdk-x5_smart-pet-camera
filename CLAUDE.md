@@ -1,54 +1,38 @@
-# Claude's Guidelines for Smart Pet Camera Project
+# Smart Pet Camera — Claude Guidelines
 
-## Development Philosophy
-- **Document First**: Always check `docs/` for specs and status before asking. Update docs when designs change.
-- **Spec-Driven**: Implement features based on defined requirements (@docs/02_requirements.md , etc.).
-- **Evidence-Based**: Use quantitative profiling tools instead of reading long logs to verify system health.
+## Workflow
+- **Package**: `uv` exclusively (`uv add`, `uv sync`, `uv run`)
+- **Verify**: Implement → `uv run scripts/profile_shm.py` → judge JSON metrics
+- **Mock**: `uv run src/capture/mock_camera_daemon.py` for testing without hardware
+- **Search**: `gemini_search` skill for external docs
 
-## Core Mandates & Constraints
-- **Package Management**: Use `uv` exclusively.
-    - Install: `uv add <package>` (NOT `pip install`)
-    - Sync: `uv sync`
-- **Execution**: Run python scripts via `uv run`.
-    - Example: `uv run src/monitor/main.py`
-    - Env vars: `env VAR=val uv run ...`
-- **Type Checking**: Adhere to `pyright` standards.
-    - Check: `PYTHONPATH=src:src/common/src:src/mock:src/monitor uv run pyright src/`
+## Project Structure
+| Directory | Lang | Role |
+|-----------|------|------|
+| `src/capture/` | C | Camera daemons, 9 SHM regions |
+| `src/streaming_server/` | Go | WebRTC/MJPEG server (pion/webrtc) |
+| `src/detector/` | Python | YOLO on BPU (hobot_dnn) |
+| `src/common/` | Python | Shared types |
+| `src/mock/` | Python | Mock camera, detector, SHM |
+| `src/ai-pyramid/` | TBD | AI Pyramid album/VLM (planned) |
+| `docs/` | — | Consolidated reference docs |
 
-## Verification Workflow (The "Profiler" Pattern)
-Instead of asking the user to "check if it works" or analyzing raw logs:
+## Docs Map
+| Doc | Scope |
+|-----|-------|
+| `01-04_*.md` | Core specs (goals, requirements, design, architecture) |
+| `camera-and-isp.md` | Camera switching, ISP, AWB, H.264 |
+| `detection-and-yolo.md` | YOLO pipeline, benchmarks, night ROI |
+| `streaming-server.md` | Go server, WebRTC, API |
+| `shared-memory.md` | 9 SHM regions, zero-copy, IPC |
+| `performance.md` | CPU optimization, idle throttling |
+| `pet-album-spec-DRAFT.md` | Album feature (iframe, AI Pyramid, rsync) |
+| `vlm_integration_spec.md` | VLM behavior analysis spec |
 
-1. **Implement/Modify Code**
-2. **Run Profiler**: Use the profiling script (`scripts/profile_shm.py`) to capture a statistical snapshot of system health.
-    - *Why*: Reduces context usage, provides objective metrics (FPS, drop rate).
-    - *Testing*: You can use `src/capture/mock_camera_daemon.py` to simulate a camera daemon for tool testing.
-3. **Analyze Metrics**: Judge success based on JSON output (e.g., "FPS is 29.8, Variance is low" -> PASS).
-
-## Tools & Skills
-
-### Gemini Search
-Use `gemini_search` skill when you need external knowledge not in the codebase.
-
-**When to use:**
-- Looking up library documentation (e.g., "latest aiortc API for media tracks").
-- Searching for specific error messages or solutions.
-- Investigating hardware specifics (e.g., "D-Robotics ISP tuning parameters").
-
-**Example:**
-```text
-User: "How do I implement a custom MediaStreamTrack in aiortc?"
-Action: Call `gemini_search` with query "aiortc custom MediaStreamTrack implementation example"
-```
-
-## Project Structure Awareness
-- **`src/capture/`**: C/C++ camera daemons & Shared Memory (Core).
-- **`src/streaming_server/`**: WebRTC/MJPEG streaming & Signaling.
-- **`src/detector/`**: YOLO inferencing module.
-- **`src/common/`**: Shared Python Types & logic.
-- **`src/mock`**: Mocking each modules.
-- **`docs/`**: The source of truth. Read `*log.md` files for recent context.
-
-## Commit Messages
-- Format: `Type: Subject`
-- Focus on "Why" and "What".
-- Example: `feat: Add H.264 WebRTC track to reduce CPU load`
+## Future Tasks
+- [ ] JSON event recording (schema defined, not coded)
+- [ ] Unified YAML config (params hardcoded across C/Python/Go)
+- [ ] Process auto-recovery / storage cleanup
+- [ ] Multi-camera fusion mode
+- [ ] AI Pyramid: HTTPS, album web app, VLM pipeline
+- [ ] HW encoder / VPU utilization investigation
