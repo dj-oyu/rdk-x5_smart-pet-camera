@@ -46,6 +46,91 @@ class CPUPreprocessor(Preprocessor):
         return self._detector._crop_nv12_roi(nv12_array, width, height, roi_x, roi_y, roi_w, roi_h)
 
 
+class HWPreprocessor(Preprocessor):
+    """GPU-based letterbox using nano2D (GC820). CPU fallback for crop_roi.
+
+    Usage:
+        hw = HWPreprocessor(detector)
+        hw.set_hb_mem_buffer(hb_mem_buffer)  # call before each letterbox
+        result = hw.letterbox(nv12, w, h, pad_top, pad_bottom)
+    """
+
+    def __init__(self, detector: "YoloDetector", lib_path: str = "") -> None:
+        import ctypes
+        self._detector = detector
+        self._ctx = None
+        self._lib = None
+        self._hb_buf = None  # Current frame's HbMemGraphicBuffer
+
+        if not lib_path:
+            lib_path = str(Path(__file__).parents[4] / "build" / "libn2d_letterbox.so")
+
+        try:
+            self._lib = ctypes.CDLL(lib_path)
+            self._lib.n2d_letterbox_create.restype = ctypes.c_void_p
+            self._lib.n2d_letterbox_create.argtypes = [
+                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+            self._lib.n2d_letterbox_process.restype = ctypes.c_int
+            self._lib.n2d_letterbox_process.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint64,
+                ctypes.c_int, ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(ctypes.c_size_t)]
+            self._lib.n2d_letterbox_destroy.restype = None
+            self._lib.n2d_letterbox_destroy.argtypes = [ctypes.c_void_p]
+            logging.getLogger(__name__).info("HWPreprocessor: loaded %s", lib_path)
+        except OSError as e:
+            logging.getLogger(__name__).warning("HWPreprocessor: failed to load %s: %s", lib_path, e)
+
+    def set_hb_mem_buffer(self, buf) -> None:
+        """Set the current frame's HbMemGraphicBuffer for GPU letterbox."""
+        self._hb_buf = buf
+
+    def _ensure_ctx(self, src_w: int, src_h: int, dst_w: int, dst_h: int) -> bool:
+        if self._lib is None:
+            return False
+        if self._ctx is None:
+            self._ctx = self._lib.n2d_letterbox_create(src_w, src_h, dst_w, dst_h)
+            if not self._ctx:
+                logging.getLogger(__name__).error("HWPreprocessor: n2d_letterbox_create failed")
+                return False
+        return True
+
+    def letterbox(self, nv12_array: np.ndarray, width: int, height: int,
+                  pad_top: int, pad_bottom: int) -> np.ndarray:
+        import ctypes
+
+        dst_h = height + pad_top + pad_bottom
+        buf = self._hb_buf
+
+        if buf and hasattr(buf, 'phys_addr') and buf.phys_addr:
+            phys = buf.phys_addr
+            stride = buf.stride if hasattr(buf, 'stride') and buf.stride else width
+            phys_y = phys[0]
+            phys_uv = phys[1] if len(phys) > 1 else 0
+
+            if phys_y and self._ensure_ctx(width, height, width, dst_h):
+                out_ptr = ctypes.c_void_p()
+                out_size = ctypes.c_size_t()
+                ret = self._lib.n2d_letterbox_process(
+                    self._ctx, phys_y, phys_uv, stride,
+                    ctypes.byref(out_ptr), ctypes.byref(out_size))
+                if ret == 0 and out_ptr.value:
+                    arr_type = ctypes.c_uint8 * out_size.value
+                    return np.ctypeslib.as_array(arr_type.from_address(out_ptr.value))
+
+        # Fallback to CPU
+        return self._detector._letterbox_nv12(nv12_array, width, height, pad_top, pad_bottom)
+
+    def crop_roi(self, nv12_array: np.ndarray, width: int, height: int,
+                 roi_x: int, roi_y: int, roi_w: int, roi_h: int) -> np.ndarray:
+        return self._detector._crop_nv12_roi(nv12_array, width, height, roi_x, roi_y, roi_w, roi_h)
+
+    def __del__(self) -> None:
+        if self._ctx and self._lib:
+            self._lib.n2d_letterbox_destroy(self._ctx)
+            self._ctx = None
+
+
 def _fast_softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
     """
     Numpy implementation of softmax (replaces scipy.special.softmax).

@@ -10,7 +10,7 @@ LIBS_VPS = -lspcdev -lcam -lvpf -lhbmem -lalog -lpthread -ldl
 LIBS_VFLOW = -lcam -lvpf -lhbmem -lalog -lpthread -ldl
 
 TARGETS = format_convert_test h265_fixqp_test letterbox_hw_test vps_test \
-          vse_6ch_test zerocopy_bench letterbox_verify
+          vse_6ch_test zerocopy_bench letterbox_verify n2d_multiprocess_test
 
 .PHONY: all clean help
 
@@ -39,6 +39,10 @@ vse_6ch_test: vse_6ch_test.c
 # Zero-copy VSE → nano2D letterbox pipeline
 zerocopy_bench: zerocopy_bench.c
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(LDFLAGS) $(LIBS_N2D) $(LIBS_VFLOW)
+
+# nano2D multi-process concurrent access test
+n2d_multiprocess_test: n2d_multiprocess_test.c
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(LDFLAGS) $(LIBS_N2D)
 
 # VSE → nano2D letterbox visual verification (outputs YUV files)
 letterbox_verify: letterbox_verify.c
