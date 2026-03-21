@@ -3,16 +3,30 @@ use askama::Template;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Json};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::get;
 use axum::Router;
+use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PhotoEvent {
+    pub filename: String,
+    pub is_valid: bool,
+    pub caption: String,
+    pub behavior: String,
+    pub pet_id: Option<String>,
+}
 
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<Mutex<PhotoStore>>,
     pub photos_dir: PathBuf,
+    pub event_tx: tokio::sync::broadcast::Sender<PhotoEvent>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -21,6 +35,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/photos", get(handle_photos_list))
         .route("/api/photos/{filename}", get(handle_photo_serve).patch(handle_photo_update))
         .route("/api/stats", get(handle_stats))
+        .route("/api/events", get(handle_sse))
         .route("/health", get(handle_health))
         .with_state(state)
 }
@@ -208,6 +223,22 @@ async fn handle_stats(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+async fn handle_sse(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let rx = state.event_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        match result {
+            Ok(photo_event) => {
+                let json = serde_json::to_string(&photo_event).unwrap_or_default();
+                Some(Ok(Event::default().event("photo").data(json)))
+            }
+            Err(_) => None,
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
 async fn handle_health() -> impl IntoResponse {
     Json(serde_json::json!({"ok": true}))
 }
@@ -254,9 +285,11 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         let photos_dir = td.path().to_path_buf();
         std::mem::forget(td);
+        let (event_tx, _) = tokio::sync::broadcast::channel(16);
         AppState {
             store: Arc::new(Mutex::new(store)),
             photos_dir,
+            event_tx,
         }
     }
 
