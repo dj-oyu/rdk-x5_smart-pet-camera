@@ -41,6 +41,13 @@ static void *encoder_thread_worker(void *arg) {
 
     encoder_frame_t *frame = &ctx->queue[read_idx % ENCODER_QUEUE_SIZE];
 
+    // Release previous VPU output buffer (held for Go to import)
+    // Go has had one full frame interval (33ms) to read it
+    if (ctx->prev_enc_out.vir_ptr) {
+      encoder_release_output(ctx->encoder, &ctx->prev_enc_out, 2000);
+      memset(&ctx->prev_enc_out, 0, sizeof(ctx->prev_enc_out));
+    }
+
     // Encode: VSE virt_addr → VPU (memcpy input only, output is zero-copy)
     encoder_output_t enc_out = {0};
     int ret = encoder_encode_frame_zerocopy(
@@ -57,12 +64,8 @@ static void *encoder_thread_worker(void *arg) {
     if (ret == 0 && enc_out.data_size > 0 && enc_out.share_id >= 0) {
       // Check if consumer (Go) is ready to receive
       // If not ready, skip zero-copy and just release VPU buffer
-      // Only do zero-copy if consumer has signaled consumed (or ready)
-      // consumed_sem starts at 0: skips until Go posts first consumed
-      bool consumer_ready = ctx->shm_h265_zc &&
-                            sem_trywait(&ctx->shm_h265_zc->consumed_sem) == 0;
-
-      if (consumer_ready) {
+      // Write share_id to SHM (non-blocking, no semaphore wait)
+      if (ctx->shm_h265_zc) {
         H265ZeroCopyFrame zc = {
             .frame_number = frame->frame_number,
             .timestamp = frame->timestamp,
@@ -74,26 +77,12 @@ static void *encoder_thread_worker(void *arg) {
             .buf_size = enc_out.buf_size,
             .phy_ptr = enc_out.phy_ptr,
         };
-
-        if (shm_h265_zc_write(ctx->shm_h265_zc, &zc) == 0) {
-          // Hold VPU buffer until Go signals consumed
-          // Go is actively reading (it posted consumed_sem), so this is fast
-          struct timespec deadline;
-          clock_gettime(CLOCK_REALTIME, &deadline);
-          deadline.tv_nsec += 50 * 1000000; // 50ms max
-          if (deadline.tv_nsec >= 1000000000) {
-            deadline.tv_sec++;
-            deadline.tv_nsec -= 1000000000;
-          }
-          // Wait for Go to import + post consumed_sem
-          // On timeout: Go stopped reading, consumed_sem stays 0, next trywait fails → skip
-          // On success: Go consumed, it posted consumed_sem for next frame
-          sem_timedwait(&ctx->shm_h265_zc->consumed_sem, &deadline);
-        }
+        shm_h265_zc_write(ctx->shm_h265_zc, &zc);
       }
 
-      // Release VPU output buffer
-      encoder_release_output(ctx->encoder, &enc_out, 2000);
+      // Hold VPU buffer — released at start of NEXT frame
+      // Go has 33ms (one frame interval) to import via share_id
+      ctx->prev_enc_out = enc_out;
       __atomic_fetch_add(&ctx->frames_encoded, 1, __ATOMIC_RELAXED);
     } else {
       if (ret != 0) {

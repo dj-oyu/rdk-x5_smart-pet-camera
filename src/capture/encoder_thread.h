@@ -56,6 +56,9 @@ typedef struct {
   // VSE handle (for releasing frames after encoding)
   hbn_vnode_handle_t vse_handle;
 
+  // Previous VPU output (held for Go to import, released on next frame)
+  encoder_output_t prev_enc_out;
+
   // Condition variable for event-driven wakeup (replaces usleep polling)
   pthread_mutex_t queue_mutex;
   pthread_cond_t queue_cond;

@@ -203,19 +203,7 @@ func (r *Reader) ReadLatest() (*types.VideoFrame, error) {
 		return nil, fmt.Errorf("shared memory not open")
 	}
 
-	// First call: signal ready by posting consumed_sem
-	// (consumed_sem starts at 0, encoder skips until we post)
-	if !r.signaled {
-		C.mark_h265_consumed(r.shm)
-		r.signaled = true
-	}
-
-	// Wait for encoder to write a frame
-	if err := r.WaitNewFrame(50 * time.Millisecond); err != nil {
-		return nil, nil // No frame yet
-	}
-
-	// Read frame metadata
+	// Read frame metadata (polling — encoder writes every 33ms)
 	var cFrame C.H265ZeroCopyFrame
 	if C.read_h265_frame(r.shm, &cFrame) != 0 {
 		return nil, nil
@@ -239,8 +227,7 @@ func (r *Reader) ReadLatest() (*types.VideoFrame, error) {
 		C.uint32_t(len(r.buf)),
 	)
 
-	// Signal consumed immediately so encoder can release VPU buffer
-	C.mark_h265_consumed(r.shm)
+	// No consumed signal needed — encoder releases previous buffer on next frame
 
 	if ret != 0 {
 		return nil, fmt.Errorf("import_h265_data failed: %d (share_id=%d)", ret, cFrame.share_id)
