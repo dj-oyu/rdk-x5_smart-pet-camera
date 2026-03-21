@@ -103,7 +103,7 @@ class CBoundingBox(Structure):
 
 class CDetection(Structure):
     _fields_ = [
-        ("class_name", c_uint8 * 32),
+        ("class_name", c_uint8 * 32),  # char[32] as bytes
         ("confidence", c_float),
         ("bbox", CBoundingBox),
     ]
@@ -270,7 +270,9 @@ class DetectionWriter:
         c_det.num_detections = min(len(detections), MAX_DETECTIONS)
         for i, det in enumerate(detections[:MAX_DETECTIONS]):
             c_detection = c_det.detections[i]
-            c_detection.class_name = det["class_name"].encode("utf-8")
+            name_bytes = det["class_name"].encode("utf-8")[:31]
+            for j, b in enumerate(name_bytes):
+                c_detection.class_name[j] = b
             c_detection.confidence = det["confidence"]
             c_detection.bbox.x = det["bbox"]["x"]
             c_detection.bbox.y = det["bbox"]["y"]
