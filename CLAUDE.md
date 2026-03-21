@@ -28,6 +28,8 @@
 | `performance.md` | CPU optimization, idle throttling |
 | `pet-album-spec-DRAFT.md` | Album feature (iframe, AI Pyramid, rsync) |
 | `vlm_integration_spec.md` | VLM behavior analysis spec |
+| `hardware-specs.md` | GPU/VPU/BPU specs, nano2D/VSE/hbn_vflow benchmarks |
+| `hw-offload-roadmap.md` | H.265移行 + HWオフロード実装計画 |
 
 ## Future Tasks
 - [ ] JSON event recording (schema defined, not coded)
@@ -35,4 +37,4 @@
 - [ ] Process auto-recovery / storage cleanup
 - [ ] Multi-camera fusion mode
 - [ ] AI Pyramid: HTTPS, album web app, VLM pipeline
-- [ ] HW encoder / VPU utilization investigation
+- [ ] HW encoder / VPU utilization → `hw-offload-roadmap.md` に計画化済み
