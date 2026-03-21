@@ -49,16 +49,10 @@
     color: var(--accent);
   }
 
-  /* Gallery — horizontal scroll (wrap = scroll container) */
+  /* Gallery layout */
   .gallery-wrap {
-    overflow-x: auto;
-    overflow-y: hidden;
-    overscroll-behavior-x: contain;
-    -webkit-overflow-scrolling: touch;
-    scroll-snap-type: x mandatory;
-    scrollbar-width: none;
+    position: relative;
   }
-  .gallery-wrap::-webkit-scrollbar { display: none; }
   .gallery {
     display: flex;
     width: max-content;
@@ -180,20 +174,6 @@
     border-radius: 8px;
   }
 
-  /* Gallery wrapper for fade effect */
-  .gallery-wrap {
-    position: relative;
-  }
-  /* Left fade — old photos dissolve into darkness */
-  .gallery-wrap::before {
-    content: "";
-    position: absolute;
-    left: 0; top: 0; bottom: 0;
-    width: 200px;
-    background: linear-gradient(to right, var(--bg-deep), transparent);
-    z-index: 1;
-    pointer-events: none;
-  }
   /* Right edge glow — elliptical bloom at the newest edge */
   .gallery-wrap::after {
     content: "";
@@ -212,14 +192,22 @@
   }
   .gallery-wrap.at-end::after { opacity: 1; }
 
-  /* Carousel mode (narrow sidebar iframe): no body overflow */
-  body.carousel { overflow: hidden; }
-
-  /* Grid mode (standalone OR wide iframe on mobile) */
-  body.grid-mode .gallery-wrap {
-    overflow-x: visible;
-    scroll-snap-type: none;
+  /* ── Carousel mode: body = horizontal scroll container ── */
+  body.carousel {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: none;
   }
+  body.carousel::-webkit-scrollbar { display: none; }
+  body.carousel .filters {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+  }
+  body.carousel .gallery-wrap::after { display: none; }
+
+  /* ── Grid mode (standalone / wide iframe on mobile) ── */
   body.grid-mode .gallery {
     flex-wrap: wrap;
     width: auto;
@@ -231,7 +219,6 @@
     padding: 5px 8px;
     opacity: 1;
   }
-  body.grid-mode .gallery-wrap::before,
   body.grid-mode .gallery-wrap::after { display: none; }
   @media (max-width: 480px) {
     body.grid-mode .card { width: 100%; }
@@ -289,10 +276,10 @@
 </div>
 
 <script>
-// Layout mode: carousel (narrow sidebar iframe) vs grid (mobile/standalone)
+// Layout mode: carousel (sidebar ~246px) vs grid (mobile/standalone)
 (function() {
   var w = document.documentElement.clientWidth;
-  document.body.classList.add(w <= 360 ? 'carousel' : 'grid-mode');
+  document.body.classList.add(w <= 300 ? 'carousel' : 'grid-mode');
 })();
 
 var inIframe = window.self !== window.top;
@@ -310,25 +297,26 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') document.getElementById('lightbox').classList.remove('show');
 });
 
-// Mouse wheel → horizontal scroll on gallery-wrap (scroll container)
+// Carousel: mouse wheel → horizontal scroll (body is the scroll container)
 (function() {
-  var wrap = document.querySelector('.gallery-wrap');
-  if (!wrap) return;
+  if (!document.body.classList.contains('carousel')) return;
+  var scrollEl = document.scrollingElement || document.documentElement;
   var g = document.getElementById('gallery');
+  var wrap = document.querySelector('.gallery-wrap');
+  if (!g) return;
   var bounceTimer = null;
 
   function updateEdge() {
-    var atEnd = wrap.scrollLeft >= wrap.scrollWidth - wrap.clientWidth - 2;
-    wrap.classList.toggle('at-end', atEnd);
+    var atEnd = scrollEl.scrollLeft >= scrollEl.scrollWidth - scrollEl.clientWidth - 2;
+    if (wrap) wrap.classList.toggle('at-end', atEnd);
   }
 
-  wrap.addEventListener('wheel', function(e) {
+  document.addEventListener('wheel', function(e) {
     e.preventDefault();
-    wrap.scrollLeft += e.deltaY;
+    scrollEl.scrollLeft += e.deltaY;
     updateEdge();
-    // Bounce effect when hitting the wall
-    var atRight = wrap.scrollLeft >= wrap.scrollWidth - wrap.clientWidth - 2 && e.deltaY > 0;
-    var atLeft = wrap.scrollLeft <= 0 && e.deltaY < 0;
+    var atRight = scrollEl.scrollLeft >= scrollEl.scrollWidth - scrollEl.clientWidth - 2 && e.deltaY > 0;
+    var atLeft = scrollEl.scrollLeft <= 0 && e.deltaY < 0;
     if (atRight || atLeft) {
       if (bounceTimer) return;
       g.style.transition = 'transform 0.15s';
@@ -341,20 +329,20 @@ document.addEventListener('keydown', function(e) {
   }, { passive: false });
 
   // Start at right (newest)
-  wrap.scrollLeft = wrap.scrollWidth;
+  scrollEl.scrollLeft = scrollEl.scrollWidth;
   updateEdge();
-  wrap.addEventListener('scroll', updateEdge);
+  document.addEventListener('scroll', updateEdge);
 })();
 
-// Center-card detection — only the center card shows its footer
+// Center-card detection — only the center card shows its footer (carousel only)
 (function() {
-  var wrap = document.querySelector('.gallery-wrap');
-  if (!wrap || document.body.classList.contains('grid-mode')) return;
+  if (!document.body.classList.contains('carousel')) return;
+  var scrollEl = document.scrollingElement || document.documentElement;
 
   var activeCard = null;
   function updateActive() {
-    var cards = wrap.querySelectorAll('.card');
-    var center = wrap.scrollLeft + wrap.clientWidth / 2;
+    var cards = document.querySelectorAll('.card');
+    var center = scrollEl.scrollLeft + scrollEl.clientWidth / 2;
     var best = null, bestDist = Infinity;
     cards.forEach(function(c) {
       var mid = c.offsetLeft + c.offsetWidth / 2;
@@ -367,8 +355,7 @@ document.addEventListener('keydown', function(e) {
       activeCard = best;
     }
   }
-  wrap.addEventListener('scroll', updateActive);
-  // Initial
+  document.addEventListener('scroll', updateActive);
   requestAnimationFrame(updateActive);
 })();
 
@@ -382,6 +369,8 @@ document.addEventListener('keydown', function(e) {
   var loaded = {{ photos.len() }};
   var loading = false;
   var params = new URLSearchParams(window.location.search);
+  var isCarousel = document.body.classList.contains('carousel');
+  var scrollEl = document.scrollingElement || document.documentElement;
 
   function buildUrl(offset, limit) {
     var url = '/api/photos?limit=' + limit + '&offset=' + offset;
@@ -419,31 +408,29 @@ document.addEventListener('keydown', function(e) {
   function loadMore() {
     if (loading || loaded >= total) return;
     loading = true;
-    var scrollWrap = document.querySelector('.gallery-wrap');
-    var prevScrollWidth = scrollWrap.scrollWidth;
-    var prevScrollLeft = scrollWrap.scrollLeft;
+    var prevScrollWidth = isCarousel ? scrollEl.scrollWidth : 0;
+    var prevScrollLeft = isCarousel ? scrollEl.scrollLeft : 0;
     fetch(buildUrl(loaded, 20))
       .then(function(r) { return r.json(); })
       .then(function(data) {
-        // Insert after sentinel (left side) — these are older photos
         var ref = sentinel.nextSibling;
         (data.photos || []).forEach(function(p) {
           gallery.insertBefore(createCard(p), ref);
         });
         loaded += (data.photos || []).length;
-        // Maintain scroll position (new cards added to left push content right)
-        var added = scrollWrap.scrollWidth - prevScrollWidth;
-        scrollWrap.scrollLeft = prevScrollLeft + added;
+        if (isCarousel) {
+          var added = scrollEl.scrollWidth - prevScrollWidth;
+          scrollEl.scrollLeft = prevScrollLeft + added;
+        }
         loading = false;
       })
       .catch(function() { loading = false; });
   }
 
-  // Observe sentinel at left edge — load more when user scrolls left
-  var wrap = document.querySelector('.gallery-wrap');
+  // Observe sentinel — use viewport (root: null) for carousel, since body scrolls
   var obs = new IntersectionObserver(function(entries) {
     if (entries[0].isIntersecting) loadMore();
-  }, { root: wrap, rootMargin: '0px 0px 0px 300px' });
+  }, { rootMargin: '0px 0px 0px 300px' });
   obs.observe(sentinel);
 })();
 
@@ -465,14 +452,15 @@ document.addEventListener('keydown', function(e) {
 (function() {
   var gallery = document.getElementById('gallery');
   if (!gallery) return;
+  var isCarousel = document.body.classList.contains('carousel');
+  var scrollEl = document.scrollingElement || document.documentElement;
 
   var es = new EventSource('/api/events');
   es.addEventListener('photo', function(e) {
     var p;
     try { p = JSON.parse(e.data); } catch(_) { return; }
-    if (!p.is_valid) return; // only show valid photos
+    if (!p.is_valid) return;
 
-    // Check for duplicate
     if (gallery.querySelector('[data-filename="' + p.filename + '"]')) return;
 
     var div = document.createElement('div');
@@ -492,16 +480,13 @@ document.addEventListener('keydown', function(e) {
       '<div class="card-overlay"><div class="card-overlay-bg">' + cap + '</div></div>' +
       '<div class="card-footer"><span>' + (p.filename.match(/\d{8}_\d{6}/)||[''])[0].replace(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/,'$1/$2/$3 $4:$5') + '</span>' + beh + '</div>';
 
-    // Slide-in animation
     div.style.opacity = '0';
     div.style.transform = 'translateX(40px) scale(0.95)';
     div.style.transition = 'opacity 0.4s, transform 0.4s';
     gallery.appendChild(div);
 
-    // Scroll to new card, then animate in
-    var sseWrap = document.querySelector('.gallery-wrap');
     requestAnimationFrame(function() {
-      if (sseWrap) sseWrap.scrollLeft = sseWrap.scrollWidth;
+      if (isCarousel) scrollEl.scrollLeft = scrollEl.scrollWidth;
       requestAnimationFrame(function() {
         div.style.opacity = '1';
         div.style.transform = 'translateX(0) scale(1)';
