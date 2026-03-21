@@ -27,8 +27,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src/ai-pyramid/target
-          key: aarch64-cargo-${{ hashFiles('src/ai-pyramid/Cargo.lock') }}
-          restore-keys: aarch64-cargo-
+          key: aarch64-22.04-cargo-${{ hashFiles('src/ai-pyramid/Cargo.lock') }}
+          restore-keys: aarch64-22.04-cargo-
 
       - name: Test
         run: cargo test
