@@ -604,47 +604,6 @@ static void draw_rect_nv12(uint8_t* nv12, int width, int height,
     }
 }
 
-// NV12 to RGBA conversion (fallback, not used with TurboJPEG optimization)
-// Cache-friendly: processes row by row with sequential memory access
-static void nv12_to_rgba(const uint8_t* nv12, int width, int height, uint8_t* rgba) {
-    int y_size = width * height;
-    const uint8_t* y_plane = nv12;
-    const uint8_t* uv_plane = nv12 + y_size;
-
-    // Outer loop: y-direction (rows)
-    for (int y = 0; y < height; y++) {
-        const uint8_t* y_row = y_plane + y * width;
-        const uint8_t* uv_row = uv_plane + (y / 2) * width;
-        uint8_t* rgba_row = rgba + y * width * 4;
-
-        // Inner loop: x-direction (columns) - sequential memory access
-        for (int x = 0; x < width; x++) {
-            int y_val = y_row[x];
-            int uv_index = (x / 2) * 2;
-            int u_val = uv_row[uv_index];
-            int v_val = uv_row[uv_index + 1];
-
-            int c = y_val - 16;
-            int d = u_val - 128;
-            int e = v_val - 128;
-
-            int r = (298 * c + 409 * e + 128) >> 8;
-            int g = (298 * c - 100 * d - 208 * e + 128) >> 8;
-            int b = (298 * c + 516 * d + 128) >> 8;
-
-            r = r < 0 ? 0 : (r > 255 ? 255 : r);
-            g = g < 0 ? 0 : (g > 255 ? 255 : g);
-            b = b < 0 ? 0 : (b > 255 ? 255 : b);
-
-            int rgba_index = x * 4;
-            rgba_row[rgba_index] = (uint8_t)r;
-            rgba_row[rgba_index + 1] = (uint8_t)g;
-            rgba_row[rgba_index + 2] = (uint8_t)b;
-            rgba_row[rgba_index + 3] = 255;
-        }
-    }
-}
-
 // NV12 to JPEG using TurboJPEG (optimized, avoids RGBA conversion)
 // Returns allocated JPEG buffer and size (caller must free)
 static int nv12_to_jpeg_turbo(const uint8_t* nv12, int width, int height, uint8_t** jpeg_out, unsigned long* jpeg_size) {
@@ -700,8 +659,6 @@ import "C"
 import (
 	"bytes"
 	"fmt"
-	"image"
-	"image/jpeg"
 	time "time"
 	"unsafe"
 )
@@ -986,14 +943,7 @@ func (r *shmReader) LatestJPEG() ([]byte, bool) {
 
 // nv12ToJPEG converts NV12 format to JPEG using hardware encoder with software fallback
 func nv12ToJPEG(nv12Data []byte, width, height int) ([]byte, error) {
-	// Try hardware encoder first (fast path: ~5ms vs ~55ms for software)
-	jpegData, err := nv12ToJPEGHardware(nv12Data, width, height)
-	if err == nil {
-		return jpegData, nil
-	}
-
-	// Fallback to software encoding if hardware fails
-	return nv12ToJPEGSoftware(nv12Data, width, height)
+	return nv12ToJPEGHardware(nv12Data, width, height)
 }
 
 // nv12ToJPEGHardware converts NV12 to JPEG using D-Robotics hardware encoder
@@ -1022,32 +972,6 @@ func nv12ToJPEGHardware(nv12Data []byte, width, height int) ([]byte, error) {
 	C.free(unsafe.Pointer(jpegPtr))
 
 	return jpegData, nil
-}
-
-// nv12ToJPEGSoftware converts NV12 to JPEG using software encoding (fallback)
-func nv12ToJPEGSoftware(nv12Data []byte, width, height int) ([]byte, error) {
-	// Convert NV12 to RGBA in C
-	img := nv12ToRGBAImg(nv12Data, width, height)
-
-	// Encode to JPEG with configurable quality
-	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: jpegQuality}); err != nil {
-		return nil, err
-	}
-
-	return buf.Bytes(), nil
-}
-
-// nv12ToRGBAImg converts NV12 format to RGBA image using C
-func nv12ToRGBAImg(nv12Data []byte, width, height int) *image.RGBA {
-	img := image.NewRGBA(image.Rect(0, 0, width, height))
-	C.nv12_to_rgba(
-		(*C.uint8_t)(unsafe.Pointer(&nv12Data[0])),
-		C.int(width),
-		C.int(height),
-		(*C.uint8_t)(unsafe.Pointer(&img.Pix[0])),
-	)
-	return img
 }
 
 // drawRectOnNV12 draws a rectangle on NV12 frame data (in-place modification)
