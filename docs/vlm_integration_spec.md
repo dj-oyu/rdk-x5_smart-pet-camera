@@ -454,15 +454,21 @@ YOLO detection context:
 - cat: bbox(400, 300, 180, 160) confidence=0.87
 ```
 
-**アルバムフィルタリング プロンプト（確定版）:**
+**アルバムフィルタリング プロンプト（v2 — pet_id判定をVLMから分離）:**
 
 ```
 Analyze this photo of a pet camera feed. Respond with valid JSON only, no markdown.
 {"is_valid": true if a cat is clearly visible else false,
  "caption": "one sentence describing the cat's appearance and action",
- "pet_id": "mike" if calico/tricolor cat or "chatora" if tabby/orange cat or null,
  "behavior": one of "eating","sleeping","playing","resting","moving","grooming","other"}
 ```
+
+> **変更 (2026-03-21)**: `pet_id` フィールドをVLMプロンプトから削除。
+> VLM（Qwen3-VL-2B）はmike/chatoraの個体識別に強いchatoraバイアスがあり、
+> 入力比率に関わらず応答の60-85%がchatoraとなる。is_valid/caption/behaviorは
+> 高精度で信頼可能。pet_idはRDK X5のGo側でYOLO bbox色分析により判定し、
+> comicファイル名に埋め込む方式に変更。
+> 詳細: `pet-album-spec-DRAFT.md` 2.6節
 
 **API呼び出し:**
 ```
@@ -475,11 +481,13 @@ max_tokens: 100
 **応答のパース**: VLMは ` ```json ``` ` マークダウンラッパーを付けることがあるため、
 正規表現 `\{.*\}` (DOTALL) で抽出してからJSONパース。
 
-#### 識別の信頼性について
+#### 個体識別 (pet_id) について
 
-- VLMによる個体識別は100%正確ではない
-- 各ログに `confidence` フィールドを持たせ、不確実な場合は `pet_id: null` とする
-- カメラ角度・照明条件により精度が変動する可能性がある
+- **VLMによるpet_id判定は採用しない**（2026-03-21テスト結果に基づく）
+- pet_idはRDK X5のGo側でbbox領域のHSV色分析により判定
+- comicファイル名に埋め込み: `comic_YYYYMMDD_HHMMSS_{pet_id}.jpg`
+- AI Pyramid Pro側はファイル名からパースしてDB格納
+- 行動解析ログの `pet_id` も同様にGo側から伝達（将来: rsyncメタデータまたはAPI）
 
 ### 4.3 SQLiteスキーマ（AX8850側）
 

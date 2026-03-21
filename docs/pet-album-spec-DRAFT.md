@@ -229,20 +229,112 @@ Album/VLMサービス (Go or Python)
 
 → **プロンプトは英語を採用**。captionも英語で生成し、UI側で必要に応じ翻訳。
 
-#### VLMフィルタリング プロンプト（確定版）
+#### VLMフィルタリング プロンプト（v2 — pet_id判定はVLMから分離）
 
 ```
 Analyze this photo of a pet camera feed. Respond with valid JSON only, no markdown.
 {"is_valid": true if a cat is clearly visible else false,
  "caption": "one sentence describing the cat's appearance and action",
- "pet_id": "mike" if calico/tricolor cat or "chatora" if tabby/orange cat or null,
  "behavior": one of "eating","sleeping","playing","resting","moving","grooming","other"}
 ```
+
+→ **pet_idフィールドはVLMプロンプトから削除**。理由は下記「2.6 pet_id判定の設計変更」を参照。
 
 #### 既知の問題
 - `max_tokens` が大きいと同じ文が繰り返されるループ現象 → max_tokens=100で回避
 - llm-openai-api Plugin側で一部リクエストが `NoneType` エラー → リトライロジックで対応
 - 非猫画像のis_valid判定が稀にtrueになる → 閾値調整またはダブルチェックで対応
+
+### 2.6 pet_id判定の設計変更（2026-03-21 検証結果）
+
+#### VLMによるpet_id判定の問題
+
+55枚のテスト画像（Wikimedia Commons）を用いた定量評価で、VLMによるpet_id判定が
+信頼できないことが判明した。
+
+**テスト結果サマリ（Qwen3-VL-2B-Instruct, otherプロンプト, 均等データセット）:**
+
+| 指標 | 値 |
+|------|-----|
+| is_valid accuracy | **100%** (55/55) |
+| pet_id accuracy (balanced) | **73%** (22/30) |
+| majority-class baseline | 57% |
+
+**混同行列（cat画像30枚, 各10枚均等）:**
+
+```
+Expected → Predicted   Count
+chatora  → chatora       10   (100% — ただしバイアスの恩恵)
+mike     → mike           3   (30%)
+mike     → chatora        6   (60% 誤判定)
+other    → other          9   (90%)
+other    → chatora        1   (10% 誤判定)
+```
+
+**バイアス分析（入力比率を変えたリサンプリング検証）:**
+
+| 入力比率 | GT chatora% | 応答 chatora% | 解釈 |
+|---------|:-----------:|:-------------:|------|
+| tabby-heavy | 67% | 79% | 入力が多くても応答はさらに偏る |
+| equal | 33% | 59% | 33%しか入れていないのに59%がchatora |
+| calico-heavy | 17% | 64% | **入力と無関係にchatoraと回答** |
+| mike-vs-chatora | 50% | 85% | 二択で85%がchatora — 識別不能 |
+
+→ chatora応答比率はGT比率に追従せず、**モデルのデフォルト回答バイアス**が支配的。
+  tabby 100%正解は「識別」ではなく「常にchatoraと答えた結果の偶然」。
+
+**VLMがpet_idに使えない理由:**
+1. JSON `null` リテラルを生成できない（旧プロンプト: other_cat全件がchatora）
+2. `"other"` 文字列にすると改善するが、mike/chatoraの二値識別が機能しない
+3. 2Bパラメータモデルの限界: 毛色の微妙な違い（三毛 vs 茶トラ）を区別できない
+
+**VLMが有効な判定:**
+- `is_valid`: 100%正解 — 猫の有無判定は完全に信頼可能
+- `caption`: 毛色・姿勢・行動を的確に記述（英語プロンプト時）
+- `behavior`: 行動分類も安定
+
+#### 新アーキテクチャ: bbox色分析によるpet_id判定
+
+pet_id判定をVLMからRDK X5側のGo処理に移管する。
+
+```
+RDK X5 (Go: comic_capture.go)
+  YOLO検出 → bbox{X,Y,W,H}
+    │
+    ├── capturePanel(): 生フレーム + bbox を保持
+    │
+    ├── classifyPetColor(img, bbox):  ← 新規追加
+    │     bbox領域をHSV変換
+    │     orange dominance, white patch, tricolor判定
+    │     → "mike" | "chatora" | "other"
+    │
+    ├── stitchAndSave(): comic_YYYYMMDD_HHMMSS_{pet_id}.jpg
+    │     ファイル名にpet_idを埋め込み
+    │
+    rsync → AI Pyramid Pro
+             ├── ファイル名からpet_idをパース → photosテーブルに格納
+             └── VLMはis_valid / caption / behaviorのみ担当
+```
+
+**色分析の方針:**
+- bbox領域（背景を含まない猫の体）のHSVヒストグラムを使用
+- 彩度のあるピクセルに限定して色比率を計算（背景の白壁・暗い床を除外）
+- 三毛猫(mike): 白+黒+オレンジの3色パッチが共存
+- 茶トラ(chatora): オレンジ/茶が支配的、白パッチが小さい
+- その他(other): 上記いずれにも該当しない（黒猫、白猫等）
+
+**ファイル名規約:**
+```
+comic_YYYYMMDD_HHMMSS_chatora.jpg   # 茶トラ検出
+comic_YYYYMMDD_HHMMSS_mike.jpg      # 三毛猫検出
+comic_YYYYMMDD_HHMMSS_other.jpg     # その他/不明
+comic_YYYYMMDD_HHMMSS.jpg           # 旧形式（後方互換）
+```
+
+**テストデータ:**
+- `tests/vlm/` にテスト画像55枚 + ground truth + 評価スクリプトを整備済み
+- `tests/vlm/analyze_bias.py`: VLMバイアス分析（リサンプリング検証）
+- 色分析のチューニングは実機のmike/chatoraの実写bbox画像で実施予定
 
 ### 2.5 AI Pyramid Pro 固有機能（将来活用の可能性）
 
@@ -344,7 +436,8 @@ CREATE TABLE photos (
     captured_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     caption TEXT,                         -- VLMによるキャプション
     is_valid BOOLEAN,                    -- NULL: 未処理, 1: 良い, 0: イマイチ
-    pet_id TEXT                           -- "mike", "chatora", or NULL
+    pet_id TEXT                           -- "mike", "chatora", "other", or NULL
+                                         -- ファイル名からパース（Go側bbox色分析で判定）
 );
 CREATE INDEX idx_photos_valid ON photos(is_valid, captured_at);
 ```
@@ -358,12 +451,18 @@ CREATE INDEX idx_photos_valid ON photos(is_valid, captured_at);
 ax-llm の OpenAI API互換エンドポイントを利用:
 
 ```
-[comic JPEG到着] → ax-llm /v1/chat/completions に画像+プロンプト送信
-  → VLM応答をパース → is_valid / caption / pet_id を photos テーブルに更新
+[comic JPEG到着]
+  ├── ファイル名から pet_id をパース (e.g. comic_..._chatora.jpg)
+  │     → photosテーブルの pet_id カラムに格納
+  │
+  └── ax-llm /v1/chat/completions に画像+プロンプト送信
+        → VLM応答をパース → is_valid / caption / behavior を更新
+        ※ pet_idはVLMに問い合わせない（2.6節 参照）
 ```
 
 - **モデル**: Qwen3-VL-2B-Instruct (GPTQ-Int4) → Qwen3.5世代へ移行予定
-- 猫が写っているか、ベストショットか → `is_valid` / `caption` 付与
+- **VLMの責務**: `is_valid`（猫の有無）/ `caption`（外見・行動記述）/ `behavior`（行動分類）
+- **pet_idの責務**: RDK X5のGo側でbbox色分析により判定、ファイル名に埋め込み
 - `vlm_integration_spec.md` の行動解析パイプラインと同一基盤
 
 #### 4.5 アルバムWebアプリ（AI Pyramid Pro側）
