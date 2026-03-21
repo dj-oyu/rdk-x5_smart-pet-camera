@@ -211,8 +211,7 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 	s.clients[client.id] = client
 	s.clientsMu.Unlock()
 
-	// Start frame sender goroutine
-	go s.sendFrames(client)
+	// Frame sending is done synchronously in SendFrame (zero-copy safety)
 
 	logger.Info("WebRTC", "Client %s connected", client.id)
 
@@ -231,19 +230,27 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 	return answerJSON, nil
 }
 
-// SendFrame sends a frame to all connected clients
+// SendFrame sends a frame to all connected clients synchronously.
+// WriteSample copies data internally for RTP, so frame.Data is safe to free after return.
 func (s *Server) SendFrame(frame *types.VideoFrame) {
 	s.clientsMu.RLock()
 	defer s.clientsMu.RUnlock()
 
 	for _, client := range s.clients {
-		// Non-blocking send
-		select {
-		case client.frameChan <- frame:
-			client.framesSent++
-		default:
-			// Channel full, drop frame
-			client.framesDropped++
+		if err := client.videoTrack.WriteSample(media.Sample{
+			Data:     frame.Data,
+			Duration: time.Second / 30,
+		}); err != nil {
+			if err != io.ErrClosedPipe {
+				logger.Warn("WebRTC", "Error writing sample for client %s: %v", client.id, err)
+			}
+			continue
+		}
+		client.framesSent++
+
+		if frame.FrameNumber%30 == 0 {
+			logger.Debug("WebRTC", "Sent H.265 frame#%d to client %s",
+				frame.FrameNumber, client.id)
 		}
 	}
 }
