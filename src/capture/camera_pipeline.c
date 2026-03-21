@@ -20,8 +20,7 @@ char Pipeline_log_header[16];
 int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
                     int sensor_width, int sensor_height, int output_width,
                     int output_height, int fps, int bitrate,
-                    volatile int *active_camera,
-                    uint64_t *frame_counter) {
+                    volatile int *active_camera) {
   int ret = 0;
 
   snprintf(Pipeline_log_header, sizeof(Pipeline_log_header), "Pipeline %d",
@@ -46,7 +45,6 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
 
   // Active camera pointer (shared variable in same process, no SHM)
   pipeline->active_camera = active_camera;
-  pipeline->frame_counter = frame_counter;
 
   // Initialize memory manager
   ret = hb_mem_module_open();
@@ -157,16 +155,18 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
 
   pipeline->running_flag = running_flag;
 
-  uint64_t frame_count = 0; // Local copy from global counter
+  uint64_t frame_number = 0; // Per-pipeline frame counter
   struct timespec start_time, current_time, frame_timestamp;
   clock_gettime(CLOCK_MONOTONIC, &start_time);
 
   hbn_vnode_image_t vio_frame = {0};
 
-  // Zero-copy: track pending YOLO frame for deferred release
+  // Zero-copy: track pending frames for deferred release
   // The frame must not be released until consumer finishes processing
   hbn_vnode_image_t pending_yolo_frame = {0};
   bool has_pending_yolo_frame = false;
+  hbn_vnode_image_t pending_mjpeg_frame = {0};
+  bool has_pending_mjpeg_frame = false;
 
   // Night camera AWB flag: set after ISP has processed enough frames to
   // fully initialize its AWB algorithm. Setting too early gets overwritten.
@@ -208,7 +208,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     }
 
     // Night camera: set 3DNR after first frame (ISP needs to be running)
-    if (frame_count == 1 && pipeline->camera_index == 1) {
+    if (frame_number == 1 && pipeline->camera_index == 1) {
       hbn_isp_3dnr_attr_t tnr_attr = {0};
       tnr_attr.mode = HBN_ISP_MODE_MANUAL;
       tnr_attr.manual_attr.tnr_strength = 128;
@@ -220,7 +220,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       }
     }
     // Retry 3DNR at frame 30 if first attempt failed
-    if (frame_count == 30 && pipeline->camera_index == 1) {
+    if (frame_number == 30 && pipeline->camera_index == 1) {
       hbn_isp_3dnr_attr_t tnr_attr = {0};
       tnr_attr.mode = HBN_ISP_MODE_MANUAL;
       tnr_attr.manual_attr.tnr_strength = 128;
@@ -256,7 +256,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     } else {
       brightness_mask = ISP_BRIGHTNESS_MASK_NIGHT;  // NIGHT camera: ~4.3 sec interval
     }
-    bool is_brightness_frame = (frame_count & brightness_mask) == 0;
+    bool is_brightness_frame = (frame_number & brightness_mask) == 0;
 
     // Both DAY and NIGHT cameras retrieve brightness
     // - DAY: used for camera switching decisions
@@ -271,7 +271,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     // Image enhancement is now done via CLAHE preprocessing on the YOLO detector side
 
     // Debug: log flags every 30 frames
-    if (frame_count % 30 == 0) {
+    if (frame_number % 30 == 0) {
       LOG_DEBUG(
           Pipeline_log_header,
           "Flags: is_active=%d, brightness=%.1f lux=%u zone=%d",
@@ -293,13 +293,13 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     if (write_active) {
       ret = encoder_thread_push_frame(
           &pipeline->encoder_thread, &vio_frame,
-          frame_count, pipeline->camera_index, frame_timestamp);
+          frame_number, pipeline->camera_index, frame_timestamp);
 
       if (ret == 0) {
         frame_owned_by_encoder = true;
       } else {
         LOG_WARN(Pipeline_log_header, "Encoder queue full, frame %d dropped",
-                 frame_count);
+                 frame_number);
       }
     }
 
@@ -321,7 +321,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
         int yolo_width = (pipeline->camera_index == 1) ? 1280 : 640;
         int yolo_height = (pipeline->camera_index == 1) ? 720 : 360;
         ZeroCopyFrame zc_frame = {0};
-        zc_frame.frame_number = frame_count;
+        zc_frame.frame_number = frame_number;
         zc_frame.timestamp = frame_timestamp;
         zc_frame.camera_id = pipeline->camera_index;
         zc_frame.width = yolo_width;
@@ -338,7 +338,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
         // Copy full hb_mem_graphic_buf_t as raw bytes for import API
         memcpy(zc_frame.hb_mem_buf_data, &yolo_frame.buffer, sizeof(yolo_frame.buffer));
 
-        // shm_zerocopy_write waits for consumer to signal consumed_sem
+        // shm_zerocopy_write overwrites unconditionally (H.265 pattern)
         // If it succeeds, consumer has finished with the PREVIOUS frame
         int zc_ret = shm_zerocopy_write(pipeline->shm_yolo_zerocopy, &zc_frame);
         if (zc_ret == 0) {
@@ -351,7 +351,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
           pending_yolo_frame = yolo_frame;
           has_pending_yolo_frame = true;
 
-          if (frame_count == 0) {
+          if (frame_number == 0) {
             // === DIAGNOSTIC: Dump ALL fields of hb_mem_graphic_buf_t ===
             // This is critical for diagnosing hb_mem_import failures on the consumer side.
             const hb_mem_graphic_buf_t *gb = &yolo_frame.buffer;
@@ -460,7 +460,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
           // Consumer busy (timeout) - release current frame, keep pending as-is
           vio_release_frame_ch1(&pipeline->vio, &yolo_frame);
         }
-      } else if (frame_count % 30 == 0) {
+      } else if (frame_number % 30 == 0) {
         LOG_DEBUG(Pipeline_log_header, "vio_get_frame_ch1 failed: %d", ret);
       }
     }
@@ -474,7 +474,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
         // Write MJPEG frame to shared memory
         // Zero-copy: share VSE Ch2 buffer via share_id
         ZeroCopyFrame mjpeg_zc = {0};
-        mjpeg_zc.frame_number = frame_count;
+        mjpeg_zc.frame_number = frame_number;
         mjpeg_zc.timestamp = frame_timestamp;
         mjpeg_zc.camera_id = pipeline->camera_index;
         mjpeg_zc.width = mjpeg_frame.buffer.width;
@@ -490,38 +490,34 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
 
         int write_ret = shm_zerocopy_write(pipeline->shm_mjpeg_zc, &mjpeg_zc);
         if (write_ret == 0) {
-          if (frame_count == 0) {
+          if (frame_number == 0) {
             LOG_INFO(Pipeline_log_header,
                      "VSE Ch2 output: %dx%d (zero-copy, share_id=%d)",
                      mjpeg_zc.width, mjpeg_zc.height, mjpeg_zc.share_id[0]);
           }
-          // Wait for consumer before releasing VSE buffer
-          struct timespec deadline;
-          clock_gettime(CLOCK_REALTIME, &deadline);
-          deadline.tv_nsec += 50 * 1000000; // 50ms timeout
-          if (deadline.tv_nsec >= 1000000000) {
-            deadline.tv_sec++;
-            deadline.tv_nsec -= 1000000000;
+          // Consumer finished with previous frame - safe to release it now
+          if (has_pending_mjpeg_frame) {
+            vio_release_frame_ch2(&pipeline->vio, &pending_mjpeg_frame);
           }
-          sem_timedwait(&pipeline->shm_mjpeg_zc->consumed_sem, &deadline);
-          sem_post(&pipeline->shm_mjpeg_zc->consumed_sem);
+          pending_mjpeg_frame = mjpeg_frame;
+          has_pending_mjpeg_frame = true;
+        } else {
+          // Consumer busy (timeout) - release current frame, keep pending as-is
+          vio_release_frame_ch2(&pipeline->vio, &mjpeg_frame);
         }
-
-        vio_release_frame_ch2(&pipeline->vio, &mjpeg_frame);
-      } else if (frame_count % 30 == 0) {
+      } else if (frame_number % 30 == 0) {
         LOG_DEBUG(Pipeline_log_header, "vio_get_frame_ch2 failed: %d", ret);
       }
     }
 
-    if (write_active && pipeline->frame_counter) {
-      (*pipeline->frame_counter)++;
+    if (write_active) {
+      frame_number++;
     }
-    frame_count = pipeline->frame_counter ? *pipeline->frame_counter : 0;
 
     // Night camera: fix AWB to Manual after ISP has stabilized (~1 sec).
     // Auto AWB cannot converge on IR scenes and causes purple/blue drift.
     // See docs/awb_tuning_report.md for test results and tuning tool usage.
-    if (!night_awb_applied && frame_count == 30) {
+    if (!night_awb_applied && frame_number == 30) {
       hbn_isp_awb_attr_t awb_attr = {0};
       int awb_ret = hbn_isp_get_awb_attr(pipeline->vio.isp_handle, &awb_attr);
       if (awb_ret == 0) {
@@ -535,37 +531,41 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       if (awb_ret != 0) {
         LOG_WARN(Pipeline_log_header, "Failed to set night AWB: %d", awb_ret);
       } else {
-        LOG_INFO(Pipeline_log_header, "Night camera AWB fixed: R=1.8 G=1.8 B=2.34 (frame %d)", frame_count);
+        LOG_INFO(Pipeline_log_header, "Night camera AWB fixed: R=1.8 G=1.8 B=2.34 (frame %d)", frame_number);
       }
       night_awb_applied = true;
     }
 
     // Print FPS every 30 frames
-    if (frame_count % 30 == 0) {
+    if (frame_number % 30 == 0) {
       clock_gettime(CLOCK_MONOTONIC, &current_time);
       double elapsed = (current_time.tv_sec - start_time.tv_sec) +
                        (current_time.tv_nsec - start_time.tv_nsec) / 1e9;
-      double fps = frame_count / elapsed;
+      double fps = frame_number / elapsed;
       LOG_DEBUG(Pipeline_log_header,
                 "Frame %d, FPS: %.2f, H.264 encoded: %lu, dropped: %lu",
-                frame_count, fps, pipeline->encoder_thread.frames_encoded,
+                frame_number, fps, pipeline->encoder_thread.frames_encoded,
                 pipeline->encoder_thread.frames_dropped);
     }
   }
 
-  // Release any pending zero-copy frame on exit
+  // Release any pending zero-copy frames on exit
   if (has_pending_yolo_frame) {
     vio_release_frame_ch1(&pipeline->vio, &pending_yolo_frame);
     has_pending_yolo_frame = false;
+  }
+  if (has_pending_mjpeg_frame) {
+    vio_release_frame_ch2(&pipeline->vio, &pending_mjpeg_frame);
+    has_pending_mjpeg_frame = false;
   }
 
   // Final statistics
   clock_gettime(CLOCK_MONOTONIC, &current_time);
   double total_elapsed = (current_time.tv_sec - start_time.tv_sec) +
                          (current_time.tv_nsec - start_time.tv_nsec) / 1e9;
-  double avg_fps = frame_count / total_elapsed;
+  double avg_fps = frame_number / total_elapsed;
   LOG_INFO(Pipeline_log_header,
-           "Completed: %d frames in %.2f seconds (avg FPS: %.2f)", frame_count,
+           "Completed: %d frames in %.2f seconds (avg FPS: %.2f)", frame_number,
            total_elapsed, avg_fps);
   LOG_INFO(Pipeline_log_header, "H.264 encoded: %lu, dropped: %lu",
            pipeline->encoder_thread.frames_encoded,

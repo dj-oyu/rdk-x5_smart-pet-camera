@@ -626,18 +626,17 @@ ISP/VSEパイプライン上でHWオーバーレイを描画するAPI。
 | テキスト描画 | `hbn_rgn_draw_word_t` 構造体 |
 | カラー | `FONT_COLOR_ORANGE` 等のプリセット |
 
-### Go側オーバーレイのHWオフロード分析
+### Go側オーバーレイのHWオフロード検討結果
 
-| 項目 | 現状 | HW OSD案 |
-|------|------|----------|
-| 実装場所 | `broadcaster.go` → C関数 (CGo) | ISP/VSEパイプラインにリージョンアタッチ |
-| パイプライン | `libspcdev` ベース | `hbn_api` ベースへの移行が必要 |
-| CPU負荷 | <0.5ms/frame | ~0ms |
-| 改修規模 | — | カメラパイプライン全面改修（大規模） |
+**結論: CPU描画を採用（HW OSD不採用）**
 
-**結論**: 現行C実装のオーバーレイコスト (<0.5ms/frame) は十分低い。HW OSD利用にはパイプラインを`hbn_api`ベースへ全面改修する必要があり、ROIが低い。
+| 検討案 | 結果 | 理由 |
+|--------|------|------|
+| hbn_rgn OSD | **不採用** | VGA_8パレットバッファへの描画API。NV12に直接描画不可。VSEにアタッチするとYOLO/comic等の全consumerにオーバーレイが焼き込まれる |
+| nano2D (GC820) | **不採用** | テキスト描画APIなし。矩形fillのみ。Goテスト環境でスタックオーバーフロー |
+| CPU描画 | **採用** | `rgn_overlay.c` — 768x432で5矩形+5テキスト = <0.5ms。NV12 Y/UVプレーンに直接描画。consumerごとに独立適用可能 |
 
-**注**: `sp_display_draw_rect`, `sp_display_draw_string` が `libspcdev` にあるが、これはDisplay (HDMI出力) 用でありストリーミング用途には使えない。
+**注**: `sp_display_draw_rect`, `sp_display_draw_string` は Display (HDMI出力) 用でありストリーミング用途には使えない。
 
 ## HW活用の優先度
 
@@ -649,7 +648,7 @@ ISP/VSEパイプライン上でHWオーバーレイを描画するAPI。
 | NV12→RGB変換 (OpenCL) | 低 | nano2Dの方が適切。OpenCLはカーネル起動オーバーヘッドあり |
 | JPEGエンコード | **解決済み** | `hb_mm_mc` HWエンコーダー実装済み (~5ms) |
 | H.265移行 | **高** | HW対応済み。同QP 9-24%削減。ターゲットクライアント全対応 |
-| オーバーレイ描画 | 低 | CPU <0.5ms。HW OSD利用にはパイプライン全面改修が必要 |
+| オーバーレイ描画 | **CPU採用** | <0.5ms。hbn_rgnはVGA_8バッファ専用、nano2Dにテキスト描画なし。CPU描画で十分 |
 | 画像スケーリング | 低 | nano2DまたはVPS (`sp_open_vps`) で可能だが、comic生成は低頻度 |
 | モーション検出前処理 | 中（将来） | 差分・モルフォロジーをGPU 2D/OpenCLでオフロード可能 |
 | AI推論 | 不適 | BPU使用 (6.75 GFLOPS GPUでは不足) |

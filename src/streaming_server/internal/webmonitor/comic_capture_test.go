@@ -1,3 +1,5 @@
+//go:build gpu
+
 package webmonitor
 
 import (
@@ -10,6 +12,13 @@ import (
 	"testing"
 	"time"
 )
+
+// newTestComicCapture creates a ComicCapture with SkipStitch=true (no nano2D in tests)
+func newTestComicCapture(src frameSource, outputDir string) *ComicCapture {
+	cc := newTestComicCapture(src, outputDir)
+	cc.SkipStitch = true
+	return cc
+}
 
 // mockFrameSource is a test double for frameSource.
 type mockFrameSource struct {
@@ -137,7 +146,7 @@ func TestPetBBox(t *testing.T) {
 
 func TestStateMachine_IdleToCaptureRequires5sCat(t *testing.T) {
 	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
-	cc := NewComicCapture(src, t.TempDir())
+	cc := newTestComicCapture(src, t.TempDir())
 
 	now := time.Now()
 
@@ -166,7 +175,7 @@ func TestStateMachine_IdleToCaptureRequires5sCat(t *testing.T) {
 func TestStateMachine_CatLostDuringCapture(t *testing.T) {
 	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
 	tmpDir := t.TempDir()
-	cc := NewComicCapture(src, tmpDir)
+	cc := newTestComicCapture(src, tmpDir)
 
 	now := time.Now()
 
@@ -197,7 +206,7 @@ func TestStateMachine_CatLostDuringCapture(t *testing.T) {
 func TestStateMachine_Full4PanelCapture(t *testing.T) {
 	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
 	tmpDir := t.TempDir()
-	cc := NewComicCapture(src, tmpDir)
+	cc := newTestComicCapture(src, tmpDir)
 	cc.BaseCaptureInterval = 500 * time.Millisecond // speed up for test
 
 	now := time.Now()
@@ -225,7 +234,7 @@ func TestStateMachine_Full4PanelCapture(t *testing.T) {
 
 func TestRateLimit(t *testing.T) {
 	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
-	cc := NewComicCapture(src, t.TempDir())
+	cc := newTestComicCapture(src, t.TempDir())
 
 	now := time.Now()
 
@@ -248,7 +257,7 @@ func TestRateLimit(t *testing.T) {
 }
 
 func TestAdaptiveInterval(t *testing.T) {
-	cc := NewComicCapture(nil, "")
+	cc := newTestComicCapture(nil, "")
 	cc.BaseCaptureInterval = 10 * time.Second
 
 	start := time.Now()
@@ -275,7 +284,7 @@ func TestAdaptiveInterval(t *testing.T) {
 
 func TestSessionIDFormat(t *testing.T) {
 	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
-	cc := NewComicCapture(src, t.TempDir())
+	cc := newTestComicCapture(src, t.TempDir())
 
 	now := time.Date(2026, 3, 20, 14, 32, 5, 0, time.Local)
 	cc.startCapturing(now)
@@ -289,7 +298,7 @@ func TestSessionIDFormat(t *testing.T) {
 
 func TestRateLimitBlocksCapture(t *testing.T) {
 	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
-	cc := NewComicCapture(src, t.TempDir())
+	cc := newTestComicCapture(src, t.TempDir())
 
 	now := time.Now()
 
@@ -314,7 +323,7 @@ func TestRateLimitBlocksCapture(t *testing.T) {
 func TestContinuousSessionAfter4Panels(t *testing.T) {
 	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
 	tmpDir := t.TempDir()
-	cc := NewComicCapture(src, tmpDir)
+	cc := newTestComicCapture(src, tmpDir)
 	cc.BaseCaptureInterval = 500 * time.Millisecond
 
 	now := time.Now()
@@ -348,7 +357,7 @@ func TestContinuousSessionAfter4Panels(t *testing.T) {
 
 func TestCapturePanelSkipsOnNV12Failure(t *testing.T) {
 	src := &mockFrameSource{nv12Data: nil}
-	cc := NewComicCapture(src, t.TempDir())
+	cc := newTestComicCapture(src, t.TempDir())
 
 	now := time.Now()
 	cc.state = comicCapturing
@@ -365,7 +374,7 @@ func TestCapturePanelSkipsOnNV12Failure(t *testing.T) {
 func TestPanelsClearedAfterStitch(t *testing.T) {
 	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
 	tmpDir := t.TempDir()
-	cc := NewComicCapture(src, tmpDir)
+	cc := newTestComicCapture(src, tmpDir)
 	cc.BaseCaptureInterval = 500 * time.Millisecond
 
 	now := time.Now()
@@ -395,7 +404,7 @@ func TestPanelsClearedAfterStitch(t *testing.T) {
 
 func TestStartStop(t *testing.T) {
 	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
-	cc := NewComicCapture(src, t.TempDir())
+	cc := newTestComicCapture(src, t.TempDir())
 
 	cc.Start()
 	// Give goroutine time to start polling
@@ -593,7 +602,7 @@ func TestHandleComicsList_MethodNotAllowed(t *testing.T) {
 
 func TestNoCatResetsContinuousTracking(t *testing.T) {
 	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
-	cc := NewComicCapture(src, t.TempDir())
+	cc := newTestComicCapture(src, t.TempDir())
 
 	now := time.Now()
 

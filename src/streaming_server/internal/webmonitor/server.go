@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -101,6 +102,9 @@ func NewServer(cfg Config) *Server {
 		comicsDir := filepath.Join(cfg.RecordingOutputPath, "comics")
 		comicCapture = NewComicCapture(comicShm, comicsDir)
 		comicCapture.Start()
+		log.Printf("[Comic] Started (frame=%s, detection=%s, output=%s)", cfg.FrameShmName, cfg.DetectionShmName, comicsDir)
+	} else {
+		log.Printf("[Comic] Disabled: SHM reader failed: %v", err)
 	}
 
 	return &Server{

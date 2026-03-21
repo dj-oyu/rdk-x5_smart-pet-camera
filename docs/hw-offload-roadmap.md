@@ -6,22 +6,23 @@
 
 ---
 
-## 現状のアーキテクチャ
+## 現状のアーキテクチャ (Phase 2実装後)
 
 ```
-Camera (libspcdev)
-  ↓ sp_vio_get_frame (NV12)
-  ├─→ POSIX SHM (/pet_camera_stream) ──→ Go streaming-server (WebRTC H.264 / MJPEG)
-  ├─→ POSIX SHM (/pet_camera_zc_*)   ──→ Python YOLO detector (BPU推論)
-  └─→ VPU H.264 encoder (libspcdev)
+Unified Camera Daemon (hbn_vflow: VIN → ISP → VSE)
+  VSE Ch0: 1280x720 NV12 → VPU H.265 encode → h265_zc SHM → Go WebRTC (hb_mem_import_com_buf)
+  VSE Ch1: 640x360/1280x720 NV12 → yolo_zc SHM → Python detector (hb_mem_import_graph_buf)
+  VSE Ch2: 768x432 NV12 → mjpeg_zc SHM → Go web_monitor (hb_mem_import_graph_buf)
+  Switcher thread: ISP brightness直読 → g_active_camera切替
 
-全IPC: POSIX SHM + セマフォ
-映像前処理: CPU (Python memcpy letterbox, crop)
-映像エンコード: VPU HW (H.264)
+全IPC: hbmemゼロコピー (SHMにはメタデータのみ)
+映像前処理: CPU (Python letterbox/crop) — Strategy化済み、HW差し替え可能
+映像エンコード: VPU HW (H.265)
 YOLO推論: BPU HW
 YOLO後処理: CPU (Python numpy/OpenCV)
-MJPEGオーバーレイ: CPU (C via CGo)
+MJPEGオーバーレイ: CPU (rgn_overlay.c、768x432で<0.5ms)
 JPEG変換: VPU HW (hb_mm_mc JPEG)
+Comic合成: nano2D GPU (n2d_comic.c)
 ```
 
 ## 目標アーキテクチャ
@@ -128,37 +129,28 @@ VSEチャンネル設計:
 | 3 | 640x480 | YOLO night ROI1 |
 | 4 | 640x480 | YOLO night ROI2 |
 
-#### 2-1b. フレーム配布: POSIX SHM → hbmem物理アドレス共有
+#### 2-1b. フレーム配布: POSIX SHM → hbmem物理アドレス共有 ✅
 
 **対象**: `src/capture/shared_memory.c`, `src/streaming_server/internal/shm/reader.go`
-
-現行のPOSIX SHMリングバッファを、hbmemの `share_id` / `phys_addr` ベースの配布に段階的に移行。
+**実装済み**:
+- SHM 7→4に統合 (h265_zc, yolo_zc, mjpeg_zc, detections)
+- CameraControl/brightness SHM廃止 → 統一カメラデーモン内の共有変数に
+- consumed_sem撤去 → H.265と同じ上書き+delayed releaseパターンに統一
+- Go CGo ZeroCopyFrame構造体をC定義と完全一致
+- 各パイプラインが独自frame_number管理（グローバルカウンター廃止）
 
 ```
-Before: sp_vio_get_frame → memcpy → SHM ring buffer → Go/Python read + memcpy
-After:  hbn_vnode_getframe → share_id をSHMメタデータに書き込み → Go/Python が hb_mem_import
+H.265:  VSE Ch0 → VPU encode → hb_mem_common_buf_t descriptor → SHM → Go hb_mem_import_com_buf
+YOLO:   VSE Ch1 → hb_mem_graphic_buf_t descriptor → SHM → Python hb_mem_import_graph_buf
+MJPEG:  VSE Ch2 → hb_mem_graphic_buf_t descriptor → SHM → Go hb_mem_import_graph_buf
 ```
 
-**メリット**: NV12フレーム本体のmemcpyが不要。メタデータ (share_id, 数十バイト) のみSHM経由。
+#### 2-1c. 検出前処理の分離 ✅
 
-#### 2-1c. 検出前処理の分離
-
-**対象**: `src/detector/yolo_detector_daemon.py`
-
-前処理 (letterbox, crop) をプラグイン可能な構造にリファクタリング。
-
-```python
-# Before: 一体化
-frame = shm.get_frame()
-letterboxed = self._letterbox_nv12(frame)
-result = self.model.forward(letterboxed)
-
-# After: 前処理をstrategyパターンで分離
-preprocessor = HWLetterboxPreprocessor()  # or CPULetterboxPreprocessor()
-frame = shm.get_frame()
-prepared = preprocessor.prepare(frame)
-result = self.model.forward(prepared)
-```
+**対象**: `src/common/src/detection/yolo_detector.py`
+**実装済み**: `Preprocessor` ABC + `CPUPreprocessor` (Strategy パターン)。
+`detect_nv12()`/`detect_nv12_roi()` 内で `self.preprocessor.letterbox()`/`crop_roi()` を使用。
+`HWPreprocessor` (nano2D) への差し替えが可能な構造。
 
 ### 2-2. 段階的にHWコードを追加、動作検証
 

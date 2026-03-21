@@ -220,10 +220,10 @@ func (r *Recorder) recordLoop() {
 			}
 
 			// Skip duplicate frames
-			if frame.FrameNum == lastFrameNum {
+			if frame.FrameNumber == lastFrameNum {
 				continue
 			}
-			lastFrameNum = frame.FrameNum
+			lastFrameNum = frame.FrameNumber
 
 			// Process frame to detect IDR and cache SPS/PPS
 			if err := processor.Process(frame); err != nil {

@@ -8,6 +8,7 @@
  *   - 2 camera pipelines (DAY=0, NIGHT=1) running at 30fps
  *   - Switcher thread reads ISP brightness directly (no SHM)
  *   - Active camera index is a shared variable (no CameraControl SHM)
+ *   - Each pipeline maintains its own frame_number counter
  *   - Only 2 SHMs: yolo_zc (detector) + h265_zc (Go streaming)
  */
 
@@ -34,7 +35,6 @@
 // Shared state (no SHM needed — same process)
 static volatile bool g_running = true;
 static volatile int g_active_camera = 0;  // 0=DAY, 1=NIGHT
-static uint64_t g_frame_count = 0;  // Global frame counter (only active camera increments)
 
 // Pipelines
 static camera_pipeline_t g_pipelines[2];
@@ -173,8 +173,7 @@ int main(int argc, char *argv[]) {
                                   1920, 1080, // sensor
                                   output_width, output_height,
                                   fps, bitrate,
-                                  &g_active_camera,
-                                  &g_frame_count);
+                                  &g_active_camera);
         if (ret != 0) {
             LOG_ERROR("Main", "Failed to create pipeline for camera %d: %d", cam, ret);
             // Continue with remaining cameras
