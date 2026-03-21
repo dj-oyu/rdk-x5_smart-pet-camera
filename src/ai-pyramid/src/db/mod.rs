@@ -15,6 +15,7 @@ pub struct Photo {
 #[derive(Debug, Default)]
 pub struct PhotoFilter {
     pub is_valid: Option<bool>,
+    pub is_pending: bool,
     pub pet_id: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
@@ -39,20 +40,28 @@ impl PhotoStore {
     pub fn migrate(&self) -> rusqlite::Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS photos (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                filename    TEXT    NOT NULL UNIQUE,
-                captured_at TEXT    NOT NULL,
-                caption     TEXT,
-                is_valid    INTEGER,
-                pet_id      TEXT,
-                behavior    TEXT,
-                created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename       TEXT    NOT NULL UNIQUE,
+                captured_at    TEXT    NOT NULL,
+                caption        TEXT,
+                is_valid       INTEGER,
+                pet_id         TEXT,
+                behavior       TEXT,
+                vlm_attempts   INTEGER NOT NULL DEFAULT 0,
+                vlm_last_error TEXT,
+                created_at     TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
             );
             CREATE INDEX IF NOT EXISTS idx_photos_valid_captured
                 ON photos(is_valid, captured_at DESC);
             CREATE INDEX IF NOT EXISTS idx_photos_pet_id
                 ON photos(pet_id, captured_at DESC);",
-        )
+        )?;
+        // Migration for existing DBs without vlm_attempts columns
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE photos ADD COLUMN vlm_attempts INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE photos ADD COLUMN vlm_last_error TEXT;",
+        );
+        Ok(())
     }
 
     pub fn insert(
@@ -77,9 +86,27 @@ impl PhotoStore {
         behavior: &str,
     ) -> rusqlite::Result<usize> {
         self.conn.execute(
-            "UPDATE photos SET is_valid = ?1, caption = ?2, behavior = ?3 WHERE filename = ?4",
+            "UPDATE photos SET is_valid = ?1, caption = ?2, behavior = ?3, vlm_attempts = vlm_attempts + 1, vlm_last_error = NULL WHERE filename = ?4",
             params![is_valid, caption, behavior, filename],
         )
+    }
+
+    pub fn record_vlm_failure(&self, filename: &str, error: &str) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE photos SET vlm_attempts = vlm_attempts + 1, vlm_last_error = ?1 WHERE filename = ?2",
+            params![error, filename],
+        )
+    }
+
+    /// Return filenames that need VLM processing (is_valid IS NULL, attempts < max).
+    pub fn list_pending_filenames(&self, max_attempts: i32) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT filename FROM photos WHERE is_valid IS NULL AND vlm_attempts < ?1 ORDER BY captured_at ASC",
+        )?;
+        let names = stmt
+            .query_map(params![max_attempts], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(names)
     }
 
     pub fn get_by_filename(&self, filename: &str) -> rusqlite::Result<Option<Photo>> {
@@ -97,7 +124,9 @@ impl PhotoStore {
         let mut where_clauses = Vec::new();
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
-        if let Some(valid) = filter.is_valid {
+        if filter.is_pending {
+            where_clauses.push("is_valid IS NULL");
+        } else if let Some(valid) = filter.is_valid {
             where_clauses.push("is_valid = ?");
             param_values.push(Box::new(valid));
         }
@@ -293,5 +322,55 @@ mod tests {
         assert_eq!(s.valid, 1);
         assert_eq!(s.invalid, 1);
         assert_eq!(s.pending, 1);
+    }
+
+    #[test]
+    fn record_vlm_failure_and_list_pending() {
+        let store = setup();
+        store.insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), None).unwrap();
+        store.insert("b.jpg", dt(2026, 3, 21, 11, 0, 0), None).unwrap();
+
+        // Both pending, 0 attempts
+        let pending = store.list_pending_filenames(5).unwrap();
+        assert_eq!(pending.len(), 2);
+
+        // Record failure for a.jpg
+        store.record_vlm_failure("a.jpg", "timeout").unwrap();
+        let pending = store.list_pending_filenames(5).unwrap();
+        assert_eq!(pending.len(), 2); // still under max
+
+        // Exhaust retries for a.jpg
+        for _ in 0..4 {
+            store.record_vlm_failure("a.jpg", "timeout").unwrap();
+        }
+        let pending = store.list_pending_filenames(5).unwrap();
+        assert_eq!(pending.len(), 1); // a.jpg excluded (5 attempts >= max)
+        assert_eq!(pending[0], "b.jpg");
+    }
+
+    #[test]
+    fn vlm_success_resets_error() {
+        let store = setup();
+        store.insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), None).unwrap();
+        store.record_vlm_failure("a.jpg", "timeout").unwrap();
+        store.update_vlm_result("a.jpg", true, "cat", "resting").unwrap();
+
+        let photo = store.get_by_filename("a.jpg").unwrap().unwrap();
+        assert_eq!(photo.is_valid, Some(true));
+        // Not in pending anymore
+        let pending = store.list_pending_filenames(5).unwrap();
+        assert_eq!(pending.len(), 0);
+    }
+
+    #[test]
+    fn list_pending_filter() {
+        let store = setup();
+        store.insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), None).unwrap();
+        store.insert("b.jpg", dt(2026, 3, 21, 11, 0, 0), None).unwrap();
+        store.update_vlm_result("b.jpg", true, "cap", "resting").unwrap();
+
+        let (photos, total) = store.list(&PhotoFilter { is_pending: true, ..Default::default() }).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(photos[0].filename, "a.jpg");
     }
 }
