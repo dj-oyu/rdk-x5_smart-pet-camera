@@ -340,6 +340,7 @@ func (s *Server) handleRecordingStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("[Recorder] Stop API called")
 	filename, err := s.recorder.Stop()
 	if err != nil {
 		writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusBadRequest)

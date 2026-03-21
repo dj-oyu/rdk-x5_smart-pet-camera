@@ -12,6 +12,7 @@ import (
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/codec"
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/logger"
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/shm"
+	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/pkg/types"
 )
 
 const (
@@ -183,86 +184,103 @@ func (r *Recorder) recordLoop() {
 		case <-r.stopCh:
 			return
 		case <-ticker.C:
-			r.mu.RLock()
-			if !r.recording || r.shmReader == nil {
-				r.mu.RUnlock()
-				return
-			}
+		}
 
-			// Check for heartbeat timeout
-			if time.Since(r.lastHeartbeat) > HeartbeatTimeout {
-				r.mu.RUnlock()
-				logger.Warn("Recorder", "Heartbeat timeout, auto-stopping recording")
-				r.autoStop("heartbeat timeout")
-				return
-			}
+		// Check stop again (non-blocking) before potentially blocking ReadLatest
+		select {
+		case <-r.stopCh:
+			return
+		default:
+		}
 
-			// Check for max duration
-			if time.Since(r.startTime) > MaxRecordingDuration {
-				r.mu.RUnlock()
-				logger.Warn("Recorder", "Max duration reached, auto-stopping recording")
-				r.autoStop("max duration reached")
-				return
-			}
-
-			reader := r.shmReader
-			processor := r.h264Processor
+		r.mu.RLock()
+		if !r.recording || r.shmReader == nil {
 			r.mu.RUnlock()
+			return
+		}
 
-			// Read frame from SHM
-			frame, err := reader.ReadLatest()
-			if err != nil {
-				logger.Debug("Recorder", "Read error: %v", err)
+		if time.Since(r.lastHeartbeat) > HeartbeatTimeout {
+			r.mu.RUnlock()
+			logger.Warn("Recorder", "Heartbeat timeout, auto-stopping recording")
+			r.autoStop("heartbeat timeout")
+			return
+		}
+
+		if time.Since(r.startTime) > MaxRecordingDuration {
+			r.mu.RUnlock()
+			logger.Warn("Recorder", "Max duration reached, auto-stopping recording")
+			r.autoStop("max duration reached")
+			return
+		}
+
+		reader := r.shmReader
+		processor := r.h264Processor
+		r.mu.RUnlock()
+
+		// ReadLatest may block on hb_mem_import — run in goroutine with timeout
+		type readResult struct {
+			frame *types.VideoFrame
+			err   error
+		}
+		ch := make(chan readResult, 1)
+		go func() {
+			f, e := reader.ReadLatest()
+			ch <- readResult{f, e}
+		}()
+
+		var frame *types.VideoFrame
+		select {
+		case <-r.stopCh:
+			return
+		case res := <-ch:
+			if res.err != nil {
+				logger.Debug("Recorder", "Read error: %v", res.err)
 				continue
 			}
-			if frame == nil {
-				continue
-			}
+			frame = res.frame
+		}
+		if frame == nil {
+			continue
+		}
 
-			// Skip duplicate frames
-			if frame.FrameNumber == lastFrameNum {
-				continue
-			}
-			lastFrameNum = frame.FrameNumber
+		if frame.FrameNumber == lastFrameNum {
+			continue
+		}
+		lastFrameNum = frame.FrameNumber
 
-			// Process frame to detect IDR and cache SPS/PPS
-			if err := processor.Process(frame); err != nil {
-				logger.Debug("Recorder", "Process error: %v", err)
-			}
+		if err := processor.Process(frame); err != nil {
+			logger.Debug("Recorder", "Process error: %v", err)
+		}
 
-			// Write frame to file
-			r.mu.Lock()
-			if r.file == nil || !r.recording {
-				r.mu.Unlock()
-				return
-			}
+		r.mu.Lock()
+		if r.file == nil || !r.recording {
+			r.mu.Unlock()
+			return
+		}
 
-			var dataToWrite []byte
-
-			// If this is the first IDR frame, prepend SPS/PPS
-			if frame.IsIDR && !firstIDRWritten {
-				headers, _ := processor.PrependHeaders(frame.Data)
-				if len(headers) > len(frame.Data) {
-					dataToWrite = headers
-					firstIDRWritten = true
-				} else {
-					dataToWrite = frame.Data
-				}
+		var dataToWrite []byte
+		if frame.IsIDR && !firstIDRWritten {
+			headers, _ := processor.PrependHeaders(frame.Data)
+			if len(headers) > len(frame.Data) {
+				dataToWrite = headers
+				firstIDRWritten = true
 			} else {
 				dataToWrite = frame.Data
 			}
-
-			n, err := r.file.Write(dataToWrite)
-			if err != nil {
-				logger.Warn("Recorder", "Write error: %v", err)
-				r.mu.Unlock()
-				continue
-			}
-
-			r.frameCount++
-			r.bytesWritten += uint64(n)
-			r.mu.Unlock()
+		} else {
+			dataToWrite = frame.Data
 		}
+
+		n, err := r.file.Write(dataToWrite)
+		if err != nil {
+			logger.Warn("Recorder", "Write error: %v", err)
+			r.mu.Unlock()
+			continue
+		}
+
+		r.frameCount++
+		r.bytesWritten += uint64(n)
+		r.mu.Unlock()
 	}
 }
 
