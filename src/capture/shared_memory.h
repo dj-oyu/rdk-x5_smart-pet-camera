@@ -33,19 +33,6 @@ typedef enum {
 } BrightnessZone;
 
 /**
- * Camera control structure for switcher daemon
- *
- * Simple atomic flag to indicate which camera is active.
- * Camera daemons read this to decide whether to encode H.264.
- * Switcher daemon writes this when switching cameras.
- */
-typedef struct {
-    volatile int active_camera_index;  // 0=DAY, 1=NIGHT
-    volatile uint32_t version;         // Incremented on each switch
-    sem_t switch_sem;                  // Posted on camera switch (for consumer notification)
-} CameraControl;
-
-/**
  * Lightweight brightness data for a single camera
  * ~32 bytes per camera (vs ~3MB for full Frame)
  */
@@ -178,6 +165,32 @@ typedef struct {
     sem_t consumed_sem;         // Posted when consumer is done (camera waits on this)
     ZeroCopyFrame frame;        // Current frame
 } ZeroCopyFrameBuffer;
+
+/**
+ * Unified camera control + zero-copy YOLO frame
+ *
+ * Single SHM replaces: /pet_camera_control + /pet_camera_zc_0 + /pet_camera_zc_1
+ * - Switcher daemon writes active_camera_index
+ * - Active camera daemon writes yolo_frame (share_id + brightness)
+ * - Detector reads yolo_frame
+ * - Switcher reads yolo_frame.brightness_avg for switching decisions
+ */
+typedef struct {
+    // Camera switching (written by switcher daemon)
+    volatile int active_camera_index;  // 0=DAY, 1=NIGHT
+    volatile uint32_t switch_version;  // Incremented on each switch
+    sem_t switch_sem;                  // Posted on camera switch
+
+    // Zero-copy YOLO frame (written by active camera daemon only)
+    sem_t frame_sem;                   // Posted when new frame ready
+    sem_t consumed_sem;                // Posted when detector done
+    ZeroCopyFrame yolo_frame;          // Current YOLO input
+
+    // Brightness (written by each camera daemon independently, always updated)
+    // Switcher reads day_brightness for DAY→NIGHT decision
+    volatile float day_brightness;     // DAY camera ISP brightness (0-255)
+    volatile float night_brightness;   // NIGHT camera ISP brightness (0-255)
+} CameraControl;
 
 /**
  * H.265 zero-copy frame — VPU output buffer shared via share_id
