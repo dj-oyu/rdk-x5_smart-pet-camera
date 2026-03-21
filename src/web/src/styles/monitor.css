@@ -1109,6 +1109,61 @@ a { color: inherit; }
     opacity: 1;
     color: var(--accent);
 }
+.album-lightbox {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: rgba(0, 0, 0, 0.92);
+    backdrop-filter: blur(8px);
+    cursor: pointer;
+}
+.album-lightbox img {
+    max-width: 92%;
+    max-height: 80vh;
+    object-fit: contain;
+    border-radius: 8px;
+}
+.album-lightbox-meta {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 20px 24px;
+    background: linear-gradient(transparent, rgba(0, 0, 0, 0.85));
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px;
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 13px;
+}
+.album-lightbox-date {
+    font-variant-numeric: tabular-nums;
+    opacity: 0.7;
+}
+.album-lightbox-pet {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.12);
+}
+.album-lightbox-pet.mike { background: rgba(255, 138, 128, 0.35); color: #ff9a90; }
+.album-lightbox-pet.chatora { background: rgba(255, 183, 77, 0.35); color: #ffc56e; }
+.album-lightbox-behavior {
+    font-size: 12px;
+    color: rgba(110, 231, 255, 0.8);
+}
+.album-lightbox-caption {
+    width: 100%;
+    margin: 4px 0 0;
+    font-size: 14px;
+    line-height: 1.5;
+    color: rgba(255, 255, 255, 0.9);
+}
 
 @media (max-width: 960px) {
     .main-content {
