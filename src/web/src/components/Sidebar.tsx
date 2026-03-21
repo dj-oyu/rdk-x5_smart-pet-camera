@@ -138,16 +138,31 @@ export function useSidebar() {
 export function SidebarView(props: ReturnType<typeof useSidebar>) {
   const [albumOffline, setAlbumOffline] = useState(false);
   const [albumHeight, setAlbumHeight] = useState(0);
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [lightboxMeta, setLightboxMeta] = useState<{ date?: string; pet?: string; behavior?: string; caption?: string }>({});
 
   useEffect(() => {
     const handler = (e: MessageEvent) => {
       if (e.data?.type === 'album-height' && typeof e.data.height === 'number') {
         setAlbumHeight(e.data.height);
       }
+      if (e.data?.type === 'album-lightbox' && typeof e.data.src === 'string') {
+        setLightboxSrc(e.data.src);
+        setLightboxMeta(e.data.meta || {});
+      }
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
   }, []);
+
+  useEffect(() => {
+    if (!lightboxSrc) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setLightboxSrc(null);
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [lightboxSrc]);
 
   return (
     <div class="sidebar">
@@ -187,6 +202,18 @@ export function SidebarView(props: ReturnType<typeof useSidebar>) {
           />
         )}
       </div>
+
+      {lightboxSrc && (
+        <div class="album-lightbox" onClick={() => setLightboxSrc(null)}>
+          <img src={lightboxSrc} alt="Full size" />
+          <div class="album-lightbox-meta" onClick={(e) => e.stopPropagation()}>
+            {lightboxMeta.date && <span class="album-lightbox-date">{lightboxMeta.date}</span>}
+            {lightboxMeta.pet && <span class={`album-lightbox-pet ${lightboxMeta.pet}`}>{lightboxMeta.pet}</span>}
+            {lightboxMeta.behavior && <span class="album-lightbox-behavior">{lightboxMeta.behavior}</span>}
+            {lightboxMeta.caption && <p class="album-lightbox-caption">{lightboxMeta.caption}</p>}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
