@@ -266,10 +266,12 @@ int vio_create(vio_context_t *ctx, int camera_index,
         // ROI definitions (sensor coordinates)
         // Original 1280x720 ROIs: (0,40,640,640), (320,40,640,640), (640,40,640,640)
         // Scale: 1920/1280=1.5, 1080/720=1.5
+        // ROI must fit within sensor bounds and be even-aligned
+        // Sensor: 1920x1080. Keep ROIs within safe margin.
         struct { int x, y, w, h; } rois[3] = {
             {0,   60, 960, 960},
             {480, 60, 960, 960},
-            {960, 60, 960, 960},
+            {896, 60, 960, 960},   // x+w=1856 < 1920 (margin for alignment)
         };
         for (int i = 0; i < 3; i++) {
             // Clamp ROI to sensor bounds

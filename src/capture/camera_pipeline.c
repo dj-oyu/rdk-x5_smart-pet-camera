@@ -116,20 +116,7 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
   // Initialize low-light correction state (Phase 2)
   isp_lowlight_state_init(&pipeline->lowlight_state);
 
-  // Night camera: ISP tuning for IR (one-time settings)
-  if (camera_index == 1) {
-    // 3DNR: max temporal noise reduction for IR noise
-    hbn_isp_3dnr_attr_t tnr_attr = {0};
-    tnr_attr.mode = HBN_ISP_MODE_MANUAL;
-    tnr_attr.manual_attr.tnr_strength = 128;  // Max temporal NR
-    int nr_ret = hbn_isp_set_3dnr_attr(pipeline->vio.isp_handle, &tnr_attr);
-    if (nr_ret != 0) {
-      LOG_WARN(Pipeline_log_header, "Failed to set night 3DNR: %d", nr_ret);
-    } else {
-      LOG_INFO(Pipeline_log_header, "Night camera 3DNR set to 128 (max)");
-    }
-
-  }
+  // Night camera 3DNR is set after first frame in pipeline_run
 
   LOG_INFO(Pipeline_log_header, "Pipeline created successfully");
   return 0;
@@ -210,7 +197,27 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       continue;
     }
 
-    // Determine active state from CameraControl SHM (Phase 2)
+    // Night camera: set 3DNR after first frame (ISP needs to be running)
+    if (frame_count == 1 && pipeline->camera_index == 1) {
+      hbn_isp_3dnr_attr_t tnr_attr = {0};
+      tnr_attr.mode = HBN_ISP_MODE_MANUAL;
+      tnr_attr.manual_attr.tnr_strength = 128;
+      int nr_ret = hbn_isp_set_3dnr_attr(pipeline->vio.isp_handle, &tnr_attr);
+      if (nr_ret != 0) {
+        LOG_WARN(Pipeline_log_header, "Night 3DNR setup failed: %d (retrying at frame 30)", nr_ret);
+      } else {
+        LOG_INFO(Pipeline_log_header, "Night camera 3DNR set to 128 (max)");
+      }
+    }
+    // Retry 3DNR at frame 30 if first attempt failed
+    if (frame_count == 30 && pipeline->camera_index == 1) {
+      hbn_isp_3dnr_attr_t tnr_attr = {0};
+      tnr_attr.mode = HBN_ISP_MODE_MANUAL;
+      tnr_attr.manual_attr.tnr_strength = 128;
+      hbn_isp_set_3dnr_attr(pipeline->vio.isp_handle, &tnr_attr);
+    }
+
+    // Determine active state
     bool write_active = pipeline->active_camera &&
                         *pipeline->active_camera == pipeline->camera_index;
 
