@@ -335,6 +335,136 @@ sp_release_vio_module(vps);
 
 リファレンス: `/app/cdev_demo/vps/vps.c`, `/app/cdev_demo/decode2display/`, `/app/cdev_demo/rtsp2display/`
 
+## hbn_vflow パイプライン + HWエンコーダー連携
+
+### アーキテクチャ
+
+hbn_vflow はVIN→ISP→VSEをカーネル内でHW結合するが、**エンコーダー (`hb_mm_mc`) はvflowの外部**で動作する。
+
+```
+┌─── hbn_vflow (カーネルHW結合) ───┐
+│  VIN → ISP → VSE                 │
+└──────────────┬────────────────────┘
+               ↓ hbn_vnode_getframe() (ユーザー空間)
+               ↓ memcpy
+        hb_mm_mc encoder (H.264/H.265/JPEG)
+```
+
+エンコーダーはvnodeではないため `hbn_vflow_bind_vnode()` で結合**不可**。`hbn_vnode_getframe()` で取り出し → `memcpy` → エンコーダー入力バッファの流れ。
+
+リファレンス: `/app/multimedia_samples/sample_pipeline/single_pipe_vin_isp_vse_vpu/single_pipe_vin_isp_vse_vpu.c:518-617`
+
+### VSE 6チャンネル同時出力 (実測値)
+
+VSEは**最大6チャンネル同時出力**可能。各チャンネルに独立した解像度・ROIクロップを設定できる。
+
+**テスト結果 (5ch同時、1920x1080入力)**:
+
+| Ch | 出力 | ROI | 用途 |
+|----|------|-----|------|
+| 0 | 1920x1080 | 全体 | ストリーミング/H.264エンコード |
+| 1 | 640x360 | 全体 | YOLO day (ダウンスケール) |
+| 2 | 640x640 | 0,0 720x720 | YOLO night ROI0 (左上) |
+| 3 | 640x640 | 600,180 720x720 | YOLO night ROI1 (中央) |
+| 4 | 640x640 | 1200,0 720x720 | YOLO night ROI2 (右上) |
+
+**性能: 30フレーム × 5ch = 150出力 / 0.11s → 268.1 fps (3.73 ms/frame)**
+
+**Ch5 (VSE_UP_SCALE_4K)**: アップスケール専用チャンネルのため、ダウンスケール設定は失敗する。実用上は5チャンネルで十分。
+
+テストコード:
+
+```c
+#include "hbn_api.h"
+#include "vse_cfg.h"
+
+// ビルド: gcc -O2 -o test test.c -lcam -lvpf -lhbmem -lalog -lpthread -ldl
+
+hbn_vnode_handle_t vse_h;
+hbn_vnode_open(HB_VSE, 0, AUTO_ALLOC_ID, &vse_h);
+
+vse_attr_t va = {0};
+hbn_vnode_set_attr(vse_h, &va);
+
+vse_ichn_attr_t ic = { .width=1920, .height=1080, .fmt=FRM_FMT_NV12, .bit_width=8 };
+hbn_vnode_set_ichn_attr(vse_h, 0, &ic);
+
+// 全チャンネル共通初期化 (重要: ROIをフルフレームで初期化)
+vse_ochn_attr_t oa = {0};
+oa.chn_en = CAM_TRUE;
+oa.roi = (common_rect_t){0, 0, 1920, 1080};
+oa.fmt = FRM_FMT_NV12;  oa.bit_width = 8;
+
+// Ch2: 夜間ROI0 (720x720領域 → 640x640にリサイズ)
+oa.roi = (common_rect_t){0, 0, 720, 720};
+oa.target_w = 640;  oa.target_h = 640;
+hbn_vnode_set_ochn_attr(vse_h, 2, &oa);
+
+// vflow作成・開始後、sendframe/getframe で各チャンネルの出力を取得
+hbn_vnode_sendframe(vse_h, 0, &input_img);
+hbn_vnode_getframe(vse_h, 2, 2000, &roi0_output);  // Ch2: 640x640 ROI
+```
+
+### YOLO前処理のHWオフロード可能性
+
+| 前処理 | 現状 | HWオフロード | 評価 |
+|--------|------|-------------|------|
+| **夜間ROIクロップ** | Python `_crop_nv12_roi()` 1-2ms×3 | VSE 3チャンネル同時クロップ ~0ms | **推奨** |
+| **ダウンスケール** | VSE Ch1 (実装済み) | — | 済 |
+| **レターボックス (黒帯追加)** | Python `_letterbox_nv12()` ~1ms | VSEにpadding API **なし** | 不可 |
+| **CLAHE** | Python OpenCV ~2ms | nano2D/ISPに該当API なし | 不可 |
+
+**レターボックスについて**: VSEは「クロップ→リサイズ」は可能だが、出力フレームに黒帯を追加する機能はない。ただしVSE ROIで720x720を切り出して640x640にリサイズすれば、モデル入力サイズに直接合わせられるため、**レターボックス自体が不要になる**場合がある（正方形ROI → 正方形出力）。
+
+## YOLO検出: Python→C移行分析
+
+### 現行パイプライン性能
+
+| 処理 | 時間 | 備考 |
+|------|------|------|
+| ゼロコピーimport (hb_mem) | ~2ms | Python ctypes |
+| 前処理 (letterbox) | ~1ms | pre-allocatedバッファ再利用 |
+| BPU推論 (YOLO11n) | 8.9ms | HW (INT8) |
+| 後処理 (softmax+DFL+NMS) | 5-10ms | numpy + OpenCV |
+| **合計** | **16-20ms** | **50-60 FPS max** |
+
+### Python API vs C API オーバーヘッド
+
+| モデル | C API (hrt_model_exec) | Python API (hobot_dnn) | 差分 |
+|--------|----------------------|----------------------|------|
+| yolov8n | 7.7ms | 8.2ms | **+0.5ms** |
+| yolo11n | 8.9ms | 9.5ms | **+0.6ms** |
+| yolov13n | 45.5ms | 46.3ms | **+0.8ms** |
+
+### C移行のコスト対効果
+
+| 項目 | Python現状 | C移行時 | 差分 |
+|------|-----------|---------|------|
+| BPU推論 | 9.5ms | 8.9ms | -0.6ms |
+| 前処理 | ~1ms | ~0.5ms | -0.5ms |
+| 後処理 (softmax+DFL+NMS) | 5-10ms | 4-8ms | -1~2ms |
+| **合計** | **16-20ms** | **14-17ms** | **-2~3ms (10-15%)** |
+| 実装コスト | — | 1000行+、YOLO11n DFL新規実装 | 高 |
+
+**結論**: C移行で得られるのは2-3ms (10-15%) だが、YOLO11n/26のDFLデコーダー・後処理のC実装が必要で保守コストが高い。**非推奨**。
+
+### 推奨ロードマップ
+
+| 優先度 | 施策 | 効果 | 工数 |
+|--------|------|------|------|
+| **高** | VSE夜間ROI (3ch HWクロップ) | 3-6ms削減 | 3-5日 |
+| 中 | YOLO26本番投入 (DFL不要) | 後処理5ms→2ms | 3日 |
+| 低 | nano2D NV12→RGBA (SWフォールバック改善) | MJPEG SW時のみ | 2日 |
+| **非推奨** | Python→C全面移行 | 2-3ms | 2-3週間 |
+
+### C YOLO参考実装
+
+- BPUラッパー: `/app/multimedia_samples/sample_pipeline/common/bpu_wraper.h` (スレッド分離、キュー管理)
+- YOLOv5後処理: `/app/multimedia_samples/sample_pipeline/common/yolov5_post_process.cpp` (NMS、anchor-based)
+- マルチパイプ統合例: `/app/multimedia_samples/sample_pipeline/multi_pipe_crop_and_stitch/` (VSE+BPU+エンコーダー)
+
+**注**: YOLO11n/YOLO26のDFLデコーダーのC実装は存在しない。移植する場合は `yolo_detector.py:1174-1183` の `_postprocess_legacy()` を参考に実装が必要。
+
 ## HW OSD (オンスクリーンディスプレイ)
 
 ISP/VSEパイプライン上でHWオーバーレイを描画するAPI。
