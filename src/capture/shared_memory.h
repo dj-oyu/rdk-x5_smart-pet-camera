@@ -72,7 +72,7 @@ typedef struct {
 
 typedef struct {
     sem_t new_frame_sem;
-    sem_t consumed_sem;
+    sem_t consumed_sem;     // Initially 0: encoder skips until Go posts first consumed
     H265ZeroCopyFrame frame;
 } H265ZeroCopyBuffer;
 

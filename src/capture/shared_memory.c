@@ -169,7 +169,7 @@ H265ZeroCopyBuffer* shm_h265_zc_create(const char* name) {
         name, sizeof(H265ZeroCopyBuffer), true, &created_new);
     if (shm && created_new) {
         sem_init(&shm->new_frame_sem, 1, 0);
-        sem_init(&shm->consumed_sem, 1, 1);
+        sem_init(&shm->consumed_sem, 1, 0);  // 0: skip until Go signals ready
         shm->frame.version = 0;
         shm->frame.consumed = 1;
         LOG_INFO("SharedMemory", "H.265 zero-copy SHM created: %s (%zu bytes)",
