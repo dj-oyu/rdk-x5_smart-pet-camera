@@ -136,6 +136,8 @@ type Reader struct {
 	shm         *C.H265ZeroCopyBuffer
 	shmName     string
 	lastVersion uint32
+	prevHandle  C.h265_import_handle_t
+	hasPrev     bool
 }
 
 // Version returns the current SHM frame version (atomic read)
@@ -217,6 +219,10 @@ func NewReader(shmName string) (*Reader, error) {
 
 // Close closes the reader
 func (r *Reader) Close() error {
+	if r.hasPrev {
+		C.import_h265_close(&r.prevHandle)
+		r.hasPrev = false
+	}
 	if r.shm != nil {
 		C.close_h265_zc(r.shm)
 		r.shm = nil
@@ -224,25 +230,29 @@ func (r *Reader) Close() error {
 	return nil
 }
 
-// ReadLatest reads the latest H.265 frame.
-// Import VPU buffer, copy once to Go heap, release immediately.
-// Previous approach had 2 copies (C buf → Go buf); now 1 (VPU → Go).
+// ReadLatest reads the latest H.265 frame via zero-copy.
+// Data points directly to VPU physical memory. Valid until next ReadLatest.
+// Caller must ensure all synchronous consumers (SendFrame) finish before next call.
 func (r *Reader) ReadLatest() (*types.VideoFrame, error) {
 	if r.shm == nil {
 		return nil, fmt.Errorf("shared memory not open")
 	}
 
-	// Read frame metadata to local copy (avoid torn reads)
 	var cFrame C.H265ZeroCopyFrame
 	if C.read_h265_frame(r.shm, &cFrame) != 0 {
 		return nil, nil
 	}
-
 	if cFrame.data_size == 0 {
 		return nil, nil
 	}
 
-	// Import VPU buffer (maps physical memory to virt_addr)
+	// Release previous VPU buffer (SendFrame already consumed it synchronously)
+	if r.hasPrev {
+		C.import_h265_close(&r.prevHandle)
+		r.hasPrev = false
+	}
+
+	// Import VPU buffer — zero-copy
 	var handle C.h265_import_handle_t
 	ret := C.import_h265_open(
 		(*C.uint8_t)(unsafe.Pointer(&cFrame.hb_mem_buf_data[0])),
@@ -253,14 +263,9 @@ func (r *Reader) ReadLatest() (*types.VideoFrame, error) {
 		return nil, fmt.Errorf("import_h265_open failed: %d", ret)
 	}
 
-	// Single copy: VPU memory → Go heap (safe for async consumers)
-	size := int(handle.data_size)
-	data := make([]byte, size)
-	src := unsafe.Slice((*byte)(handle.virt_addr), size)
-	copy(data, src)
-
-	// Release VPU mapping immediately (data is now in Go heap)
-	C.import_h265_close(&handle)
+	data := unsafe.Slice((*byte)(handle.virt_addr), handle.data_size)
+	r.prevHandle = handle
+	r.hasPrev = true
 
 	timestamp := time.Unix(
 		int64(cFrame.timestamp.tv_sec),
@@ -268,11 +273,11 @@ func (r *Reader) ReadLatest() (*types.VideoFrame, error) {
 	)
 
 	return &types.VideoFrame{
-		Data:      data,
-		Timestamp: timestamp,
-		FrameNumber:  uint64(cFrame.frame_number),
-		Width:     int(cFrame.width),
-		Height:    int(cFrame.height),
-		IsIDR:     false,
+		Data:        data,
+		Timestamp:   timestamp,
+		FrameNumber: uint64(cFrame.frame_number),
+		Width:       int(cFrame.width),
+		Height:      int(cFrame.height),
+		IsIDR:       false,
 	}, nil
 }
