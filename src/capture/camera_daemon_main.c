@@ -42,6 +42,14 @@ static void signal_handler(int signum) {
     g_running = false;
 }
 
+// Pipeline thread wrapper
+typedef struct { camera_pipeline_t *pipeline; volatile bool *running; } pipeline_run_arg_t;
+static void *pipeline_thread_fn(void *arg) {
+    pipeline_run_arg_t *a = (pipeline_run_arg_t *)arg;
+    pipeline_run(a->pipeline, a->running);
+    return NULL;
+}
+
 // Switcher thread: reads ISP brightness directly, switches active camera
 typedef struct {
     CameraSwitchController switcher;
@@ -160,7 +168,8 @@ int main(int argc, char *argv[]) {
         int ret = pipeline_create(&g_pipelines[cam], cam,
                                   1920, 1080, // sensor
                                   output_width, output_height,
-                                  fps, bitrate);
+                                  fps, bitrate,
+                                  &g_active_camera);
         if (ret != 0) {
             LOG_ERROR("Main", "Failed to create pipeline for camera %d: %d", cam, ret);
             // Continue with remaining cameras
@@ -206,35 +215,21 @@ int main(int argc, char *argv[]) {
     // Both pipelines run their capture loops, but only active one encodes
     // We use pipeline_run which checks write_active internally
 
-    // Run all pipelines in separate threads
-    typedef struct { int cam_idx; } pipeline_run_arg_t;
+    // Run pipelines in threads
     pthread_t pipeline_tids[2] = {0};
+    pipeline_run_arg_t pipeline_args[2] = {0};
 
     for (int i = 0; i < num_cameras; i++) {
         int cam = camera_indices[i];
-        // pipeline_run blocks, so run in threads
-        // Pass active_camera pointer so pipeline can check it
-        // For now, just run them and they check g_active_camera
+        pipeline_args[i].pipeline = &g_pipelines[cam];
+        pipeline_args[i].running = &g_running;
+        pthread_create(&pipeline_tids[i], NULL, pipeline_thread_fn, &pipeline_args[i]);
+        LOG_INFO("Main", "Pipeline thread started for camera %d", cam);
     }
 
-    // Simpler approach: run pipelines sequentially in threads
-    // pipeline_run already checks CameraControl SHM for active state
-    // We need to make it check g_active_camera instead
-
-    // For now, run first camera in main thread (blocking)
-    // TODO: proper multi-pipeline threading
-    if (num_cameras == 1) {
-        pipeline_run(&g_pipelines[camera_indices[0]], &g_running);
-    } else {
-        // Both pipelines need to run simultaneously
-        // pipeline_run is blocking, so we need threads
-        // But pipeline_run currently checks CameraControl SHM...
-        // This needs camera_pipeline.c refactoring to use g_active_camera
-
-        // Temporary: just run DAY pipeline in main thread
-        // Full integration requires pipeline_run to accept active_camera pointer
-        LOG_INFO("Main", "Running DAY pipeline (full integration pending)");
-        pipeline_run(&g_pipelines[0], &g_running);
+    // Wait for all pipeline threads
+    for (int i = 0; i < num_cameras; i++) {
+        pthread_join(pipeline_tids[i], NULL);
     }
 
     // Cleanup

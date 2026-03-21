@@ -19,7 +19,8 @@ char Pipeline_log_header[16];
 
 int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
                     int sensor_width, int sensor_height, int output_width,
-                    int output_height, int fps, int bitrate) {
+                    int output_height, int fps, int bitrate,
+                    volatile int *active_camera) {
   int ret = 0;
 
   snprintf(Pipeline_log_header, sizeof(Pipeline_log_header), "Pipeline %d",
@@ -42,26 +43,8 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
            "Creating pipeline for Camera %d (%dx%d@%dfps, %dkbps)",
            camera_index, output_width, output_height, fps, bitrate / 1000);
 
-  // Open CameraControl shared memory (Phase 2: SHM-based activation)
-  // Retry for up to 5 seconds since switcher_daemon may not have created it yet
-  for (int i = 0; i < 50; i++) {
-    pipeline->control_shm = shm_control_open();
-    if (pipeline->control_shm) {
-      break;
-    }
-    if (i == 0) {
-      LOG_INFO(Pipeline_log_header, "Waiting for CameraControl SHM (%s)...",
-               SHM_NAME_CONTROL);
-    }
-    usleep(100000); // 100ms
-  }
-  if (!pipeline->control_shm) {
-    LOG_WARN(Pipeline_log_header,
-             "CameraControl SHM not available, defaulting to inactive");
-  } else {
-    LOG_INFO(Pipeline_log_header, "CameraControl SHM opened: %s",
-             SHM_NAME_CONTROL);
-  }
+  // Active camera pointer (shared variable in same process, no SHM)
+  pipeline->active_camera = active_camera;
 
   // Initialize memory manager
   ret = hb_mem_module_open();
@@ -95,15 +78,7 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
     goto error_cleanup;
   }
 
-  // Lightweight brightness shared memory (updated every brightness check)
-  pipeline->shm_brightness = shm_brightness_create();
-  if (!pipeline->shm_brightness) {
-    LOG_ERROR(Pipeline_log_header,
-              "Failed to open/create brightness shared memory: %s",
-              SHM_NAME_BRIGHTNESS);
-    ret = -1;
-    goto error_cleanup;
-  }
+  // Brightness: read directly from ISP by switcher thread (no SHM needed)
 
   // Zero-copy YOLO input (share_id based, no memcpy)
   // Phase 2: per-camera ZeroCopy SHM (zc_0 for DAY, zc_1 for NIGHT)
@@ -224,8 +199,8 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       // Error -43 (HBN_STATUS_NODE_DEQUE_ERROR) is transient during camera
       // switches - the VIO buffer isn't ready yet. Use DEBUG level to avoid log
       // spam. Non-active cameras may also fail to get frames.
-      bool is_active = pipeline->control_shm &&
-                       shm_control_get_active(pipeline->control_shm) == pipeline->camera_index;
+      bool is_active = pipeline->active_camera &&
+                       *pipeline->active_camera == pipeline->camera_index;
       if (is_active && ret != -43) {
         LOG_WARN(Pipeline_log_header, "vio_get_frame failed: %d", ret);
       } else {
@@ -236,8 +211,8 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
     }
 
     // Determine active state from CameraControl SHM (Phase 2)
-    bool write_active = pipeline->control_shm &&
-                        shm_control_get_active(pipeline->control_shm) == pipeline->camera_index;
+    bool write_active = pipeline->active_camera &&
+                        *pipeline->active_camera == pipeline->camera_index;
 
     // Get ISP brightness statistics with throttling (using power-of-2 masks for fast bitwise AND)
     // - DAY camera active: every 8 frames (~3.75Hz) for fast DAY→NIGHT detection
@@ -296,31 +271,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       clock_gettime(CLOCK_REALTIME, &frame_timestamp);
     }
 
-    // Phase 2: Always update brightness in per-camera ZeroCopy SHM
-    // Ensures switcher can read brightness from any camera's ZeroCopy (Phase 3)
-    if (is_brightness_frame && brightness_result.valid &&
-        pipeline->shm_yolo_zerocopy) {
-      pipeline->shm_yolo_zerocopy->frame.brightness_avg =
-          brightness_result.brightness_avg;
-    }
-
-    // Write brightness to lightweight shared memory
-    // DAY camera (index 0) always writes - used for switching decisions
-    // Frequency: active=~3.75Hz (8 frames), inactive=~0.47Hz (64 frames, ~2.1 sec)
-    if (is_day_camera && is_brightness_frame && brightness_result.valid) {
-      struct timespec now_ts;
-      clock_gettime(CLOCK_REALTIME, &now_ts);
-      CameraBrightness cam_brightness = {
-          .frame_number = frame_count,
-          .timestamp = now_ts,
-          .brightness_avg = brightness_result.brightness_avg,
-          .brightness_lux = brightness_result.brightness_lux,
-          .brightness_zone = (uint8_t)brightness_result.zone,
-          .correction_applied = pipeline->lowlight_state.correction_active ? 1 : 0,
-      };
-      shm_brightness_write(pipeline->shm_brightness, pipeline->camera_index,
-                           &cam_brightness);
-    }
+    // Brightness: switcher thread reads ISP directly (no SHM write needed)
 
     // Push VSE Ch0 frame to encoder thread (zero-copy via phys_addr)
     // On success, encoder thread owns the VSE buffer and will release it.
@@ -644,21 +595,9 @@ void pipeline_destroy(camera_pipeline_t *pipeline) {
   // Destroy VIO
   vio_destroy(&pipeline->vio);
 
-  // Close CameraControl SHM (do not destroy - owned by camera_switcher_daemon)
-  if (pipeline->control_shm) {
-    shm_control_close(pipeline->control_shm);
-    pipeline->control_shm = NULL;
-  }
-
-  // Close shared memory (do not destroy - owned by camera_switcher_daemon)
   if (pipeline->shm_h265_zc) {
     shm_h265_zc_close(pipeline->shm_h265_zc);
     pipeline->shm_h265_zc = NULL;
-  }
-
-  if (pipeline->shm_brightness) {
-    shm_brightness_close(pipeline->shm_brightness);
-    pipeline->shm_brightness = NULL;
   }
 
   if (pipeline->shm_yolo_zerocopy) {
