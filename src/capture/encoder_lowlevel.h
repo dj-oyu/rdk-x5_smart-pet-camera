@@ -81,12 +81,37 @@ typedef struct {
     uint32_t enc_pic_byte;    // Encoded frame size (bytes)
 } encoder_stats_t;
 
-int encoder_encode_frame_vaddr(encoder_context_t *ctx,
-                               const uint8_t *nv12_y, const uint8_t *nv12_uv,
-                               size_t y_size, size_t uv_size,
-                               uint8_t *h265_data_out, size_t *h265_size_out,
-                               size_t max_size, int timeout_ms,
-                               encoder_stats_t *stats_out);
+/**
+ * Encode result — holds VPU output buffer for zero-copy sharing
+ */
+typedef struct {
+    int32_t share_id;          // hb_mem share_id for Go import
+    uint8_t *vir_ptr;          // Virtual address of H.265 bitstream
+    uint64_t phy_ptr;          // Physical address
+    uint32_t data_size;        // Actual H.265 frame size (bytes)
+    uint32_t buf_size;         // Total buffer size
+    media_codec_buffer_t output_buffer;  // VPU buffer (for release)
+    encoder_stats_t stats;     // VPU encoder statistics
+} encoder_output_t;
+
+/**
+ * Encode one NV12 frame to H.265 (zero-copy output)
+ *
+ * Encodes the frame and returns the VPU output buffer info.
+ * Caller MUST call encoder_release_output() after consumer is done.
+ */
+int encoder_encode_frame_zerocopy(encoder_context_t *ctx,
+                                  const uint8_t *nv12_y, const uint8_t *nv12_uv,
+                                  size_t y_size, size_t uv_size,
+                                  int timeout_ms,
+                                  encoder_output_t *out);
+
+/**
+ * Release VPU output buffer after consumer has read the data
+ */
+int encoder_release_output(encoder_context_t *ctx,
+                           encoder_output_t *out,
+                           int timeout_ms);
 
 /**
  * Stop encoder

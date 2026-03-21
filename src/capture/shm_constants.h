@@ -25,6 +25,7 @@
 // Per-camera zero-copy shared memory
 #define SHM_NAME_ZEROCOPY_DAY "/pet_camera_zc_0"          // DAY camera zero-copy
 #define SHM_NAME_ZEROCOPY_NIGHT "/pet_camera_zc_1"        // NIGHT camera zero-copy
+#define SHM_NAME_H265_ZC "/pet_camera_h265_zc"            // H.265 stream zero-copy
 
 // Buffer sizes
 #define RING_BUFFER_SIZE 6                                // 200ms buffer at 30fps

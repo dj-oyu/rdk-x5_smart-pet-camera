@@ -86,12 +86,11 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
     goto error_cleanup;
   }
 
-  // Active camera H.264 (written only when active)
-  pipeline->shm_active_h264 = shm_frame_buffer_create_named(SHM_NAME_STREAM);
-  if (!pipeline->shm_active_h264) {
+  // H.265 zero-copy SHM (share_id based, no bitstream memcpy)
+  pipeline->shm_h265_zc = shm_h265_zc_create(SHM_NAME_H265_ZC);
+  if (!pipeline->shm_h265_zc) {
     LOG_ERROR(Pipeline_log_header,
-              "Failed to open/create active H.264 shared memory: %s",
-              SHM_NAME_STREAM);
+              "Failed to create H.265 zero-copy SHM: %s", SHM_NAME_H265_ZC);
     ret = -1;
     goto error_cleanup;
   }
@@ -135,7 +134,7 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
 
   // Create encoder thread (writes to active H.264 shm)
   ret = encoder_thread_create(&pipeline->encoder_thread, &pipeline->encoder,
-                              pipeline->shm_active_h264, SHM_NAME_STREAM,
+                              pipeline->shm_h265_zc,
                               output_width, output_height,
                               pipeline->vio.vse_handle);
   if (ret != 0) {
@@ -652,9 +651,9 @@ void pipeline_destroy(camera_pipeline_t *pipeline) {
   }
 
   // Close shared memory (do not destroy - owned by camera_switcher_daemon)
-  if (pipeline->shm_active_h264) {
-    shm_frame_buffer_close(pipeline->shm_active_h264);
-    pipeline->shm_active_h264 = NULL;
+  if (pipeline->shm_h265_zc) {
+    shm_h265_zc_close(pipeline->shm_h265_zc);
+    pipeline->shm_h265_zc = NULL;
   }
 
   if (pipeline->shm_brightness) {

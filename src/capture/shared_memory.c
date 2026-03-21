@@ -615,6 +615,61 @@ void shm_zerocopy_mark_consumed(ZeroCopyFrameBuffer* shm) {
 }
 
 // ============================================================================
+// H.265 Zero-Copy Shared Memory Functions
+// ============================================================================
+
+H265ZeroCopyBuffer* shm_h265_zc_create(const char* name) {
+    bool created_new = false;
+    H265ZeroCopyBuffer* shm = (H265ZeroCopyBuffer*)shm_create_or_open_ex(
+        name, sizeof(H265ZeroCopyBuffer), true, &created_new);
+    if (shm && created_new) {
+        sem_init(&shm->new_frame_sem, 1, 0);
+        sem_init(&shm->consumed_sem, 1, 1);
+        shm->frame.version = 0;
+        shm->frame.consumed = 1;
+        LOG_INFO("SharedMemory", "H.265 zero-copy SHM created: %s (%zu bytes)",
+                 name, sizeof(H265ZeroCopyBuffer));
+    }
+    return shm;
+}
+
+H265ZeroCopyBuffer* shm_h265_zc_open(const char* name) {
+    return (H265ZeroCopyBuffer*)shm_create_or_open(
+        name, sizeof(H265ZeroCopyBuffer), false);
+}
+
+void shm_h265_zc_close(H265ZeroCopyBuffer* shm) {
+    if (shm) munmap(shm, sizeof(H265ZeroCopyBuffer));
+}
+
+void shm_h265_zc_destroy(H265ZeroCopyBuffer* shm, const char* name) {
+    if (shm) {
+        sem_destroy(&shm->new_frame_sem);
+        sem_destroy(&shm->consumed_sem);
+        munmap(shm, sizeof(H265ZeroCopyBuffer));
+        shm_unlink(name);
+    }
+}
+
+int shm_h265_zc_write(H265ZeroCopyBuffer* shm, const H265ZeroCopyFrame* frame) {
+    if (!shm || !frame) return -1;
+    if (sem_trywait(&shm->consumed_sem) != 0) return -1; // consumer busy
+
+    uint32_t ver = __atomic_load_n(&shm->frame.version, __ATOMIC_ACQUIRE);
+    memcpy(&shm->frame, frame, sizeof(H265ZeroCopyFrame));
+    __atomic_store_n(&shm->frame.consumed, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&shm->frame.version, ver + 1, __ATOMIC_RELEASE);
+    sem_post(&shm->new_frame_sem);
+    return 0;
+}
+
+void shm_h265_zc_mark_consumed(H265ZeroCopyBuffer* shm) {
+    if (!shm) return;
+    __atomic_store_n(&shm->frame.consumed, 1, __ATOMIC_RELEASE);
+    sem_post(&shm->consumed_sem);
+}
+
+// ============================================================================
 // Camera Control Shared Memory Functions
 // ============================================================================
 

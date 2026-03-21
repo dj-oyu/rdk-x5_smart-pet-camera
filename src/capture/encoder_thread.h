@@ -41,9 +41,8 @@ typedef struct {
   // Encoder
   encoder_context_t *encoder;
 
-  // Output
-  SharedFrameBuffer *shm_h264;
-  char shm_h264_name[64];
+  // Output (zero-copy: share_id via SHM, no bitstream memcpy)
+  H265ZeroCopyBuffer *shm_h265_zc;
 
   // Configuration
   int output_width;
@@ -82,9 +81,9 @@ typedef struct {
  *   0 on success, negative error code on failure
  */
 int encoder_thread_create(encoder_thread_t *ctx, encoder_context_t *encoder,
-                          SharedFrameBuffer *shm_h264,
-                          const char *shm_h264_name, int output_width,
-                          int output_height, hbn_vnode_handle_t vse_handle);
+                          H265ZeroCopyBuffer *shm_h265_zc,
+                          int output_width, int output_height,
+                          hbn_vnode_handle_t vse_handle);
 
 /**
  * Start encoder thread

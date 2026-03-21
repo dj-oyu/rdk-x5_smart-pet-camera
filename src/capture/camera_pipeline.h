@@ -35,7 +35,7 @@ typedef struct {
     encoder_thread_t encoder_thread;
 
     // Shared memory output
-    SharedFrameBuffer *shm_active_h264;   // Active camera H.264 (only when active)
+    H265ZeroCopyBuffer *shm_h265_zc;      // H.265 zero-copy (share_id based)
     SharedBrightnessData *shm_brightness; // Lightweight brightness data (always updated)
     SharedFrameBuffer *shm_mjpeg_frame;   // MJPEG 640x480 NV12 input (VSE Ch2, always active, writable)
 
