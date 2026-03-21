@@ -1084,78 +1084,30 @@ a { color: inherit; }
     backdrop-filter: blur(4px);
 }
 
-/* Comic Gallery — horizontal scroll with peek */
-.comic-gallery {
-    display: flex;
-    overflow-x: auto;
-    gap: 10px;
-    padding-bottom: 8px;
-    scroll-snap-type: x mandatory;
-    -webkit-overflow-scrolling: touch;
-    /* Let cards peek out the right edge */
-    margin-right: -16px;
-    padding-right: 16px;
-}
-.comic-gallery::-webkit-scrollbar {
-    height: 6px;
-}
-.comic-gallery::-webkit-scrollbar-track {
-    background: rgba(255, 255, 255, 0.04);
-    border-radius: 3px;
-}
-.comic-gallery::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.15);
-    border-radius: 3px;
-}
-.comic-gallery::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.25);
-}
-.comic-gallery .load-sentinel {
-    flex-shrink: 0;
-    width: 1px;
-}
-.comic-card {
-    flex-shrink: 0;
-    width: 200px;
-    border-radius: 8px;
-    overflow: hidden;
-    position: relative;
-    background: rgba(0, 0, 0, 0.28);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    cursor: pointer;
-    transition: transform 0.15s ease, box-shadow 0.15s ease;
-    scroll-snap-align: start;
-}
-.comic-card:hover {
-    transform: scale(1.02);
-    box-shadow: 0 8px 24px rgba(110, 231, 255, 0.2);
-}
-.comic-card img {
+/* Album iframe */
+.album-iframe {
     width: 100%;
-    height: auto;
-    display: block;
+    height: 200px;
+    border: none;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.28);
 }
-.comic-card-footer {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 8px 10px;
-    background: rgba(0, 0, 0, 0.4);
-}
-.comic-card-date {
-    font-size: 12px;
+.album-offline {
+    padding: 20px 0;
+    text-align: center;
     color: var(--text-muted);
+    font-size: 14px;
 }
-.comic-card-delete {
-    width: 28px;
-    height: 28px;
-    border-radius: 6px;
-    font-size: 18px;
-    line-height: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
+.album-link {
+    font-size: 14px;
+    color: var(--text-muted);
+    text-decoration: none;
+    opacity: 0.6;
+    transition: opacity 0.15s;
+}
+.album-link:hover {
+    opacity: 1;
+    color: var(--accent);
 }
 
 @media (max-width: 960px) {
@@ -1238,9 +1190,6 @@ a { color: inherit; }
     .sidebar {
         min-width: 0;
     }
-    .comic-card {
-        width: 160px;
-    }
 }
 
 @media (max-width: 480px) {
@@ -1264,8 +1213,5 @@ a { color: inherit; }
     .record-btn::before, .btn-recordings::before {
         width: 32px;
         height: 32px;
-    }
-    .comic-card {
-        width: 140px;
     }
 }

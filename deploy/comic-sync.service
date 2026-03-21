@@ -1,0 +1,14 @@
+[Unit]
+Description=Comic JPEG sync to AI Pyramid Pro
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/smart-pet-camera/scripts/sync-comics.sh
+Restart=always
+RestartSec=5
+Environment=RECORDING_PATH=/opt/smart-pet-camera/recordings
+
+[Install]
+WantedBy=multi-user.target
