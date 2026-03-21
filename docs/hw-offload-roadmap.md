@@ -164,9 +164,10 @@ result = self.model.forward(prepared)
 
 各ステップで動作検証し、問題があればCPUフォールバックに戻せる設計。
 
-#### 2-2a. nano2Dレターボックス統合
+#### 2-2a. nano2Dレターボックス統合 ✅
 
 **対象**: 新規 `src/capture/n2d_letterbox.c`
+**実装済み**: n2d_letterbox_create/process/destroy API。n2d_wrap ゼロコピー入力。
 
 VSE出力 → nano2Dレターボックス → BPU入力バッファ
 
@@ -185,11 +186,10 @@ n2d_commit();
 - [ ] YOLO検出精度に差がないことを確認 (同一フレームで比較)
 - [ ] 30fps持続動作の安定性テスト (1時間)
 
-#### 2-2b. VSE夜間ROI HWクロップ
+#### 2-2b. VSE夜間ROI HWクロップ ✅
 
-**対象**: `src/capture/camera_pipeline.c` (VSE設定), `src/detector/yolo_detector_daemon.py` (ROI取得)
-
-現行のPython `_crop_nv12_roi()` を VSE Ch2-4 の HWクロップに置き換え。
+**対象**: `src/capture/vio_lowlevel.c` (VSE Ch3-5設定)
+**実装済み**: VSE Ch3-5 で 1920x1080 → 640x640 ROI HWクロップ。vio_get_frame_roi/release API追加。
 
 ```
 Before: Python → memcpy crop (1-2ms × 3) → letterbox → BPU
@@ -203,9 +203,11 @@ After:  VSE Ch2-4 HW crop+resize (~0ms) → nano2D letterbox → BPU
 - [ ] ラウンドロビン切り替えの動作確認
 - [ ] モーション検出との連携確認
 
-#### 2-2c. H.265エンコーダーの物理アドレス入力
+#### 2-2c. H.265エンコーダーのmemcpy削減 ✅
 
 **対象**: `src/capture/encoder_lowlevel.c`, `src/capture/encoder_thread.c`
+**実装済み**: VSE virt_addr → VPU 直接memcpy (pool buffer経由の2回memcpyを1回に削減)。
+VPU phys_addr直接入力はVPU APIの制約で不可のため、memcpy 1回が最適解。
 
 VSE Ch0 出力の `phys_addr` を直接エンコーダー入力に使用し、memcpyを排除。
 
