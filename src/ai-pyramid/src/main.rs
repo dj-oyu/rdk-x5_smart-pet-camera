@@ -3,6 +3,7 @@ use pet_album::db::PhotoStore;
 use pet_album::ingest::watcher::PhotoWatcher;
 use pet_album::server;
 use pet_album::vlm::VlmConfig;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -13,6 +14,12 @@ use tracing::info;
 struct Args {
     #[arg(long, default_value = ":8090")]
     addr: String,
+
+    #[arg(long)]
+    tls_cert: Option<PathBuf>,
+
+    #[arg(long)]
+    tls_key: Option<PathBuf>,
 
     #[arg(long, default_value = "data/photos")]
     photos_dir: PathBuf,
@@ -63,16 +70,30 @@ async fn main() {
     };
     let app = server::router(app_state);
 
-    let bind_addr = args.addr.strip_prefix(':').map_or_else(
-        || args.addr.clone(),
-        |port| format!("0.0.0.0:{port}"),
-    );
+    let bind_addr: SocketAddr = args
+        .addr
+        .strip_prefix(':')
+        .map_or_else(|| args.addr.clone(), |port| format!("0.0.0.0:{port}"))
+        .parse()
+        .expect("invalid bind address");
 
-    info!("Listening on {bind_addr}");
-
-    let listener = tokio::net::TcpListener::bind(&bind_addr)
-        .await
-        .expect("failed to bind");
-
-    axum::serve(listener, app).await.expect("server error");
+    match (args.tls_cert, args.tls_key) {
+        (Some(cert), Some(key)) => {
+            info!("HTTPS on {bind_addr} (cert: {}, key: {})", cert.display(), key.display());
+            let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
+                .await
+                .expect("failed to load TLS cert/key");
+            axum_server::bind_rustls(bind_addr, tls_config)
+                .serve(app.into_make_service())
+                .await
+                .expect("HTTPS server error");
+        }
+        _ => {
+            info!("HTTP on {bind_addr} (no TLS)");
+            let listener = tokio::net::TcpListener::bind(bind_addr)
+                .await
+                .expect("failed to bind");
+            axum::serve(listener, app).await.expect("server error");
+        }
+    }
 }

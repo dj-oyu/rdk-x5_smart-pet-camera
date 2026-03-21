@@ -101,14 +101,14 @@ impl PhotoWatcher {
                             Ok(m) => m,
                             Err(e) => { warn!("Skipping {name}: {e}"); continue; }
                         };
-                        let s = store.lock().unwrap();
-                        match s.insert(&name, meta.captured_at, meta.pet_id.as_deref()) {
-                            Ok(_) => {
-                                info!("New photo: {name}");
-                                let _ = tx.blocking_send(name);
+                        {
+                            let s = store.lock().unwrap();
+                            match s.insert(&name, meta.captured_at, meta.pet_id.as_deref()) {
+                                Ok(_) => info!("New photo: {name}"),
+                                Err(e) => { warn!("DB insert {name}: {e}"); continue; }
                             }
-                            Err(e) => warn!("DB insert {name}: {e}"),
                         }
+                        let _ = tx.send(name).await;
                     }
                 }
             });
