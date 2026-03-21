@@ -17,6 +17,14 @@ package shm
 
 #include "shm_constants.h"
 
+static int g_hb_mem_initialized = 0;
+static void ensure_hb_mem_init(void) {
+    if (!g_hb_mem_initialized) {
+        hb_mem_module_open();
+        g_hb_mem_initialized = 1;
+    }
+}
+
 #ifndef EINVAL
 #define EINVAL 22
 #endif
@@ -87,6 +95,7 @@ int read_h265_frame(H265ZeroCopyBuffer* shm, H265ZeroCopyFrame* out) {
 int import_h265_data(int32_t share_id, uint32_t data_size,
                      uint8_t* dst, uint32_t dst_size) {
     if (share_id < 0 || data_size == 0 || !dst || data_size > dst_size) return -1;
+    ensure_hb_mem_init();
 
     // Set up import request with share_id
     hb_mem_common_buf_t in_buf = {0};
