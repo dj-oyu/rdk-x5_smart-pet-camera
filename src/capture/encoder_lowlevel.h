@@ -1,8 +1,8 @@
 /*
- * encoder_lowlevel.h - Low-level H.264 Encoder Abstraction
+ * encoder_lowlevel.h - Low-level H.265 Encoder Abstraction
  *
- * Hardware Abstraction Layer for D-Robotics H.264 Encoder
- * Manages multimedia codec API (hb_mm_mc_*) for H.264 encoding
+ * Hardware Abstraction Layer for D-Robotics H.265 Encoder
+ * Manages multimedia codec API (hb_mm_mc_*) for H.265 encoding
  */
 
 #ifndef ENCODER_LOWLEVEL_H
@@ -13,7 +13,7 @@
 #include "hb_media_codec.h"
 
 /**
- * Encoder context - encapsulates H.264 encoder state
+ * Encoder context - encapsulates H.265 encoder state
  */
 typedef struct {
     media_codec_context_t codec_ctx;
@@ -27,9 +27,9 @@ typedef struct {
 } encoder_context_t;
 
 /**
- * Create and initialize H.264 encoder
+ * Create and initialize H.265 encoder
  *
- * Creates an H.264 encoder instance with CBR rate control.
+ * Creates an H.265 encoder instance with CBR rate control.
  * Configures GOP, buffer counts, and rate control parameters.
  *
  * Args:
@@ -45,7 +45,7 @@ typedef struct {
  *
  * Note:
  *   - Automatically starts the encoder (ready to encode immediately)
- *   - Uses H.264 CBR mode with GOP preset 1
+ *   - Uses H.265 CBR mode with GOP preset 1
  *   - Buffer counts are set to 3 (required for X5 hardware)
  *   - HARDWARE LIMIT: Bitrate must be <= 700000 bps (700 kbps)
  *   - Exceeding this limit will cause encoder initialization to fail
@@ -54,17 +54,17 @@ int encoder_create(encoder_context_t *ctx, int camera_index,
                    int width, int height, int fps, int bitrate);
 
 /**
- * Encode one NV12 frame to H.264
+ * Encode one NV12 frame to H.265
  *
- * Takes NV12 frame data and produces H.264 bitstream.
+ * Takes NV12 frame data and produces H.265 bitstream.
  * Blocks until encoding is complete or timeout occurs.
  *
  * Args:
  *   ctx: Encoder context
  *   nv12_y: Pointer to Y plane data (width * height bytes)
  *   nv12_uv: Pointer to UV plane data (width * height / 2 bytes)
- *   h264_data_out: Output buffer for H.264 bitstream
- *   h264_size_out: Output size of H.264 data (bytes)
+ *   h264_data_out: Output buffer for H.265 bitstream
+ *   h264_size_out: Output size of H.265 data (bytes)
  *   max_size: Maximum size of output buffer
  *   timeout_ms: Timeout in milliseconds
  *

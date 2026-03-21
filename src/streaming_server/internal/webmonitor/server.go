@@ -429,9 +429,9 @@ func (s *Server) handleRecordingDownload(w http.ResponseWriter, r *http.Request)
 	if strings.HasSuffix(filename, ".mp4") {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
 		w.Header().Set("Content-Type", "video/mp4")
-	} else if strings.HasSuffix(filename, ".h264") {
+	} else if strings.HasSuffix(filename, ".hevc") || strings.HasSuffix(filename, ".h264") {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
-		w.Header().Set("Content-Type", "video/h264")
+		w.Header().Set("Content-Type", "video/hevc")
 	} else if strings.HasSuffix(filename, ".jpg") {
 		w.Header().Set("Content-Type", "image/jpeg")
 		// No Content-Disposition = display in browser

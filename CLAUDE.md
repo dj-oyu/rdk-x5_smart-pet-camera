@@ -37,4 +37,5 @@
 - [ ] Process auto-recovery / storage cleanup
 - [ ] Multi-camera fusion mode
 - [ ] AI Pyramid: HTTPS, album web app, VLM pipeline
-- [ ] HW encoder / VPU utilization → `hw-offload-roadmap.md` に計画化済み
+- [x] H.265移行 (Phase 1) → エンコーダー、WebRTC (pion v4)、録画パイプライン完了
+- [ ] HW offload Phase 2 → `hw-offload-roadmap.md` に計画化済み

@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/h264"
+	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/codec"
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/logger"
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/metrics"
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/recorder"
@@ -44,15 +44,15 @@ type Server struct {
 	wg         sync.WaitGroup
 	metrics    *metrics.Metrics
 	shmReader  *shm.Reader
-	processor  *h264.Processor
+	processor  *codec.Processor
 	webrtc     *webrtc.Server
 	recorder   *recorder.Recorder
 	httpServer *http.Server
 
 	// Channels for goroutine communication
-	processChan  chan *types.H264Frame
-	webrtcChan   chan *types.H264Frame
-	recorderChan chan *types.H264Frame
+	processChan  chan *types.VideoFrame
+	webrtcChan   chan *types.VideoFrame
+	recorderChan chan *types.VideoFrame
 }
 
 func main() {
@@ -114,7 +114,7 @@ func NewServer() (*Server, error) {
 	}
 
 	// Create H.264 processor
-	processor := h264.NewProcessor()
+	processor := codec.NewProcessor()
 
 	// Create WebRTC server
 	stunURLs := []string{*stunServers}
@@ -139,9 +139,9 @@ func NewServer() (*Server, error) {
 		webrtc:       webrtcSrv,
 		recorder:     rec,
 		httpServer:   httpServer,
-		processChan:  make(chan *types.H264Frame, 30),
-		webrtcChan:   make(chan *types.H264Frame, 30),
-		recorderChan: make(chan *types.H264Frame, 60),
+		processChan:  make(chan *types.VideoFrame, 30),
+		webrtcChan:   make(chan *types.VideoFrame, 30),
+		recorderChan: make(chan *types.VideoFrame, 60),
 	}
 
 	// Setup HTTP routes
@@ -279,7 +279,7 @@ func (s *Server) processFrames() {
 
 			// Update recorder's header cache when headers are available
 			if s.processor.HasHeaders() {
-				s.recorder.UpdateHeaders(s.processor.GetSPS(), s.processor.GetPPS())
+				s.recorder.UpdateHeaders(s.processor.GetVPS(), s.processor.GetSPS(), s.processor.GetPPS())
 			}
 
 			s.metrics.FramesProcessed.Add(1)

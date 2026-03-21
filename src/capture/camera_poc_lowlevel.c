@@ -516,7 +516,7 @@ static int run_encode_loop(poc_context_t *ctx) {
             Frame shm_frame = {0};
             shm_frame.width = ctx->out_width;
             shm_frame.height = ctx->out_height;
-            shm_frame.format = 3;  // H.264
+            shm_frame.format = 4;  // H.265
             shm_frame.data_size = output_buffer.vstream_buf.size;
             shm_frame.frame_number = frame_count;
             shm_frame.camera_id = ctx->camera_index;

@@ -68,7 +68,7 @@ static void *encoder_thread_worker(void *arg) {
         Frame h264_frame = {0};
         h264_frame.width = ctx->output_width;
         h264_frame.height = ctx->output_height;
-        h264_frame.format = 3; // H.264
+        h264_frame.format = 4; // H.265
         h264_frame.data_size = h264_size;
         h264_frame.frame_number = frame->frame_number;
         h264_frame.camera_id = frame->camera_id;

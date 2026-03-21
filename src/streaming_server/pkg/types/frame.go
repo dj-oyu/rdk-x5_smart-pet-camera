@@ -2,9 +2,9 @@ package types
 
 import "time"
 
-// H264Frame represents a complete H.264 frame with metadata
-type H264Frame struct {
-	Data      []byte    // Raw H.264 data (NAL units)
+// VideoFrame represents a complete video frame with metadata
+type VideoFrame struct {
+	Data      []byte    // Raw video data (NAL units)
 	Timestamp time.Time // Frame capture timestamp
 	FrameNum  uint64    // Sequential frame number
 	IsIDR     bool      // True if this frame contains an IDR
@@ -12,23 +12,35 @@ type H264Frame struct {
 	Height    int       // Frame height
 }
 
-// NALUnit represents a single H.264 NAL unit
+// NALUnit represents a single NAL unit
 type NALUnit struct {
-	Type uint8  // NAL unit type (lower 5 bits)
+	Type uint8  // NAL unit type
 	Data []byte // Complete NAL unit including header
 }
 
-// NALUnitType constants
+// H.264 NAL unit type constants
 const (
-	NALTypeSlice    uint8 = 1
-	NALTypeIDR      uint8 = 5
-	NALTypeSEI      uint8 = 6
-	NALTypeSPS      uint8 = 7
-	NALTypePPS      uint8 = 8
-	NALTypeAUD      uint8 = 9
-	NALTypeEndSeq   uint8 = 10
+	NALTypeSlice     uint8 = 1
+	NALTypeIDR       uint8 = 5
+	NALTypeSEI       uint8 = 6
+	NALTypeSPS       uint8 = 7
+	NALTypePPS       uint8 = 8
+	NALTypeAUD       uint8 = 9
+	NALTypeEndSeq    uint8 = 10
 	NALTypeEndStream uint8 = 11
-	NALTypeFiller   uint8 = 12
+	NALTypeFiller    uint8 = 12
+)
+
+// H.265 (HEVC) NAL unit type constants
+// NAL type = (first_byte >> 1) & 0x3F
+const (
+	NALTypeH265TrailN   uint8 = 0
+	NALTypeH265TrailR   uint8 = 1
+	NALTypeH265IDRWRADL uint8 = 19
+	NALTypeH265IDRNLP   uint8 = 20
+	NALTypeH265VPS      uint8 = 32
+	NALTypeH265SPS      uint8 = 33
+	NALTypeH265PPS      uint8 = 34
 )
 
 // StreamConfig holds configuration for the streaming server

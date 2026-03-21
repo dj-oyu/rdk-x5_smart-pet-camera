@@ -20,13 +20,14 @@ type Recorder struct {
 	frameCount    uint64
 	bytesWritten  uint64
 	startTime     time.Time
-	frameChan     chan *types.H264Frame
+	frameChan     chan *types.VideoFrame
 	closeChan     chan struct{}
 	wg            sync.WaitGroup
 
 	// Header management
-	spsCache      []byte
-	ppsCache      []byte
+	vpsCache        []byte
+	spsCache        []byte
+	ppsCache        []byte
 	firstIDRWritten bool
 }
 
@@ -35,7 +36,7 @@ func NewRecorder(basePath string) *Recorder {
 	return &Recorder{
 		basePath:  basePath,
 		recording: false,
-		frameChan: make(chan *types.H264Frame, 60), // Buffer 2 seconds
+		frameChan: make(chan *types.VideoFrame, 60), // Buffer 2 seconds
 		closeChan: make(chan struct{}),
 	}
 }
@@ -51,7 +52,7 @@ func (r *Recorder) Start() error {
 
 	// Generate filename with timestamp
 	timestamp := time.Now().Format("20060102_150405")
-	filename := fmt.Sprintf("recording_%s.h264", timestamp)
+	filename := fmt.Sprintf("recording_%s.hevc", timestamp)
 	filepath := filepath.Join(r.basePath, filename)
 
 	// Create file
@@ -108,11 +109,15 @@ func (r *Recorder) Stop() error {
 	return nil
 }
 
-// UpdateHeaders updates the cached SPS/PPS headers
-func (r *Recorder) UpdateHeaders(sps, pps []byte) {
+// UpdateHeaders updates the cached VPS/SPS/PPS headers
+func (r *Recorder) UpdateHeaders(vps, sps, pps []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if len(vps) > 0 {
+		r.vpsCache = make([]byte, len(vps))
+		copy(r.vpsCache, vps)
+	}
 	if len(sps) > 0 {
 		r.spsCache = make([]byte, len(sps))
 		copy(r.spsCache, sps)
@@ -124,7 +129,7 @@ func (r *Recorder) UpdateHeaders(sps, pps []byte) {
 }
 
 // SendFrame sends a frame to the recorder (non-blocking)
-func (r *Recorder) SendFrame(frame *types.H264Frame) bool {
+func (r *Recorder) SendFrame(frame *types.VideoFrame) bool {
 	r.mu.RLock()
 	recording := r.recording
 	r.mu.RUnlock()
@@ -171,7 +176,7 @@ func (r *Recorder) writeFrames() {
 }
 
 // writeFrame writes a single frame to file
-func (r *Recorder) writeFrame(frame *types.H264Frame) {
+func (r *Recorder) writeFrame(frame *types.VideoFrame) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -182,9 +187,10 @@ func (r *Recorder) writeFrame(frame *types.H264Frame) {
 	var dataToWrite []byte
 
 	// If this is the first IDR frame and we have cached headers, prepend them
-	if frame.IsIDR && !r.firstIDRWritten && len(r.spsCache) > 0 && len(r.ppsCache) > 0 {
-		// Prepend SPS and PPS headers to ensure playability
-		dataToWrite = make([]byte, 0, len(r.spsCache)+len(r.ppsCache)+len(frame.Data))
+	if frame.IsIDR && !r.firstIDRWritten && len(r.vpsCache) > 0 && len(r.spsCache) > 0 && len(r.ppsCache) > 0 {
+		// Prepend VPS/SPS/PPS headers to ensure playability
+		dataToWrite = make([]byte, 0, len(r.vpsCache)+len(r.spsCache)+len(r.ppsCache)+len(frame.Data))
+		dataToWrite = append(dataToWrite, r.vpsCache...)
 		dataToWrite = append(dataToWrite, r.spsCache...)
 		dataToWrite = append(dataToWrite, r.ppsCache...)
 		dataToWrite = append(dataToWrite, frame.Data...)
