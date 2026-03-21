@@ -19,6 +19,8 @@ base64 = "0.22"
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 [dev-dependencies]
 axum-test = "16"

@@ -1,15 +1,16 @@
 use crate::db::PhotoStore;
 use crate::ingest::filename::parse_comic_filename;
+use crate::server::PhotoEvent;
 use crate::vlm::{VlmClient, VlmConfig};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, warn};
 
 const MAX_VLM_ATTEMPTS: i32 = 5;
-const RESCAN_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
+const RESCAN_INTERVAL: Duration = Duration::from_secs(300);
 const FILE_STABLE_DELAY: Duration = Duration::from_millis(500);
 const FILE_STABLE_MAX_RETRIES: u32 = 3;
 
@@ -17,11 +18,17 @@ pub struct PhotoWatcher {
     photos_dir: PathBuf,
     store: Arc<Mutex<PhotoStore>>,
     vlm_config: VlmConfig,
+    event_tx: broadcast::Sender<PhotoEvent>,
 }
 
 impl PhotoWatcher {
-    pub fn new(photos_dir: PathBuf, store: Arc<Mutex<PhotoStore>>, vlm_config: VlmConfig) -> Self {
-        Self { photos_dir, store, vlm_config }
+    pub fn new(
+        photos_dir: PathBuf,
+        store: Arc<Mutex<PhotoStore>>,
+        vlm_config: VlmConfig,
+        event_tx: broadcast::Sender<PhotoEvent>,
+    ) -> Self {
+        Self { photos_dir, store, vlm_config, event_tx }
     }
 
     /// Scan existing files and insert any not yet in DB.
@@ -169,14 +176,25 @@ impl PhotoWatcher {
             info!("VLM processing: {filename}");
             match vlm_client.analyze(&jpeg_path).await {
                 Ok(resp) => {
-                    let s = store_for_vlm.lock().unwrap();
-                    if let Err(e) = s.update_vlm_result(
-                        &filename, resp.is_valid, &resp.caption, &resp.behavior,
-                    ) {
-                        error!("DB update {filename}: {e}");
-                    } else {
-                        info!("VLM done: {filename} is_valid={} behavior={}", resp.is_valid, resp.behavior);
-                    }
+                    let pet_id = {
+                        let s = store_for_vlm.lock().unwrap();
+                        if let Err(e) = s.update_vlm_result(
+                            &filename, resp.is_valid, &resp.caption, &resp.behavior,
+                        ) {
+                            error!("DB update {filename}: {e}");
+                            None
+                        } else {
+                            info!("VLM done: {filename} is_valid={} behavior={}", resp.is_valid, resp.behavior);
+                            s.get_by_filename(&filename).ok().flatten().and_then(|p| p.pet_id)
+                        }
+                    };
+                    let _ = self.event_tx.send(PhotoEvent {
+                        filename: filename.clone(),
+                        is_valid: resp.is_valid,
+                        caption: resp.caption.clone(),
+                        behavior: resp.behavior.clone(),
+                        pet_id,
+                    });
                 }
                 Err(e) => {
                     error!("VLM error for {filename}: {e}");
