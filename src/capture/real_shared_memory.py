@@ -15,6 +15,7 @@ from ctypes import (
     c_uint64,
     c_int,
     c_int32,
+    c_double,
     c_float,
     c_long,
     sizeof,
@@ -110,7 +111,7 @@ class CDetection(Structure):
 class CLatestDetectionResult(Structure):
     _fields_ = [
         ("frame_number", c_uint64),
-        ("timestamp", CTimespec),
+        ("timestamp", c_double),
         ("num_detections", c_int),
         ("detections", CDetection * MAX_DETECTIONS),
         ("version", c_uint32),
@@ -265,8 +266,7 @@ class DetectionWriter:
             return
         c_det = CLatestDetectionResult()
         c_det.frame_number = frame_number
-        c_det.timestamp.tv_sec = int(timestamp_sec)
-        c_det.timestamp.tv_nsec = int((timestamp_sec - int(timestamp_sec)) * 1e9)
+        c_det.timestamp = timestamp_sec
         c_det.num_detections = min(len(detections), MAX_DETECTIONS)
         for i, det in enumerate(detections[:MAX_DETECTIONS]):
             c_detection = c_det.detections[i]
