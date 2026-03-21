@@ -45,7 +45,6 @@ void camera_switcher_destroy(CameraSwitchController *ctrl) {
   if (!ctrl) {
     return;
   }
-  ctrl->frame_buf = NULL;
 }
 
 void camera_switcher_force_manual(CameraSwitchController *ctrl,
@@ -155,31 +154,6 @@ camera_switcher_record_brightness(CameraSwitchController *ctrl,
 }
 
 
-CameraSwitchDecision
-camera_switcher_handle_frame(CameraSwitchController *ctrl, Frame const *frame,
-                             CameraMode camera, bool is_active_camera,
-                             camera_publish_fn publish_cb, void *user_data) {
-  if (!ctrl || !frame) {
-    return CAMERA_SWITCH_DECISION_NONE;
-  }
-
-  // ISP brightness (from AE statistics, written by camera_pipeline)
-  double brightness = (double)frame->brightness_avg;
-
-  CameraSwitchDecision decision = CAMERA_SWITCH_DECISION_NONE;
-  if (brightness >= 0) {
-    decision = camera_switcher_record_brightness(ctrl, camera, brightness);
-  } else {
-    LOG_WARN("Switcher", "Brightness calculation failed (returned -1)");
-  }
-
-  if (is_active_camera && publish_cb) {
-    camera_switcher_publish_frame(ctrl, frame, publish_cb, user_data);
-  }
-
-  return decision;
-}
-
 void camera_switcher_notify_active_camera(CameraSwitchController *ctrl,
                                           CameraMode camera,
                                           const char *reason) {
@@ -191,19 +165,6 @@ void camera_switcher_notify_active_camera(CameraSwitchController *ctrl,
   ctrl->above_threshold_since = -1.0;
   snprintf(ctrl->last_switch_reason, sizeof(ctrl->last_switch_reason), "%s",
            reason ? reason : "switch");
-}
-
-int camera_switcher_publish_frame(CameraSwitchController *ctrl,
-                                  Frame const *frame,
-                                  camera_publish_fn publish_cb,
-                                  void *user_data) {
-  if (!ctrl || !frame || !publish_cb) {
-    return -1;
-  }
-
-  ctrl->frame_buf = frame;
-
-  return publish_cb(ctrl->frame_buf, user_data);
 }
 
 void camera_switcher_get_status(const CameraSwitchController *ctrl,

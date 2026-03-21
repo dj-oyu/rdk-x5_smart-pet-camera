@@ -68,15 +68,11 @@ typedef struct {
   SwitchMode mode;
   CameraMode active_camera;
   int manual_target; // -1 when auto, otherwise 0/1
-  Frame const *frame_buf;
-
   BrightnessStat brightness[2]; // [0]=day, [1]=night
   double below_threshold_since; // seconds (CLOCK_MONOTONIC), or -1
   double above_threshold_since; // seconds (CLOCK_MONOTONIC), or -1
   char last_switch_reason[64];
 } CameraSwitchController;
-
-typedef int (*camera_publish_fn)(Frame const *frame, void *user_data);
 
 /**
  * Initialize controller with defaults.
@@ -111,18 +107,6 @@ camera_switcher_record_brightness(CameraSwitchController *ctrl,
                                   CameraMode camera, double brightness);
 
 /**
- * Convenience: process a frame, record brightness, and (optionally) publish if
- * active.
- *
- * Returns switch decision (NONE/TO_DAY/TO_NIGHT). Caller is responsible for
- * invoking camera_switcher_notify_active_camera() after reconfiguring hardware.
- */
-CameraSwitchDecision
-camera_switcher_handle_frame(CameraSwitchController *ctrl, Frame const *frame,
-                             CameraMode camera, bool is_active_camera,
-                             camera_publish_fn publish_cb, void *user_data);
-
-/**
  * Notify controller that hardware has switched to a camera.
  * Resets warmup/drop counters.
  */
@@ -130,17 +114,6 @@ void camera_switcher_notify_active_camera(CameraSwitchController *ctrl,
                                           CameraMode camera,
                                           const char *reason);
 
-/**
- * Publish a captured frame with double-buffering and warmup gating.
- *
- * The frame is copied into an internal double buffer before publishing to
- * avoid readers observing partially written data during camera switches.
- * Returns 0 on success, -1 on error (e.g., null callback).
- */
-int camera_switcher_publish_frame(CameraSwitchController *ctrl,
-                                  Frame const *frame,
-                                  camera_publish_fn publish_cb,
-                                  void *user_data);
 
 /**
  * Snapshot current status (lightweight helper).
