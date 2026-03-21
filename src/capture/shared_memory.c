@@ -198,7 +198,6 @@ void shm_h265_zc_destroy(H265ZeroCopyBuffer* shm, const char* name) {
 
 int shm_h265_zc_write(H265ZeroCopyBuffer* shm, const H265ZeroCopyFrame* frame) {
     if (!shm || !frame) return -1;
-    if (sem_trywait(&shm->consumed_sem) != 0) return -1;
     uint32_t ver = __atomic_load_n(&shm->frame.version, __ATOMIC_ACQUIRE);
     memcpy(&shm->frame, frame, sizeof(H265ZeroCopyFrame));
     __atomic_store_n(&shm->frame.consumed, 0, __ATOMIC_RELEASE);
