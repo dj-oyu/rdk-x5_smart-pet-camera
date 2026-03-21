@@ -8,12 +8,42 @@ MockDetectorと同じインターフェースを提供
 
 import os
 import sys
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
 import logging
 
 import cv2
 import numpy as np
+
+
+class Preprocessor(ABC):
+    """Abstract base class for YOLO input preprocessing."""
+
+    @abstractmethod
+    def letterbox(self, nv12_array: np.ndarray, width: int, height: int,
+                  pad_top: int, pad_bottom: int) -> np.ndarray:
+        """Add letterbox padding to NV12 frame. Returns padded NV12."""
+
+    @abstractmethod
+    def crop_roi(self, nv12_array: np.ndarray, width: int, height: int,
+                 roi_x: int, roi_y: int, roi_w: int, roi_h: int) -> np.ndarray:
+        """Crop ROI from NV12 frame. Returns cropped NV12."""
+
+
+class CPUPreprocessor(Preprocessor):
+    """CPU-based preprocessing using numpy (default)."""
+
+    def __init__(self, detector: "YoloDetector") -> None:
+        self._detector = detector
+
+    def letterbox(self, nv12_array: np.ndarray, width: int, height: int,
+                  pad_top: int, pad_bottom: int) -> np.ndarray:
+        return self._detector._letterbox_nv12(nv12_array, width, height, pad_top, pad_bottom)
+
+    def crop_roi(self, nv12_array: np.ndarray, width: int, height: int,
+                 roi_x: int, roi_y: int, roi_w: int, roi_h: int) -> np.ndarray:
+        return self._detector._crop_nv12_roi(nv12_array, width, height, roi_x, roi_y, roi_w, roi_h)
 
 
 def _fast_softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
@@ -249,6 +279,9 @@ class YoloDetector:
         # CLAHE前処理設定 (nightカメラのIR映像用、daemon側でclahe_enabledを制御)
         self.clahe_enabled = clahe_enabled
         self.clahe = cv2.createCLAHE(clipLimit=clahe_clip_limit, tileGridSize=(8, 8))
+
+        # Preprocessor (CPU default, swappable for HW acceleration)
+        self.preprocessor: Preprocessor = CPUPreprocessor(self)
 
         # モデルの自動ダウンロード
         if auto_download and not os.path.exists(model_path):
@@ -622,7 +655,7 @@ class YoloDetector:
 
         # ROIクロップ（先にクロップしてからCLAHE適用 = 処理ピクセル数削減）
         if roi_w == self.input_w and roi_h == self.input_h:
-            cropped = self._crop_nv12_roi(
+            cropped = self.preprocessor.crop_roi(
                 nv12_array, width, height, roi_x, roi_y, roi_w, roi_h
             )
             # CLAHE + UV=128 をcrop後の小さいデータに適用
@@ -642,7 +675,7 @@ class YoloDetector:
             logger.warning(
                 f"ROI size {roi_w}x{roi_h} differs from model input {self.input_w}x{self.input_h}"
             )
-            cropped = self._crop_nv12_roi(
+            cropped = self.preprocessor.crop_roi(
                 nv12_array, width, height, roi_x, roi_y, roi_w, roi_h
             )
             if need_clahe:
@@ -783,7 +816,7 @@ class YoloDetector:
             pad_top = pad_total // 2
             pad_bottom = pad_total - pad_top
 
-            input_tensor = self._letterbox_nv12(
+            input_tensor = self.preprocessor.letterbox(
                 nv12_array, width, height, pad_top, pad_bottom
             )
             scale = (1.0, 1.0)  # スケールは既にVSEで適用済み
