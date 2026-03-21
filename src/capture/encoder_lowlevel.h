@@ -71,11 +71,22 @@ int encoder_create(encoder_context_t *ctx, int camera_index,
  * Returns:
  *   0 on success, negative error code on failure/timeout
  */
+/**
+ * VPU encoder statistics (per-frame, from output_info)
+ */
+typedef struct {
+    uint32_t intra_block_num;  // Blocks encoded as intra (8x8 units)
+    uint32_t skip_block_num;   // Blocks skipped (no change)
+    uint32_t avg_mb_qp;       // Average macroblock QP
+    uint32_t enc_pic_byte;    // Encoded frame size (bytes)
+} encoder_stats_t;
+
 int encoder_encode_frame_vaddr(encoder_context_t *ctx,
                                const uint8_t *nv12_y, const uint8_t *nv12_uv,
                                size_t y_size, size_t uv_size,
                                uint8_t *h265_data_out, size_t *h265_size_out,
-                               size_t max_size, int timeout_ms);
+                               size_t max_size, int timeout_ms,
+                               encoder_stats_t *stats_out);
 
 /**
  * Stop encoder

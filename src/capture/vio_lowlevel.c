@@ -325,11 +325,13 @@ int vio_create(vio_context_t *ctx, int camera_index,
         for (int i = 0; i < 3; i++) {
             ret = hbn_vnode_set_ochn_attr(ctx->vse_handle, 3 + i, &vse_ochn_attr_roi[i]);
             if (ret != 0) {
-                LOG_WARN("VIO", "VSE Ch%d ROI setup failed: %d", 3 + i, ret);
-                goto error_cleanup;
+                LOG_WARN("VIO", "VSE Ch%d ROI setup failed: %d (skipping)", 3 + i, ret);
+                continue;
             }
             ret = hbn_vnode_set_ochn_buf_attr(ctx->vse_handle, 3 + i, &alloc_attr);
-            if (ret != 0) goto error_cleanup;
+            if (ret != 0) {
+                LOG_WARN("VIO", "VSE Ch%d buf setup failed: %d (skipping)", 3 + i, ret);
+            }
         }
     }
 

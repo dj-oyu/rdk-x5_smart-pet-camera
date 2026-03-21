@@ -148,7 +148,7 @@ class YoloDetectorDaemon:
 
         # Detection result cache for temporal integration
         self.detection_cache: list[list[dict]] = []  # [roi_0_dets, roi_1_dets, ...]
-        self.cache_zc_frame.frame_number: int = -1  # Frame number when cache started
+        self.cache_frame_number: int = -1  # Frame number when cache started
         self.cache_timestamp: float = 0.0  # Timestamp when cache started
 
         # Night motion detection state
@@ -464,7 +464,7 @@ class YoloDetectorDaemon:
                             brightness_avg=zc_frame.brightness_avg,
                         )
                         if current_roi == 0:
-                            self.cache_zc_frame.frame_number = zc_frame.frame_number
+                            self.cache_frame_number = zc_frame.frame_number
                             self.cache_timestamp = zc_frame.timestamp_sec
                         self.roi_index = (self.roi_index + 1) % len(self.night_roi_regions)
                         cycle_complete = (self.roi_index == 0)
@@ -525,7 +525,7 @@ class YoloDetectorDaemon:
 
                         if scaled_dicts:
                             self.detection_writer.write_detection_result(
-                                frame_number=self.cache_zc_frame.frame_number,
+                                frame_number=self.cache_frame_number,
                                 timestamp_sec=self.cache_timestamp,
                                 detections=scaled_dicts,
                             )
@@ -577,7 +577,7 @@ class YoloDetectorDaemon:
 
                     # Track cache start for first ROI
                     if current_roi == 0:
-                        self.cache_zc_frame.frame_number = zc_frame.frame_number
+                        self.cache_frame_number = zc_frame.frame_number
                         self.cache_timestamp = zc_frame.timestamp_sec
 
                     # Advance to next ROI for next frame
@@ -660,7 +660,7 @@ class YoloDetectorDaemon:
                         # Write scaled results
                         if scaled_dicts:
                             self.detection_writer.write_detection_result(
-                                frame_number=self.cache_zc_frame.frame_number,
+                                frame_number=self.cache_frame_number,
                                 timestamp_sec=self.cache_timestamp,
                                 detections=scaled_dicts,
                             )
@@ -715,7 +715,7 @@ class YoloDetectorDaemon:
                         # Write scaled results
                         if scaled_dicts:
                             self.detection_writer.write_detection_result(
-                                frame_number=self.cache_zc_frame.frame_number,
+                                frame_number=self.cache_frame_number,
                                 timestamp_sec=self.cache_timestamp,
                                 detections=scaled_dicts,
                             )
