@@ -468,7 +468,7 @@ Analyze this photo of a pet camera feed. Respond with valid JSON only, no markdo
 > 入力比率に関わらず応答の60-85%がchatoraとなる。is_valid/caption/behaviorは
 > 高精度で信頼可能。pet_idはRDK X5のGo側でYOLO bbox色分析により判定し、
 > comicファイル名に埋め込む方式に変更。
-> 詳細: `pet-album-spec-DRAFT.md` 2.6節
+> 詳細: `pet-album-spec.md` 2.6節
 
 **API呼び出し:**
 ```
@@ -610,7 +610,7 @@ CREATE TABLE daily_summary (
 | **Qwen3.5-0.8B** | 0.8B | Early-Fusion VLM、最軽量 | axmodel未提供、Pulsar2変換を検証予定 |
 | **Qwen3.5-2B** | 2B | Early-Fusion VLM、本命候補 | axmodel未提供、AXERA対応待ち |
 
-→ 詳細は `pet-album-spec-DRAFT.md` §2.4 を参照。
+→ 詳細は `pet-album-spec.md` §2.4 を参照。
 
 ### 5.3 設定ファイル
 
