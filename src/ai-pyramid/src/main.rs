@@ -12,12 +12,15 @@ use tracing::info;
 #[derive(Parser)]
 #[command(name = "pet-album", about = "AI Pyramid Pro album service")]
 struct Args {
-    #[arg(long, default_value = ":8090")]
+    /// Listen address (e.g. :8082 or 0.0.0.0:8082)
+    #[arg(long, default_value = ":8082")]
     addr: String,
 
+    /// TLS cert path (auto-detected if omitted)
     #[arg(long)]
     tls_cert: Option<PathBuf>,
 
+    /// TLS key path (auto-detected if omitted)
     #[arg(long)]
     tls_key: Option<PathBuf>,
 
@@ -35,6 +38,22 @@ struct Args {
 
     #[arg(long, default_value_t = 128)]
     vlm_max_tokens: u32,
+}
+
+const CERT_SEARCH_PATHS: &[&str] = &[
+    "/data/tailscale/certs/m5stack-ai-pyramid.tail848eb5.ts.net",
+    "../../m5stack-ai-pyramid.tail848eb5.ts.net", // repo root from src/ai-pyramid
+];
+
+fn find_tls_certs() -> Option<(PathBuf, PathBuf)> {
+    for base in CERT_SEARCH_PATHS {
+        let cert = PathBuf::from(format!("{base}.crt"));
+        let key = PathBuf::from(format!("{base}.key"));
+        if cert.exists() && key.exists() {
+            return Some((cert, key));
+        }
+    }
+    None
 }
 
 #[tokio::main]
@@ -77,9 +96,15 @@ async fn main() {
         .parse()
         .expect("invalid bind address");
 
-    match (args.tls_cert, args.tls_key) {
-        (Some(cert), Some(key)) => {
-            info!("HTTPS on {bind_addr} (cert: {}, key: {})", cert.display(), key.display());
+    // Resolve TLS certs: explicit args > auto-detect > HTTP fallback
+    let tls = match (args.tls_cert, args.tls_key) {
+        (Some(c), Some(k)) => Some((c, k)),
+        _ => find_tls_certs(),
+    };
+
+    match tls {
+        Some((cert, key)) => {
+            info!("HTTPS on {bind_addr} (cert: {})", cert.display());
             let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
                 .await
                 .expect("failed to load TLS cert/key");
@@ -88,8 +113,8 @@ async fn main() {
                 .await
                 .expect("HTTPS server error");
         }
-        _ => {
-            info!("HTTP on {bind_addr} (no TLS)");
+        None => {
+            info!("HTTP on {bind_addr} (no TLS certs found)");
             let listener = tokio::net::TcpListener::bind(bind_addr)
                 .await
                 .expect("failed to bind");
