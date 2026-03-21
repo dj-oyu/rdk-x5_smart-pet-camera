@@ -245,7 +245,7 @@ def main():
                         help="Max tokens for VLM response (default: 128)")
     parser.add_argument("--limit", type=int, default=0,
                         help="Limit total images to evaluate (0=all)")
-    parser.add_argument("--categories", nargs="*", choices=["calico", "tabby", "other_cat", "non_cat"],
+    parser.add_argument("--categories", nargs="*",
                         help="Only evaluate specific categories")
     parser.add_argument("--prompt", choices=list(PROMPTS.keys()), default="original",
                         help="Prompt variant to use (default: original)")
