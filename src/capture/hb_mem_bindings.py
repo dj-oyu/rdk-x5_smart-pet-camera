@@ -414,6 +414,7 @@ class HbMemBuffer:
 _GRAPH_BUF_LAYOUT = {
     "fd": 0,            # int32_t[3]
     "plane_cnt": 12,    # int32_t
+    "stride": 28,       # int32_t
     "share_id": 40,     # int32_t[3]
     "size": 64,         # uint64_t[3]
     "virt_addr": 88,    # uint8_t*[3] (uint64 on aarch64)
