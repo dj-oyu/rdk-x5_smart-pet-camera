@@ -196,11 +196,22 @@
   }
   .gallery-wrap.at-end::after { opacity: 1; }
 
-  /* Responsive card sizes — matches existing comic-gallery breakpoints */
-  @media (max-width: 960px) { .card { width: 160px; } }
+  /* Desktop sidebar: single row, no vertical overflow */
+  @media (min-width: 961px) {
+    body { overflow-y: hidden; }
+  }
+
+  /* Mobile: vertical grid, no horizontal scroll */
+  @media (max-width: 960px) {
+    .gallery {
+      flex-wrap: wrap;
+      overflow-x: visible;
+    }
+    .card { width: calc(50% - 4px); }
+    .gallery-wrap::before, .gallery-wrap::after { display: none; }
+  }
   @media (max-width: 480px) {
-    .card { width: 140px; }
-    .gallery-wrap::before { width: 60px; }
+    .card { width: 100%; }
   }
 
   @media (hover: none) { .card-overlay { opacity: 1; } }
@@ -360,6 +371,20 @@ document.addEventListener('keydown', function(e) {
     if (entries[0].isIntersecting) loadMore();
   }, { root: gallery, rootMargin: '0px 0px 0px 300px' });
   obs.observe(sentinel);
+})();
+
+// Notify parent iframe of content height
+(function() {
+  function sendHeight() {
+    var h = document.body.scrollHeight;
+    window.parent.postMessage({ type: 'album-height', height: h }, '*');
+  }
+  sendHeight();
+  new MutationObserver(sendHeight).observe(document.body, { childList: true, subtree: true });
+  window.addEventListener('resize', sendHeight);
+  document.querySelectorAll('img').forEach(function(img) {
+    img.addEventListener('load', sendHeight);
+  });
 })();
 
 // SSE: live photo updates — new card slides in from right
