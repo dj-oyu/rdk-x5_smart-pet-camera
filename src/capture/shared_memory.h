@@ -179,6 +179,39 @@ typedef struct {
     ZeroCopyFrame frame;        // Current frame
 } ZeroCopyFrameBuffer;
 
+/**
+ * H.265 zero-copy frame — VPU output buffer shared via share_id
+ *
+ * Encoder holds VPU output buffer until Go consumer signals consumed.
+ * Go imports buffer via hb_mem_import_com_buf(share_id) and reads data_size bytes.
+ */
+typedef struct {
+    uint64_t frame_number;
+    struct timespec timestamp;
+    int camera_id;
+    int width, height;
+    int32_t share_id;           // hb_mem share_id for VPU output buffer
+    uint32_t data_size;         // Actual H.265 frame size (bytes)
+    uint32_t buf_size;          // Total buffer size
+    uint64_t phy_ptr;           // Physical address (for direct access)
+    volatile uint32_t version;  // Incremented when frame is ready
+    volatile uint8_t consumed;  // Consumer sets to 1 when done
+    uint8_t _pad[3];
+} H265ZeroCopyFrame;
+
+typedef struct {
+    sem_t new_frame_sem;
+    sem_t consumed_sem;
+    H265ZeroCopyFrame frame;
+} H265ZeroCopyBuffer;
+
+H265ZeroCopyBuffer* shm_h265_zc_create(const char* name);
+H265ZeroCopyBuffer* shm_h265_zc_open(const char* name);
+void shm_h265_zc_close(H265ZeroCopyBuffer* shm);
+void shm_h265_zc_destroy(H265ZeroCopyBuffer* shm, const char* name);
+int shm_h265_zc_write(H265ZeroCopyBuffer* shm, const H265ZeroCopyFrame* frame);
+void shm_h265_zc_mark_consumed(H265ZeroCopyBuffer* shm);
+
 // SHM names defined in shm_constants.h
 
 /**
