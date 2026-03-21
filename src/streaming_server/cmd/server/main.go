@@ -265,17 +265,11 @@ func (s *Server) readFrames() {
 		s.webrtc.SendFrame(frame)
 		s.metrics.WebRTCFramesSent.Add(1)
 
-		// Recorder: copy data (async write needs independent buffer)
-		if s.recorder.IsRecording() {
-			dataCopy := make([]byte, len(frame.Data))
-			copy(dataCopy, frame.Data)
-			recFrame := *frame
-			recFrame.Data = dataCopy
-			select {
-			case s.recorderChan <- &recFrame:
-			default:
-				s.metrics.RecorderFramesDropped.Add(1)
-			}
+		// Recorder (frame.Data is Go heap, safe for async)
+		select {
+		case s.recorderChan <- frame:
+		default:
+			s.metrics.RecorderFramesDropped.Add(1)
 		}
 	}
 }
