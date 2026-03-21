@@ -230,29 +230,38 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 	return answerJSON, nil
 }
 
-// SendFrame sends a frame to all connected clients synchronously.
-// WriteSample copies data internally for RTP, so frame.Data is safe to free after return.
+// SendFrame sends a frame to all connected clients in parallel.
+// Blocks until all WriteSample calls complete (frame.Data must stay valid).
 func (s *Server) SendFrame(frame *types.VideoFrame) {
 	s.clientsMu.RLock()
-	defer s.clientsMu.RUnlock()
-
-	for _, client := range s.clients {
-		if err := client.videoTrack.WriteSample(media.Sample{
-			Data:     frame.Data,
-			Duration: time.Second / 30,
-		}); err != nil {
-			if err != io.ErrClosedPipe {
-				logger.Warn("WebRTC", "Error writing sample for client %s: %v", client.id, err)
-			}
-			continue
-		}
-		client.framesSent++
-
-		if frame.FrameNumber%30 == 0 {
-			logger.Debug("WebRTC", "Sent H.265 frame#%d to client %s",
-				frame.FrameNumber, client.id)
-		}
+	clients := make([]*Client, 0, len(s.clients))
+	for _, c := range s.clients {
+		clients = append(clients, c)
 	}
+	s.clientsMu.RUnlock()
+
+	if len(clients) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	for _, client := range clients {
+		wg.Add(1)
+		go func(c *Client) {
+			defer wg.Done()
+			if err := c.videoTrack.WriteSample(media.Sample{
+				Data:     frame.Data,
+				Duration: time.Second / 30,
+			}); err != nil {
+				if err != io.ErrClosedPipe {
+					logger.Warn("WebRTC", "Error writing sample for client %s: %v", c.id, err)
+				}
+				return
+			}
+			c.framesSent++
+		}(client)
+	}
+	wg.Wait()
 }
 
 // sendFrames sends frames to a specific client

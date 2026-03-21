@@ -261,11 +261,7 @@ func (s *Server) readFrames() {
 		}
 		s.metrics.FramesProcessed.Add(1)
 
-		// WebRTC: send directly (zero-copy, pion copies internally)
-		s.webrtc.SendFrame(frame)
-		s.metrics.WebRTCFramesSent.Add(1)
-
-		// Recorder: copy data (VPU buffer freed on next ReadLatest)
+		// Recorder: copy before SendFrame (VPU buffer freed on next ReadLatest)
 		if s.recorder.IsRecording() {
 			dataCopy := make([]byte, len(frame.Data))
 			copy(dataCopy, frame.Data)
@@ -277,6 +273,10 @@ func (s *Server) readFrames() {
 				s.metrics.RecorderFramesDropped.Add(1)
 			}
 		}
+
+		// WebRTC: parallel WriteSample to all clients, blocks until done
+		s.webrtc.SendFrame(frame)
+		s.metrics.WebRTCFramesSent.Add(1)
 	}
 }
 
