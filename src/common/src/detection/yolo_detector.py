@@ -31,21 +31,6 @@ class Preprocessor(ABC):
         """Crop ROI from NV12 frame. Returns cropped NV12."""
 
 
-class CPUPreprocessor(Preprocessor):
-    """CPU-based preprocessing using numpy (default)."""
-
-    def __init__(self, detector: "YoloDetector") -> None:
-        self._detector = detector
-
-    def letterbox(self, nv12_array: np.ndarray, width: int, height: int,
-                  pad_top: int, pad_bottom: int) -> np.ndarray:
-        return self._detector._letterbox_nv12(nv12_array, width, height, pad_top, pad_bottom)
-
-    def crop_roi(self, nv12_array: np.ndarray, width: int, height: int,
-                 roi_x: int, roi_y: int, roi_w: int, roi_h: int) -> np.ndarray:
-        return self._detector._crop_nv12_roi(nv12_array, width, height, roi_x, roi_y, roi_w, roi_h)
-
-
 class HWPreprocessor(Preprocessor):
     """GPU-based letterbox using nano2D (GC820). CPU fallback for crop_roi.
 
@@ -364,8 +349,8 @@ class YoloDetector:
         self.clahe_enabled = clahe_enabled
         self.clahe = cv2.createCLAHE(clipLimit=clahe_clip_limit, tileGridSize=(8, 8))
 
-        # Preprocessor (CPU default, swappable for HW acceleration)
-        self.preprocessor: Preprocessor = CPUPreprocessor(self)
+        # Preprocessor (set by detector daemon — HWPreprocessor for real HW)
+        self.preprocessor: Optional[Preprocessor] = None
 
         # モデルの自動ダウンロード
         if auto_download and not os.path.exists(model_path):
