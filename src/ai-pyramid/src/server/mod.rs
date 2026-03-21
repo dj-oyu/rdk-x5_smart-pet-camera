@@ -220,12 +220,16 @@ async fn handle_health() -> impl IntoResponse {
 }
 
 fn build_filter(q: &PhotosQuery) -> PhotoFilter {
+    let is_pending = q.is_valid.as_deref() == Some("pending");
     PhotoFilter {
-        is_valid: q.is_valid.as_ref().and_then(|v| match v.as_str() {
-            "true" | "1" => Some(true),
-            "false" | "0" => Some(false),
-            _ => None,
-        }),
+        is_valid: if is_pending { None } else {
+            q.is_valid.as_ref().and_then(|v| match v.as_str() {
+                "true" | "1" => Some(true),
+                "false" | "0" => Some(false),
+                _ => None,
+            })
+        },
+        is_pending,
         pet_id: q.pet_id.clone().filter(|s| !s.is_empty()),
         limit: q.limit,
         offset: q.offset,
