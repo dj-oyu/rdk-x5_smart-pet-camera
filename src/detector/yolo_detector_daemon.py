@@ -10,6 +10,7 @@ import sys
 import time
 import signal
 import logging
+from collections import namedtuple
 from pathlib import Path
 
 import cv2
@@ -43,15 +44,28 @@ logging.basicConfig(
 logger = logging.getLogger("YOLODetectorDaemon")
 yolo_logger = logging.getLogger("detection.yolo_detector")
 
+# Lightweight result types (namedtuples are faster than dicts and give attribute access)
+DetBbox = namedtuple('DetBbox', ['x', 'y', 'w', 'h'])
+DetDict = namedtuple('DetDict', ['class_name', 'confidence', 'bbox'])
+
+
+def _det_to_dict(d: 'DetDict') -> dict:
+    """Convert a DetDict namedtuple to a plain dict for the SHM write boundary."""
+    return {
+        "class_name": d.class_name,
+        "confidence": d.confidence,
+        "bbox": {"x": d.bbox.x, "y": d.bbox.y, "w": d.bbox.w, "h": d.bbox.h},
+    }
+
 
 def apply_cross_roi_nms(
-    detections: list[dict], iou_threshold: float = 0.5  # type: ignore[type-arg]
-) -> list[dict]:  # type: ignore[type-arg]
+    detections: list[DetDict], iou_threshold: float = 0.5
+) -> list[DetDict]:
     """
     Cross-ROI NMS: cv2.dnn.NMSBoxesを使用して異なるROI間の重複検出を除去
 
     Args:
-        detections: 検出結果リスト [{class_name, confidence, bbox: {x,y,w,h}}, ...]
+        detections: 検出結果リスト [DetDict(class_name, confidence, bbox), ...]
         iou_threshold: IoU閾値（これ以上重なっていれば重複とみなす）
 
     Returns:
@@ -61,18 +75,18 @@ def apply_cross_roi_nms(
         return detections
 
     # クラス別にグループ化
-    by_class: dict[str, list[dict]] = {}  # type: ignore[type-arg]
+    by_class: dict[str, list[DetDict]] = {}
     for det in detections:
-        cls = str(det["class_name"])
+        cls = str(det.class_name)
         if cls not in by_class:
             by_class[cls] = []
         by_class[cls].append(det)
 
-    result: list[dict] = []  # type: ignore[type-arg]
+    result: list[DetDict] = []
     for dets in by_class.values():
         # cv2.dnn.NMSBoxes用にデータを準備
-        bboxes = [[d["bbox"]["x"], d["bbox"]["y"], d["bbox"]["w"], d["bbox"]["h"]] for d in dets]
-        scores = [float(d["confidence"]) for d in dets]
+        bboxes = [[d.bbox.x, d.bbox.y, d.bbox.w, d.bbox.h] for d in dets]
+        scores = [float(d.confidence) for d in dets]
 
         # NMS適用 (score_threshold=0でフィルタリングなし、iou_thresholdで重複除去)
         indices = cv2.dnn.NMSBoxes(bboxes, scores, score_threshold=0.0, nms_threshold=iou_threshold)
@@ -414,11 +428,11 @@ class YoloDetectorDaemon:
                                 continue
                             confidence = min(1.0, area / (motion_w * motion_h * 0.05))
                             # Scale bbox back to full frame coordinates
-                            motion_dicts.append({
-                                "class_name": "motion",
-                                "confidence": float(confidence),
-                                "bbox": {"x": x * 2, "y": y * 2, "w": w * 2, "h": h * 2},
-                            })
+                            motion_dicts.append(DetDict(
+                                class_name="motion",
+                                confidence=float(confidence),
+                                bbox=DetBbox(x=x * 2, y=y * 2, w=w * 2, h=h * 2),
+                            ))
                         if len(motion_dicts) > 5:
                             motion_dicts = []
                         if motion_dicts:
@@ -454,16 +468,13 @@ class YoloDetectorDaemon:
 
 
                     if run_yolo:
-                        # Convert YOLO detections to dicts
+                        # Convert YOLO detections to namedtuples
                         yolo_dicts = [
-                            {
-                                "class_name": det.class_name.value,
-                                "confidence": det.confidence,
-                                "bbox": {
-                                    "x": det.bbox.x, "y": det.bbox.y,
-                                    "w": det.bbox.w, "h": det.bbox.h,
-                                },
-                            }
+                            DetDict(
+                                class_name=det.class_name.value,
+                                confidence=det.confidence,
+                                bbox=DetBbox(x=det.bbox.x, y=det.bbox.y, w=det.bbox.w, h=det.bbox.h),
+                            )
                             for det in detections
                         ]
 
@@ -480,7 +491,7 @@ class YoloDetectorDaemon:
                         # Filter night YOLO false positives (IR-caused misdetections)
                         merged_yolo = [
                             d for d in merged_yolo
-                            if d["class_name"] not in self.night_fp_classes
+                            if d.class_name not in self.night_fp_classes
                         ]
 
                         # Combine: motion + YOLO results
@@ -488,16 +499,16 @@ class YoloDetectorDaemon:
 
                         # Scale to output coordinates
                         scaled_dicts = [
-                            {
-                                "class_name": d["class_name"],
-                                "confidence": d["confidence"],
-                                "bbox": {
-                                    "x": int(d["bbox"]["x"] * self.scale_x),
-                                    "y": int(d["bbox"]["y"] * self.scale_y),
-                                    "w": int(d["bbox"]["w"] * self.scale_x),
-                                    "h": int(d["bbox"]["h"] * self.scale_y),
-                                },
-                            }
+                            DetDict(
+                                class_name=d.class_name,
+                                confidence=d.confidence,
+                                bbox=DetBbox(
+                                    x=int(d.bbox.x * self.scale_x),
+                                    y=int(d.bbox.y * self.scale_y),
+                                    w=int(d.bbox.w * self.scale_x),
+                                    h=int(d.bbox.h * self.scale_y),
+                                ),
+                            )
                             for d in all_dicts
                         ]
 
@@ -505,7 +516,7 @@ class YoloDetectorDaemon:
                             self.detection_writer.write_detection_result(
                                 frame_number=self.cache_frame_number,
                                 timestamp_sec=self.cache_timestamp,
-                                detections=scaled_dicts,
+                                detections=[_det_to_dict(d) for d in scaled_dicts],
                             )
 
                         self.detection_cache = [[] for _ in self.night_roi_regions]
@@ -522,7 +533,7 @@ class YoloDetectorDaemon:
 
                     # Periodic stats log
                     if self.stats["frames_processed"] % 300 == 0:
-                        mot = sum(1 for d in detection_dicts if d.get("class_name") == "motion")
+                        mot = sum(1 for d in detection_dicts if d.class_name == "motion")
                         yolo = len(detection_dicts) - mot
                         logger.info(
                             f"[{self.stats['frames_processed']}f] "
@@ -533,7 +544,7 @@ class YoloDetectorDaemon:
                         )
 
                     if is_debug and cycle_complete and detection_dicts:
-                        classes = ",".join(d["class_name"] for d in detection_dicts)
+                        classes = ",".join(d.class_name for d in detection_dicts)
                         logger.debug(f"#{self.stats['frames_processed']}: {classes}")
 
                     continue
@@ -579,16 +590,11 @@ class YoloDetectorDaemon:
 
                 # Keep bbox coordinates in frame space (scaling moved to final output)
                 detection_dicts = [
-                    {
-                        "class_name": det.class_name.value,
-                        "confidence": det.confidence,
-                        "bbox": {
-                            "x": det.bbox.x,
-                            "y": det.bbox.y,
-                            "w": det.bbox.w,
-                            "h": det.bbox.h,
-                        },
-                    }
+                    DetDict(
+                        class_name=det.class_name.value,
+                        confidence=det.confidence,
+                        bbox=DetBbox(x=det.bbox.x, y=det.bbox.y, w=det.bbox.w, h=det.bbox.h),
+                    )
                     for det in detections
                 ]
 
@@ -603,7 +609,7 @@ class YoloDetectorDaemon:
                         for roi_idx, roi_dets in enumerate(self.detection_cache):
                             all_detections.extend(roi_dets)
                             if roi_dets and is_debug:
-                                classes = [d["class_name"] for d in roi_dets]
+                                classes = [d.class_name for d in roi_dets]
                                 logger.debug(f"  Night ROI {roi_idx}: {classes}")
 
                         if is_debug and all_detections:
@@ -621,16 +627,16 @@ class YoloDetectorDaemon:
 
                         # Apply scaling after merge (single rounding at final output)
                         scaled_dicts = [
-                            {
-                                "class_name": d["class_name"],
-                                "confidence": d["confidence"],
-                                "bbox": {
-                                    "x": int(d["bbox"]["x"] * self.scale_x),
-                                    "y": int(d["bbox"]["y"] * self.scale_y),
-                                    "w": int(d["bbox"]["w"] * self.scale_x),
-                                    "h": int(d["bbox"]["h"] * self.scale_y),
-                                },
-                            }
+                            DetDict(
+                                class_name=d.class_name,
+                                confidence=d.confidence,
+                                bbox=DetBbox(
+                                    x=int(d.bbox.x * self.scale_x),
+                                    y=int(d.bbox.y * self.scale_y),
+                                    w=int(d.bbox.w * self.scale_x),
+                                    h=int(d.bbox.h * self.scale_y),
+                                ),
+                            )
                             for d in merged_dicts
                         ]
 
@@ -639,7 +645,7 @@ class YoloDetectorDaemon:
                             self.detection_writer.write_detection_result(
                                 frame_number=self.cache_frame_number,
                                 timestamp_sec=self.cache_timestamp,
-                                detections=scaled_dicts,
+                                detections=[_det_to_dict(d) for d in scaled_dicts],
                             )
 
                         # Use scaled results for stats/logging
@@ -663,7 +669,7 @@ class YoloDetectorDaemon:
                             all_detections.extend(roi_dets)
                             # Debug: show detections per ROI
                             if roi_dets and is_debug:
-                                classes = [d["class_name"] for d in roi_dets]
+                                classes = [d.class_name for d in roi_dets]
                                 logger.debug(f"  ROI {roi_idx}: {classes}")
 
                         if is_debug and all_detections:
@@ -676,16 +682,16 @@ class YoloDetectorDaemon:
 
                         # Apply scaling after merge (single rounding at final output)
                         scaled_dicts = [
-                            {
-                                "class_name": d["class_name"],
-                                "confidence": d["confidence"],
-                                "bbox": {
-                                    "x": int(d["bbox"]["x"] * self.scale_x),
-                                    "y": int(d["bbox"]["y"] * self.scale_y),
-                                    "w": int(d["bbox"]["w"] * self.scale_x),
-                                    "h": int(d["bbox"]["h"] * self.scale_y),
-                                },
-                            }
+                            DetDict(
+                                class_name=d.class_name,
+                                confidence=d.confidence,
+                                bbox=DetBbox(
+                                    x=int(d.bbox.x * self.scale_x),
+                                    y=int(d.bbox.y * self.scale_y),
+                                    w=int(d.bbox.w * self.scale_x),
+                                    h=int(d.bbox.h * self.scale_y),
+                                ),
+                            )
                             for d in merged_dicts
                         ]
 
@@ -694,7 +700,7 @@ class YoloDetectorDaemon:
                             self.detection_writer.write_detection_result(
                                 frame_number=self.cache_frame_number,
                                 timestamp_sec=self.cache_timestamp,
-                                detections=scaled_dicts,
+                                detections=[_det_to_dict(d) for d in scaled_dicts],
                             )
 
                         # Clear cache for next cycle
@@ -705,23 +711,23 @@ class YoloDetectorDaemon:
                 else:
                     # Direct mode: apply scaling and write immediately
                     scaled_dicts = [
-                        {
-                            "class_name": d["class_name"],
-                            "confidence": d["confidence"],
-                            "bbox": {
-                                "x": int(d["bbox"]["x"] * self.scale_x),
-                                "y": int(d["bbox"]["y"] * self.scale_y),
-                                "w": int(d["bbox"]["w"] * self.scale_x),
-                                "h": int(d["bbox"]["h"] * self.scale_y),
-                            },
-                        }
+                        DetDict(
+                            class_name=d.class_name,
+                            confidence=d.confidence,
+                            bbox=DetBbox(
+                                x=int(d.bbox.x * self.scale_x),
+                                y=int(d.bbox.y * self.scale_y),
+                                w=int(d.bbox.w * self.scale_x),
+                                h=int(d.bbox.h * self.scale_y),
+                            ),
+                        )
                         for d in detection_dicts
                     ]
                     if scaled_dicts:
                         self.detection_writer.write_detection_result(
                             frame_number=zc_frame.frame_number,
                             timestamp_sec=zc_frame.timestamp_sec,
-                            detections=scaled_dicts,
+                            detections=[_det_to_dict(d) for d in scaled_dicts],
                         )
                     detection_dicts = scaled_dicts
 
@@ -753,7 +759,7 @@ class YoloDetectorDaemon:
 
                 # Debug logging (per-frame details)
                 if is_debug and cycle_complete and detection_dicts:
-                    classes = ",".join(d["class_name"] for d in detection_dicts)
+                    classes = ",".join(d.class_name for d in detection_dicts)
                     logger.debug(f"#{self.stats['frames_processed']}: {classes}")
 
         except KeyboardInterrupt:

@@ -50,8 +50,6 @@ type Server struct {
 	httpServer *http.Server
 
 	// Channels for goroutine communication
-	processChan  chan *types.VideoFrame
-	webrtcChan   chan *types.VideoFrame
 	recorderChan chan *types.VideoFrame
 }
 
@@ -139,8 +137,6 @@ func NewServer() (*Server, error) {
 		webrtc:       webrtcSrv,
 		recorder:     rec,
 		httpServer:   httpServer,
-		processChan:  make(chan *types.VideoFrame, 30),
-		webrtcChan:   make(chan *types.VideoFrame, 30),
 		recorderChan: make(chan *types.VideoFrame, 60),
 	}
 
@@ -277,74 +273,6 @@ func (s *Server) readFrames() {
 		// WebRTC: parallel WriteSample to all clients, blocks until done
 		s.webrtc.SendFrame(frame)
 		s.metrics.WebRTCFramesSent.Add(1)
-	}
-}
-
-// processFrames processes H.264 frames
-func (s *Server) processFrames() {
-	defer s.wg.Done()
-
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case frame := <-s.processChan:
-			startTime := time.Now()
-
-			// Process frame (extract SPS/PPS, detect IDR)
-			if err := s.processor.Process(frame); err != nil {
-				s.metrics.ProcessErrors.Add(1)
-				logger.Warn("Processor", "Error: %v", err)
-				continue
-			}
-
-			// Don't modify frame data - send original H.264 stream as-is
-			// This allows WebRTC to receive the raw stream without duplication
-
-			// Update recorder's header cache when headers are available
-			if s.processor.HasHeaders() {
-				s.recorder.UpdateHeaders(s.processor.GetVPS(), s.processor.GetSPS(), s.processor.GetPPS())
-			}
-
-			s.metrics.FramesProcessed.Add(1)
-			s.metrics.UpdateProcessLatency(time.Since(startTime))
-
-			// Send to WebRTC (non-blocking)
-			select {
-			case s.webrtcChan <- frame:
-			default:
-				s.metrics.WebRTCFramesDropped.Add(1)
-			}
-
-			// Send to recorder (non-blocking)
-			select {
-			case s.recorderChan <- frame:
-			default:
-				s.metrics.RecorderFramesDropped.Add(1)
-			}
-
-			// Update buffer usage metrics
-			s.metrics.UpdateBufferUsage(
-				len(s.webrtcChan), cap(s.webrtcChan),
-				len(s.recorderChan), cap(s.recorderChan),
-			)
-		}
-	}
-}
-
-// distributeWebRTC distributes frames to WebRTC clients
-func (s *Server) distributeWebRTC() {
-	defer s.wg.Done()
-
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case frame := <-s.webrtcChan:
-			s.webrtc.SendFrame(frame)
-			s.metrics.WebRTCFramesSent.Add(1)
-			s.metrics.ActiveClients.Store(uint64(s.webrtc.GetClientCount()))
-		}
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"image/color"
 	"image/jpeg"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/logger"
@@ -56,6 +55,16 @@ func blankJPEG() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+var cachedBlankJPEG []byte
+
+func init() {
+	var err error
+	cachedBlankJPEG, err = blankJPEG()
+	if err != nil {
+		panic("failed to generate blank JPEG: " + err.Error())
+	}
+}
+
 type jpegProvider func() ([]byte, bool)
 
 // streamMJPEGFromChannel streams MJPEG from a channel (fanout pattern).
@@ -69,12 +78,6 @@ func streamMJPEGFromChannel(w http.ResponseWriter, r *http.Request, frameCh <-ch
 
 	w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
 	w.Header().Set("Cache-Control", "no-cache")
-
-	blank, err := blankJPEG()
-	if err != nil {
-		http.Error(w, "Failed to render frame", http.StatusInternalServerError)
-		return
-	}
 
 	for {
 		var jpegData []byte
@@ -90,20 +93,17 @@ func streamMJPEGFromChannel(w http.ResponseWriter, r *http.Request, frameCh <-ch
 			if data != nil {
 				jpegData = data
 			} else {
-				jpegData = blank
+				jpegData = cachedBlankJPEG
 			}
 		case <-time.After(5 * time.Second):
 			// No frame for 5 seconds, send blank to keep connection alive
-			jpegData = blank
+			jpegData = cachedBlankJPEG
 		}
 
 		// Write frame in single syscall for TCP efficiency
-		header := strconv.AppendInt(
-			append([]byte("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "), make([]byte, 0, 10)...),
-			int64(len(jpegData)), 10)
-		header = append(header, "\r\n\r\n"...)
-		buf := make([]byte, 0, len(header)+len(jpegData)+2)
-		buf = append(buf, header...)
+		const headerPrefix = "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+		buf := make([]byte, 0, len(headerPrefix)+10+4+len(jpegData)+2)
+		buf = fmt.Appendf(buf, "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(jpegData))
 		buf = append(buf, jpegData...)
 		buf = append(buf, "\r\n"...)
 		if _, err := w.Write(buf); err != nil {
@@ -124,17 +124,11 @@ func streamMJPEG(w http.ResponseWriter, interval time.Duration, provider jpegPro
 	w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
 	w.Header().Set("Cache-Control", "no-cache")
 
-	blank, err := blankJPEG()
-	if err != nil {
-		http.Error(w, "Failed to render frame", http.StatusInternalServerError)
-		return
-	}
-
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
-		jpegData := blank
+		jpegData := cachedBlankJPEG
 		if provider != nil {
 			if data, ok := provider(); ok {
 				jpegData = data
