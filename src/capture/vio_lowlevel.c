@@ -9,6 +9,7 @@
 #include "isp_cfg.h"
 #include "vse_cfg.h"
 #include "hb_mem_mgr.h"
+#include "shm_constants.h"
 #include "logger.h"
 
 #define RAW10 0x2B
