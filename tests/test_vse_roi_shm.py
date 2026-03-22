@@ -263,20 +263,17 @@ def test_roi_vs_crop_comparison(duration_sec: float = 10.0):
     comparisons = 0
     roi_index = 0
     skipped_day = 0
+    last_yolo_version = 0
+    last_roi_version = [0] * num_rois
     start = time.monotonic()
 
     while time.monotonic() - start < duration_sec:
-        # Read from yolo_zc — try version poll if semaphore misses
-        got = yolo_zc.wait_for_frame(timeout_sec=0.1)
-        if not got:
-            full_frame = yolo_zc.get_frame()
-            if full_frame is None or full_frame.frame_number == 0:
-                continue
-        else:
-            full_frame = yolo_zc.get_frame()
-
-        if full_frame is None:
+        # Version-based polling (semaphore is consumed by detector daemon)
+        time.sleep(0.05)  # ~20 fps polling
+        full_frame = yolo_zc.get_frame()
+        if full_frame is None or full_frame.version == last_yolo_version:
             continue
+        last_yolo_version = full_frame.version
 
         if full_frame.camera_id != 1:
             skipped_day += 1
@@ -284,20 +281,13 @@ def test_roi_vs_crop_comparison(duration_sec: float = 10.0):
                 logger.info(f"  Day camera active (camera_id={full_frame.camera_id}), waiting for night...")
             continue
 
-        # Got night camera frame — read matching ROI
+        # Got night camera frame — read matching ROI (version-based)
         roi_reader = roi_readers[roi_index]
-        got_roi = roi_reader.wait_for_frame(timeout_sec=0.05)
-        if not got_roi:
-            roi_frame = roi_reader.get_frame()
-            if roi_frame is None or roi_frame.frame_number == 0:
-                roi_index = (roi_index + 1) % num_rois
-                continue
-        else:
-            roi_frame = roi_reader.get_frame()
-
-        if roi_frame is None:
+        roi_frame = roi_reader.get_frame()
+        if roi_frame is None or roi_frame.version == last_roi_version[roi_index]:
             roi_index = (roi_index + 1) % num_rois
             continue
+        last_roi_version[roi_index] = roi_frame.version
 
         # Path A: Traditional (Python crop from 1280x720)
         try:
