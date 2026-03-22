@@ -55,20 +55,20 @@ type ComicCapture struct {
 	src       frameSource
 	outputDir string
 
-	state            comicState
-	catFirstSeen     time.Time
-	lastCatSeen      time.Time
-	lastCatBBox      *BoundingBox
-	lastCatClass     string
+	state             comicState
+	catFirstSeen      time.Time
+	lastCatSeen       time.Time
+	lastCatBBox       *BoundingBox
+	lastCatClass      string
 	lastVersionChange time.Time
-	sessionID        string
-	panels           []capturedPanel
-	lastCaptureTime  time.Time
-	captureStartTime time.Time
-	recentComics     []time.Time
-	mu               sync.Mutex
-	stop             chan struct{}
-	done             chan struct{}
+	sessionID         string
+	panels            []capturedPanel
+	lastCaptureTime   time.Time
+	captureStartTime  time.Time
+	recentComics      []time.Time
+	mu                sync.Mutex
+	stop              chan struct{}
+	done              chan struct{}
 
 	// Configurable parameters
 	DetectionThreshold  time.Duration // continuous cat before capture starts
@@ -77,7 +77,7 @@ type ComicCapture struct {
 	MaxPanels           int
 	RateLimitWindow     time.Duration
 	RateLimitMax        int
-	SkipStitch          bool          // Skip nano2D composition (for testing)
+	SkipStitch          bool // Skip nano2D composition (for testing)
 }
 
 func NewComicCapture(src frameSource, outputDir string) *ComicCapture {
@@ -330,10 +330,18 @@ func (cc *ComicCapture) stitchAndSave() {
 			expandW := int(float64(p.bbox.W) * factor)
 			expandH := int(float64(p.bbox.H) * factor)
 			x0, y0 := cx-expandW/2, cy-expandH/2
-			if x0 < 0 { x0 = 0 }
-			if y0 < 0 { y0 = 0 }
-			if x0+expandW > p.width { expandW = p.width - x0 }
-			if y0+expandH > p.height { expandH = p.height - y0 }
+			if x0 < 0 {
+				x0 = 0
+			}
+			if y0 < 0 {
+				y0 = 0
+			}
+			if x0+expandW > p.width {
+				expandW = p.width - x0
+			}
+			if y0+expandH > p.height {
+				expandH = p.height - y0
+			}
 			cCrops[i] = C.comic_crop_t{
 				src_x: C.int(x0), src_y: C.int(y0),
 				src_w: C.int(expandW), src_h: C.int(expandH),
@@ -372,8 +380,12 @@ func (cc *ComicCapture) stitchAndSave() {
 		ts := cc.panels[i].timestamp.Format("15:04:05")
 		px := comicMargin + border
 		py := comicMargin + border
-		if i%2 == 1 { px += cellW + comicGap }
-		if i >= 2 { py += cellH + comicGap }
+		if i%2 == 1 {
+			px += cellW + comicGap
+		}
+		if i >= 2 {
+			py += cellH + comicGap
+		}
 		// Draw timestamp at bottom-right of panel
 		drawTextWithBackgroundNV12(outNV12, outW, outH,
 			px+comicPanelW-len(ts)*8*2-12, py+comicPanelH-32-6,
@@ -408,6 +420,32 @@ func (cc *ComicCapture) stitchAndSave() {
 	log.Printf("[Comic] Saved %s (%d panels, nano2D+HW JPEG)", filename, numPanels)
 }
 
+// CaptureSnapshot grabs the current NV12 frame, encodes it as JPEG, and saves
+// it to outputDir as snap_YYYYMMDD_HHMMSS.jpg. Returns the saved filename.
+func (cc *ComicCapture) CaptureSnapshot() (string, error) {
+	frame, ok := cc.src.LatestNV12()
+	if !ok {
+		return "", fmt.Errorf("no frame available from SHM")
+	}
+
+	jpegData, err := nv12ToJPEG(frame.Data, frame.Width, frame.Height)
+	if err != nil {
+		return "", fmt.Errorf("JPEG encode failed: %w", err)
+	}
+
+	if err := os.MkdirAll(cc.outputDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create output dir: %w", err)
+	}
+
+	filename := fmt.Sprintf("snap_%s.jpg", time.Now().Format("20060102_150405"))
+	outPath := filepath.Join(cc.outputDir, filename)
+	if err := os.WriteFile(outPath, jpegData, 0644); err != nil {
+		return "", fmt.Errorf("failed to write file: %w", err)
+	}
+
+	log.Printf("[Capture] On-demand snapshot saved: %s (%d bytes)", filename, len(jpegData))
+	return filename, nil
+}
 
 func isPetClass(name string) bool {
 	return name == "cat" || name == "dog"
