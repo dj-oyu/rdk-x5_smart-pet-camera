@@ -198,6 +198,22 @@ def test_roi_fps(duration_sec: float = 5.0):
         return False
 
 
+def _find_yolo_model() -> str:
+    """Find available YOLO model on this system."""
+    candidates = [
+        PROJECT_ROOT / "models" / "yolo26n_det_bpu_bayese_640x640_nv12.bin",
+        PROJECT_ROOT / "models" / "yolov13n_detect_bayese_640x640_nv12.bin",
+        PROJECT_ROOT / "models" / "yolo11n_detect_bayese_640x640_nv12.bin",
+        Path("/tmp/yolo_models/yolo26n_det_bpu_bayese_640x640_nv12.bin"),
+        Path("/tmp/yolo_models/yolov13n_detect_bayese_640x640_nv12.bin"),
+        Path("/tmp/yolo_models/yolo11n_detect_bayese_640x640_nv12.bin"),
+    ]
+    for p in candidates:
+        if p.exists():
+            return str(p)
+    return ""
+
+
 def test_roi_vs_crop_comparison(duration_sec: float = 10.0):
     """Test 4: VSE ROI と Python crop の検出結果を比較"""
     import numpy as np
@@ -205,6 +221,7 @@ def test_roi_vs_crop_comparison(duration_sec: float = 10.0):
         ZeroCopySharedMemory,
         SHM_NAME_YOLO_ZC,
         open_roi_readers,
+        NUM_ROI_REGIONS,
     )
     from hb_mem_bindings import import_nv12_graph_buf, init_module as hb_mem_init
     from detection.yolo_detector import YoloDetector
@@ -213,49 +230,74 @@ def test_roi_vs_crop_comparison(duration_sec: float = 10.0):
         logger.warning("  SKIP: hb_mem not available")
         return True
 
-    # Open both paths
+    # Open yolo_zc (1280x720 full frame)
     yolo_zc = ZeroCopySharedMemory(SHM_NAME_YOLO_ZC)
+    if not yolo_zc.open():
+        logger.error("  FAIL: Cannot open yolo_zc SHM")
+        return False
+
+    # Open ROI readers
     roi_readers = open_roi_readers()
     if not roi_readers:
         logger.error("  FAIL: ROI readers not available")
         return False
 
+    num_rois = len(roi_readers)
+    logger.info(f"  Opened yolo_zc + {num_rois} ROI readers")
+
     # Load detector
-    model_path = str(PROJECT_ROOT / "models" / "yolov13n_detect_bayese_640x640_nv12.bin")
+    model_path = _find_yolo_model()
+    if not model_path:
+        logger.warning("  SKIP: No YOLO model found")
+        return True
+
     try:
-        detector = YoloDetector(model_path=model_path, auto_download=True)
+        detector = YoloDetector(model_path=model_path, auto_download=False)
+        logger.info(f"  Loaded model: {Path(model_path).name}")
     except Exception as e:
         logger.error(f"  FAIL: Cannot load YOLO model — {e}")
         return False
-
-    VSE_ROI_REGIONS = [
-        (0, 60, 960, 960),
-        (480, 60, 960, 960),
-        (896, 60, 960, 960),
-    ]
-    VSE_SCALE = 960.0 / 640.0
 
     matches = 0
     mismatches = 0
     comparisons = 0
     roi_index = 0
+    skipped_day = 0
     start = time.monotonic()
 
     while time.monotonic() - start < duration_sec:
-        # Wait for both yolo_zc and ROI frame
-        if not yolo_zc.wait_for_frame(timeout_sec=0.1):
+        # Read from yolo_zc — try version poll if semaphore misses
+        got = yolo_zc.wait_for_frame(timeout_sec=0.1)
+        if not got:
+            full_frame = yolo_zc.get_frame()
+            if full_frame is None or full_frame.frame_number == 0:
+                continue
+        else:
+            full_frame = yolo_zc.get_frame()
+
+        if full_frame is None:
             continue
 
-        full_frame = yolo_zc.get_frame()
         if full_frame.camera_id != 1:
-            continue  # Only compare night camera
-
-        roi_reader = roi_readers[roi_index]
-        if not roi_reader.wait_for_frame(timeout_sec=0.05):
-            roi_index = (roi_index + 1) % 3
+            skipped_day += 1
+            if skipped_day == 1:
+                logger.info(f"  Day camera active (camera_id={full_frame.camera_id}), waiting for night...")
             continue
 
-        roi_frame = roi_reader.get_frame()
+        # Got night camera frame — read matching ROI
+        roi_reader = roi_readers[roi_index]
+        got_roi = roi_reader.wait_for_frame(timeout_sec=0.05)
+        if not got_roi:
+            roi_frame = roi_reader.get_frame()
+            if roi_frame is None or roi_frame.frame_number == 0:
+                roi_index = (roi_index + 1) % num_rois
+                continue
+        else:
+            roi_frame = roi_reader.get_frame()
+
+        if roi_frame is None:
+            roi_index = (roi_index + 1) % num_rois
+            continue
 
         # Path A: Traditional (Python crop from 1280x720)
         try:
@@ -273,7 +315,8 @@ def test_roi_vs_crop_comparison(duration_sec: float = 10.0):
                 nv12_full, roi_index, full_frame.brightness_avg
             )
             hb_buf.release()
-        except Exception:
+        except Exception as e:
+            logger.debug(f"  Path A error: {e}")
             continue
 
         # Path B: VSE ROI (pre-cropped 640x640)
@@ -292,7 +335,8 @@ def test_roi_vs_crop_comparison(duration_sec: float = 10.0):
                 roi_nv12, roi_frame.width, roi_frame.height, roi_frame.brightness_avg
             )
             roi_hb.release()
-        except Exception:
+        except Exception as e:
+            logger.debug(f"  Path B error: {e}")
             continue
 
         # Compare detection counts
@@ -306,10 +350,16 @@ def test_roi_vs_crop_comparison(duration_sec: float = 10.0):
                     f"  Mismatch ROI[{roi_index}]: crop={len(dets_crop)} vs roi={len(dets_roi)}"
                 )
 
-        roi_index = (roi_index + 1) % 3
+        roi_index = (roi_index + 1) % num_rois
+
+        if comparisons % 10 == 0:
+            logger.info(f"  Progress: {comparisons} compared, {matches} match so far...")
 
     if comparisons == 0:
-        logger.warning("  SKIP: No night camera frames received for comparison")
+        if skipped_day > 0:
+            logger.warning(f"  SKIP: Day camera was active ({skipped_day} frames). Run at night for comparison.")
+        else:
+            logger.warning("  SKIP: No frames received for comparison")
         return True
 
     match_rate = matches / comparisons * 100
