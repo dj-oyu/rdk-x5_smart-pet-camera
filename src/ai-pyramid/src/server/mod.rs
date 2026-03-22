@@ -1,16 +1,20 @@
+use crate::application::{ActivityStats, EventSummary};
 use crate::db::{PhotoFilter, PhotoStore};
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
-use axum::response::{IntoResponse, Json};
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Json, Response};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::Router;
 use futures_util::stream::Stream;
+use include_dir::{include_dir, Dir};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+
+static EMBEDDED_UI: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PhotoEvent {
@@ -44,6 +48,8 @@ pub fn router(state: AppState) -> Router {
         .with_state(mcp_state);
 
     Router::new()
+        .route("/app", get(handle_embedded_app))
+        .route("/app/{*path}", get(handle_embedded_asset))
         .route("/api/photos", get(handle_photos_list))
         .route("/api/photos/{filename}", get(handle_photo_serve).patch(handle_photo_update))
         .route("/api/stats", get(handle_stats))
@@ -63,51 +69,39 @@ struct PhotosQuery {
 
 #[derive(Serialize)]
 struct PhotosResponse {
-    photos: Vec<PhotoJson>,
+    events: Vec<EventSummary>,
     total: i64,
 }
 
-#[derive(Serialize, Clone)]
-struct PhotoJson {
-    id: i64,
-    filename: String,
-    captured_at: String,
-    caption: Option<String>,
-    is_valid: Option<bool>,
-    pet_id: Option<String>,
-    behavior: Option<String>,
+async fn handle_embedded_app() -> Response {
+    embedded_ui_response(None)
 }
 
-impl PhotoJson {
-    fn caption_display(&self) -> &str {
-        self.caption.as_deref().unwrap_or("")
-    }
-    fn pet_id_display(&self) -> &str {
-        self.pet_id.as_deref().unwrap_or("")
-    }
-    fn behavior_display(&self) -> &str {
-        self.behavior.as_deref().unwrap_or("")
-    }
-    fn status_class(&self) -> &str {
-        match self.is_valid {
-            Some(true) => "valid",
-            Some(false) => "invalid",
-            None => "pending",
-        }
-    }
+async fn handle_embedded_asset(Path(path): Path<String>) -> Response {
+    embedded_ui_response(Some(path.as_str()))
 }
 
-impl From<crate::db::Photo> for PhotoJson {
-    fn from(p: crate::db::Photo) -> Self {
-        Self {
-            id: p.id,
-            filename: p.filename,
-            captured_at: p.captured_at.format("%Y-%m-%dT%H:%M:%S").to_string(),
-            caption: p.caption,
-            is_valid: p.is_valid,
-            pet_id: p.pet_id,
-            behavior: p.behavior,
+fn embedded_ui_response(path: Option<&str>) -> Response {
+    let requested = path.unwrap_or("index.html").trim_start_matches('/');
+    let file = EMBEDDED_UI
+        .get_file(requested)
+        .or_else(|| EMBEDDED_UI.get_file("index.html"));
+
+    match file {
+        Some(file) => {
+            let mime = mime_guess::from_path(file.path())
+                .first_or_octet_stream()
+                .to_string();
+            let mut response = Response::new(file.contents().to_vec().into_response().into_body());
+            *response.status_mut() = StatusCode::OK;
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_str(&mime)
+                    .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+            );
+            response
         }
+        None => (StatusCode::NOT_FOUND, "embedded asset not found").into_response(),
     }
 }
 
@@ -123,7 +117,7 @@ async fn handle_photos_list(
     match store.list(&filter) {
         Ok((photos, total)) => {
             let resp = PhotosResponse {
-                photos: photos.into_iter().map(PhotoJson::from).collect(),
+                events: photos.into_iter().map(EventSummary::from).collect(),
                 total,
             };
             Json(resp).into_response()
@@ -173,10 +167,8 @@ async fn handle_photo_update(
         // Toggle is_valid (user override)
         let result = store.get_by_filename(&safe_name);
         match result {
-            Ok(Some(photo)) => {
-                let caption = photo.caption.as_deref().unwrap_or("");
-                let behavior = photo.behavior.as_deref().unwrap_or("other");
-                if let Err(e) = store.update_vlm_result(&safe_name, is_valid, caption, behavior) {
+            Ok(Some(_photo)) => {
+                if let Err(e) = store.set_validation_override(&safe_name, is_valid) {
                     return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response();
                 }
                 Json(serde_json::json!({"ok": true, "is_valid": is_valid})).into_response()
@@ -192,7 +184,7 @@ async fn handle_photo_update(
 async fn handle_stats(State(state): State<AppState>) -> impl IntoResponse {
     let store = state.store.lock().unwrap();
     match store.stats() {
-        Ok(stats) => Json(stats).into_response(),
+        Ok(stats) => Json(ActivityStats::from(stats)).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
     }
 }
@@ -205,7 +197,7 @@ async fn handle_sse(
         match result {
             Ok(photo_event) => {
                 let json = serde_json::to_string(&photo_event).unwrap_or_default();
-                Some(Ok(Event::default().event("photo").data(json)))
+                Some(Ok(Event::default().event("event").data(json)))
             }
             Err(_) => None,
         }
@@ -247,6 +239,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use chrono::NaiveDate;
+    use futures_util::StreamExt;
     use tower::util::ServiceExt;
 
     fn dt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> chrono::NaiveDateTime {
@@ -270,6 +263,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn embedded_app_serves_index() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(Request::builder().uri("/app").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("<div id=\"app\"></div>"));
+        assert!(html.contains("/app/main."));
+    }
+
+    #[tokio::test]
     async fn health_endpoint() {
         let app = router(test_state());
         let resp = app
@@ -280,7 +287,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn photos_list_empty() {
+    async fn photos_list_empty_returns_events_shape() {
         let app = router(test_state());
         let resp = app
             .oneshot(Request::builder().uri("/api/photos").body(Body::empty()).unwrap())
@@ -290,25 +297,34 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["total"], 0);
+        assert!(json["events"].is_array());
+        assert_eq!(json["events"].as_array().unwrap().len(), 0);
     }
 
     #[tokio::test]
-    async fn photos_list_with_data() {
+    async fn photos_list_returns_frontend_event_contract() {
         let state = test_state();
         {
             let store = state.store.lock().unwrap();
             store.insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), Some("chatora")).unwrap();
-            store.insert("b.jpg", dt(2026, 3, 21, 11, 0, 0), Some("mike")).unwrap();
-            store.update_vlm_result("a.jpg", true, "cap", "resting").unwrap();
+            store.update_vlm_result("a.jpg", true, "tabby cat resting", "resting").unwrap();
         }
         let app = router(state);
         let resp = app
             .oneshot(Request::builder().uri("/api/photos?is_valid=true").body(Body::empty()).unwrap())
             .await
             .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["total"], 1);
+        let event = &json["events"][0];
+        assert_eq!(event["source_filename"], "a.jpg");
+        assert_eq!(event["status"], "valid");
+        assert_eq!(event["pet_id"], "chatora");
+        assert_eq!(event["behavior"], "resting");
+        assert_eq!(event["summary"], "tabby cat resting");
+        assert!(event["observed_at"].as_str().unwrap().starts_with("2026-03-21T10:00:00"));
     }
 
     #[tokio::test]
@@ -332,7 +348,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stats_endpoint() {
+    async fn stats_endpoint_returns_frontend_contract() {
         let state = test_state();
         {
             let store = state.store.lock().unwrap();
@@ -343,22 +359,42 @@ mod tests {
             .oneshot(Request::builder().uri("/api/stats").body(Body::empty()).unwrap())
             .await
             .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["total"], 1);
-        assert_eq!(json["pending"], 1);
+        assert_eq!(json["total_events"], 1);
+        assert_eq!(json["pending_events"], 1);
+        assert_eq!(json["confirmed_events"], 0);
+        assert_eq!(json["rejected_events"], 0);
     }
 
     #[tokio::test]
-    async fn album_page_renders() {
-        let app = router(test_state());
+    async fn sse_uses_frontend_event_name() {
+        let state = test_state();
+        let tx = state.event_tx.clone();
+        let app = router(state);
         let resp = app
-            .oneshot(Request::builder().uri("/album").body(Body::empty()).unwrap())
+            .oneshot(Request::builder().uri("/api/events").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("Pet Album"));
+        let mut stream = resp.into_body().into_data_stream();
+
+        tx.send(PhotoEvent {
+            filename: "a.jpg".into(),
+            is_valid: true,
+            caption: "tabby cat resting".into(),
+            behavior: "resting".into(),
+            pet_id: Some("chatora".into()),
+        }).unwrap();
+
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8_lossy(&chunk);
+        assert!(text.contains("event: event"));
+        assert!(text.contains("\"filename\":\"a.jpg\""));
     }
 }

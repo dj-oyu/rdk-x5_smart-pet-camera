@@ -139,15 +139,11 @@ export type MobileTab = 'live' | 'tracking' | 'album';
 
 export function SidebarView(props: ReturnType<typeof useSidebar> & { mobileTab: MobileTab }) {
   const [albumOffline, setAlbumOffline] = useState(false);
-  const [albumHeight, setAlbumHeight] = useState(0);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const [lightboxMeta, setLightboxMeta] = useState<{ date?: string; pet?: string; behavior?: string; caption?: string }>({});
 
   useEffect(() => {
     const handler = (e: MessageEvent) => {
-      if (e.data?.type === 'album-height' && typeof e.data.height === 'number') {
-        setAlbumHeight(e.data.height);
-      }
       if (e.data?.type === 'album-lightbox' && typeof e.data.src === 'string') {
         setLightboxSrc(e.data.src);
         setLightboxMeta(e.data.meta || {});
@@ -187,7 +183,7 @@ export function SidebarView(props: ReturnType<typeof useSidebar> & { mobileTab: 
         </div>
       </div>
 
-      <div class={`panel ${props.mobileTab === 'tracking' ? 'mobile-hidden' : ''}`}>
+      <div class={`panel album-panel ${props.mobileTab === 'tracking' ? 'mobile-hidden' : ''}`}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <h2>アルバム</h2>
           <a href={ALBUM_URL} target="_blank" class="album-link" title="別タブで開く">↗</a>
@@ -199,7 +195,6 @@ export function SidebarView(props: ReturnType<typeof useSidebar> & { mobileTab: 
             src={ALBUM_URL}
             class="album-iframe"
             scrolling="auto"
-            style={albumHeight ? { height: `${albumHeight}px` } : undefined}
             onError={() => setAlbumOffline(true)}
           />
         )}

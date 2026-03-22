@@ -17,7 +17,7 @@ export function StatsStrip({ stats }: StatsStripProps) {
   return (
     <section class="stats-strip">
       <article>
-        <span>Total</span>
+        <span>Events</span>
         <strong>{value.total_events}</strong>
       </article>
       <article>
