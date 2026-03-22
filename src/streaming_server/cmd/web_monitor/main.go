@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/logger"
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/webmonitor"
@@ -64,23 +68,38 @@ func main() {
 		Handler: server.Handler(),
 	}
 
-	// Use HTTPS if TLS certificate is provided
-	if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
-		logger.Info("Main", "Go web monitor listening on %s (HTTPS)", cfg.Addr)
-		logger.Info("Main", "TLS cert: %s", cfg.TLSCertFile)
-		logger.Info("Main", "Assets: %s (build: %s)", cfg.AssetsDir, cfg.BuildAssetsDir)
-		logger.Info("Main", "Log level: %s", level)
-
-		if err := httpServer.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
+	// Start HTTP(S) server in goroutine
+	go func() {
+		if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
+			logger.Info("Main", "Go web monitor listening on %s (HTTPS)", cfg.Addr)
+			logger.Info("Main", "TLS cert: %s", cfg.TLSCertFile)
+			logger.Info("Main", "Assets: %s (build: %s)", cfg.AssetsDir, cfg.BuildAssetsDir)
+			logger.Info("Main", "Log level: %s", level)
+			if err := httpServer.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("server error: %v", err)
+			}
+		} else {
+			logger.Info("Main", "Go web monitor listening on %s (HTTP)", cfg.Addr)
+			logger.Info("Main", "Assets: %s (build: %s)", cfg.AssetsDir, cfg.BuildAssetsDir)
+			logger.Info("Main", "Log level: %s", level)
+			if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("server error: %v", err)
+			}
 		}
-	} else {
-		logger.Info("Main", "Go web monitor listening on %s (HTTP)", cfg.Addr)
-		logger.Info("Main", "Assets: %s (build: %s)", cfg.AssetsDir, cfg.BuildAssetsDir)
-		logger.Info("Main", "Log level: %s", level)
+	}()
 
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
-		}
+	// Graceful shutdown on SIGINT/SIGTERM
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	<-sigChan
+
+	logger.Info("Main", "Shutting down...")
+	server.Shutdown()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := httpServer.Shutdown(ctx); err != nil {
+		logger.Warn("Main", "HTTP shutdown error: %v", err)
 	}
+	logger.Info("Main", "Server stopped")
 }
