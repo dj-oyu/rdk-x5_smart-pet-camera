@@ -1,19 +1,24 @@
 use crate::application::{AppContext, EventQuery, EventStatusFilter, EventSummary};
 use askama::Template;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Json};
+use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::Router;
 use futures_util::stream::Stream;
+use include_dir::{include_dir, Dir};
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
+static EMBEDDED_UI: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
+
 pub fn router(state: AppContext) -> Router {
     Router::new()
         .route("/album", get(handle_album_page))
+        .route("/app", get(handle_embedded_app))
+        .route("/app/{*path}", get(handle_embedded_asset))
         .route("/api/photos", get(handle_event_list))
         .route("/api/photos/{filename}", get(handle_photo_serve).patch(handle_event_validity_override))
         .route("/api/stats", get(handle_activity_stats))
@@ -68,6 +73,37 @@ async fn handle_album_page(
         filter_pet_id,
     };
     Html(template.render().unwrap_or_else(|e| format!("Template error: {e}")))
+}
+
+async fn handle_embedded_app() -> Response {
+    embedded_ui_response(None)
+}
+
+async fn handle_embedded_asset(Path(path): Path<String>) -> Response {
+    embedded_ui_response(Some(path.as_str()))
+}
+
+fn embedded_ui_response(path: Option<&str>) -> Response {
+    let requested = path.unwrap_or("index.html").trim_start_matches('/');
+    let file = EMBEDDED_UI
+        .get_file(requested)
+        .or_else(|| EMBEDDED_UI.get_file("index.html"));
+
+    match file {
+        Some(file) => {
+            let mime = mime_guess::from_path(file.path())
+                .first_or_octet_stream()
+                .to_string();
+            let mut response = Response::new(file.contents().to_vec().into_response().into_body());
+            *response.status_mut() = StatusCode::OK;
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_str(&mime).unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+            );
+            response
+        }
+        None => (StatusCode::NOT_FOUND, "embedded asset not found").into_response(),
+    }
 }
 
 async fn handle_event_list(
@@ -221,6 +257,20 @@ mod tests {
         std::mem::forget(tempdir);
         let (event_tx, _) = tokio::sync::broadcast::channel(16);
         AppContext::new(PhotoStoreRepository::shared(store), photos_dir, event_tx)
+    }
+
+    #[tokio::test]
+    async fn embedded_app_serves_index() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(Request::builder().uri("/app").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("<div id=\"app\"></div>"));
+        assert!(html.contains("/app/main.js"));
     }
 
     #[tokio::test]
