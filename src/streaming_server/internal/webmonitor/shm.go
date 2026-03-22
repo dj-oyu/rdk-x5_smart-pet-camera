@@ -123,51 +123,10 @@ static int hw_jpeg_encode(const uint8_t* nv12_data, int width, int height,
     return 0;
 }
 
-// Constants from single source of truth
-#include "shm_constants.h"
-
-// Frame/SharedFrameBuffer removed — using ZeroCopyFrameBuffer now
-
-typedef struct {
-    int x;
-    int y;
-    int w;
-    int h;
-} BoundingBox;
-
-typedef struct {
-    char class_name[32];
-    float confidence;
-    BoundingBox bbox;
-} Detection;
-
-typedef struct {
-    uint64_t frame_number;
-    double timestamp;
-    int num_detections;
-    Detection detections[MAX_DETECTIONS];
-    volatile uint32_t version;
-    sem_t detection_update_sem;
-} LatestDetectionResult;
-
-// ZeroCopy frame buffer for MJPEG (matching shared_memory.h)
-typedef struct {
-    uint64_t frame_number;
-    struct timespec timestamp;
-    int camera_id;
-    int width, height;
-    float brightness_avg;
-    int32_t share_id[ZEROCOPY_MAX_PLANES];
-    uint64_t plane_size[ZEROCOPY_MAX_PLANES];
-    int32_t plane_cnt;
-    uint8_t hb_mem_buf_data[HB_MEM_GRAPHIC_BUF_SIZE];
-    volatile uint32_t version;
-} ZeroCopyFrame;
-
-typedef struct {
-    uint8_t new_frame_sem[32];
-    ZeroCopyFrame frame;
-} ZeroCopyFrameBuffer;
+// All frame/buffer structs from single source of truth.
+// CGO holds pointers to sem_t-containing structs but never accesses
+// sem_t fields directly — all sem operations go through C functions.
+#include "shared_memory.h"
 
 static ZeroCopyFrameBuffer* open_frame_zc(const char* name) {
     int fd = shm_open(name, O_RDWR, 0666);
@@ -278,8 +237,23 @@ static int read_detection_snapshot(LatestDetectionResult* shm, LatestDetectionRe
     return 0;
 }
 
-// NOTE: wait_new_frame() removed - FrameBroadcaster uses polling mode
-// NOTE: wait_new_detection() removed - DetectionBroadcaster uses polling mode
+// Wait for detection update via semaphore (event-driven, replaces polling).
+// Returns 0 on success (new detection available), -1 on timeout.
+// Accumulated sem_posts are drained by repeated wait calls; the caller
+// uses version checking to skip already-processed events.
+static int wait_detection_update(LatestDetectionResult* shm, int timeout_ms) {
+    if (!shm) return -1;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += timeout_ms / 1000;
+    ts.tv_nsec += (timeout_ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000L;
+    }
+    return sem_timedwait(&shm->detection_update_sem, &ts);
+}
+
 // NOTE: CPU bitmap font and draw_*_nv12 functions removed - using hbn_rgn HW overlay
 
 // NV12 to JPEG using TurboJPEG (optimized, avoids RGBA conversion)
@@ -378,9 +352,11 @@ type frameSnapshot struct {
 	Data        []byte // NV12 pixel data
 }
 
+const frameBufSize = 768 * 432 * 3 / 2 // Max NV12 frame size
+
+
 type shmReader struct {
 	frameShm      *C.ZeroCopyFrameBuffer
-	frameBuf      []byte // Reusable NV12 import buffer
 	detectionShm  *C.LatestDetectionResult
 	detectionName string
 	lastDetVer    uint32
@@ -396,7 +372,6 @@ func newSHMReader(frameName, detectionName string) (*shmReader, error) {
 
 	r := &shmReader{
 		frameShm:      frame,
-		frameBuf:      make([]byte, 768*432*3/2), // 768x432 NV12
 		detectionName: detectionName,
 	}
 
@@ -472,16 +447,18 @@ func (r *shmReader) LatestFrame() (*frameSnapshot, bool) {
 		return nil, false
 	}
 
+	buf := make([]byte, frameBufSize)
 	var outW, outH C.int
+
 	dataSize := int(C.import_zc_nv12(&cFrame,
-		(*C.uint8_t)(unsafe.Pointer(&r.frameBuf[0])),
-		C.int(len(r.frameBuf)), &outW, &outH))
+		(*C.uint8_t)(unsafe.Pointer(&buf[0])),
+		C.int(len(buf)), &outW, &outH))
+
 	if dataSize <= 0 {
 		return nil, false
 	}
 
-	data := make([]byte, dataSize)
-	copy(data, r.frameBuf[:dataSize])
+	data := buf[:dataSize]
 
 	timestamp := time.Unix(
 		int64(cFrame.timestamp.tv_sec),
@@ -547,6 +524,19 @@ func (r *shmReader) LatestDetection() (*DetectionResult, bool) {
 	}
 
 	return &result, true
+}
+
+// WaitDetectionUpdate blocks until a new detection is posted to SHM
+// or the timeout expires. Returns true if a new detection may be available.
+func (r *shmReader) WaitDetectionUpdate(timeoutMs int) bool {
+	if r.detectionShm == nil {
+		r.tryOpenDetection()
+	}
+	if r.detectionShm == nil {
+		return false
+	}
+	ret := C.wait_detection_update(r.detectionShm, C.int(timeoutMs))
+	return ret == 0
 }
 
 func (r *shmReader) LatestNV12() (*NV12Frame, bool) {

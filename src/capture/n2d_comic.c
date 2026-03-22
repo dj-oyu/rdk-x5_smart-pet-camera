@@ -74,6 +74,19 @@ static int ensure_src(int w, int h) {
     return 0;
 }
 
+// Copy NV12 frame into nano2D buffer respecting stride alignment
+static void copy_nv12_to_n2d(n2d_buffer_t *buf, const uint8_t *nv12, int w, int h) {
+    uint8_t *dst = (uint8_t *)buf->memory;
+    // Y plane
+    for (int y = 0; y < h; y++)
+        memcpy(dst + y * buf->stride, nv12 + y * w, w);
+    // UV plane
+    uint8_t *dst_uv = dst + buf->stride * buf->alignedh;
+    const uint8_t *src_uv = nv12 + w * h;
+    for (int y = 0; y < h / 2; y++)
+        memcpy(dst_uv + y * buf->stride, src_uv + y * w, w);
+}
+
 int n2d_comic_compose(
     const uint8_t *nv12_frames[],
     const int frame_widths[],
@@ -91,8 +104,8 @@ int n2d_comic_compose(
     if (ensure_n2d_init() != 0) return -1;
     if (ensure_canvas(out_w, out_h) != 0) return -1;
 
-    // Fill white (Y=235, packed as 0x80EB8080 for NV12 fill)
-    n2d_fill(&g_canvas, N2D_NULL, 0x80EB8080, N2D_BLEND_NONE);
+    // Fill white
+    n2d_fill(&g_canvas, N2D_NULL, 0xFFFFFFFF, N2D_BLEND_NONE);
 
     // Panel positions in 2x2 grid
     int border = 2;
@@ -112,16 +125,16 @@ int n2d_comic_compose(
 
         // Black border fill
         n2d_rectangle_t border_rect = {px, py, cell_w, cell_h};
-        n2d_fill(&g_canvas, &border_rect, 0x80108080, N2D_BLEND_NONE);  // Y=16 (black)
+        n2d_fill(&g_canvas, &border_rect, 0xFF000000, N2D_BLEND_NONE);  // black
 
         // Ensure src buffer matches this panel's dimensions
         int fw = frame_widths[i];
         int fh = frame_heights[i];
         if (ensure_src(fw, fh) != 0) continue;
 
-        // Copy NV12 frame data to nano2D buffer
+        // Copy NV12 frame data respecting nano2D stride alignment
         if (g_src_buf.memory && nv12_frames[i]) {
-            memcpy(g_src_buf.memory, nv12_frames[i], fw * fh * 3 / 2);
+            copy_nv12_to_n2d(&g_src_buf, nv12_frames[i], fw, fh);
         } else {
             continue;
         }
@@ -138,13 +151,20 @@ int n2d_comic_compose(
         // Blit: crop from source → scale to panel size → place in canvas
         n2d_rectangle_t dst_rect = {px + border, py + border, panel_w, panel_h};
         n2d_blit(&g_canvas, &dst_rect, &g_src_buf, &src_rect, N2D_BLEND_NONE);
+        n2d_commit();  // Execute before g_src_buf is overwritten by next panel
     }
 
-    n2d_commit();
-
-    // Copy result to output buffer
+    // Copy result to output buffer (respecting stride alignment)
     if (g_canvas.memory) {
-        memcpy(out_nv12, g_canvas.memory, out_w * out_h * 3 / 2);
+        uint8_t *src = (uint8_t *)g_canvas.memory;
+        // Y plane
+        for (int y = 0; y < out_h; y++)
+            memcpy(out_nv12 + y * out_w, src + y * g_canvas.stride, out_w);
+        // UV plane
+        uint8_t *src_uv = src + g_canvas.stride * g_canvas.alignedh;
+        uint8_t *dst_uv = out_nv12 + out_w * out_h;
+        for (int y = 0; y < out_h / 2; y++)
+            memcpy(dst_uv + y * out_w, src_uv + y * g_canvas.stride, out_w);
     }
 
     return 0;
