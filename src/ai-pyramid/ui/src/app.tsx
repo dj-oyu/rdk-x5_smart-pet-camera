@@ -27,7 +27,7 @@ export function App() {
     let cancelled = false;
 
     async function load() {
-      console.debug("[pet-album] load:start", { query, refreshTick });
+      console.log("[pet-album] load:start", { query, refreshTick });
       setLoading(true);
       setError(null);
       try {
@@ -38,7 +38,7 @@ export function App() {
         if (cancelled) {
           return;
         }
-        console.debug("[pet-album] load:success", {
+        console.log("[pet-album] load:success", {
           total: eventResult.total,
           eventCount: eventResult.events.length,
           firstEvent: eventResult.events[0]?.source_filename ?? null
@@ -69,9 +69,9 @@ export function App() {
 
   useEffect(() => {
     const source = new EventSource("/api/events");
-    console.debug("[pet-album] sse:open");
+    console.log("[pet-album] sse:open");
     source.addEventListener("event", (message) => {
-      console.debug("[pet-album] sse:event", message.data);
+      console.log("[pet-album] sse:event", message.data);
       setRefreshTick((current) => current + 1);
     });
     source.onerror = () => {
