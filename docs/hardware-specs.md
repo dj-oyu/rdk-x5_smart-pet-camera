@@ -116,6 +116,65 @@ int main() {
 }
 ```
 
+### nano2D 実装時の注意事項 (実機検証済み)
+
+#### 1. バッファの stride アライメント
+
+`n2d_util_allocate_buffer()` で確保したバッファは `alignedw` が 64 バイト境界に切り上げられる。
+`stride` は `alignedw` に基づくため、**width が 64 の倍数でない場合 stride != width** となる。
+
+```
+例: width=848 → alignedw=896, stride=896
+例: width=768 → alignedw=768, stride=768 (768は64の倍数)
+```
+
+CPU `memcpy` でデータを出し入れする際は stride を考慮する必要がある:
+
+```c
+// NG: 一発コピー (stride != width のとき Y/UV プレーンがズレてノイズになる)
+memcpy(buf.memory, nv12_data, w * h * 3 / 2);
+
+// OK: stride を考慮した行単位コピー
+uint8_t *dst = (uint8_t *)buf.memory;
+for (int y = 0; y < h; y++)
+    memcpy(dst + y * buf.stride, src + y * w, w);
+uint8_t *dst_uv = dst + buf.stride * buf.alignedh;
+const uint8_t *src_uv = src + w * h;
+for (int y = 0; y < h / 2; y++)
+    memcpy(dst_uv + y * buf.stride, src_uv + y * w, w);
+```
+
+#### 2. n2d_blit と n2d_commit のタイミング
+
+`n2d_blit()` は GPU コマンドをキューに入れるだけで、`n2d_commit()` で一括実行される。
+同じソースバッファを複数回 blit する場合、**commit 前にソースを上書きすると全 blit が最後のデータで実行される**。
+
+```c
+// NG: 4回 blit してから 1回 commit → 最後のパネルのデータで全部描画
+for (int i = 0; i < 4; i++) {
+    memcpy(src_buf.memory, panels[i], size);
+    n2d_blit(&canvas, &dst_rect[i], &src_buf, &src_rect, N2D_BLEND_NONE);
+}
+n2d_commit();  // src_buf は panels[3] のデータしか残っていない
+
+// OK: パネルごとに commit
+for (int i = 0; i < 4; i++) {
+    memcpy(src_buf.memory, panels[i], size);
+    n2d_blit(&canvas, &dst_rect[i], &src_buf, &src_rect, N2D_BLEND_NONE);
+    n2d_commit();  // ここで GPU 実行、次のパネルで上書き可能
+}
+```
+
+#### 3. n2d_fill のカラーフォーマット
+
+NV12 バッファに対する `n2d_fill()` のカラー値は **ARGB (0xAARRGGBB)** で指定する（NV12 の YUV 値ではない）。nano2D が内部で色空間変換を行う。
+
+```c
+n2d_fill(&buf, N2D_NULL, 0xFFFFFFFF, N2D_BLEND_NONE);  // 白
+n2d_fill(&buf, N2D_NULL, 0xFF000000, N2D_BLEND_NONE);  // 黒
+n2d_fill(&buf, N2D_NULL, 0x00108080, N2D_BLEND_NONE);  // NG: YUV値を直接入れると意図しない色になる
+```
+
 ## BPU (Brain Processing Unit)
 
 | 項目 | 値 |
