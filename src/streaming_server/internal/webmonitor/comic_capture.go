@@ -455,9 +455,10 @@ func (cc *ComicCapture) CaptureComic() (string, error) {
 	fw, fh := frame.Width, frame.Height
 
 	randomBBox := func() *BoundingBox {
-		// Random center point in the middle 60% of frame
-		cx := fw/5 + rand.Intn(fw*3/5)
-		cy := fh/5 + rand.Intn(fh*3/5)
+		// Bias toward center-left (cat food bowl area) with some variation.
+		// Base center: ~35-50% from left, ~40-60% from top
+		cx := fw*35/100 + rand.Intn(fw*15/100) // 35-50% X
+		cy := fh*40/100 + rand.Intn(fh*20/100) // 40-60% Y
 		// Random size (15-40% of frame)
 		bw := fw/7 + rand.Intn(fw/4)
 		bh := fh/7 + rand.Intn(fh/4)
