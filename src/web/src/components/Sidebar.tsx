@@ -135,7 +135,9 @@ export function useSidebar() {
   return { canvasRef, legendEntries, updateTrajectory };
 }
 
-export function SidebarView(props: ReturnType<typeof useSidebar>) {
+export type MobileTab = 'live' | 'tracking' | 'album';
+
+export function SidebarView(props: ReturnType<typeof useSidebar> & { mobileTab: MobileTab }) {
   const [albumOffline, setAlbumOffline] = useState(false);
   const [albumHeight, setAlbumHeight] = useState(0);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
@@ -165,8 +167,8 @@ export function SidebarView(props: ReturnType<typeof useSidebar>) {
   }, [lightboxSrc]);
 
   return (
-    <div class="sidebar">
-      <div class="trajectory-card">
+    <div class={`sidebar ${props.mobileTab === 'live' ? 'mobile-hidden' : ''}`}>
+      <div class={`trajectory-card ${props.mobileTab === 'album' ? 'mobile-hidden' : ''}`}>
         <canvas class="trajectory-canvas" ref={props.canvasRef} />
         <div class="legend">
           {props.legendEntries.length === 0 ? (
@@ -185,7 +187,7 @@ export function SidebarView(props: ReturnType<typeof useSidebar>) {
         </div>
       </div>
 
-      <div class="panel">
+      <div class={`panel ${props.mobileTab === 'tracking' ? 'mobile-hidden' : ''}`}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <h2>アルバム</h2>
           <a href={ALBUM_URL} target="_blank" class="album-link" title="別タブで開く">↗</a>
