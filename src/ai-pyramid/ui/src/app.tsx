@@ -68,6 +68,14 @@ export function App() {
   }, [query, refreshTick]);
 
   useEffect(() => {
+    const timer = window.setInterval(() => {
+      console.log("[pet-album] heartbeat", { href: window.location.href, now: new Date().toISOString() });
+    }, 30000);
+
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     const source = new EventSource("/api/events");
     console.log("[pet-album] sse:open");
     source.addEventListener("event", (message) => {
