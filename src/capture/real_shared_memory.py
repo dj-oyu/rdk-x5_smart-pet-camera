@@ -5,6 +5,7 @@ Provides zero-copy frame access via hb_mem share_id.
 Matches shared_memory.h structure layout.
 """
 
+import ctypes
 import mmap
 import os
 import time
@@ -55,6 +56,9 @@ HB_MEM_GRAPHIC_BUF_SIZE = 160
 SHM_NAME_YOLO_ZC = "/pet_camera_yolo_zc"
 SHM_NAME_DETECTIONS = os.getenv("SHM_NAME_DETECTIONS", "/pet_camera_detections")
 MAX_DETECTIONS = 10
+SHM_NAME_ROI_ZC_0 = "/pet_camera_roi_zc_0"
+SHM_NAME_ROI_ZC_1 = "/pet_camera_roi_zc_1"
+NUM_ROI_REGIONS = 2
 
 
 # ============================================================================
@@ -213,6 +217,22 @@ class ZeroCopySharedMemory:
         return ret == 0
 
 
+def open_roi_readers() -> list["ZeroCopySharedMemory"]:
+    """Open all 3 ROI SHM readers for night camera."""
+    names = [SHM_NAME_ROI_ZC_0, SHM_NAME_ROI_ZC_1]
+    readers = []
+    for name in names:
+        r = ZeroCopySharedMemory(name)
+        if r.open():
+            readers.append(r)
+        else:
+            # Cleanup already-opened readers
+            for opened in readers:
+                opened.close()
+            return []
+    return readers
+
+
 # ============================================================================
 # DetectionWriter — writes YOLO results to detection SHM
 # ============================================================================
@@ -256,8 +276,9 @@ class DetectionWriter:
         for i, det in enumerate(detections[:MAX_DETECTIONS]):
             c_detection = c_det.detections[i]
             name_bytes = det["class_name"].encode("utf-8")[:31]
-            for j, b in enumerate(name_bytes):
-                c_detection.class_name[j] = b
+            ctypes.memmove(c_detection.class_name, name_bytes, len(name_bytes))
+            # bytes beyond len(name_bytes) up to index 31 are already zero
+            # because CLatestDetectionResult() zero-initialises its buffer
             c_detection.confidence = det["confidence"]
             c_detection.bbox.x = det["bbox"]["x"]
             c_detection.bbox.y = det["bbox"]["y"]

@@ -33,6 +33,12 @@
 #define MAX_FRAME_SIZE (1920 * 1080 * 3 / 2)             // Max NV12 frame size (1080p)
 #define NUM_CAMERAS 2                                     // DAY=0, NIGHT=1
 
+// ROI zero-copy SHM names (night camera pre-cropped 640x640 regions)
+// RDK X5 VSE supports max 5 output channels (Ch0-4). Ch3-4 used for ROI.
+#define SHM_NAME_ROI_ZC_0  "/pet_camera_roi_zc_0"
+#define SHM_NAME_ROI_ZC_1  "/pet_camera_roi_zc_1"
+#define NUM_ROI_REGIONS     2
+
 // Zero-copy constants
 #define ZEROCOPY_MAX_PLANES 2                             // NV12: Y + UV
 #define HB_MEM_GRAPHIC_BUF_SIZE 160                       // sizeof(hb_mem_graphic_buf_t)
