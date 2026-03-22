@@ -382,11 +382,159 @@ def test_roi_vs_crop_comparison(duration_sec: float = 10.0):
         return False
 
 
-def test_condvar_camera_switch():
-    """Test 5: カメラ切替時の条件変数による即時起床確認"""
-    import subprocess
+def test_mjpeg_frame_sanity():
+    """Test 5: MJPEG SHM フレームが正常な映像データか確認 (砂嵐検出)"""
+    import numpy as np
+    from real_shared_memory import ZeroCopySharedMemory
+    from hb_mem_bindings import import_nv12_graph_buf, init_module as hb_mem_init
 
-    # camera_daemon が動いていれば、切替ログのタイムスタンプを確認
+    if not hb_mem_init():
+        logger.warning("  SKIP: hb_mem not available")
+        return True
+
+    reader = ZeroCopySharedMemory("/pet_camera_mjpeg_zc")
+    if not reader.open():
+        logger.warning("  SKIP: MJPEG SHM not available")
+        return True
+
+    frame = reader.get_frame()
+    if frame is None:
+        logger.warning("  SKIP: No MJPEG frame")
+        return True
+
+    try:
+        y_arr, uv_arr, hb_buf = import_nv12_graph_buf(
+            raw_buf_data=frame.hb_mem_buf_data,
+            expected_plane_sizes=frame.plane_size,
+        )
+
+        y_size = frame.width * frame.height
+        y_data = y_arr[:y_size] if len(y_arr) >= y_size else y_arr
+
+        y_mean = float(np.mean(y_data))
+        y_std = float(np.std(y_data))
+
+        # JPEG に変換して保存
+        try:
+            import cv2
+            if len(y_arr) == y_size + len(uv_arr):
+                nv12 = y_arr
+            else:
+                nv12 = np.concatenate([y_arr, uv_arr])
+            bgr = cv2.cvtColor(
+                nv12.reshape(frame.height * 3 // 2, frame.width),
+                cv2.COLOR_YUV2BGR_NV12,
+            )
+            out_path = "/tmp/mjpeg_sanity_check.jpg"
+            cv2.imwrite(out_path, bgr)
+            logger.info(f"  Saved snapshot: {out_path}")
+        except Exception as e:
+            logger.warning(f"  Could not save snapshot: {e}")
+
+        hb_buf.release()
+
+        logger.info(
+            f"  MJPEG frame: {frame.width}x{frame.height}, "
+            f"Y mean={y_mean:.1f}, std={y_std:.1f}"
+        )
+
+        # 砂嵐検出: ランダムノイズは std が非常に高く (>60)、mean が ~128 付近
+        if y_std > 70 and 100 < y_mean < 160:
+            logger.error(
+                f"  FAIL: Frame looks like noise/static (mean={y_mean:.1f}, std={y_std:.1f})"
+            )
+            return False
+
+        # 真っ黒フレーム検出
+        if y_std < 1.0:
+            logger.warning(f"  WARNING: Frame appears blank (std={y_std:.1f})")
+
+        logger.info("  Frame data looks normal")
+        return True
+
+    except Exception as e:
+        logger.error(f"  FAIL: hb_mem import failed — {e}")
+        return False
+
+
+def test_comic_capture_ondemand():
+    """Test 6: 4コマ撮影のオンデマンドテスト (1フレーム NV12→JPEG 保存)"""
+    import numpy as np
+    from real_shared_memory import ZeroCopySharedMemory, SHM_NAME_ROI_ZC_0
+    from hb_mem_bindings import import_nv12_graph_buf, init_module as hb_mem_init
+
+    if not hb_mem_init():
+        logger.warning("  SKIP: hb_mem not available")
+        return True
+
+    # 各 SHM ソースから 1 フレームずつキャプチャ
+    sources = [
+        ("/pet_camera_mjpeg_zc", "mjpeg"),
+        ("/pet_camera_yolo_zc", "yolo"),
+        (SHM_NAME_ROI_ZC_0, "roi0"),
+    ]
+
+    try:
+        import cv2
+    except ImportError:
+        logger.warning("  SKIP: cv2 not available")
+        return True
+
+    saved = 0
+    for shm_name, label in sources:
+        reader = ZeroCopySharedMemory(shm_name)
+        if not reader.open():
+            logger.info(f"  {label}: SHM not available, skipping")
+            continue
+
+        frame = reader.get_frame()
+        if frame is None:
+            logger.info(f"  {label}: No frame")
+            reader.close()
+            continue
+
+        try:
+            y_arr, uv_arr, hb_buf = import_nv12_graph_buf(
+                raw_buf_data=frame.hb_mem_buf_data,
+                expected_plane_sizes=frame.plane_size,
+            )
+
+            y_size = frame.width * frame.height
+            if len(y_arr) == y_size + len(uv_arr):
+                nv12 = y_arr
+            else:
+                nv12 = np.concatenate([y_arr, uv_arr])
+
+            bgr = cv2.cvtColor(
+                nv12.reshape(frame.height * 3 // 2, frame.width),
+                cv2.COLOR_YUV2BGR_NV12,
+            )
+            out_path = f"/tmp/capture_test_{label}.jpg"
+            cv2.imwrite(out_path, bgr)
+            hb_buf.release()
+
+            y_mean = float(np.mean(y_arr[:y_size]))
+            y_std = float(np.std(y_arr[:y_size]))
+            logger.info(
+                f"  {label}: {frame.width}x{frame.height} → {out_path} "
+                f"(Y mean={y_mean:.1f}, std={y_std:.1f})"
+            )
+            saved += 1
+        except Exception as e:
+            logger.warning(f"  {label}: capture failed — {e}")
+
+        reader.close()
+
+    if saved > 0:
+        logger.info(f"  Captured {saved} frames to /tmp/capture_test_*.jpg")
+        return True
+    else:
+        logger.error("  FAIL: Could not capture any frames")
+        return False
+
+
+def test_condvar_camera_switch():
+    """Test 7: カメラ切替時の条件変数による即時起床確認"""
     logger.info("  This test requires camera_daemon running with dual cameras")
     logger.info("  Check logs for: 'pthread_cond_broadcast' after camera switch")
     logger.info("  Expected: inactive pipeline wakes within <10ms (was 100ms)")
@@ -395,9 +543,7 @@ def test_condvar_camera_switch():
 
 
 def test_go_pipeline():
-    """Test 6: Go streaming server パイプライン化の検証"""
-    import subprocess
-
+    """Test 8: Go streaming server パイプライン化の検証"""
     logger.info("  Go server pipeline verification:")
     logger.info("  1. Start streaming server")
     logger.info("  2. Connect 3+ WebRTC clients")
@@ -427,8 +573,10 @@ def main():
         )
 
     tests.extend([
-        ("5. Camera Switch CondVar", test_condvar_camera_switch),
-        ("6. Go Pipeline", test_go_pipeline),
+        ("5. MJPEG Frame Sanity", test_mjpeg_frame_sanity),
+        ("6. On-Demand Capture", test_comic_capture_ondemand),
+        ("7. Camera Switch CondVar", test_condvar_camera_switch),
+        ("8. Go Pipeline", test_go_pipeline),
     ])
 
     results = []
