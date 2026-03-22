@@ -120,6 +120,17 @@ impl PhotoStore {
             .optional()
     }
 
+    pub fn get_by_id(&self, id: i64) -> rusqlite::Result<Option<Photo>> {
+        self.conn
+            .query_row(
+                "SELECT id, filename, captured_at, caption, is_valid, pet_id, behavior
+                 FROM photos WHERE id = ?1",
+                params![id],
+                |row| row_to_photo(row),
+            )
+            .optional()
+    }
+
     pub fn list(&self, filter: &PhotoFilter) -> rusqlite::Result<(Vec<Photo>, i64)> {
         let mut where_clauses = Vec::new();
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
