@@ -132,15 +132,15 @@ export function useBBoxOverlay(videoRef: preact.RefObject<HTMLVideoElement | nul
       const infoScale = canvas.width / 640;
       const infoFontSize = Math.round(16 * infoScale);
       ctx.font = `${infoFontSize}px monospace`;
-      const charWidth = 9.6 * infoScale;
-      const totalChars = 34 + minDigits;
-      const bgWidth = totalChars * charWidth + 20 * infoScale;
+      const textMetrics = ctx.measureText(text);
+      const padX = Math.round(8 * infoScale);
+      const bgWidth = textMetrics.width + padX * 2;
       const bgHeight = Math.round(24 * infoScale);
       const margin = Math.round(10 * infoScale);
       ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
       ctx.fillRect(margin, margin, bgWidth, bgHeight);
       ctx.fillStyle = '#FFFF00';
-      ctx.fillText(text, margin + Math.round(5 * infoScale), margin + bgHeight - Math.round(7 * infoScale));
+      ctx.fillText(text, margin + padX, margin + bgHeight - Math.round(7 * infoScale));
 
       animIdRef.current = requestAnimationFrame(renderLoop);
     };
