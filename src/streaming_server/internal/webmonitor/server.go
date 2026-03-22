@@ -26,15 +26,15 @@ type mjpegStreamEntry struct {
 
 // Server serves the Go-based web monitor endpoints.
 type Server struct {
-	cfg                    Config
-	monitor                *Monitor
-	recorder               *Recorder
-	webrtc                 *http.Client
-	broadcaster            *FrameBroadcaster
-	detectionBroadcaster   *DetectionBroadcaster
-	statusBroadcaster      *StatusBroadcaster
-	connectionBroadcaster  *ConnectionBroadcaster
-	comicCapture           *ComicCapture
+	cfg                   Config
+	monitor               *Monitor
+	recorder              *Recorder
+	webrtc                *http.Client
+	broadcaster           *FrameBroadcaster
+	detectionBroadcaster  *DetectionBroadcaster
+	statusBroadcaster     *StatusBroadcaster
+	connectionBroadcaster *ConnectionBroadcaster
+	comicCapture          *ComicCapture
 
 	// Per-session MJPEG stream tracking: cancel old stream when same browser reconnects
 	mjpegStreamsMu sync.Mutex
@@ -145,6 +145,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/webrtc/offer", s.handleWebRTCOffer)
 	mux.HandleFunc("/api/comics", s.handleComicsList)
 	mux.HandleFunc("/api/comics/", s.handleComicServe)
+	mux.HandleFunc("/api/comic-capture", s.handleComicCaptureNow)
 
 	return mux
 }
@@ -649,6 +650,29 @@ func (s *Server) handleComicServe(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) handleComicCaptureNow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.comicCapture == nil {
+		writeJSONWithStatus(w, map[string]any{"error": "comic capture not available (SHM not connected)"}, http.StatusServiceUnavailable)
+		return
+	}
+
+	filename, err := s.comicCapture.CaptureSnapshot()
+	if err != nil {
+		writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]any{
+		"status":   "ok",
+		"filename": filename,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, payload any) {
