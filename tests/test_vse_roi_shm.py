@@ -298,13 +298,13 @@ def test_roi_vs_crop_comparison(duration_sec: float = 10.0):
                 logger.info(f"  Day camera active (camera_id={full_frame.camera_id}), waiting for night...")
             continue
 
-        # Got night camera frame — read matching ROI (version-based)
+        # Got night camera frame — read latest ROI frame
+        # ROI SHM is always fresh (60fps write), just grab current snapshot
         roi_reader = roi_readers[roi_index]
         roi_frame = roi_reader.get_frame()
-        if roi_frame is None or roi_frame.version == last_roi_version[roi_index]:
+        if roi_frame is None:
             roi_index = (roi_index + 1) % num_rois
             continue
-        last_roi_version[roi_index] = roi_frame.version
 
         # Path A: Traditional (Python crop from 1280x720)
         try:
