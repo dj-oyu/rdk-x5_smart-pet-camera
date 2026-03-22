@@ -12,7 +12,7 @@ const result = await Bun.build({
   entrypoints: [entryPath],
   outdir: distDir,
   target: "browser",
-  format: "esm",
+  format: "iife",
   minify: true,
   sourcemap: "none"
 });
@@ -51,7 +51,7 @@ writeFileSync(
 </head>
 <body>
 <div id="app"></div>
-<script type="module" src="/app/${jsFile}"></script>
+<script src="/app/${jsFile}"></script>
 </body>
 </html>`
 );
