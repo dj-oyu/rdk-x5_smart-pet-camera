@@ -26,17 +26,19 @@ export function VideoControls({
     if (captureState === 'capturing') return;
     setCaptureState('capturing');
     try {
+      // 4-panel comic capture takes ~4-12s (randomized intervals)
       const res = await fetch('/api/comic-capture', { method: 'POST' });
       if (res.ok) {
+        const data = await res.json();
         setCaptureState('ok');
+        console.log('[Comic] Saved:', data.filename);
       } else {
         setCaptureState('error');
       }
     } catch {
       setCaptureState('error');
     }
-    // Reset back to idle after 2s
-    setTimeout(() => setCaptureState('idle'), 2000);
+    setTimeout(() => setCaptureState('idle'), 3000);
   }, [captureState]);
 
   const recBtnClass = [
