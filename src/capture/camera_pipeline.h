@@ -43,6 +43,9 @@ typedef struct {
     // MJPEG NV12 zero-copy (Go web_monitor)
     ZeroCopyFrameBuffer *shm_mjpeg_zc;
 
+    // Night camera ROI SHM (NULL for day camera)
+    ZeroCopyFrameBuffer* shm_roi_zc[NUM_ROI_REGIONS];
+
     // Shared state (same process, no SHM needed)
     volatile int *active_camera;
 

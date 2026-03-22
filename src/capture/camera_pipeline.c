@@ -108,6 +108,21 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
     goto error_cleanup;
   }
 
+  // Night camera ROI SHM: 3 pre-cropped 640x640 regions for YOLO
+  if (pipeline->camera_index == 1) {
+    const char* roi_names[] = {SHM_NAME_ROI_ZC_0, SHM_NAME_ROI_ZC_1, SHM_NAME_ROI_ZC_2};
+    for (int i = 0; i < NUM_ROI_REGIONS; i++) {
+      pipeline->shm_roi_zc[i] = shm_roi_zc_create(roi_names[i]);
+      if (!pipeline->shm_roi_zc[i]) {
+        LOG_ERROR(Pipeline_log_header,
+                  "Failed to create ROI SHM[%d]: %s", i, roi_names[i]);
+        ret = -1;
+        goto error_cleanup;
+      }
+    }
+    LOG_INFO(Pipeline_log_header, "Night camera ROI SHM created (%d regions)", NUM_ROI_REGIONS);
+  }
+
   // Create encoder thread (writes to active H.264 shm)
   ret = encoder_thread_create(&pipeline->encoder_thread, &pipeline->encoder,
                               pipeline->shm_h265_zc,
@@ -432,6 +447,45 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
       }
     }
 
+    // Get ROI frames from VSE Channels 3-5 (night camera only, 640x640 pre-cropped)
+    // No pending pattern needed: consumer imports via share_id, release is immediate.
+    if (write_active && pipeline->camera_index == 1) {
+      for (int i = 0; i < NUM_ROI_REGIONS; i++) {
+        if (pipeline->shm_roi_zc[i] == NULL) continue;
+
+        hbn_vnode_image_t roi_frame = {0};
+        int roi_ret = vio_get_frame_roi(&pipeline->vio, i, &roi_frame, 10);
+        if (roi_ret == 0) {
+          if (frame_number == 0) {
+            LOG_DEBUG(Pipeline_log_header, "ROI[%d]: %dx%d, planes=%d, share_id=[%d,%d]",
+                i, roi_frame.buffer.width, roi_frame.buffer.height,
+                roi_frame.buffer.plane_cnt, roi_frame.buffer.share_id[0],
+                roi_frame.buffer.share_id[1]);
+          }
+
+          ZeroCopyFrame roi_zc = {0};
+          roi_zc.frame_number = frame_number;
+          roi_zc.camera_id = pipeline->camera_index;
+          roi_zc.width = roi_frame.buffer.width;    // Should be 640
+          roi_zc.height = roi_frame.buffer.height;  // Should be 640
+          roi_zc.brightness_avg = cached_brightness.brightness_avg;
+          roi_zc.plane_cnt = roi_frame.buffer.plane_cnt;
+          for (int p = 0; p < roi_frame.buffer.plane_cnt && p < ZEROCOPY_MAX_PLANES; p++) {
+            roi_zc.share_id[p] = roi_frame.buffer.share_id[p];
+            roi_zc.plane_size[p] = roi_frame.buffer.size[p];
+          }
+          memcpy(roi_zc.hb_mem_buf_data, &roi_frame.buffer, sizeof(roi_frame.buffer));
+
+          shm_roi_zc_write(pipeline->shm_roi_zc[i], &roi_zc);
+
+          // Release immediately: consumer imports a copy via share_id
+          vio_release_frame_roi(&pipeline->vio, i, &roi_frame);
+        } else if (frame_number % 30 == 0) {
+          LOG_DEBUG(Pipeline_log_header, "vio_get_frame_roi[%d] failed: %d", i, roi_ret);
+        }
+      }
+    }
+
     // Get MJPEG frame from VSE Channel 2 (768x432, 16:9)
     // This frame is writable by web_monitor for overlay drawing (zero-copy)
     if (write_active) {
@@ -578,6 +632,15 @@ void pipeline_destroy(camera_pipeline_t *pipeline) {
   if (pipeline->shm_mjpeg_zc) {
     shm_zerocopy_close(pipeline->shm_mjpeg_zc);
     pipeline->shm_mjpeg_zc = NULL;
+  }
+
+  // Destroy ROI SHM (night camera only)
+  const char* roi_names[] = {SHM_NAME_ROI_ZC_0, SHM_NAME_ROI_ZC_1, SHM_NAME_ROI_ZC_2};
+  for (int i = 0; i < NUM_ROI_REGIONS; i++) {
+    if (pipeline->shm_roi_zc[i]) {
+      shm_roi_zc_destroy(pipeline->shm_roi_zc[i], roi_names[i]);
+      pipeline->shm_roi_zc[i] = NULL;
+    }
   }
 
   // Destroy condition variable for inactive camera blocking
