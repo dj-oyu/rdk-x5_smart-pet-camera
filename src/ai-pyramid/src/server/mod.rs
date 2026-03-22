@@ -1,8 +1,7 @@
 use crate::db::{PhotoFilter, PhotoStore};
-use askama::Template;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
-use axum::response::{Html, IntoResponse, Json};
+use axum::response::{IntoResponse, Json};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::Router;
@@ -45,7 +44,6 @@ pub fn router(state: AppState) -> Router {
         .with_state(mcp_state);
 
     Router::new()
-        .route("/album", get(handle_album_page))
         .route("/api/photos", get(handle_photos_list))
         .route("/api/photos/{filename}", get(handle_photo_serve).patch(handle_photo_update))
         .route("/api/stats", get(handle_stats))
@@ -113,47 +111,8 @@ impl From<crate::db::Photo> for PhotoJson {
     }
 }
 
-// --- Album HTML page ---
-
-#[derive(Template)]
-#[template(path = "album.html")]
-struct AlbumTemplate {
-    photos: Vec<PhotoJson>,
-    total: i64,
-    filter_valid: String,
-    filter_pet_id: String,
-}
-
-async fn handle_album_page(
-    State(state): State<AppState>,
-    Query(q): Query<PhotosQuery>,
-) -> impl IntoResponse {
-    let filter = build_filter(&q);
-    let filter_valid = q.is_valid.unwrap_or_default();
-    let filter_pet_id = q.pet_id.unwrap_or_default();
-
-    // Initial page: newest 20, reversed so oldest is first (left→right = old→new)
-    let page_filter = PhotoFilter {
-        limit: Some(20),
-        ..filter
-    };
-    let store = state.store.lock().unwrap();
-    let (photos, total) = store.list(&page_filter).unwrap_or_default();
-    drop(store);
-
-    let mut photos: Vec<PhotoJson> = photos.into_iter().map(PhotoJson::from).collect();
-    photos.reverse(); // oldest first → left=old, right=new
-
-    let template = AlbumTemplate {
-        photos,
-        total,
-        filter_valid,
-        filter_pet_id,
-    };
-    Html(template.render().unwrap_or_else(|e| format!("Template error: {e}")))
-}
-
 // --- REST API ---
+
 
 async fn handle_photos_list(
     State(state): State<AppState>,
