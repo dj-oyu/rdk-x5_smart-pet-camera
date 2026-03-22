@@ -50,9 +50,10 @@ type Server struct {
 	httpServer *http.Server
 
 	// Channels for goroutine communication
-	processChan  chan *types.VideoFrame
-	webrtcChan   chan *types.VideoFrame
 	recorderChan chan *types.VideoFrame
+
+	// Pool for recorder frame buffers — avoids per-frame heap allocation
+	recorderBufPool sync.Pool
 }
 
 func main() {
@@ -139,9 +140,14 @@ func NewServer() (*Server, error) {
 		webrtc:       webrtcSrv,
 		recorder:     rec,
 		httpServer:   httpServer,
-		processChan:  make(chan *types.VideoFrame, 30),
-		webrtcChan:   make(chan *types.VideoFrame, 30),
 		recorderChan: make(chan *types.VideoFrame, 60),
+		recorderBufPool: sync.Pool{
+			New: func() interface{} {
+				// Pre-allocate 512KB — typical H.265 frame size
+				buf := make([]byte, 0, 512*1024)
+				return &buf
+			},
+		},
 	}
 
 	// Setup HTTP routes
@@ -184,7 +190,7 @@ func (s *Server) Start() error {
 	}()
 
 	// Start goroutines
-	// readFrames handles process + WebRTC inline (zero-copy requires same goroutine)
+	// readFrames: 2-stage pipeline — SHM read (ReadLatestCopy) + async WebRTC send
 	s.wg.Add(2)
 	go s.readFrames()
 	go s.distributeRecorder()
@@ -193,13 +199,42 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// readFrames reads frames from shared memory (polling-based)
+// readFrames reads frames from shared memory using a 2-stage pipeline.
+//
+// Stage 1 (this goroutine): ReadLatestCopy → Process → recorder copy → sendCh
+// Stage 2 (sender goroutine): sendCh → SendFrame (blocks per-frame on wg.Wait)
+//
+// ReadLatestCopy returns an independent Go-owned copy of the VPU buffer, so
+// the sender goroutine can hold frame.Data safely while Stage 1 immediately
+// calls ReadLatestCopy again for the next frame. This breaks the serialisation
+// that existed when ReadLatest (zero-copy, valid only until next ReadLatest)
+// was used together with the blocking SendFrame.
 func (s *Server) readFrames() {
 	defer s.wg.Done()
 
-	// Measure camera frame interval and sync to frame boundary
+	// Stage 2: async WebRTC sender.
+	// Buffer of 1 so the producer can hand off a frame and immediately loop
+	// back to read the next one without waiting for all WebRTC clients.
+	sendCh := make(chan *types.VideoFrame, 1)
+	var sendWg sync.WaitGroup
+	sendWg.Add(1)
+	go func() {
+		defer sendWg.Done()
+		for frame := range sendCh {
+			s.webrtc.SendFrame(frame)
+			s.metrics.WebRTCFramesSent.Add(1)
+		}
+	}()
+
+	// Ensure the sender goroutine is drained and exited before readFrames returns.
+	defer func() {
+		close(sendCh)
+		sendWg.Wait()
+	}()
+
+	// Measure camera frame interval and sync to frame boundary.
 	interval := s.shmReader.MeasureFrameInterval(5)
-	logger.Info("Reader", "Frame interval: %v (zero-copy)", interval)
+	logger.Info("Reader", "Frame interval: %v (double-buffered)", interval)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -214,17 +249,17 @@ func (s *Server) readFrames() {
 		case <-ticker.C:
 		}
 
-		// Skip reading if no clients and not recording
+		// Skip reading if no clients and not recording.
 		if s.webrtc.GetClientCount() == 0 && !s.recorder.IsRecording() {
 			lastVer = s.shmReader.Version()
 			continue
 		}
 
-		// Check for new frame
+		// Check for new frame.
 		ver := s.shmReader.Version()
 		if ver == lastVer {
 			missCount++
-			// Camera switch or stall — re-sync after 5 consecutive misses
+			// Camera switch or stall — re-sync after 5 consecutive misses.
 			if missCount > 5 {
 				interval = s.shmReader.MeasureFrameInterval(3)
 				ticker.Reset(interval)
@@ -237,8 +272,9 @@ func (s *Server) readFrames() {
 		lastVer = ver
 		missCount = 0
 
-		// Read latest frame (zero-copy: Data points to VPU memory)
-		frame, err := s.shmReader.ReadLatest()
+		// Read latest frame as an independent copy (import + memcpy + VPU free).
+		// frame.Data is a plain Go []byte; no VPU lifetime dependency.
+		frame, err := s.shmReader.ReadLatestCopy()
 		if err != nil {
 			s.metrics.ReadErrors.Add(1)
 			logger.Warn("Reader", "Read error: %v", err)
@@ -251,7 +287,7 @@ func (s *Server) readFrames() {
 		s.metrics.FramesRead.Add(1)
 		s.metrics.UpdateFrameLatency(frame.Timestamp)
 
-		// Process inline (same goroutine — frame.Data is valid until next ReadLatest)
+		// Process (NAL parsing, header extraction) — safe on our owned copy.
 		if err := s.processor.Process(frame); err != nil {
 			s.metrics.ProcessErrors.Add(1)
 			continue
@@ -261,89 +297,38 @@ func (s *Server) readFrames() {
 		}
 		s.metrics.FramesProcessed.Add(1)
 
-		// Recorder: copy before SendFrame (VPU buffer freed on next ReadLatest)
+		// Recorder path: copy frame.Data into a pool buffer.
+		// This copy is separate from the WebRTC frame so that distributeRecorder
+		// can call recorderBufPool.Put after the recorder consumes it, while the
+		// WebRTC sender still holds frame.Data independently.
 		if s.recorder.IsRecording() {
-			dataCopy := make([]byte, len(frame.Data))
-			copy(dataCopy, frame.Data)
+			bufPtr := s.recorderBufPool.Get().(*[]byte)
+			buf := (*bufPtr)[:0]
+			if cap(buf) < len(frame.Data) {
+				buf = make([]byte, len(frame.Data))
+			} else {
+				buf = buf[:len(frame.Data)]
+			}
+			copy(buf, frame.Data)
 			recFrame := *frame
-			recFrame.Data = dataCopy
+			recFrame.Data = buf
 			select {
 			case s.recorderChan <- &recFrame:
 			default:
+				s.recorderBufPool.Put(&buf)
 				s.metrics.RecorderFramesDropped.Add(1)
 			}
 		}
 
-		// WebRTC: parallel WriteSample to all clients, blocks until done
-		s.webrtc.SendFrame(frame)
-		s.metrics.WebRTCFramesSent.Add(1)
-	}
-}
-
-// processFrames processes H.264 frames
-func (s *Server) processFrames() {
-	defer s.wg.Done()
-
-	for {
+		// Hand frame off to the async sender (Stage 2).
+		// sendCh has capacity 1; if the sender is still busy with the previous
+		// frame we drop rather than block — the recorder path above has already
+		// captured this frame independently.
 		select {
-		case <-s.ctx.Done():
-			return
-		case frame := <-s.processChan:
-			startTime := time.Now()
-
-			// Process frame (extract SPS/PPS, detect IDR)
-			if err := s.processor.Process(frame); err != nil {
-				s.metrics.ProcessErrors.Add(1)
-				logger.Warn("Processor", "Error: %v", err)
-				continue
-			}
-
-			// Don't modify frame data - send original H.264 stream as-is
-			// This allows WebRTC to receive the raw stream without duplication
-
-			// Update recorder's header cache when headers are available
-			if s.processor.HasHeaders() {
-				s.recorder.UpdateHeaders(s.processor.GetVPS(), s.processor.GetSPS(), s.processor.GetPPS())
-			}
-
-			s.metrics.FramesProcessed.Add(1)
-			s.metrics.UpdateProcessLatency(time.Since(startTime))
-
-			// Send to WebRTC (non-blocking)
-			select {
-			case s.webrtcChan <- frame:
-			default:
-				s.metrics.WebRTCFramesDropped.Add(1)
-			}
-
-			// Send to recorder (non-blocking)
-			select {
-			case s.recorderChan <- frame:
-			default:
-				s.metrics.RecorderFramesDropped.Add(1)
-			}
-
-			// Update buffer usage metrics
-			s.metrics.UpdateBufferUsage(
-				len(s.webrtcChan), cap(s.webrtcChan),
-				len(s.recorderChan), cap(s.recorderChan),
-			)
-		}
-	}
-}
-
-// distributeWebRTC distributes frames to WebRTC clients
-func (s *Server) distributeWebRTC() {
-	defer s.wg.Done()
-
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case frame := <-s.webrtcChan:
-			s.webrtc.SendFrame(frame)
-			s.metrics.WebRTCFramesSent.Add(1)
-			s.metrics.ActiveClients.Store(uint64(s.webrtc.GetClientCount()))
+		case sendCh <- frame:
+		default:
+			// Sender busy; drop WebRTC frame for this tick (recorder already saved it).
+			logger.Debug("Reader", "WebRTC sender busy, dropping frame %d", frame.FrameNumber)
 		}
 	}
 }
@@ -361,6 +346,7 @@ func (s *Server) distributeRecorder() {
 			if s.recorder.SendFrame(frame) {
 				s.metrics.RecorderFramesSent.Add(1)
 			}
+			s.recorderBufPool.Put(&frame.Data) // return buffer to pool
 
 			// Update recording metrics
 			status := s.recorder.GetStatus()

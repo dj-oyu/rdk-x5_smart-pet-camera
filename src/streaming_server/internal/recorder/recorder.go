@@ -178,9 +178,9 @@ func (r *Recorder) writeFrames() {
 // writeFrame writes a single frame to file
 func (r *Recorder) writeFrame(frame *types.VideoFrame) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	if r.file == nil {
+		r.mu.Unlock()
 		return
 	}
 
@@ -200,14 +200,32 @@ func (r *Recorder) writeFrame(frame *types.VideoFrame) {
 		dataToWrite = frame.Data
 	}
 
-	n, err := r.file.Write(dataToWrite)
+	// Update counters and capture file reference under lock, then write outside lock
+	// so disk I/O does not block operations that acquire the mutex (e.g. GetStatus, Stop).
+	expectedLen := uint64(len(dataToWrite))
+	r.bytesWritten += expectedLen
+	r.frameCount++
+	file := r.file // Capture file reference before releasing the lock
+
+	r.mu.Unlock()
+
+	// Write OUTSIDE lock — disk I/O won't block other operations
+	n, err := file.Write(dataToWrite)
 	if err != nil {
-		// Log error but continue
+		// Log error but continue; reverse the optimistic counter updates
+		r.mu.Lock()
+		r.bytesWritten -= expectedLen
+		r.frameCount--
+		r.mu.Unlock()
 		return
 	}
 
-	r.bytesWritten += uint64(n)
-	r.frameCount++
+	// Correct bytesWritten if the kernel wrote fewer bytes than expected (short write)
+	if uint64(n) != expectedLen {
+		r.mu.Lock()
+		r.bytesWritten -= expectedLen - uint64(n)
+		r.mu.Unlock()
+	}
 }
 
 // IsRecording returns true if currently recording
