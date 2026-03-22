@@ -10,6 +10,9 @@ import sys
 import time
 import signal
 import logging
+import queue
+import threading
+from collections import namedtuple
 from pathlib import Path
 
 import cv2
@@ -28,6 +31,7 @@ from real_shared_memory import (
     DetectionWriter,
     ZeroCopySharedMemory,
     SHM_NAME_YOLO_ZC,
+    open_roi_readers,
 )
 from detection.yolo_detector import YoloDetector
 
@@ -43,15 +47,28 @@ logging.basicConfig(
 logger = logging.getLogger("YOLODetectorDaemon")
 yolo_logger = logging.getLogger("detection.yolo_detector")
 
+# Lightweight result types (namedtuples are faster than dicts and give attribute access)
+DetBbox = namedtuple('DetBbox', ['x', 'y', 'w', 'h'])
+DetDict = namedtuple('DetDict', ['class_name', 'confidence', 'bbox'])
+
+
+def _det_to_dict(d: 'DetDict') -> dict:
+    """Convert a DetDict namedtuple to a plain dict for the SHM write boundary."""
+    return {
+        "class_name": d.class_name,
+        "confidence": d.confidence,
+        "bbox": {"x": d.bbox.x, "y": d.bbox.y, "w": d.bbox.w, "h": d.bbox.h},
+    }
+
 
 def apply_cross_roi_nms(
-    detections: list[dict], iou_threshold: float = 0.5  # type: ignore[type-arg]
-) -> list[dict]:  # type: ignore[type-arg]
+    detections: list[DetDict], iou_threshold: float = 0.5
+) -> list[DetDict]:
     """
     Cross-ROI NMS: cv2.dnn.NMSBoxesを使用して異なるROI間の重複検出を除去
 
     Args:
-        detections: 検出結果リスト [{class_name, confidence, bbox: {x,y,w,h}}, ...]
+        detections: 検出結果リスト [DetDict(class_name, confidence, bbox), ...]
         iou_threshold: IoU閾値（これ以上重なっていれば重複とみなす）
 
     Returns:
@@ -61,18 +78,18 @@ def apply_cross_roi_nms(
         return detections
 
     # クラス別にグループ化
-    by_class: dict[str, list[dict]] = {}  # type: ignore[type-arg]
+    by_class: dict[str, list[DetDict]] = {}
     for det in detections:
-        cls = str(det["class_name"])
+        cls = str(det.class_name)
         if cls not in by_class:
             by_class[cls] = []
         by_class[cls].append(det)
 
-    result: list[dict] = []  # type: ignore[type-arg]
+    result: list[DetDict] = []
     for dets in by_class.values():
         # cv2.dnn.NMSBoxes用にデータを準備
-        bboxes = [[d["bbox"]["x"], d["bbox"]["y"], d["bbox"]["w"], d["bbox"]["h"]] for d in dets]
-        scores = [float(d["confidence"]) for d in dets]
+        bboxes = [[d.bbox.x, d.bbox.y, d.bbox.w, d.bbox.h] for d in dets]
+        scores = [float(d.confidence) for d in dets]
 
         # NMS適用 (score_threshold=0でフィルタリングなし、iou_thresholdで重複除去)
         indices = cv2.dnn.NMSBoxes(bboxes, scores, score_threshold=0.0, nms_threshold=iou_threshold)
@@ -118,6 +135,7 @@ class YoloDetectorDaemon:
             "frames_processed": 0,
             "total_detections": 0,
             "avg_inference_time_ms": 0.0,
+            "yolo_skipped_frames": 0,
         }
 
         self.running = True
@@ -135,6 +153,20 @@ class YoloDetectorDaemon:
         # Night camera ROI mode (1280x720 with 3 overlapping ROIs)
         self.night_roi_mode: bool = False  # Enabled only for camera_id=1
         self.night_roi_regions: list[tuple[int, int, int, int]] = []  # 3 ROIs for 720p
+
+        # VSE ROI SHM readers (opened when night camera is first detected)
+        # Each reader corresponds to one pre-cropped 640x640 NV12 ROI from VSE Ch3-4.
+        # RDK X5 VSE supports max 5 channels (Ch0-4), so 2 ROIs max.
+        self.roi_readers: list[ZeroCopySharedMemory] = []
+
+        # VSE ROI coordinate mapping: regions are defined on 1920x1080 sensor space.
+        # Each VSE output is 640x640, so scale = 960/640 = 1.5.
+        # 2 ROIs cover full 1920px width: left (0-960) + right (960-1920).
+        self.VSE_ROI_REGIONS: list[tuple[int, int, int, int]] = [
+            (0,   60, 960, 960),   # ROI 0: left half
+            (960, 60, 960, 960),   # ROI 1: right half
+        ]
+        self.VSE_SCALE: float = 960.0 / 640.0  # 1.5 — 640x640 → 1920x1080 sensor space
 
         # Detection result cache for temporal integration
         self.detection_cache: list[list[dict]] = []  # [roi_0_dets, roi_1_dets, ...]
@@ -155,16 +187,28 @@ class YoloDetectorDaemon:
         self.night_collect_interval: int = 150  # Collect every N frames during motion
 
     def _save_night_frame(self, nv12_data, width: int, height: int, frame_number: int) -> None:
-        """Save NV12 frame for future fine-tuning data collection."""
+        """Enqueue NV12 frame for async saving (fine-tuning data collection)."""
         try:
-            self.night_collect_dir.mkdir(parents=True, exist_ok=True)
-            path = self.night_collect_dir / f"night_{frame_number:08d}_{width}x{height}.nv12"
-            with open(path, "wb") as f:
-                f.write(bytes(nv12_data))
-            self.night_collect_count += 1
-            logger.debug(f"Saved night frame: {path.name} ({self.night_collect_count}/{self.night_collect_max})")
-        except Exception as e:
-            logger.warning(f"Failed to save night frame: {e}")
+            self._save_queue.put_nowait((bytes(nv12_data), width, height, frame_number))
+        except queue.Full:
+            pass  # Drop if queue full
+
+    def _save_worker(self) -> None:
+        """Worker thread: drain the save queue and write frames to disk."""
+        while True:
+            item = self._save_queue.get()
+            if item is None:
+                break
+            nv12_data, width, height, frame_number = item
+            try:
+                self.night_collect_dir.mkdir(parents=True, exist_ok=True)
+                path = self.night_collect_dir / f"night_{frame_number:08d}_{width}x{height}.nv12"
+                with open(path, "wb") as f:
+                    f.write(nv12_data)
+                self.night_collect_count += 1
+                logger.debug(f"Saved night frame: {path.name} ({self.night_collect_count}/{self.night_collect_max})")
+            except Exception as e:
+                logger.warning(f"Night frame save failed: {e}")
 
     def setup(self) -> None:
         """セットアップ"""
@@ -217,6 +261,24 @@ class YoloDetectorDaemon:
         except Exception as e:
             logger.debug(f"HW preprocessor init failed: {e}")
 
+    def _open_roi_readers(self) -> None:
+        """Open VSE ROI SHM readers for night camera.
+
+        Called lazily on first camera_id=1 frame.  The three SHM regions are
+        written by the C camera daemon via VSE Ch3-5 (640x640 pre-cropped NV12).
+        Falls back gracefully if the SHM is not yet available.
+        """
+        if self.roi_readers:
+            return  # Already opened
+
+        readers = open_roi_readers()  # Returns already-opened readers, or [] on failure
+        if not readers:
+            logger.warning("ROI SHM not available — night VSE path disabled")
+            return
+
+        self.roi_readers = readers
+        logger.info(f"VSE ROI SHM readers opened: {[r.shm_name for r in self.roi_readers]}")
+
     def _get_active_zerocopy(self) -> ZeroCopySharedMemory | None:
         return self.shm_zerocopy
 
@@ -224,6 +286,9 @@ class YoloDetectorDaemon:
         """クリーンアップ"""
         if self.shm_zerocopy:
             self.shm_zerocopy.close()
+        for reader in self.roi_readers:
+            reader.close()
+        self.roi_readers = []
         if self.detection_writer:
             self.detection_writer.close()
         if self.stats["frames_processed"] > 0:
@@ -243,6 +308,11 @@ class YoloDetectorDaemon:
 
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
+
+        # Async night frame save queue + worker thread
+        self._save_queue: queue.Queue = queue.Queue(maxsize=10)
+        self._save_thread = threading.Thread(target=self._save_worker, daemon=True)
+        self._save_thread.start()
 
         logger.debug("Starting detection loop")
 
@@ -290,7 +360,13 @@ class YoloDetectorDaemon:
                         raw_buf_data=zc_frame.hb_mem_buf_data,
                         expected_plane_sizes=zc_frame.plane_size,
                     )
-                    nv12_data = np.concatenate([y_arr, uv_arr])
+                    # If contiguous, y_arr already covers full NV12 (zero-copy)
+                    # If non-contiguous, must concatenate (fallback)
+                    y_size = zc_frame.width * zc_frame.height
+                    if len(y_arr) == y_size + len(uv_arr):
+                        nv12_data = y_arr  # zero-copy view
+                    else:
+                        nv12_data = np.concatenate([y_arr, uv_arr])
                     if hasattr(self.detector.preprocessor, 'set_hb_mem_buffer'):
                         self.detector.preprocessor.set_hb_mem_buffer(hb_mem_buffer)
                 except Exception as e:
@@ -328,7 +404,9 @@ class YoloDetectorDaemon:
                         self.detection_cache = [[] for _ in self.night_roi_regions]
                         # Lower score_threshold for night camera (darker images = lower confidence)
                         self.detector.score_threshold = max(0.25, self.score_threshold - 0.15)
-                        logger.debug(f"Camera switched to {camera_id} [night ROI mode: {len(self.night_roi_regions)} regions, score_th={self.detector.score_threshold:.2f}]")
+                        # Open VSE ROI SHM readers (lazy — no-op if already open)
+                        self._open_roi_readers()
+                        logger.debug(f"Camera switched to {camera_id} [night ROI mode: {len(self.night_roi_regions)} regions, score_th={self.detector.score_threshold:.2f}, vse_roi={'yes' if self.roi_readers else 'fallback'}]")
 
                     # Update active camera after processing switch
                     self.active_camera = camera_id
@@ -359,6 +437,8 @@ class YoloDetectorDaemon:
                         # Initialize detection cache for 3 ROIs
                         self.detection_cache = [[] for _ in self.night_roi_regions]
                         self.roi_index = 0
+                        # Open VSE ROI SHM readers (lazy — no-op if already open)
+                        self._open_roi_readers()
                     else:
                         # Day camera or other resolutions: use original logic
                         self.night_roi_mode = False
@@ -408,11 +488,11 @@ class YoloDetectorDaemon:
                                 continue
                             confidence = min(1.0, area / (motion_w * motion_h * 0.05))
                             # Scale bbox back to full frame coordinates
-                            motion_dicts.append({
-                                "class_name": "motion",
-                                "confidence": float(confidence),
-                                "bbox": {"x": x * 2, "y": y * 2, "w": w * 2, "h": h * 2},
-                            })
+                            motion_dicts.append(DetDict(
+                                class_name="motion",
+                                confidence=float(confidence),
+                                bbox=DetBbox(x=x * 2, y=y * 2, w=w * 2, h=h * 2),
+                            ))
                         if len(motion_dicts) > 5:
                             motion_dicts = []
                         if motion_dicts:
@@ -427,14 +507,59 @@ class YoloDetectorDaemon:
                     self.prev_y_plane = y_small_denoised
 
                     # YOLO ROI detection (every 3rd frame — motion runs every frame)
-                    run_yolo = (self.stats["frames_processed"] % 3 == 0)
+                    # Skip YOLO when scene is static (no motion detected or in cooldown)
+                    num_rois = len(self.roi_readers) if self.roi_readers else len(self.night_roi_regions)
+                    run_yolo = (self.stats["frames_processed"] % max(num_rois, 1) == 0) and (self.motion_cooldown > 0 or len(motion_dicts) > 0)
+                    if not run_yolo:
+                        self.stats["yolo_skipped_frames"] = self.stats.get("yolo_skipped_frames", 0) + 1
                     if run_yolo:
                         current_roi = self.roi_index
-                        detections = self.detector.detect_nv12_roi_720p(
-                            nv12_data=nv12_data,
-                            roi_index=current_roi,
-                            brightness_avg=zc_frame.brightness_avg,
-                        )
+
+                        # ── VSE ROI SHM path (preferred) ──────────────────────────
+                        # ROI SHM contains pre-cropped 640x640 NV12 from VSE Ch3-5.
+                        # No CPU crop needed; read directly and call detect_nv12().
+                        vse_detections = None
+                        roi_hb_buf = None
+                        if self.roi_readers and len(self.roi_readers) == 3:
+                            roi_reader = self.roi_readers[current_roi]
+                            if roi_reader.wait_for_frame(timeout_sec=0.05):
+                                roi_frame = roi_reader.get_frame()
+                                if roi_frame is not None:
+                                    try:
+                                        roi_y_arr, roi_uv_arr, roi_hb_buf = import_nv12_graph_buf(
+                                            raw_buf_data=roi_frame.hb_mem_buf_data,
+                                            expected_plane_sizes=roi_frame.plane_size,
+                                        )
+                                        # Combine planes (zero-copy if contiguous)
+                                        roi_y_size = roi_frame.width * roi_frame.height
+                                        if len(roi_y_arr) == roi_y_size + len(roi_uv_arr):
+                                            roi_nv12 = roi_y_arr  # contiguous — full NV12 view
+                                        else:
+                                            roi_nv12 = np.concatenate([roi_y_arr, roi_uv_arr])
+                                        vse_detections = self.detector.detect_nv12(
+                                            nv12_data=roi_nv12,
+                                            width=roi_frame.width,
+                                            height=roi_frame.height,
+                                            brightness_avg=roi_frame.brightness_avg,
+                                        )
+                                    except Exception as e:
+                                        logger.warning(f"VSE ROI SHM import failed (roi={current_roi}): {e}")
+                                        if roi_hb_buf is not None:
+                                            roi_hb_buf.release()
+                                            roi_hb_buf = None
+                            else:
+                                logger.debug(f"VSE ROI SHM timeout (roi={current_roi}), falling back")
+
+                        # ── Fallback: CPU crop from yolo_zc 1280x720 ──────────────
+                        if vse_detections is None:
+                            detections = self.detector.detect_nv12_roi_720p(
+                                nv12_data=nv12_data,
+                                roi_index=current_roi,
+                                brightness_avg=zc_frame.brightness_avg,
+                            )
+                        else:
+                            detections = vse_detections
+
                         if current_roi == 0:
                             self.cache_frame_number = zc_frame.frame_number
                             self.cache_timestamp = zc_frame.timestamp_sec
@@ -442,24 +567,57 @@ class YoloDetectorDaemon:
                         cycle_complete = (self.roi_index == 0)
                     else:
                         cycle_complete = False
+                        roi_hb_buf = None
 
-                    # Release buffer
+                    # Release main yolo_zc buffer (motion detection used it above)
                     hb_mem_buffer.release()
-
+                    # Release ROI buffer if we used VSE path
+                    if roi_hb_buf is not None:
+                        roi_hb_buf.release()
 
                     if run_yolo:
-                        # Convert YOLO detections to dicts
-                        yolo_dicts = [
-                            {
-                                "class_name": det.class_name.value,
-                                "confidence": det.confidence,
-                                "bbox": {
-                                    "x": det.bbox.x, "y": det.bbox.y,
-                                    "w": det.bbox.w, "h": det.bbox.h,
-                                },
-                            }
-                            for det in detections
-                        ]
+                        # Convert YOLO detections to namedtuples.
+                        # VSE path: detections are in 640x640 space; add the VSE ROI origin
+                        #           (mapped 1920x1080 → 1280x720) to get 1280x720 coords.
+                        # Fallback path: detect_nv12_roi_720p already returns 1280x720 coords.
+                        if vse_detections is not None:
+                            # VSE path: 640x640 → 1280x720 output space.
+                            #
+                            # Math: VSE crops a 960x960 region from the 1920x1080 sensor,
+                            # then scales to 640x640.  The combined end-to-end scale from
+                            # detection coords (640x640) to 1280x720 output is:
+                            #
+                            #   scale = (960/640) * (1280/1920) = 1.5 * (2/3) = 1.0  (x)
+                            #   scale = (960/640) * ( 720/1080) = 1.5 * (2/3) = 1.0  (y)
+                            #
+                            # So det.x/y/w/h are already in 1280x720 units — we only need
+                            # to add the ROI origin mapped from 1920x1080 → 1280x720.
+                            roi_sx, roi_sy, _, _ = self.VSE_ROI_REGIONS[current_roi]
+                            roi_ox = int(roi_sx * (1280.0 / 1920.0))  # sensor → output x
+                            roi_oy = int(roi_sy * (720.0 / 1080.0))   # sensor → output y
+                            yolo_dicts = [
+                                DetDict(
+                                    class_name=det.class_name.value,
+                                    confidence=det.confidence,
+                                    bbox=DetBbox(
+                                        x=det.bbox.x + roi_ox,
+                                        y=det.bbox.y + roi_oy,
+                                        w=det.bbox.w,
+                                        h=det.bbox.h,
+                                    ),
+                                )
+                                for det in detections
+                            ]
+                        else:
+                            # Fallback path: coords already in 1280x720 space
+                            yolo_dicts = [
+                                DetDict(
+                                    class_name=det.class_name.value,
+                                    confidence=det.confidence,
+                                    bbox=DetBbox(x=det.bbox.x, y=det.bbox.y, w=det.bbox.w, h=det.bbox.h),
+                                )
+                                for det in detections
+                            ]
 
                         # Accumulate YOLO ROI results
                         self.detection_cache[current_roi] = yolo_dicts
@@ -474,7 +632,7 @@ class YoloDetectorDaemon:
                         # Filter night YOLO false positives (IR-caused misdetections)
                         merged_yolo = [
                             d for d in merged_yolo
-                            if d["class_name"] not in self.night_fp_classes
+                            if d.class_name not in self.night_fp_classes
                         ]
 
                         # Combine: motion + YOLO results
@@ -482,16 +640,16 @@ class YoloDetectorDaemon:
 
                         # Scale to output coordinates
                         scaled_dicts = [
-                            {
-                                "class_name": d["class_name"],
-                                "confidence": d["confidence"],
-                                "bbox": {
-                                    "x": int(d["bbox"]["x"] * self.scale_x),
-                                    "y": int(d["bbox"]["y"] * self.scale_y),
-                                    "w": int(d["bbox"]["w"] * self.scale_x),
-                                    "h": int(d["bbox"]["h"] * self.scale_y),
-                                },
-                            }
+                            DetDict(
+                                class_name=d.class_name,
+                                confidence=d.confidence,
+                                bbox=DetBbox(
+                                    x=int(d.bbox.x * self.scale_x),
+                                    y=int(d.bbox.y * self.scale_y),
+                                    w=int(d.bbox.w * self.scale_x),
+                                    h=int(d.bbox.h * self.scale_y),
+                                ),
+                            )
                             for d in all_dicts
                         ]
 
@@ -499,7 +657,7 @@ class YoloDetectorDaemon:
                             self.detection_writer.write_detection_result(
                                 frame_number=self.cache_frame_number,
                                 timestamp_sec=self.cache_timestamp,
-                                detections=scaled_dicts,
+                                detections=[_det_to_dict(d) for d in scaled_dicts],
                             )
 
                         self.detection_cache = [[] for _ in self.night_roi_regions]
@@ -516,18 +674,19 @@ class YoloDetectorDaemon:
 
                     # Periodic stats log
                     if self.stats["frames_processed"] % 300 == 0:
-                        mot = sum(1 for d in detection_dicts if d.get("class_name") == "motion")
+                        mot = sum(1 for d in detection_dicts if d.class_name == "motion")
                         yolo = len(detection_dicts) - mot
                         logger.info(
                             f"[{self.stats['frames_processed']}f] "
                             f"det={self.stats['total_detections']}(mot={mot},yolo={yolo}) "
                             f"inf={self.stats['avg_inference_time_ms']:.0f}ms "
                             f"cam={self.active_camera} "
-                            f"bright={zc_frame.brightness_avg:.1f}"
+                            f"bright={zc_frame.brightness_avg:.1f} "
+                            f"yolo_skipped={self.stats['yolo_skipped_frames']}"
                         )
 
                     if is_debug and cycle_complete and detection_dicts:
-                        classes = ",".join(d["class_name"] for d in detection_dicts)
+                        classes = ",".join(d.class_name for d in detection_dicts)
                         logger.debug(f"#{self.stats['frames_processed']}: {classes}")
 
                     continue
@@ -573,16 +732,11 @@ class YoloDetectorDaemon:
 
                 # Keep bbox coordinates in frame space (scaling moved to final output)
                 detection_dicts = [
-                    {
-                        "class_name": det.class_name.value,
-                        "confidence": det.confidence,
-                        "bbox": {
-                            "x": det.bbox.x,
-                            "y": det.bbox.y,
-                            "w": det.bbox.w,
-                            "h": det.bbox.h,
-                        },
-                    }
+                    DetDict(
+                        class_name=det.class_name.value,
+                        confidence=det.confidence,
+                        bbox=DetBbox(x=det.bbox.x, y=det.bbox.y, w=det.bbox.w, h=det.bbox.h),
+                    )
                     for det in detections
                 ]
 
@@ -597,7 +751,7 @@ class YoloDetectorDaemon:
                         for roi_idx, roi_dets in enumerate(self.detection_cache):
                             all_detections.extend(roi_dets)
                             if roi_dets and is_debug:
-                                classes = [d["class_name"] for d in roi_dets]
+                                classes = [d.class_name for d in roi_dets]
                                 logger.debug(f"  Night ROI {roi_idx}: {classes}")
 
                         if is_debug and all_detections:
@@ -615,16 +769,16 @@ class YoloDetectorDaemon:
 
                         # Apply scaling after merge (single rounding at final output)
                         scaled_dicts = [
-                            {
-                                "class_name": d["class_name"],
-                                "confidence": d["confidence"],
-                                "bbox": {
-                                    "x": int(d["bbox"]["x"] * self.scale_x),
-                                    "y": int(d["bbox"]["y"] * self.scale_y),
-                                    "w": int(d["bbox"]["w"] * self.scale_x),
-                                    "h": int(d["bbox"]["h"] * self.scale_y),
-                                },
-                            }
+                            DetDict(
+                                class_name=d.class_name,
+                                confidence=d.confidence,
+                                bbox=DetBbox(
+                                    x=int(d.bbox.x * self.scale_x),
+                                    y=int(d.bbox.y * self.scale_y),
+                                    w=int(d.bbox.w * self.scale_x),
+                                    h=int(d.bbox.h * self.scale_y),
+                                ),
+                            )
                             for d in merged_dicts
                         ]
 
@@ -633,7 +787,7 @@ class YoloDetectorDaemon:
                             self.detection_writer.write_detection_result(
                                 frame_number=self.cache_frame_number,
                                 timestamp_sec=self.cache_timestamp,
-                                detections=scaled_dicts,
+                                detections=[_det_to_dict(d) for d in scaled_dicts],
                             )
 
                         # Use scaled results for stats/logging
@@ -657,7 +811,7 @@ class YoloDetectorDaemon:
                             all_detections.extend(roi_dets)
                             # Debug: show detections per ROI
                             if roi_dets and is_debug:
-                                classes = [d["class_name"] for d in roi_dets]
+                                classes = [d.class_name for d in roi_dets]
                                 logger.debug(f"  ROI {roi_idx}: {classes}")
 
                         if is_debug and all_detections:
@@ -670,16 +824,16 @@ class YoloDetectorDaemon:
 
                         # Apply scaling after merge (single rounding at final output)
                         scaled_dicts = [
-                            {
-                                "class_name": d["class_name"],
-                                "confidence": d["confidence"],
-                                "bbox": {
-                                    "x": int(d["bbox"]["x"] * self.scale_x),
-                                    "y": int(d["bbox"]["y"] * self.scale_y),
-                                    "w": int(d["bbox"]["w"] * self.scale_x),
-                                    "h": int(d["bbox"]["h"] * self.scale_y),
-                                },
-                            }
+                            DetDict(
+                                class_name=d.class_name,
+                                confidence=d.confidence,
+                                bbox=DetBbox(
+                                    x=int(d.bbox.x * self.scale_x),
+                                    y=int(d.bbox.y * self.scale_y),
+                                    w=int(d.bbox.w * self.scale_x),
+                                    h=int(d.bbox.h * self.scale_y),
+                                ),
+                            )
                             for d in merged_dicts
                         ]
 
@@ -688,7 +842,7 @@ class YoloDetectorDaemon:
                             self.detection_writer.write_detection_result(
                                 frame_number=self.cache_frame_number,
                                 timestamp_sec=self.cache_timestamp,
-                                detections=scaled_dicts,
+                                detections=[_det_to_dict(d) for d in scaled_dicts],
                             )
 
                         # Clear cache for next cycle
@@ -699,23 +853,23 @@ class YoloDetectorDaemon:
                 else:
                     # Direct mode: apply scaling and write immediately
                     scaled_dicts = [
-                        {
-                            "class_name": d["class_name"],
-                            "confidence": d["confidence"],
-                            "bbox": {
-                                "x": int(d["bbox"]["x"] * self.scale_x),
-                                "y": int(d["bbox"]["y"] * self.scale_y),
-                                "w": int(d["bbox"]["w"] * self.scale_x),
-                                "h": int(d["bbox"]["h"] * self.scale_y),
-                            },
-                        }
+                        DetDict(
+                            class_name=d.class_name,
+                            confidence=d.confidence,
+                            bbox=DetBbox(
+                                x=int(d.bbox.x * self.scale_x),
+                                y=int(d.bbox.y * self.scale_y),
+                                w=int(d.bbox.w * self.scale_x),
+                                h=int(d.bbox.h * self.scale_y),
+                            ),
+                        )
                         for d in detection_dicts
                     ]
                     if scaled_dicts:
                         self.detection_writer.write_detection_result(
                             frame_number=zc_frame.frame_number,
                             timestamp_sec=zc_frame.timestamp_sec,
-                            detections=scaled_dicts,
+                            detections=[_det_to_dict(d) for d in scaled_dicts],
                         )
                     detection_dicts = scaled_dicts
 
@@ -747,7 +901,7 @@ class YoloDetectorDaemon:
 
                 # Debug logging (per-frame details)
                 if is_debug and cycle_complete and detection_dicts:
-                    classes = ",".join(d["class_name"] for d in detection_dicts)
+                    classes = ",".join(d.class_name for d in detection_dicts)
                     logger.debug(f"#{self.stats['frames_processed']}: {classes}")
 
         except KeyboardInterrupt:
