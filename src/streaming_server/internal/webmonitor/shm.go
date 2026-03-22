@@ -278,8 +278,23 @@ static int read_detection_snapshot(LatestDetectionResult* shm, LatestDetectionRe
     return 0;
 }
 
-// NOTE: wait_new_frame() removed - FrameBroadcaster uses polling mode
-// NOTE: wait_new_detection() removed - DetectionBroadcaster uses polling mode
+// Wait for detection update via semaphore (event-driven, replaces polling).
+// Returns 0 on success (new detection available), -1 on timeout.
+// Accumulated sem_posts are drained by repeated wait calls; the caller
+// uses version checking to skip already-processed events.
+static int wait_detection_update(LatestDetectionResult* shm, int timeout_ms) {
+    if (!shm) return -1;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += timeout_ms / 1000;
+    ts.tv_nsec += (timeout_ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000L;
+    }
+    return sem_timedwait(&shm->detection_update_sem, &ts);
+}
+
 // NOTE: CPU bitmap font and draw_*_nv12 functions removed - using hbn_rgn HW overlay
 
 // NV12 to JPEG using TurboJPEG (optimized, avoids RGBA conversion)
@@ -547,6 +562,19 @@ func (r *shmReader) LatestDetection() (*DetectionResult, bool) {
 	}
 
 	return &result, true
+}
+
+// WaitDetectionUpdate blocks until a new detection is posted to SHM
+// or the timeout expires. Returns true if a new detection may be available.
+func (r *shmReader) WaitDetectionUpdate(timeoutMs int) bool {
+	if r.detectionShm == nil {
+		r.tryOpenDetection()
+	}
+	if r.detectionShm == nil {
+		return false
+	}
+	ret := C.wait_detection_update(r.detectionShm, C.int(timeoutMs))
+	return ret == 0
 }
 
 func (r *shmReader) LatestNV12() (*NV12Frame, bool) {
