@@ -4,7 +4,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Json};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use futures_util::stream::Stream;
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,16 @@ pub struct AppState {
 }
 
 pub fn router(state: AppState) -> Router {
+    let mcp_state = crate::mcp::McpState {
+        store: state.store.clone(),
+        photos_dir: state.photos_dir.clone(),
+    };
+
+    let mcp_router = Router::new()
+        .route("/mcp", post(crate::mcp::handle_mcp))
+        .route("/mcp/photos/{id}", get(crate::mcp::handle_mcp_photo_download))
+        .with_state(mcp_state);
+
     Router::new()
         .route("/album", get(handle_album_page))
         .route("/api/photos", get(handle_photos_list))
@@ -38,6 +48,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events", get(handle_sse))
         .route("/health", get(handle_health))
         .with_state(state)
+        .merge(mcp_router)
 }
 
 #[derive(Deserialize)]
