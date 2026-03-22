@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
     paths:
+      - '.github/workflows/build-pet-album.yml'
       - 'src/ai-pyramid/**'
   workflow_dispatch:
 
@@ -20,6 +21,11 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -29,6 +35,23 @@ jobs:
             src/ai-pyramid/target
           key: aarch64-22.04-cargo-${{ hashFiles('src/ai-pyramid/Cargo.lock') }}
           restore-keys: aarch64-22.04-cargo-
+
+      - name: Cache Bun
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.bun/install/cache
+            src/ai-pyramid/ui/node_modules
+          key: aarch64-22.04-bun-${{ hashFiles('src/ai-pyramid/ui/bun.lock', 'src/ai-pyramid/ui/package.json') }}
+          restore-keys: aarch64-22.04-bun-
+
+      - name: Install frontend dependencies
+        working-directory: src/ai-pyramid/ui
+        run: bun install --frozen-lockfile
+
+      - name: Build frontend
+        working-directory: src/ai-pyramid/ui
+        run: bun run build
 
       - name: Test
         run: cargo test
