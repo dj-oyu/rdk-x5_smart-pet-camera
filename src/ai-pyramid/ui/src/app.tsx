@@ -27,7 +27,6 @@ export function App() {
     let cancelled = false;
 
     async function load() {
-      console.log("[pet-album] load:start", { query, refreshTick });
       setLoading(true);
       setError(null);
       try {
@@ -38,11 +37,6 @@ export function App() {
         if (cancelled) {
           return;
         }
-        console.log("[pet-album] load:success", {
-          total: eventResult.total,
-          eventCount: eventResult.events.length,
-          firstEvent: eventResult.events[0]?.source_filename ?? null
-        });
         setEvents(eventResult.events);
         setTotal(eventResult.total);
         setStats(statsResult);
@@ -51,7 +45,6 @@ export function App() {
           return;
         }
         const message = loadError instanceof Error ? loadError.message : "Failed to load data";
-        console.error("[pet-album] load:error", message);
         setError(message);
       } finally {
         if (!cancelled) {
@@ -68,23 +61,10 @@ export function App() {
   }, [query, refreshTick]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      console.log("[pet-album] heartbeat", { href: window.location.href, now: new Date().toISOString() });
-    }, 30000);
-
-    return () => window.clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
     const source = new EventSource("/api/events");
-    console.log("[pet-album] sse:open");
     source.addEventListener("event", (message) => {
-      console.log("[pet-album] sse:event", message.data);
       setRefreshTick((current) => current + 1);
     });
-    source.onerror = () => {
-      console.error("[pet-album] sse:error");
-    };
     return () => source.close();
   }, []);
 
