@@ -16,9 +16,18 @@ impl ObservationCommands {
     }
 
     pub async fn ingest_source_photo(&self, input: ObservationInput) -> AppResult<i64> {
-        self.repository
+        let id = self
+            .repository
             .store_source_photo(&input.source_filename, input.captured_at, input.pet_id.as_deref())
-            .await
+            .await?;
+        let _ = self.event_tx.send(PetEvent {
+            source_filename: input.source_filename,
+            is_valid: false,
+            summary: String::new(),
+            behavior: String::new(),
+            pet_id: input.pet_id,
+        });
+        Ok(id)
     }
 
     pub async fn apply_observation(&self, result: ObservationResult) -> AppResult<Option<PetEvent>> {
