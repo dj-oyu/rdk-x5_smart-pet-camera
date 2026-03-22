@@ -287,6 +287,9 @@ const (
 	comicQuality = 85
 )
 
+// caption is drawn at the bottom of the comic canvas. Empty string = no caption.
+var pendingCaption string
+
 func (cc *ComicCapture) stitchAndSave() {
 	if err := os.MkdirAll(cc.outputDir, 0755); err != nil {
 		log.Printf("[Comic] Failed to create output dir: %v", err)
@@ -393,6 +396,13 @@ func (cc *ComicCapture) stitchAndSave() {
 			ts, 255, 16, 2)
 	}
 
+	// Draw user caption with TrueType font (Japanese/emoji support)
+	if pendingCaption != "" {
+		caption := pendingCaption
+		pendingCaption = ""
+		DrawCaptionOnNV12(outNV12, outW, outH, caption)
+	}
+
 	// HW JPEG encode (via VPU, same path as MJPEG)
 	jpegData, err := nv12ToJPEG(outNV12, outW, outH)
 	if err != nil {
@@ -424,8 +434,8 @@ func (cc *ComicCapture) stitchAndSave() {
 // CaptureComic triggers an immediate 4-panel comic capture using the exact
 // same pipeline as auto-capture: startCapturing → capturePanel × MaxPanels
 // → finishCapturing → stitchAndSave (nano2D + HW JPEG).
-// Panels are captured ~500ms apart. Returns the saved filename.
-func (cc *ComicCapture) CaptureComic() (string, error) {
+// Panels are captured ~1-4s apart. Optional message is drawn on the comic.
+func (cc *ComicCapture) CaptureComic(message string) (string, error) {
 	now := time.Now()
 
 	// Save and restore state so on-demand doesn't break auto-capture
@@ -468,6 +478,11 @@ func (cc *ComicCapture) CaptureComic() (string, error) {
 			W: bw,
 			H: bh,
 		}
+	}
+
+	// Set caption for stitchAndSave to draw on the comic
+	if message != "" {
+		pendingCaption = message
 	}
 
 	// Use startCapturing (captures first panel immediately)
