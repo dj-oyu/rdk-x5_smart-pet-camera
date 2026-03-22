@@ -41,10 +41,9 @@ def test_roi_shm_readable():
         ZeroCopySharedMemory,
         SHM_NAME_ROI_ZC_0,
         SHM_NAME_ROI_ZC_1,
-        SHM_NAME_ROI_ZC_2,
     )
 
-    names = [SHM_NAME_ROI_ZC_0, SHM_NAME_ROI_ZC_1, SHM_NAME_ROI_ZC_2]
+    names = [SHM_NAME_ROI_ZC_0, SHM_NAME_ROI_ZC_1]
     readers = []
 
     for name in names:
@@ -94,12 +93,11 @@ def test_roi_shm_readable():
         else:
             logger.warning(f"  SKIP: {name} — no frame (VSE channel may not be active)")
 
-    # ROI[2] (Ch5) is known to fail on some RDK X5 configs, so 2/3 is acceptable
-    if success_count >= 2:
-        logger.info(f"  {success_count}/3 ROI SHM regions readable with correct dimensions")
+    if success_count == len(names):
+        logger.info(f"  {success_count}/{len(names)} ROI SHM regions readable with correct dimensions")
         return True
     else:
-        logger.error(f"  FAIL: Only {success_count}/3 ROI regions working (need >= 2)")
+        logger.error(f"  FAIL: Only {success_count}/{len(names)} ROI regions working")
         return False
 
 
@@ -174,7 +172,7 @@ def test_roi_fps(duration_sec: float = 5.0):
         logger.error("  FAIL: Could not open ROI readers")
         return False
 
-    counts = [0, 0, 0]
+    counts = [0] * len(readers)
     start = time.monotonic()
 
     while time.monotonic() - start < duration_sec:
@@ -184,19 +182,19 @@ def test_roi_fps(duration_sec: float = 5.0):
                 counts[i] += 1
 
     elapsed = time.monotonic() - start
-    for i in range(3):
+    for i in range(len(readers)):
         fps = counts[i] / elapsed
         logger.info(f"  ROI[{i}]: {counts[i]} frames in {elapsed:.1f}s = {fps:.1f} fps")
 
     total_fps = sum(counts) / elapsed
-    logger.info(f"  Total: {total_fps:.1f} fps across 3 ROIs")
+    logger.info(f"  Total: {total_fps:.1f} fps across {len(readers)} ROIs")
 
     active = sum(1 for c in counts if c > 0)
-    if active >= 2:
-        logger.info(f"  {active}/3 ROI channels producing frames (2+ required)")
+    if active == len(readers):
+        logger.info(f"  All {active} ROI channels producing frames")
         return True
     else:
-        logger.error(f"  FAIL: Only {active}/3 ROI channels producing frames (need >= 2)")
+        logger.error(f"  FAIL: Only {active}/{len(readers)} ROI channels producing frames")
         return False
 
 

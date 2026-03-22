@@ -108,9 +108,9 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
     goto error_cleanup;
   }
 
-  // Night camera ROI SHM: 3 pre-cropped 640x640 regions for YOLO
+  // Night camera ROI SHM: 2 pre-cropped 640x640 regions for YOLO (VSE Ch3-4)
   if (pipeline->camera_index == 1) {
-    const char* roi_names[] = {SHM_NAME_ROI_ZC_0, SHM_NAME_ROI_ZC_1, SHM_NAME_ROI_ZC_2};
+    const char* roi_names[] = {SHM_NAME_ROI_ZC_0, SHM_NAME_ROI_ZC_1};
     for (int i = 0; i < NUM_ROI_REGIONS; i++) {
       pipeline->shm_roi_zc[i] = shm_roi_zc_create(roi_names[i]);
       if (!pipeline->shm_roi_zc[i]) {
@@ -635,7 +635,7 @@ void pipeline_destroy(camera_pipeline_t *pipeline) {
   }
 
   // Destroy ROI SHM (night camera only)
-  const char* roi_names[] = {SHM_NAME_ROI_ZC_0, SHM_NAME_ROI_ZC_1, SHM_NAME_ROI_ZC_2};
+  const char* roi_names[] = {SHM_NAME_ROI_ZC_0, SHM_NAME_ROI_ZC_1};
   for (int i = 0; i < NUM_ROI_REGIONS; i++) {
     if (pipeline->shm_roi_zc[i]) {
       shm_roi_zc_destroy(pipeline->shm_roi_zc[i], roi_names[i]);

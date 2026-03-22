@@ -155,17 +155,16 @@ class YoloDetectorDaemon:
         self.night_roi_regions: list[tuple[int, int, int, int]] = []  # 3 ROIs for 720p
 
         # VSE ROI SHM readers (opened when night camera is first detected)
-        # Each reader corresponds to one pre-cropped 640x640 NV12 ROI from VSE Ch3-5.
+        # Each reader corresponds to one pre-cropped 640x640 NV12 ROI from VSE Ch3-4.
+        # RDK X5 VSE supports max 5 channels (Ch0-4), so 2 ROIs max.
         self.roi_readers: list[ZeroCopySharedMemory] = []
 
         # VSE ROI coordinate mapping: regions are defined on 1920x1080 sensor space.
         # Each VSE output is 640x640, so scale = 960/640 = 1.5.
-        # Detection coords from detect_nv12() are in 640x640 space and must be mapped
-        # back to 1920x1080, then scaled by self.scale_x/scale_y to output space.
+        # 2 ROIs cover full 1920px width: left (0-960) + right (960-1920).
         self.VSE_ROI_REGIONS: list[tuple[int, int, int, int]] = [
-            (0,   60, 960, 960),  # ROI 0: left
-            (480, 60, 960, 960),  # ROI 1: centre (50% overlap)
-            (896, 60, 960, 960),  # ROI 2: right
+            (0,   60, 960, 960),   # ROI 0: left half
+            (960, 60, 960, 960),   # ROI 1: right half
         ]
         self.VSE_SCALE: float = 960.0 / 640.0  # 1.5 — 640x640 → 1920x1080 sensor space
 
@@ -509,7 +508,8 @@ class YoloDetectorDaemon:
 
                     # YOLO ROI detection (every 3rd frame — motion runs every frame)
                     # Skip YOLO when scene is static (no motion detected or in cooldown)
-                    run_yolo = (self.stats["frames_processed"] % 3 == 0) and (self.motion_cooldown > 0 or len(motion_dicts) > 0)
+                    num_rois = len(self.roi_readers) if self.roi_readers else len(self.night_roi_regions)
+                    run_yolo = (self.stats["frames_processed"] % max(num_rois, 1) == 0) and (self.motion_cooldown > 0 or len(motion_dicts) > 0)
                     if not run_yolo:
                         self.stats["yolo_skipped_frames"] = self.stats.get("yolo_skipped_frames", 0) + 1
                     if run_yolo:
