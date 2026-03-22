@@ -1,12 +1,10 @@
-use crate::db::PhotoStore;
+use crate::application::{AppContext, ObservationInput, ObservationResult};
 use crate::ingest::filename::parse_comic_filename;
-use crate::server::PhotoEvent;
 use crate::vlm::{VlmClient, VlmConfig};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::path::Path;
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 const MAX_VLM_ATTEMPTS: i32 = 5;
@@ -15,74 +13,75 @@ const FILE_STABLE_DELAY: Duration = Duration::from_millis(500);
 const FILE_STABLE_MAX_RETRIES: u32 = 3;
 
 pub struct PhotoWatcher {
-    photos_dir: PathBuf,
-    store: Arc<Mutex<PhotoStore>>,
+    app: AppContext,
     vlm_config: VlmConfig,
-    event_tx: broadcast::Sender<PhotoEvent>,
 }
 
 impl PhotoWatcher {
-    pub fn new(
-        photos_dir: PathBuf,
-        store: Arc<Mutex<PhotoStore>>,
-        vlm_config: VlmConfig,
-        event_tx: broadcast::Sender<PhotoEvent>,
-    ) -> Self {
-        Self { photos_dir, store, vlm_config, event_tx }
+    pub fn new(app: AppContext, vlm_config: VlmConfig) -> Self {
+        Self { app, vlm_config }
     }
 
-    /// Scan existing files and insert any not yet in DB.
-    fn initial_scan(&self) {
-        let entries = match std::fs::read_dir(&self.photos_dir) {
-            Ok(e) => e,
-            Err(e) => {
-                warn!("Cannot read photos dir {}: {e}", self.photos_dir.display());
+    async fn initial_scan(&self) {
+        let entries = match std::fs::read_dir(self.app.photos_dir()) {
+            Ok(entries) => entries,
+            Err(error) => {
+                warn!("Cannot read photos dir {}: {error}", self.app.photos_dir().display());
                 return;
             }
         };
 
+        let commands = self.app.observation_commands();
+        let queries = self.app.event_queries();
         let mut count = 0;
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if !is_jpeg(&name) { continue; }
+            if !is_jpeg(&name) {
+                continue;
+            }
             if let Ok(meta) = parse_comic_filename(&name) {
-                let store = self.store.lock().unwrap();
-                if store.get_by_filename(&name).ok().flatten().is_none() {
-                    let _ = store.insert(&name, meta.captured_at, meta.pet_id.as_deref());
-                    count += 1;
+                if queries.get_event_by_source(&name).await.ok().flatten().is_none() {
+                    if commands
+                        .ingest_source_photo(ObservationInput {
+                            source_filename: name.clone(),
+                            captured_at: meta.captured_at,
+                            pet_id: meta.pet_id,
+                        })
+                        .await
+                        .is_ok()
+                    {
+                        count += 1;
+                    }
                 }
             }
         }
-        info!("Initial scan: inserted {count} new files");
+        info!("Initial scan: inserted {count} new source photos");
     }
 
-    /// Query DB for pending files and send them to VLM queue.
-    fn queue_pending(&self, tx: &mpsc::Sender<String>) {
-        let store = self.store.lock().unwrap();
-        match store.list_pending_filenames(MAX_VLM_ATTEMPTS) {
+    async fn queue_pending(&self, tx: &mpsc::Sender<String>) {
+        let queries = self.app.event_queries();
+        match queries.list_pending_sources(MAX_VLM_ATTEMPTS).await {
             Ok(names) => {
                 if !names.is_empty() {
-                    info!("Rescan: {} pending files queued for VLM", names.len());
+                    info!("Rescan: {} pending sources queued for observation", names.len());
                 }
                 for name in names {
                     let _ = tx.try_send(name);
                 }
             }
-            Err(e) => warn!("Failed to query pending: {e}"),
+            Err(error) => warn!("Failed to query pending sources: {error}"),
         }
     }
 
     pub async fn run(self) {
         let (tx, mut rx) = mpsc::channel::<String>(64);
 
-        // Initial scan: insert new files, then queue all pending
-        self.initial_scan();
-        self.queue_pending(&tx);
+        self.initial_scan().await;
+        self.queue_pending(&tx).await;
 
-        // Filesystem watcher
-        let store_for_watcher = Arc::clone(&self.store);
         let tx_for_watcher = tx.clone();
-        let photos_dir_for_watcher = self.photos_dir.clone();
+        let app_for_watcher = self.app.clone();
+        let photos_dir_for_watcher = self.app.photos_dir().to_path_buf();
 
         let _watcher = {
             let (notify_tx, mut notify_rx) = mpsc::channel(64);
@@ -101,22 +100,24 @@ impl PhotoWatcher {
                 .watch(&photos_dir_for_watcher, RecursiveMode::NonRecursive)
                 .expect("failed to watch photos directory");
 
-            let store = Arc::clone(&store_for_watcher);
             let tx = tx_for_watcher;
             let photos_dir = photos_dir_for_watcher.clone();
             tokio::spawn(async move {
+                let commands = app_for_watcher.observation_commands();
+                let queries = app_for_watcher.event_queries();
                 while let Some(event) = notify_rx.recv().await {
                     if !matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
                         continue;
                     }
                     for path in event.paths {
                         let name = match path.file_name() {
-                            Some(n) => n.to_string_lossy().to_string(),
+                            Some(name) => name.to_string_lossy().to_string(),
                             None => continue,
                         };
-                        if !is_jpeg(&name) { continue; }
+                        if !is_jpeg(&name) {
+                            continue;
+                        }
 
-                        // Wait for file to stabilize (rsync partial write protection)
                         let full_path = photos_dir.join(&name);
                         if !wait_file_stable(&full_path).await {
                             warn!("File not stable, skipping: {name}");
@@ -124,14 +125,26 @@ impl PhotoWatcher {
                         }
 
                         let meta = match parse_comic_filename(&name) {
-                            Ok(m) => m,
-                            Err(e) => { warn!("Skipping {name}: {e}"); continue; }
+                            Ok(meta) => meta,
+                            Err(error) => {
+                                warn!("Skipping {name}: {error}");
+                                continue;
+                            }
                         };
-                        {
-                            let s = store.lock().unwrap();
-                            match s.insert(&name, meta.captured_at, meta.pet_id.as_deref()) {
-                                Ok(_) => info!("New photo: {name}"),
-                                Err(e) => { warn!("DB insert {name}: {e}"); continue; }
+                        if queries.get_event_by_source(&name).await.ok().flatten().is_none() {
+                            match commands
+                                .ingest_source_photo(ObservationInput {
+                                    source_filename: name.clone(),
+                                    captured_at: meta.captured_at,
+                                    pet_id: meta.pet_id,
+                                })
+                                .await
+                            {
+                                Ok(_) => info!("New source photo: {name}"),
+                                Err(error) => {
+                                    warn!("DB insert {name}: {error}");
+                                    continue;
+                                }
                             }
                         }
                         let _ = tx.send(name).await;
@@ -142,21 +155,19 @@ impl PhotoWatcher {
             watcher
         };
 
-        // VLM worker with periodic rescan
         let vlm_client = VlmClient::new(self.vlm_config);
-        let store_for_vlm = Arc::clone(&self.store);
-        let photos_dir = self.photos_dir.clone();
+        let photos_dir = self.app.photos_dir().to_path_buf();
         let tx_for_rescan = tx.clone();
-        let store_for_rescan = Arc::clone(&self.store);
+        let app_for_rescan = self.app.clone();
+        let commands = self.app.observation_commands();
 
-        // Periodic rescan task
         tokio::spawn(async move {
+            let queries = app_for_rescan.event_queries();
             loop {
                 tokio::time::sleep(RESCAN_INTERVAL).await;
-                let store = store_for_rescan.lock().unwrap();
-                if let Ok(names) = store.list_pending_filenames(MAX_VLM_ATTEMPTS) {
+                if let Ok(names) = queries.list_pending_sources(MAX_VLM_ATTEMPTS).await {
                     if !names.is_empty() {
-                        info!("Periodic rescan: {} pending files", names.len());
+                        info!("Periodic rescan: {} pending sources", names.len());
                         for name in names {
                             let _ = tx_for_rescan.try_send(name);
                         }
@@ -165,41 +176,33 @@ impl PhotoWatcher {
             }
         });
 
-        // VLM processing loop
         while let Some(filename) = rx.recv().await {
             let jpeg_path = photos_dir.join(&filename);
             if !jpeg_path.exists() {
-                warn!("VLM: file missing {filename}");
+                warn!("Observation source missing {filename}");
                 continue;
             }
 
-            info!("VLM processing: {filename}");
+            info!("Observing source photo: {filename}");
             match vlm_client.analyze(&jpeg_path).await {
-                Ok(resp) => {
-                    let pet_id = {
-                        let s = store_for_vlm.lock().unwrap();
-                        if let Err(e) = s.update_vlm_result(
-                            &filename, resp.is_valid, &resp.caption, &resp.behavior,
-                        ) {
-                            error!("DB update {filename}: {e}");
-                            None
-                        } else {
-                            info!("VLM done: {filename} is_valid={} behavior={}", resp.is_valid, resp.behavior);
-                            s.get_by_filename(&filename).ok().flatten().and_then(|p| p.pet_id)
-                        }
-                    };
-                    let _ = self.event_tx.send(PhotoEvent {
-                        filename: filename.clone(),
-                        is_valid: resp.is_valid,
-                        caption: resp.caption.clone(),
-                        behavior: resp.behavior.clone(),
-                        pet_id,
-                    });
+                Ok(response) => {
+                    if let Err(error) = commands
+                        .apply_observation(ObservationResult {
+                            source_filename: filename.clone(),
+                            is_valid: response.is_valid,
+                            summary: response.caption,
+                            behavior: response.behavior,
+                        })
+                        .await
+                    {
+                        error!("DB update {filename}: {error}");
+                    } else {
+                        info!("Observation done: {filename}");
+                    }
                 }
-                Err(e) => {
-                    error!("VLM error for {filename}: {e}");
-                    let s = store_for_vlm.lock().unwrap();
-                    let _ = s.record_vlm_failure(&filename, &e);
+                Err(error) => {
+                    error!("Observation error for {filename}: {error}");
+                    let _ = commands.record_observation_failure(&filename, &error).await;
                 }
             }
         }
@@ -210,13 +213,14 @@ fn is_jpeg(name: &str) -> bool {
     name.ends_with(".jpg") || name.ends_with(".JPG") || name.ends_with(".jpeg")
 }
 
-/// Wait until file size stops changing, to avoid reading partial rsync transfers.
-async fn wait_file_stable(path: &PathBuf) -> bool {
+async fn wait_file_stable(path: &Path) -> bool {
     for _ in 0..FILE_STABLE_MAX_RETRIES {
-        let size1 = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        if size1 == 0 { return false; }
+        let size1 = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        if size1 == 0 {
+            return false;
+        }
         tokio::time::sleep(FILE_STABLE_DELAY).await;
-        let size2 = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let size2 = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
         if size1 == size2 {
             return true;
         }

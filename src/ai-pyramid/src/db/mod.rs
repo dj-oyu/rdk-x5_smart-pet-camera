@@ -91,6 +91,13 @@ impl PhotoStore {
         )
     }
 
+    pub fn set_validation_override(&self, filename: &str, is_valid: bool) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE photos SET is_valid = ?1 WHERE filename = ?2",
+            params![is_valid, filename],
+        )
+    }
+
     pub fn record_vlm_failure(&self, filename: &str, error: &str) -> rusqlite::Result<usize> {
         self.conn.execute(
             "UPDATE photos SET vlm_attempts = vlm_attempts + 1, vlm_last_error = ?1 WHERE filename = ?2",
@@ -127,6 +134,16 @@ impl PhotoStore {
                  FROM photos WHERE id = ?1",
                 params![id],
                 |row| row_to_photo(row),
+            )
+            .optional()
+    }
+
+    pub fn get_vlm_attempts(&self, filename: &str) -> rusqlite::Result<Option<i32>> {
+        self.conn
+            .query_row(
+                "SELECT vlm_attempts FROM photos WHERE filename = ?1",
+                params![filename],
+                |row| row.get(0),
             )
             .optional()
     }
@@ -272,6 +289,24 @@ mod tests {
         assert_eq!(photo.is_valid, Some(true));
         assert_eq!(photo.caption.as_deref(), Some("A tabby cat resting"));
         assert_eq!(photo.behavior.as_deref(), Some("resting"));
+    }
+
+    #[test]
+    fn set_validation_override_does_not_change_vlm_attempts() {
+        let store = setup();
+        store.insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), None).unwrap();
+        store.record_vlm_failure("a.jpg", "timeout").unwrap();
+
+        let before = store.get_vlm_attempts("a.jpg").unwrap().unwrap();
+        store.set_validation_override("a.jpg", true).unwrap();
+        let after = store.get_vlm_attempts("a.jpg").unwrap().unwrap();
+        let photo = store.get_by_filename("a.jpg").unwrap().unwrap();
+
+        assert_eq!(before, 1);
+        assert_eq!(after, 1);
+        assert_eq!(photo.is_valid, Some(true));
+        assert_eq!(photo.caption, None);
+        assert_eq!(photo.behavior, None);
     }
 
     #[test]
