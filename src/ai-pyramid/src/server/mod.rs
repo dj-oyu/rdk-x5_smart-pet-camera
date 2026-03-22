@@ -4,7 +4,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Json, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use futures_util::stream::Stream;
 use include_dir::{include_dir, Dir};
@@ -15,6 +15,10 @@ use tokio_stream::StreamExt;
 static EMBEDDED_UI: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
 
 pub fn router(state: AppContext) -> Router {
+    let mcp_router = Router::new()
+        .route("/mcp", post(crate::mcp::handle_mcp))
+        .route("/mcp/photos/{id}", get(crate::mcp::handle_mcp_photo_download));
+
     Router::new()
         .route("/album", get(handle_album_page))
         .route("/app", get(handle_embedded_app))
@@ -24,6 +28,7 @@ pub fn router(state: AppContext) -> Router {
         .route("/api/stats", get(handle_activity_stats))
         .route("/api/events", get(handle_sse))
         .route("/health", get(handle_health))
+        .merge(mcp_router)
         .with_state(state)
 }
 
@@ -256,7 +261,7 @@ mod tests {
         let photos_dir = tempdir.path().to_path_buf();
         std::mem::forget(tempdir);
         let (event_tx, _) = tokio::sync::broadcast::channel(16);
-        AppContext::new(PhotoStoreRepository::shared(store), photos_dir, event_tx)
+        AppContext::new(PhotoStoreRepository::shared(store), photos_dir, event_tx, None, false)
     }
 
     #[tokio::test]

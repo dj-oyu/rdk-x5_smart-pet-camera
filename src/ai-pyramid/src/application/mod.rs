@@ -35,7 +35,7 @@ mod tests {
         store.migrate().unwrap();
         let repository = PhotoStoreRepository::shared(store);
         let (event_tx, _) = broadcast::channel(16);
-        AppContext::new(repository, PathBuf::from("data/photos"), event_tx)
+        AppContext::new(repository, PathBuf::from("data/photos"), event_tx, None, false)
     }
 
     #[tokio::test]

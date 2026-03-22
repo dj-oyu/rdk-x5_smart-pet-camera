@@ -46,6 +46,10 @@ pub(crate) enum DbCommand {
         filename: String,
         reply: oneshot::Sender<AppResult<Option<Photo>>>,
     },
+    GetPhotoById {
+        id: i64,
+        reply: oneshot::Sender<AppResult<Option<Photo>>>,
+    },
     ListPhotos {
         filter: PhotoFilter,
         reply: oneshot::Sender<AppResult<(Vec<Photo>, i64)>>,
@@ -92,6 +96,7 @@ fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
             DbCommand::GetPhoto { filename, reply } => {
                 send_reply(reply, store.get_by_filename(&filename))
             }
+            DbCommand::GetPhotoById { id, reply } => send_reply(reply, store.get_by_id(id)),
             DbCommand::ListPhotos { filter, reply } => send_reply(reply, store.list(&filter)),
             DbCommand::ListPendingFilenames {
                 max_attempts,

@@ -7,6 +7,8 @@ pub struct AppContext {
     repository: SharedEventRepository,
     photos_dir: PathBuf,
     event_tx: broadcast::Sender<PetEvent>,
+    base_url: Option<String>,
+    is_tls: bool,
 }
 
 impl AppContext {
@@ -14,11 +16,15 @@ impl AppContext {
         repository: SharedEventRepository,
         photos_dir: PathBuf,
         event_tx: broadcast::Sender<PetEvent>,
+        base_url: Option<String>,
+        is_tls: bool,
     ) -> Self {
         Self {
             repository,
             photos_dir,
             event_tx,
+            base_url,
+            is_tls,
         }
     }
 
@@ -32,6 +38,14 @@ impl AppContext {
 
     pub fn photos_dir(&self) -> &Path {
         &self.photos_dir
+    }
+
+    pub fn base_url(&self) -> Option<&str> {
+        self.base_url.as_deref()
+    }
+
+    pub fn is_tls(&self) -> bool {
+        self.is_tls
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<PetEvent> {
