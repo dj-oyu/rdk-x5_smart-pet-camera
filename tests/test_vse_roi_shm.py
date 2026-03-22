@@ -323,7 +323,8 @@ def test_roi_vs_crop_comparison(duration_sec: float = 10.0):
             )
             hb_buf.release()
         except Exception as e:
-            logger.debug(f"  Path A error: {e}")
+            if comparisons == 0 and new_frame_count <= 3:
+                logger.warning(f"  Path A error (first): {e}")
             continue
 
         # Path B: VSE ROI (pre-cropped 640x640)
@@ -343,7 +344,8 @@ def test_roi_vs_crop_comparison(duration_sec: float = 10.0):
             )
             roi_hb.release()
         except Exception as e:
-            logger.debug(f"  Path B error: {e}")
+            if comparisons == 0 and new_frame_count <= 3:
+                logger.warning(f"  Path B error (first): {e}")
             continue
 
         # Compare detection counts
