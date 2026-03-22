@@ -1,9 +1,8 @@
 use crate::application::{AppContext, EventQuery, EventStatusFilter, EventSummary};
-use askama::Template;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Json, Response};
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use futures_util::stream::Stream;
@@ -20,7 +19,6 @@ pub fn router(state: AppContext) -> Router {
         .route("/mcp/photos/{id}", get(crate::mcp::handle_mcp_photo_download));
 
     Router::new()
-        .route("/album", get(handle_album_page))
         .route("/app", get(handle_embedded_app))
         .route("/app/{*path}", get(handle_embedded_asset))
         .route("/api/photos", get(handle_event_list))
@@ -44,40 +42,6 @@ struct EventListQuery {
 struct EventListResponse {
     events: Vec<EventSummary>,
     total: i64,
-}
-
-#[derive(Template)]
-#[template(path = "album.html")]
-struct AlbumTemplate {
-    events: Vec<EventSummary>,
-    total: i64,
-    filter_valid: String,
-    filter_pet_id: String,
-}
-
-async fn handle_album_page(
-    State(state): State<AppContext>,
-    Query(query): Query<EventListQuery>,
-) -> impl IntoResponse {
-    let event_query = build_event_query(&query);
-    let filter_valid = query.is_valid.unwrap_or_default();
-    let filter_pet_id = query.pet_id.unwrap_or_default();
-    let page_query = EventQuery {
-        limit: Some(20),
-        ..event_query
-    };
-
-    let event_queries = state.event_queries();
-    let (mut events, total) = event_queries.list_events(page_query).await.unwrap_or_default();
-    events.reverse();
-
-    let template = AlbumTemplate {
-        events,
-        total,
-        filter_valid,
-        filter_pet_id,
-    };
-    Html(template.render().unwrap_or_else(|e| format!("Template error: {e}")))
 }
 
 async fn handle_embedded_app() -> Response {
@@ -404,16 +368,4 @@ mod tests {
         assert_eq!(json["pending_events"], 1);
     }
 
-    #[tokio::test]
-    async fn album_page_renders() {
-        let app = router(test_state());
-        let response = app
-            .oneshot(Request::builder().uri("/album").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let html = String::from_utf8(body.to_vec()).unwrap();
-        assert!(html.contains("Pet Album"));
-    }
 }
