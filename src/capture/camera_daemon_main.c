@@ -83,6 +83,9 @@ static void *switcher_thread(void *arg) {
                         CAMERA_MODE_NIGHT, "auto-night");
                     LOG_INFO("Switcher", "Switch: DAY -> NIGHT (brightness=%.1f)",
                              brightness.brightness_avg);
+                    // Wake inactive pipeline threads immediately
+                    pthread_cond_broadcast(&g_pipelines[0].switch_cond);
+                    pthread_cond_broadcast(&g_pipelines[1].switch_cond);
                 }
             } else if (decision == CAMERA_SWITCH_DECISION_TO_DAY) {
                 int prev = g_active_camera;
@@ -92,6 +95,9 @@ static void *switcher_thread(void *arg) {
                         CAMERA_MODE_DAY, "auto-day");
                     LOG_INFO("Switcher", "Switch: NIGHT -> DAY (brightness=%.1f)",
                              brightness.brightness_avg);
+                    // Wake inactive pipeline threads immediately
+                    pthread_cond_broadcast(&g_pipelines[0].switch_cond);
+                    pthread_cond_broadcast(&g_pipelines[1].switch_cond);
                 }
             }
         }

@@ -149,6 +149,48 @@ int shm_zerocopy_write(ZeroCopyFrameBuffer* shm, const ZeroCopyFrame* frame) {
 }
 
 // ============================================================================
+// ROI Zero-Copy (night camera pre-cropped 640x640 regions)
+// Reuses ZeroCopyFrameBuffer — identical layout to YOLO/MJPEG zero-copy.
+// ============================================================================
+
+ZeroCopyFrameBuffer* shm_roi_zc_create(const char* shm_name) {
+    bool created_new = false;
+    ZeroCopyFrameBuffer* shm = (ZeroCopyFrameBuffer*)shm_create_or_open_ex(
+        shm_name, sizeof(ZeroCopyFrameBuffer), true, &created_new);
+    if (shm && created_new) {
+        sem_init(&shm->new_frame_sem, 1, 0);
+        shm->frame.version = 0;
+        LOG_INFO("SharedMemory", "ROI zero-copy SHM created: %s (%zu bytes)",
+                 shm_name, sizeof(ZeroCopyFrameBuffer));
+    }
+    return shm;
+}
+
+ZeroCopyFrameBuffer* shm_roi_zc_open(const char* shm_name) {
+    ZeroCopyFrameBuffer* shm = (ZeroCopyFrameBuffer*)shm_create_or_open(
+        shm_name, sizeof(ZeroCopyFrameBuffer), false);
+    if (shm) LOG_INFO("SharedMemory", "ROI zero-copy SHM opened: %s", shm_name);
+    return shm;
+}
+
+void shm_roi_zc_destroy(ZeroCopyFrameBuffer* shm, const char* shm_name) {
+    if (shm) {
+        sem_destroy(&shm->new_frame_sem);
+        munmap(shm, sizeof(ZeroCopyFrameBuffer));
+        shm_unlink(shm_name);
+    }
+}
+
+int shm_roi_zc_write(ZeroCopyFrameBuffer* shm, const ZeroCopyFrame* frame) {
+    if (!shm || !frame) return -1;
+    uint32_t ver = __atomic_load_n(&shm->frame.version, __ATOMIC_ACQUIRE);
+    memcpy(&shm->frame, frame, sizeof(ZeroCopyFrame));
+    __atomic_store_n(&shm->frame.version, ver + 1, __ATOMIC_RELEASE);
+    sem_post(&shm->new_frame_sem);
+    return 0;
+}
+
+// ============================================================================
 // H.265 Zero-Copy (bitstream)
 // ============================================================================
 

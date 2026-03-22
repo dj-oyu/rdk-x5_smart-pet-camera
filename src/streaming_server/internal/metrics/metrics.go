@@ -27,12 +27,18 @@ type Metrics struct {
 	RecorderErrors  atomic.Uint64
 
 	// Latency tracking
-	FrameLatencyMs  atomic.Uint64 // Average frame latency in ms
-	ProcessLatencyMs atomic.Uint64 // Average processing latency in ms
+	FrameLatencyMs       atomic.Uint64 // Average frame latency in ms
+	ProcessLatencyMs     atomic.Uint64 // Average processing latency in ms
+	RecorderWriteLatencyMs atomic.Uint64 // Latest recorder write latency in ms
+	WebRTCSendLatencyMs  atomic.Uint64 // Latest WebRTC SendFrame latency in ms
 
 	// Buffer usage
 	WebRTCBufferUsage   atomic.Uint64 // Percentage (0-100)
 	RecorderBufferUsage atomic.Uint64 // Percentage (0-100)
+
+	// SHM / recorder queue depth
+	SHMFrameDropRate    atomic.Uint64 // Cumulative count of SHM frame version jumps (missed frames)
+	RecorderQueueDepth  atomic.Uint64 // Current recorder channel occupancy
 
 	// WebRTC client tracking
 	ActiveClients atomic.Uint64
@@ -144,6 +150,38 @@ func (m *Metrics) registerPrometheusMetrics() {
 		func() float64 { return float64(m.ProcessLatencyMs.Load()) },
 	))
 
+	m.registry.MustRegister(prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "streaming_recorder_write_latency_ms",
+			Help: "Latest recorder write latency in milliseconds",
+		},
+		func() float64 { return float64(m.RecorderWriteLatencyMs.Load()) },
+	))
+
+	m.registry.MustRegister(prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "streaming_webrtc_send_latency_ms",
+			Help: "Latest WebRTC SendFrame latency in milliseconds",
+		},
+		func() float64 { return float64(m.WebRTCSendLatencyMs.Load()) },
+	))
+
+	m.registry.MustRegister(prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "streaming_shm_frame_drop_rate_total",
+			Help: "Cumulative count of SHM frame version jumps (missed frames)",
+		},
+		func() float64 { return float64(m.SHMFrameDropRate.Load()) },
+	))
+
+	m.registry.MustRegister(prometheus.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "streaming_recorder_queue_depth",
+			Help: "Current recorder channel occupancy",
+		},
+		func() float64 { return float64(m.RecorderQueueDepth.Load()) },
+	))
+
 	// Buffer usage metrics
 	m.registry.MustRegister(prometheus.NewGaugeFunc(
 		prometheus.GaugeOpts{
@@ -213,6 +251,16 @@ func (m *Metrics) UpdateFrameLatency(captureTime time.Time) {
 // UpdateProcessLatency updates the average processing latency
 func (m *Metrics) UpdateProcessLatency(duration time.Duration) {
 	m.ProcessLatencyMs.Store(uint64(duration.Milliseconds()))
+}
+
+// UpdateRecorderWriteLatency records the latest recorder write latency.
+func (m *Metrics) UpdateRecorderWriteLatency(duration time.Duration) {
+	m.RecorderWriteLatencyMs.Store(uint64(duration.Milliseconds()))
+}
+
+// UpdateWebRTCSendLatency records the latest WebRTC SendFrame latency.
+func (m *Metrics) UpdateWebRTCSendLatency(duration time.Duration) {
+	m.WebRTCSendLatencyMs.Store(uint64(duration.Milliseconds()))
 }
 
 // UpdateBufferUsage updates buffer usage percentages
