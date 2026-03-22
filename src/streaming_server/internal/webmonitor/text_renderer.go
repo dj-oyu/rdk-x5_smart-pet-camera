@@ -1,123 +1,133 @@
 package webmonitor
 
+/*
+#cgo CFLAGS: -I/usr/include/freetype2
+#cgo LDFLAGS: -lfreetype
+
+#include "ft_text.h"
+#include <stdlib.h>
+*/
+import "C"
+
 import (
 	"image"
 	"image/color"
-	"image/draw"
 	"log"
-	"os"
 	"sync"
-
-	"golang.org/x/image/font"
-	"golang.org/x/image/font/opentype"
-	"golang.org/x/image/math/fixed"
+	"unsafe"
 )
 
-// TextRenderer draws Unicode text (Japanese, English, symbols) onto images
-// using Noto Sans JP. Thread-safe after initialization.
-type TextRenderer struct {
-	face     font.Face
-	initOnce sync.Once
-	initErr  error
-}
-
-var defaultRenderer TextRenderer
-
-// fontSearchPaths lists where to look for the font file.
-var fontSearchPaths = []string{
+// Font search paths.
+var textFontPaths = []string{
 	"assets/fonts/NotoSansJP-Bold.ttf",
 	"/app/smart-pet-camera/assets/fonts/NotoSansJP-Bold.ttf",
-	"/tmp/noto-fonts/extracted/Noto_Sans_JP/static/NotoSansJP-Bold.ttf",
 }
 
-func (tr *TextRenderer) init(sizePt float64) {
-	tr.initOnce.Do(func() {
-		var fontData []byte
-		for _, path := range fontSearchPaths {
-			data, err := os.ReadFile(path)
-			if err == nil {
-				fontData = data
-				log.Printf("[TextRenderer] Loaded font: %s (%.1f MB)", path, float64(len(data))/1024/1024)
+var emojiFontPaths = []string{
+	"assets/fonts/NotoColorEmoji-Regular.ttf",
+	"/app/smart-pet-camera/assets/fonts/NotoColorEmoji-Regular.ttf",
+}
+
+var ftInitOnce sync.Once
+var ftInitOK bool
+
+func initFreeType() {
+	ftInitOnce.Do(func() {
+		var textPath, emojiPath string
+		for _, p := range textFontPaths {
+			if fileExists(p) {
+				textPath = p
 				break
 			}
 		}
-		if fontData == nil {
-			tr.initErr = os.ErrNotExist
-			log.Printf("[TextRenderer] WARNING: No font file found, text rendering disabled")
+		for _, p := range emojiFontPaths {
+			if fileExists(p) {
+				emojiPath = p
+				break
+			}
+		}
+
+		if textPath == "" {
+			log.Printf("[ft_text] No text font found — text rendering disabled")
 			return
 		}
 
-		ft, err := opentype.Parse(fontData)
-		if err != nil {
-			tr.initErr = err
-			log.Printf("[TextRenderer] Failed to parse font: %v", err)
+		cText := C.CString(textPath)
+		defer C.free(unsafe.Pointer(cText))
+
+		var cEmoji *C.char
+		if emojiPath != "" {
+			cEmoji = C.CString(emojiPath)
+			defer C.free(unsafe.Pointer(cEmoji))
+		}
+
+		if ret := C.ft_text_init(cText, cEmoji); ret != 0 {
+			log.Printf("[ft_text] Init failed: %d", ret)
 			return
 		}
 
-		face, err := opentype.NewFace(ft, &opentype.FaceOptions{
-			Size:    sizePt,
-			DPI:     72,
-			Hinting: font.HintingFull,
-		})
-		if err != nil {
-			tr.initErr = err
-			log.Printf("[TextRenderer] Failed to create face: %v", err)
-			return
-		}
-
-		tr.face = face
+		ftInitOK = true
+		log.Printf("[ft_text] Initialized (text=%s, emoji=%s)", textPath, emojiPath)
 	})
 }
 
-// DrawTextOnRGBA draws text with a semi-transparent background box onto an RGBA image.
-// Returns the bounding box of the drawn text area.
-func (tr *TextRenderer) DrawTextOnRGBA(img *image.RGBA, x, y int, text string, textColor, bgColor color.Color) image.Rectangle {
-	tr.init(24) // 24pt default
-	if tr.face == nil {
-		return image.Rectangle{}
+// RenderTextBGRA renders UTF-8 text to an RGBA image via FreeType.
+func RenderTextBGRA(text string, sizePt int, fg, bg color.Color) *image.RGBA {
+	initFreeType()
+	if !ftInitOK {
+		return nil
 	}
 
-	// Measure text width
-	d := &font.Drawer{
-		Dst:  img,
-		Src:  image.NewUniform(textColor),
-		Face: tr.face,
-		Dot:  fixed.P(x, y),
-	}
+	fr, fgc, fb, _ := fg.RGBA()
+	br, bgc, bb, ba := bg.RGBA()
 
-	bounds, advance := d.BoundString(text)
-	textW := advance.Ceil()
-	metrics := tr.face.Metrics()
-	textH := metrics.Height.Ceil()
-	ascent := metrics.Ascent.Ceil()
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
 
-	// Draw background box with padding
-	pad := 6
-	bgRect := image.Rect(
-		x-pad,
-		y-ascent-pad,
-		x+textW+pad,
-		y-ascent+textH+pad,
+	var outPixels *C.uint8_t
+	var outW, outH C.int
+
+	ret := C.ft_text_render(
+		cText, C.int(sizePt),
+		C.uint8_t(fr>>8), C.uint8_t(fgc>>8), C.uint8_t(fb>>8),
+		C.uint8_t(br>>8), C.uint8_t(bgc>>8), C.uint8_t(bb>>8), C.uint8_t(ba>>8),
+		&outPixels, &outW, &outH,
 	)
-	_ = bounds
+	if ret != 0 || outPixels == nil {
+		return nil
+	}
+	defer C.free(unsafe.Pointer(outPixels))
 
-	// Semi-transparent background
-	bgImg := image.NewUniform(bgColor)
-	draw.Draw(img, bgRect, bgImg, image.Point{}, draw.Over)
+	w, h := int(outW), int(outH)
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
 
-	// Draw text
-	d.DrawString(text)
-
-	return bgRect
+	src := unsafe.Slice((*byte)(unsafe.Pointer(outPixels)), w*h*4)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			i := (y*w + x) * 4
+			j := y*img.Stride + x*4
+			img.Pix[j+0] = src[i+2] // R ← B
+			img.Pix[j+1] = src[i+1] // G
+			img.Pix[j+2] = src[i+0] // B ← R
+			img.Pix[j+3] = src[i+3] // A
+		}
+	}
+	return img
 }
 
-// blendRGBAOnNV12 composites an RGBA overlay onto NV12 at position (ox, oy).
-// Shared by both comic captions (one-time) and MJPEG overlay (cached, per-frame).
+// RenderLabel creates an RGBA label image. Returns nil if FreeType unavailable.
+func RenderLabel(text string, textColor, bgColor color.Color, sizePt float64) *image.RGBA {
+	return RenderTextBGRA(text, int(sizePt), textColor, bgColor)
+}
+
+// blendRGBAOnNV12 composites an RGBA overlay onto NV12 at (ox, oy).
 func blendRGBAOnNV12(nv12 []byte, width, height int, overlay *image.RGBA, ox, oy int) {
+	if overlay == nil {
+		return
+	}
 	bounds := overlay.Bounds()
 	overlayW := bounds.Dx()
 	overlayH := bounds.Dy()
-
 	yPlane := nv12[:width*height]
 	uvPlane := nv12[width*height:]
 
@@ -127,7 +137,6 @@ func blendRGBAOnNV12(nv12 []byte, width, height int, overlay *image.RGBA, ox, oy
 			if a == 0 {
 				continue
 			}
-
 			alpha := int(a >> 8)
 			invAlpha := 256 - alpha
 			nx := ox + px
@@ -138,8 +147,7 @@ func blendRGBAOnNV12(nv12 []byte, width, height int, overlay *image.RGBA, ox, oy
 
 			yIdx := ny*width + nx
 			if yIdx < len(yPlane) {
-				oldY := int(yPlane[yIdx])
-				yPlane[yIdx] = uint8((alpha*newY + invAlpha*oldY) >> 8)
+				yPlane[yIdx] = uint8((alpha*newY + invAlpha*int(yPlane[yIdx])) >> 8)
 			}
 
 			if nx%2 == 0 && ny%2 == 0 {
@@ -147,111 +155,30 @@ func blendRGBAOnNV12(nv12 []byte, width, height int, overlay *image.RGBA, ox, oy
 				if uvIdx+1 < len(uvPlane) {
 					newU := ((-38*ri - 74*gi + 112*bi + 128) >> 8) + 128
 					newV := ((112*ri - 94*gi - 18*bi + 128) >> 8) + 128
-					oldU := int(uvPlane[uvIdx])
-					oldV := int(uvPlane[uvIdx+1])
-					uvPlane[uvIdx] = uint8((alpha*newU + invAlpha*oldU) >> 8)
-					uvPlane[uvIdx+1] = uint8((alpha*newV + invAlpha*oldV) >> 8)
+					uvPlane[uvIdx] = uint8((alpha*newU + invAlpha*int(uvPlane[uvIdx])) >> 8)
+					uvPlane[uvIdx+1] = uint8((alpha*newV + invAlpha*int(uvPlane[uvIdx+1])) >> 8)
 				}
 			}
 		}
 	}
 }
 
-// OverlayCache holds a pre-rendered RGBA overlay for fast per-frame blending.
-// Render once when detections change, blend cheaply every frame (~0.2ms).
-type OverlayCache struct {
-	img     *image.RGBA // Pre-rendered text overlay
-	x, y    int         // Position on NV12 frame
-	version int         // Detection version that generated this cache
-}
-
-// RenderLabel creates an RGBA overlay with a text label at the given position.
-// Used for detection class names and confidence on MJPEG overlay.
-func RenderLabel(text string, textColor, bgColor color.Color, sizePt float64) *image.RGBA {
-	defaultRenderer.init(sizePt)
-	if defaultRenderer.face == nil {
-		return nil
-	}
-
-	d := &font.Drawer{Face: defaultRenderer.face, Dot: fixed.P(0, 0)}
-	textW := d.MeasureString(text).Ceil()
-	metrics := defaultRenderer.face.Metrics()
-	textH := metrics.Height.Ceil()
-	ascent := metrics.Ascent.Ceil()
-
-	pad := 4
-	img := image.NewRGBA(image.Rect(0, 0, textW+pad*2, textH+pad*2))
-	draw.Draw(img, img.Bounds(), image.NewUniform(bgColor), image.Point{}, draw.Src)
-
-	drawer := &font.Drawer{
-		Dst:  img,
-		Src:  image.NewUniform(textColor),
-		Face: defaultRenderer.face,
-		Dot:  fixed.P(pad, pad+ascent),
-	}
-	drawer.DrawString(text)
-	return img
-}
-
 // DrawCaptionOnNV12 draws a caption at the bottom center of an NV12 frame.
-// It converts the caption area to RGBA, draws text, and converts back.
-// This is designed for one-time use (comic generation), not per-frame (30fps).
 func DrawCaptionOnNV12(nv12 []byte, width, height int, caption string) {
 	if caption == "" {
 		return
 	}
-
-	defaultRenderer.init(28) // 28pt for comic captions
-	if defaultRenderer.face == nil {
-		// Fallback to ASCII bitmap
-		drawTextWithBackgroundNV12(nv12, width, height,
-			width/2-len(caption)*8, height-36,
-			caption, 255, 16, 2)
+	img := RenderTextBGRA(caption, 28, color.White, color.RGBA{A: 180})
+	if img == nil {
 		return
 	}
-
-	// Measure text to determine overlay region size
-	d := &font.Drawer{
-		Face: defaultRenderer.face,
-		Dot:  fixed.P(0, 0),
-	}
-	textW := d.MeasureString(caption).Ceil()
-	metrics := defaultRenderer.face.Metrics()
-	textH := metrics.Height.Ceil()
-	ascent := metrics.Ascent.Ceil()
-
-	pad := 10
-	overlayW := textW + pad*2
-	overlayH := textH + pad*2
-
-	// Center horizontally, position near bottom
-	ox := (width - overlayW) / 2
-	oy := height - overlayH - 8
+	ox := (width - img.Bounds().Dx()) / 2
+	oy := height - img.Bounds().Dy() - 8
 	if ox < 0 {
 		ox = 0
 	}
 	if oy < 0 {
 		oy = 0
 	}
-
-	// Create RGBA overlay
-	overlay := image.NewRGBA(image.Rect(0, 0, overlayW, overlayH))
-
-	// Fill with semi-transparent dark background
-	bgColor := color.RGBA{R: 0, G: 0, B: 0, A: 180}
-	draw.Draw(overlay, overlay.Bounds(), image.NewUniform(bgColor), image.Point{}, draw.Src)
-
-	// Draw text centered
-	textX := pad
-	textY := pad + ascent
-	drawer := &font.Drawer{
-		Dst:  overlay,
-		Src:  image.NewUniform(color.White),
-		Face: defaultRenderer.face,
-		Dot:  fixed.P(textX, textY),
-	}
-	drawer.DrawString(caption)
-
-	// Composite overlay onto NV12
-	blendRGBAOnNV12(nv12, width, height, overlay, ox, oy)
+	blendRGBAOnNV12(nv12, width, height, img, ox, oy)
 }

@@ -1,23 +1,26 @@
 use clap::Parser;
-use pet_album::application::{AppContext, PhotoStoreRepository};
 use pet_album::db::PhotoStore;
 use pet_album::ingest::watcher::PhotoWatcher;
 use pet_album::server;
 use pet_album::vlm::VlmConfig;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::info;
 
 #[derive(Parser)]
 #[command(name = "pet-album", about = "AI Pyramid Pro album service")]
 struct Args {
+    /// Listen address (e.g. :8082 or 0.0.0.0:8082)
     #[arg(long, default_value = ":8082")]
     addr: String,
 
+    /// TLS cert path (auto-detected if omitted)
     #[arg(long)]
     tls_cert: Option<PathBuf>,
 
+    /// TLS key path (auto-detected if omitted)
     #[arg(long)]
     tls_key: Option<PathBuf>,
 
@@ -39,7 +42,7 @@ struct Args {
 
 const CERT_SEARCH_PATHS: &[&str] = &[
     "/data/tailscale/certs/<album-host>",
-    "../../<album-host>",
+    "../../<album-host>", // repo root from src/ai-pyramid
 ];
 
 fn find_tls_certs() -> Option<(PathBuf, PathBuf)> {
@@ -58,11 +61,12 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
+
     std::fs::create_dir_all(&args.photos_dir).expect("failed to create photos directory");
 
     let store = PhotoStore::open(&args.db_path).expect("failed to open database");
     store.migrate().expect("failed to migrate database");
-    let repository = PhotoStoreRepository::shared(store);
+    let store = Arc::new(Mutex::new(store));
 
     info!("Database: {}", args.db_path);
     info!("Photos dir: {}", args.photos_dir.display());
@@ -74,7 +78,15 @@ async fn main() {
         timeout: Duration::from_secs(30),
     };
 
-    let (event_tx, _) = tokio::sync::broadcast::channel(64);
+    // Broadcast channel: watcher notifies SSE clients when photos are processed
+    let (event_tx, _) = tokio::sync::broadcast::channel::<server::PhotoEvent>(64);
+
+    let watcher = PhotoWatcher::new(
+        args.photos_dir.clone(), Arc::clone(&store), vlm_config, event_tx.clone(),
+    );
+    tokio::spawn(async move {
+        watcher.run().await;
+    });
 
     let bind_addr: SocketAddr = args
         .addr
@@ -83,29 +95,25 @@ async fn main() {
         .parse()
         .expect("invalid bind address");
 
+    // Resolve TLS certs: explicit args > auto-detect > HTTP fallback
     let tls = match (args.tls_cert, args.tls_key) {
         (Some(c), Some(k)) => Some((c, k)),
         _ => find_tls_certs(),
     };
+
     let base_url = std::env::var("PUBLIC_URL").ok();
     if let Some(ref url) = base_url {
         info!("PUBLIC_URL: {url}");
     }
 
-    let app_context = AppContext::new(
-        repository,
-        args.photos_dir.clone(),
+    let app_state = server::AppState {
+        store,
+        photos_dir: args.photos_dir,
         event_tx,
         base_url,
-        tls.is_some(),
-    );
-
-    let watcher = PhotoWatcher::new(app_context.clone(), vlm_config);
-    tokio::spawn(async move {
-        watcher.run().await;
-    });
-
-    let app = server::router(app_context);
+        is_tls: tls.is_some(),
+    };
+    let app = server::router(app_state);
 
     match tls {
         Some((cert, key)) => {

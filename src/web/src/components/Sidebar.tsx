@@ -29,7 +29,7 @@ interface TrajectoryPoint {
   color: [number, number, number];
 }
 
-const ALBUM_URL = 'https://<album-host>:8082/album';
+const ALBUM_URL = 'https://<album-host>:8082/app';
 
 export function useSidebar() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
