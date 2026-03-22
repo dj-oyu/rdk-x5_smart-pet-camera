@@ -434,21 +434,50 @@ func (cc *ComicCapture) CaptureComic() (string, error) {
 	prevSession := cc.sessionID
 	prevCaptureStart := cc.captureStartTime
 	prevLastCapture := cc.lastCaptureTime
+	prevBBox := cc.lastCatBBox
 	defer func() {
 		cc.state = prevState
 		cc.panels = prevPanels
 		cc.sessionID = prevSession
 		cc.captureStartTime = prevCaptureStart
 		cc.lastCaptureTime = prevLastCapture
+		cc.lastCatBBox = prevBBox
 	}()
 
+	// Generate a random "virtual bbox" to drive the crop variety in stitchAndSave.
+	// Without a real detection, lastCatBBox would be nil → all panels use full frame.
+	// By setting a randomized bbox per panel, we get the same zoom/angle variety
+	// as auto-captured comics.
+	frame, ok := cc.src.LatestNV12()
+	if !ok {
+		return "", fmt.Errorf("no frame available from SHM")
+	}
+	fw, fh := frame.Width, frame.Height
+
+	randomBBox := func() *BoundingBox {
+		// Random center point in the middle 60% of frame
+		cx := fw/5 + rand.Intn(fw*3/5)
+		cy := fh/5 + rand.Intn(fh*3/5)
+		// Random size (15-40% of frame)
+		bw := fw/7 + rand.Intn(fw/4)
+		bh := fh/7 + rand.Intn(fh/4)
+		return &BoundingBox{
+			X: cx - bw/2,
+			Y: cy - bh/2,
+			W: bw,
+			H: bh,
+		}
+	}
+
 	// Use startCapturing (captures first panel immediately)
+	cc.lastCatBBox = randomBBox()
 	cc.startCapturing(now)
 
 	// Capture remaining panels with randomized intervals (1-4s) for natural variety
 	for len(cc.panels) < cc.MaxPanels {
 		delay := 1000 + rand.Intn(3000) // 1-4 seconds
 		time.Sleep(time.Duration(delay) * time.Millisecond)
+		cc.lastCatBBox = randomBBox() // Different crop per panel
 		cc.capturePanel(time.Now())
 	}
 
