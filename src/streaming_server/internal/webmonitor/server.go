@@ -93,6 +93,15 @@ func NewServer(cfg Config) *Server {
 	recorder := NewRecorder(cfg.RecordingOutputPath, streamShmName)
 	detectionHistory := NewDetectionHistory(24 * time.Hour)
 
+	// Load persisted detection history from previous run
+	if cfg.DetectionHistoryPath != "" {
+		if err := detectionHistory.Load(cfg.DetectionHistoryPath); err != nil {
+			logger.Warn("Server", "Failed to load detection history: %v", err)
+		} else if n := len(detectionHistory.Records()); n > 0 {
+			logger.Info("Server", "Loaded %d detection history records", n)
+		}
+	}
+
 	// Wire up detection callback for recording thumbnail
 	detectionBroadcaster.SetOnDetection(func() {
 		recorder.NotifyDetection()
@@ -559,10 +568,17 @@ func (s *Server) handleConnectionsStream(w http.ResponseWriter, r *http.Request)
 	streamConnectionEventsFromChannel(w, r, eventCh)
 }
 
-// Shutdown stops background goroutines.
+// Shutdown stops background goroutines and persists state.
 func (s *Server) Shutdown() {
 	if s.comicCapture != nil {
 		s.comicCapture.Stop()
+	}
+	if s.cfg.DetectionHistoryPath != "" {
+		if err := s.detectionHistory.Save(s.cfg.DetectionHistoryPath); err != nil {
+			logger.Warn("Server", "Failed to save detection history: %v", err)
+		} else {
+			logger.Info("Server", "Saved detection history")
+		}
 	}
 }
 
