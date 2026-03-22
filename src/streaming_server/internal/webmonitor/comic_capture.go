@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -420,31 +421,51 @@ func (cc *ComicCapture) stitchAndSave() {
 	log.Printf("[Comic] Saved %s (%d panels, nano2D+HW JPEG)", filename, numPanels)
 }
 
-// CaptureSnapshot grabs the current NV12 frame, encodes it as JPEG, and saves
-// it to outputDir as snap_YYYYMMDD_HHMMSS.jpg. Returns the saved filename.
-func (cc *ComicCapture) CaptureSnapshot() (string, error) {
-	frame, ok := cc.src.LatestNV12()
-	if !ok {
-		return "", fmt.Errorf("no frame available from SHM")
+// CaptureComic triggers an immediate 4-panel comic capture using the exact
+// same pipeline as auto-capture: startCapturing → capturePanel × MaxPanels
+// → finishCapturing → stitchAndSave (nano2D + HW JPEG).
+// Panels are captured ~500ms apart. Returns the saved filename.
+func (cc *ComicCapture) CaptureComic() (string, error) {
+	now := time.Now()
+
+	// Save and restore state so on-demand doesn't break auto-capture
+	prevState := cc.state
+	prevPanels := cc.panels
+	prevSession := cc.sessionID
+	prevCaptureStart := cc.captureStartTime
+	prevLastCapture := cc.lastCaptureTime
+	defer func() {
+		cc.state = prevState
+		cc.panels = prevPanels
+		cc.sessionID = prevSession
+		cc.captureStartTime = prevCaptureStart
+		cc.lastCaptureTime = prevLastCapture
+	}()
+
+	// Use startCapturing (captures first panel immediately)
+	cc.startCapturing(now)
+
+	// Capture remaining panels with randomized intervals (1-4s) for natural variety
+	for len(cc.panels) < cc.MaxPanels {
+		delay := 1000 + rand.Intn(3000) // 1-4 seconds
+		time.Sleep(time.Duration(delay) * time.Millisecond)
+		cc.capturePanel(time.Now())
 	}
 
-	jpegData, err := nv12ToJPEG(frame.Data, frame.Width, frame.Height)
-	if err != nil {
-		return "", fmt.Errorf("JPEG encode failed: %w", err)
+	// Finalize: fillMissingPanels + stitchAndSave (exact same as auto-capture)
+	cc.finishCapturing()
+
+	// Find the saved file by session ID prefix
+	prefix := "comic_" + cc.sessionID
+	entries, _ := os.ReadDir(cc.outputDir)
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasPrefix(e.Name(), prefix) {
+			log.Printf("[Comic] On-demand comic saved: %s", e.Name())
+			return e.Name(), nil
+		}
 	}
 
-	if err := os.MkdirAll(cc.outputDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create output dir: %w", err)
-	}
-
-	filename := fmt.Sprintf("snap_%s.jpg", time.Now().Format("20060102_150405"))
-	outPath := filepath.Join(cc.outputDir, filename)
-	if err := os.WriteFile(outPath, jpegData, 0644); err != nil {
-		return "", fmt.Errorf("failed to write file: %w", err)
-	}
-
-	log.Printf("[Capture] On-demand snapshot saved: %s (%d bytes)", filename, len(jpegData))
-	return filename, nil
+	return "", fmt.Errorf("comic file not found after stitchAndSave (session=%s)", cc.sessionID)
 }
 
 func isPetClass(name string) bool {
