@@ -275,7 +275,9 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("<div id=\"app\"></div>"));
-        assert!(html.contains("/app/main.js"));
+        assert!(html.contains("/app/main."));
+        assert!(html.contains(".js"));
+        assert!(html.contains(".css"));
     }
 
     #[tokio::test]
