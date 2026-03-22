@@ -10,6 +10,7 @@ package webmonitor
 import "C"
 import (
 	"fmt"
+	"image/color"
 	"log"
 	"math/rand"
 	"os"
@@ -50,6 +51,13 @@ type capturedPanel struct {
 	petClass    string // "mike", "chatora", "other", or "" if unknown
 }
 
+type stitchRequest struct {
+	panels         []capturedPanel
+	sessionID      string
+	pendingCaption string
+	resultCh       chan string // returns saved filename (empty on error)
+}
+
 // ComicCapture monitors detection SHM for cat presence and produces
 // 4-panel comic-strip images from captured JPEG frames.
 type ComicCapture struct {
@@ -67,9 +75,11 @@ type ComicCapture struct {
 	lastCaptureTime   time.Time
 	captureStartTime  time.Time
 	recentComics      []time.Time
+	pendingCaption    string
 	mu                sync.Mutex
 	stop              chan struct{}
 	done              chan struct{}
+	stitchCh          chan stitchRequest
 
 	// Configurable parameters
 	DetectionThreshold  time.Duration // continuous cat before capture starts
@@ -88,6 +98,7 @@ func NewComicCapture(src frameSource, outputDir string) *ComicCapture {
 		state:               comicIdle,
 		stop:                make(chan struct{}),
 		done:                make(chan struct{}),
+		stitchCh:            make(chan stitchRequest, 1),
 		DetectionThreshold:  5 * time.Second,
 		BaseCaptureInterval: 10 * time.Second,
 		DetectionLost:       5 * time.Second,
@@ -97,11 +108,15 @@ func NewComicCapture(src frameSource, outputDir string) *ComicCapture {
 	}
 }
 
-func (cc *ComicCapture) Start() { go cc.run() }
+func (cc *ComicCapture) Start() {
+	go cc.run()
+	go cc.runStitcher()
+}
 
 func (cc *ComicCapture) Stop() {
 	close(cc.stop)
 	<-cc.done
+	close(cc.stitchCh)
 }
 
 func (cc *ComicCapture) run() {
@@ -114,12 +129,24 @@ func (cc *ComicCapture) run() {
 		case <-cc.stop:
 			return
 		case <-ticker.C:
-			cc.tick(time.Now())
+			if needsStitch := cc.tick(time.Now()); needsStitch {
+				// stitchAndSave runs outside cc.mu to avoid deadlock with stitcher goroutine
+				if len(cc.panels) > 0 && !cc.SkipStitch {
+					cc.stitchAndSave()
+				}
+				cc.mu.Lock()
+				cc.state = comicIdle
+				cc.panels = nil
+				cc.catFirstSeen = time.Time{}
+				log.Printf("[Comic] Session finished: %s", cc.sessionID)
+				cc.mu.Unlock()
+			}
 		}
 	}
 }
 
-func (cc *ComicCapture) tick(now time.Time) {
+// tick returns true if finishCapturing should be called after releasing cc.mu.
+func (cc *ComicCapture) tick(now time.Time) bool {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
 
@@ -158,22 +185,19 @@ func (cc *ComicCapture) tick(now time.Time) {
 
 	case comicCapturing:
 		if catGone || versionStale {
-			cc.finishCapturing()
-			return
+			cc.prepareFinish()
+			return true
 		}
 		interval := cc.currentInterval(now)
 		if now.Sub(cc.lastCaptureTime) >= interval {
 			cc.capturePanel(now)
 			if len(cc.panels) >= cc.MaxPanels {
-				cc.finishCapturing()
-				// Continue if cat is still present and rate limit allows
-				catStillHere := !cc.lastCatSeen.IsZero() && !catGone
-				if catStillHere && cc.canGenerateComic(now) {
-					cc.startCapturing(now)
-				}
+				cc.prepareFinish()
+				return true
 			}
 		}
 	}
+	return false
 }
 
 // currentInterval returns the adaptive capture interval based on elapsed time.
@@ -206,17 +230,23 @@ func (cc *ComicCapture) startCapturing(now time.Time) {
 }
 
 func (cc *ComicCapture) finishCapturing() {
-	// Fill missing panels with current frame + last known bbox (wide crop)
-	if n := len(cc.panels); n > 0 && n < cc.MaxPanels {
-		cc.fillMissingPanels(time.Now())
-	}
+	cc.prepareFinish()
 	if len(cc.panels) > 0 && !cc.SkipStitch {
 		cc.stitchAndSave()
 	}
+	cc.mu.Lock()
 	cc.state = comicIdle
 	cc.panels = nil
 	cc.catFirstSeen = time.Time{}
 	log.Printf("[Comic] Session finished: %s", cc.sessionID)
+	cc.mu.Unlock()
+}
+
+// prepareFinish fills missing panels. Must be called with cc.mu held.
+func (cc *ComicCapture) prepareFinish() {
+	if n := len(cc.panels); n > 0 && n < cc.MaxPanels {
+		cc.fillMissingPanels(time.Now())
+	}
 }
 
 // fillMissingPanels captures the current frame for each missing slot,
@@ -271,6 +301,7 @@ func (cc *ComicCapture) capturePanel(now time.Time) {
 	}
 	cc.panels = append(cc.panels, panel)
 	cc.lastCaptureTime = now
+
 	log.Printf("[Comic] Panel %d captured (session=%s)", len(cc.panels), cc.sessionID)
 }
 
@@ -287,18 +318,42 @@ const (
 	comicQuality = 85
 )
 
-// caption is drawn at the bottom of the comic canvas. Empty string = no caption.
-var pendingCaption string
+// runStitcher runs on a dedicated OS thread for nano2D GPU context affinity.
+func (cc *ComicCapture) runStitcher() {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	for req := range cc.stitchCh {
+		filename := cc.doStitch(req.panels, req.sessionID, req.pendingCaption)
+		req.resultCh <- filename
+	}
+}
 
+// stitchAndSave sends panels to the stitcher goroutine and waits for the result.
 func (cc *ComicCapture) stitchAndSave() {
+	cc.mu.Lock()
+	caption := cc.pendingCaption
+	cc.pendingCaption = ""
+	cc.mu.Unlock()
+
+	resultCh := make(chan string, 1)
+	cc.stitchCh <- stitchRequest{
+		panels:         cc.panels,
+		sessionID:      cc.sessionID,
+		pendingCaption: caption,
+		resultCh:       resultCh,
+	}
+	<-resultCh
+}
+
+func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption string) string {
 	if err := os.MkdirAll(cc.outputDir, 0755); err != nil {
 		log.Printf("[Comic] Failed to create output dir: %v", err)
-		return
+		return ""
 	}
 
-	numPanels := len(cc.panels)
+	numPanels := len(panels)
 	if numPanels == 0 {
-		return
+		return ""
 	}
 	if numPanels > 4 {
 		numPanels = 4
@@ -315,7 +370,7 @@ func (cc *ComicCapture) stitchAndSave() {
 	defer pinner.Unpin()
 
 	for i := 0; i < numPanels; i++ {
-		p := cc.panels[i]
+		p := panels[i]
 		pinner.Pin(&p.nv12Data[0])
 		cFrames[i] = (*C.uint8_t)(unsafe.Pointer(&p.nv12Data[0]))
 		cWidths[i] = C.int(p.width)
@@ -376,12 +431,12 @@ func (cc *ComicCapture) stitchAndSave() {
 	)
 	if ret != 0 {
 		log.Printf("[Comic] nano2D composition failed: %d", ret)
-		return
+		return ""
 	}
 
 	// Draw timestamps on NV12 canvas
 	for i := 0; i < numPanels && i < 4; i++ {
-		ts := cc.panels[i].timestamp.Format("15:04:05")
+		ts := panels[i].timestamp.Format("15:04:05")
 		px := comicMargin + border
 		py := comicMargin + border
 		if i%2 == 1 {
@@ -390,16 +445,17 @@ func (cc *ComicCapture) stitchAndSave() {
 		if i >= 2 {
 			py += cellH + comicGap
 		}
-		// Draw timestamp at bottom-right of panel
-		drawTextWithBackgroundNV12(outNV12, outW, outH,
-			px+comicPanelW-len(ts)*8*2-12, py+comicPanelH-32-6,
-			ts, 255, 16, 2)
+		// Draw timestamp at bottom-right of panel (TrueType)
+		tsImg := RenderLabel(ts, color.White, color.RGBA{A: 180}, 14)
+		if tsImg != nil {
+			tsX := px + comicPanelW - tsImg.Bounds().Dx() - 6
+			tsY := py + comicPanelH - tsImg.Bounds().Dy() - 4
+			blendRGBAOnNV12(outNV12, outW, outH, tsImg, tsX, tsY)
+		}
 	}
 
 	// Draw user caption with TrueType font (Japanese/emoji support)
-	if pendingCaption != "" {
-		caption := pendingCaption
-		pendingCaption = ""
+	if caption != "" {
 		DrawCaptionOnNV12(outNV12, outW, outH, caption)
 	}
 
@@ -407,17 +463,18 @@ func (cc *ComicCapture) stitchAndSave() {
 	jpegData, err := nv12ToJPEG(outNV12, outW, outH)
 	if err != nil {
 		log.Printf("[Comic] HW JPEG encode failed: %v", err)
-		return
+		return ""
 	}
 
-	petID := dominantPetID(cc.panels)
-	filename := fmt.Sprintf("comic_%s_%s.jpg", cc.sessionID, petID)
+	petID := dominantPetID(panels)
+	filename := fmt.Sprintf("comic_%s_%s.jpg", sessionID, petID)
 	outPath := filepath.Join(cc.outputDir, filename)
 	if err := os.WriteFile(outPath, jpegData, 0644); err != nil {
 		log.Printf("[Comic] Failed to write %s: %v", filename, err)
-		return
+		return ""
 	}
 
+	cc.mu.Lock()
 	cc.recentComics = append(cc.recentComics, time.Now())
 	cutoff := time.Now().Add(-cc.RateLimitWindow)
 	trimmed := cc.recentComics[:0]
@@ -427,8 +484,10 @@ func (cc *ComicCapture) stitchAndSave() {
 		}
 	}
 	cc.recentComics = trimmed
+	cc.mu.Unlock()
 
 	log.Printf("[Comic] Saved %s (%d panels, nano2D+HW JPEG)", filename, numPanels)
+	return filename
 }
 
 // CaptureComic triggers an immediate 4-panel comic capture using the exact
@@ -480,11 +539,6 @@ func (cc *ComicCapture) CaptureComic(message string) (string, error) {
 		}
 	}
 
-	// Set caption for stitchAndSave to draw on the comic
-	if message != "" {
-		pendingCaption = message
-	}
-
 	// Use startCapturing (captures first panel immediately)
 	cc.lastCatBBox = randomBBox()
 	cc.startCapturing(now)
@@ -495,6 +549,13 @@ func (cc *ComicCapture) CaptureComic(message string) (string, error) {
 		time.Sleep(time.Duration(delay) * time.Millisecond)
 		cc.lastCatBBox = randomBBox() // Different crop per panel
 		cc.capturePanel(time.Now())
+	}
+
+	// Set caption just before stitch to avoid being cleared by auto-capture's stitchAndSave
+	if message != "" {
+		cc.mu.Lock()
+		cc.pendingCaption = message
+		cc.mu.Unlock()
 	}
 
 	// Finalize: fillMissingPanels + stitchAndSave (exact same as auto-capture)
