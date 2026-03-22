@@ -470,29 +470,46 @@ class YoloDetectorDaemon:
                     motion_dicts = []
                     if self.prev_y_plane is not None and self.motion_cooldown <= 0:
                         diff = cv2.absdiff(y_small_denoised, self.prev_y_plane)
-                        _, thresh = cv2.threshold(diff, 15, 255, cv2.THRESH_BINARY)
-                        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-                        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-                        merge_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
-                        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, merge_kernel)
-                        contours, _ = cv2.findContours(
-                            thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-                        )
-                        min_area = motion_w * motion_h * 0.002  # 0.2% of frame
-                        for cnt in contours:
-                            area = cv2.contourArea(cnt)
-                            if area < min_area:
-                                continue
-                            x, y, w, h = cv2.boundingRect(cnt)
-                            if w < 15 or h < 15:
-                                continue
-                            confidence = min(1.0, area / (motion_w * motion_h * 0.05))
-                            # Scale bbox back to full frame coordinates
-                            motion_dicts.append(DetDict(
-                                class_name="motion",
-                                confidence=float(confidence),
-                                bbox=DetBbox(x=x * 2, y=y * 2, w=w * 2, h=h * 2),
-                            ))
+                        open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                        close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+
+                        # Two-tier detection: normal threshold + low-threshold/large-area pass
+                        # Contours that fail area filter can still pass via arc length
+                        # (elongated shapes like cat body/tail have long perimeter relative to area)
+                        frame_pixels = motion_w * motion_h
+                        tier_params = [
+                            (10, frame_pixels * 0.001),  # normal: thresh=10, min_area=0.1%
+                            (5,  frame_pixels * 0.005),  # soft: thresh=5, min_area=0.5%
+                        ]
+                        min_perimeter = (motion_w + motion_h) * 0.06  # ~60px at 640x360
+                        seen_boxes = set()
+                        for bin_thresh, min_area in tier_params:
+                            _, thresh = cv2.threshold(diff, bin_thresh, 255, cv2.THRESH_BINARY)
+                            thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, open_kernel)
+                            thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, close_kernel)
+                            contours, _ = cv2.findContours(
+                                thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                            )
+                            for cnt in contours:
+                                area = cv2.contourArea(cnt)
+                                perimeter = cv2.arcLength(cnt, True)
+                                # Accept if area is large enough, OR perimeter is long (elongated shape)
+                                if area < min_area and perimeter < min_perimeter:
+                                    continue
+                                x, y, w, h = cv2.boundingRect(cnt)
+                                if w < 10 or h < 10:
+                                    continue
+                                box_key = (x // 20, y // 20, w // 20, h // 20)
+                                if box_key in seen_boxes:
+                                    continue
+                                seen_boxes.add(box_key)
+                                confidence = min(1.0, area / (frame_pixels * 0.05))
+                                # Scale bbox back to full frame coordinates
+                                motion_dicts.append(DetDict(
+                                    class_name="motion",
+                                    confidence=float(confidence),
+                                    bbox=DetBbox(x=x * 2, y=y * 2, w=w * 2, h=h * 2),
+                                ))
                         if len(motion_dicts) > 5:
                             motion_dicts = []
                         if motion_dicts:
