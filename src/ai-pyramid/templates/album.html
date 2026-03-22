@@ -218,7 +218,7 @@
 
   /* ── Grid mode (standalone / wide iframe on mobile) ── */
   body.grid-mode .gallery {
-    flex-wrap: wrap;
+    flex-wrap: wrap-reverse;
     width: auto;
   }
   body.grid-mode .gallery-spacer { display: none; }
@@ -232,6 +232,21 @@
   @media (max-width: 480px) {
     body.grid-mode .card { width: 100%; }
   }
+  body.grid-mode .card.grid-hidden { display: none; }
+  .show-more-btn {
+    display: block;
+    width: 100%;
+    padding: 10px;
+    margin-top: 8px;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 10px;
+    background: rgba(255,255,255,0.05);
+    color: var(--text-muted);
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .show-more-btn:hover { background: rgba(255,255,255,0.1); color: var(--text-main); }
 
   @media (hover: none) { .card-overlay { opacity: 1; } }
 </style>
@@ -440,6 +455,36 @@ document.addEventListener('keydown', function(e) {
     if (entries[0].isIntersecting) loadMore();
   }, { rootMargin: '0px 0px 0px 300px' });
   obs.observe(sentinel);
+})();
+
+// Grid mode: show only newest 6, "show more" reveals older
+(function() {
+  if (!document.body.classList.contains('grid-mode')) return;
+  var gallery = document.getElementById('gallery');
+  if (!gallery) return;
+  var GRID_PAGE = 6;
+  var cards = gallery.querySelectorAll('.card');
+  if (cards.length <= GRID_PAGE) return;
+
+  // Hide older cards (first in DOM = oldest, wrap-reverse puts newest on top)
+  for (var i = 0; i < cards.length - GRID_PAGE; i++) {
+    cards[i].classList.add('grid-hidden');
+  }
+
+  var btn = document.createElement('button');
+  btn.className = 'show-more-btn';
+  btn.textContent = 'もっと見る';
+  btn.onclick = function() {
+    var hidden = gallery.querySelectorAll('.grid-hidden');
+    var toShow = Math.min(GRID_PAGE, hidden.length);
+    for (var i = hidden.length - toShow; i < hidden.length; i++) {
+      hidden[i].classList.remove('grid-hidden');
+    }
+    if (gallery.querySelectorAll('.grid-hidden').length === 0) {
+      btn.remove();
+    }
+  };
+  document.querySelector('.gallery-wrap').insertAdjacentElement('afterend', btn);
 })();
 
 // Notify parent iframe of content height
