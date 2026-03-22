@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -55,20 +56,20 @@ type ComicCapture struct {
 	src       frameSource
 	outputDir string
 
-	state            comicState
-	catFirstSeen     time.Time
-	lastCatSeen      time.Time
-	lastCatBBox      *BoundingBox
-	lastCatClass     string
+	state             comicState
+	catFirstSeen      time.Time
+	lastCatSeen       time.Time
+	lastCatBBox       *BoundingBox
+	lastCatClass      string
 	lastVersionChange time.Time
-	sessionID        string
-	panels           []capturedPanel
-	lastCaptureTime  time.Time
-	captureStartTime time.Time
-	recentComics     []time.Time
-	mu               sync.Mutex
-	stop             chan struct{}
-	done             chan struct{}
+	sessionID         string
+	panels            []capturedPanel
+	lastCaptureTime   time.Time
+	captureStartTime  time.Time
+	recentComics      []time.Time
+	mu                sync.Mutex
+	stop              chan struct{}
+	done              chan struct{}
 
 	// Configurable parameters
 	DetectionThreshold  time.Duration // continuous cat before capture starts
@@ -77,7 +78,7 @@ type ComicCapture struct {
 	MaxPanels           int
 	RateLimitWindow     time.Duration
 	RateLimitMax        int
-	SkipStitch          bool          // Skip nano2D composition (for testing)
+	SkipStitch          bool // Skip nano2D composition (for testing)
 }
 
 func NewComicCapture(src frameSource, outputDir string) *ComicCapture {
@@ -286,6 +287,9 @@ const (
 	comicQuality = 85
 )
 
+// caption is drawn at the bottom of the comic canvas. Empty string = no caption.
+var pendingCaption string
+
 func (cc *ComicCapture) stitchAndSave() {
 	if err := os.MkdirAll(cc.outputDir, 0755); err != nil {
 		log.Printf("[Comic] Failed to create output dir: %v", err)
@@ -330,10 +334,18 @@ func (cc *ComicCapture) stitchAndSave() {
 			expandW := int(float64(p.bbox.W) * factor)
 			expandH := int(float64(p.bbox.H) * factor)
 			x0, y0 := cx-expandW/2, cy-expandH/2
-			if x0 < 0 { x0 = 0 }
-			if y0 < 0 { y0 = 0 }
-			if x0+expandW > p.width { expandW = p.width - x0 }
-			if y0+expandH > p.height { expandH = p.height - y0 }
+			if x0 < 0 {
+				x0 = 0
+			}
+			if y0 < 0 {
+				y0 = 0
+			}
+			if x0+expandW > p.width {
+				expandW = p.width - x0
+			}
+			if y0+expandH > p.height {
+				expandH = p.height - y0
+			}
 			cCrops[i] = C.comic_crop_t{
 				src_x: C.int(x0), src_y: C.int(y0),
 				src_w: C.int(expandW), src_h: C.int(expandH),
@@ -372,12 +384,23 @@ func (cc *ComicCapture) stitchAndSave() {
 		ts := cc.panels[i].timestamp.Format("15:04:05")
 		px := comicMargin + border
 		py := comicMargin + border
-		if i%2 == 1 { px += cellW + comicGap }
-		if i >= 2 { py += cellH + comicGap }
+		if i%2 == 1 {
+			px += cellW + comicGap
+		}
+		if i >= 2 {
+			py += cellH + comicGap
+		}
 		// Draw timestamp at bottom-right of panel
 		drawTextWithBackgroundNV12(outNV12, outW, outH,
 			px+comicPanelW-len(ts)*8*2-12, py+comicPanelH-32-6,
 			ts, 255, 16, 2)
+	}
+
+	// Draw user caption with TrueType font (Japanese/emoji support)
+	if pendingCaption != "" {
+		caption := pendingCaption
+		pendingCaption = ""
+		DrawCaptionOnNV12(outNV12, outW, outH, caption)
 	}
 
 	// HW JPEG encode (via VPU, same path as MJPEG)
@@ -408,6 +431,87 @@ func (cc *ComicCapture) stitchAndSave() {
 	log.Printf("[Comic] Saved %s (%d panels, nano2D+HW JPEG)", filename, numPanels)
 }
 
+// CaptureComic triggers an immediate 4-panel comic capture using the exact
+// same pipeline as auto-capture: startCapturing → capturePanel × MaxPanels
+// → finishCapturing → stitchAndSave (nano2D + HW JPEG).
+// Panels are captured ~1-4s apart. Optional message is drawn on the comic.
+func (cc *ComicCapture) CaptureComic(message string) (string, error) {
+	now := time.Now()
+
+	// Save and restore state so on-demand doesn't break auto-capture
+	prevState := cc.state
+	prevPanels := cc.panels
+	prevSession := cc.sessionID
+	prevCaptureStart := cc.captureStartTime
+	prevLastCapture := cc.lastCaptureTime
+	prevBBox := cc.lastCatBBox
+	defer func() {
+		cc.state = prevState
+		cc.panels = prevPanels
+		cc.sessionID = prevSession
+		cc.captureStartTime = prevCaptureStart
+		cc.lastCaptureTime = prevLastCapture
+		cc.lastCatBBox = prevBBox
+	}()
+
+	// Generate a random "virtual bbox" to drive the crop variety in stitchAndSave.
+	// Without a real detection, lastCatBBox would be nil → all panels use full frame.
+	// By setting a randomized bbox per panel, we get the same zoom/angle variety
+	// as auto-captured comics.
+	frame, ok := cc.src.LatestNV12()
+	if !ok {
+		return "", fmt.Errorf("no frame available from SHM")
+	}
+	fw, fh := frame.Width, frame.Height
+
+	randomBBox := func() *BoundingBox {
+		// Bias toward center-left (cat food bowl area) with some variation.
+		// Base center: ~35-50% from left, ~40-60% from top
+		cx := fw*35/100 + rand.Intn(fw*15/100) // 35-50% X
+		cy := fh*40/100 + rand.Intn(fh*20/100) // 40-60% Y
+		// Random size (15-40% of frame)
+		bw := fw/7 + rand.Intn(fw/4)
+		bh := fh/7 + rand.Intn(fh/4)
+		return &BoundingBox{
+			X: cx - bw/2,
+			Y: cy - bh/2,
+			W: bw,
+			H: bh,
+		}
+	}
+
+	// Set caption for stitchAndSave to draw on the comic
+	if message != "" {
+		pendingCaption = message
+	}
+
+	// Use startCapturing (captures first panel immediately)
+	cc.lastCatBBox = randomBBox()
+	cc.startCapturing(now)
+
+	// Capture remaining panels with randomized intervals (1-4s) for natural variety
+	for len(cc.panels) < cc.MaxPanels {
+		delay := 1000 + rand.Intn(3000) // 1-4 seconds
+		time.Sleep(time.Duration(delay) * time.Millisecond)
+		cc.lastCatBBox = randomBBox() // Different crop per panel
+		cc.capturePanel(time.Now())
+	}
+
+	// Finalize: fillMissingPanels + stitchAndSave (exact same as auto-capture)
+	cc.finishCapturing()
+
+	// Find the saved file by session ID prefix
+	prefix := "comic_" + cc.sessionID
+	entries, _ := os.ReadDir(cc.outputDir)
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasPrefix(e.Name(), prefix) {
+			log.Printf("[Comic] On-demand comic saved: %s", e.Name())
+			return e.Name(), nil
+		}
+	}
+
+	return "", fmt.Errorf("comic file not found after stitchAndSave (session=%s)", cc.sessionID)
+}
 
 func isPetClass(name string) bool {
 	return name == "cat" || name == "dog"

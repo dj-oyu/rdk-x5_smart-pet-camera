@@ -47,6 +47,13 @@ void shm_zerocopy_close(ZeroCopyFrameBuffer* shm);
 void shm_zerocopy_destroy(ZeroCopyFrameBuffer* shm, const char* name);
 int shm_zerocopy_write(ZeroCopyFrameBuffer* shm, const ZeroCopyFrame* frame);
 
+// ROI zero-copy shared memory (night camera pre-cropped 640x640 regions)
+// Uses the same ZeroCopyFrameBuffer struct (sem_t + ZeroCopyFrame).
+ZeroCopyFrameBuffer* shm_roi_zc_create(const char* shm_name);
+int shm_roi_zc_write(ZeroCopyFrameBuffer* shm, const ZeroCopyFrame* frame);
+ZeroCopyFrameBuffer* shm_roi_zc_open(const char* shm_name);
+void shm_roi_zc_destroy(ZeroCopyFrameBuffer* shm, const char* shm_name);
+
 // ============================================================================
 // H.265 Zero-Copy (bitstream, shared via hb_mem share_id)
 // Used by: h265_zc
