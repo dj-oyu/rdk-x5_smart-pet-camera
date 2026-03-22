@@ -31,6 +31,7 @@ from real_shared_memory import (
     DetectionWriter,
     ZeroCopySharedMemory,
     SHM_NAME_YOLO_ZC,
+    open_roi_readers,
 )
 from detection.yolo_detector import YoloDetector
 
@@ -153,6 +154,21 @@ class YoloDetectorDaemon:
         self.night_roi_mode: bool = False  # Enabled only for camera_id=1
         self.night_roi_regions: list[tuple[int, int, int, int]] = []  # 3 ROIs for 720p
 
+        # VSE ROI SHM readers (opened when night camera is first detected)
+        # Each reader corresponds to one pre-cropped 640x640 NV12 ROI from VSE Ch3-5.
+        self.roi_readers: list[ZeroCopySharedMemory] = []
+
+        # VSE ROI coordinate mapping: regions are defined on 1920x1080 sensor space.
+        # Each VSE output is 640x640, so scale = 960/640 = 1.5.
+        # Detection coords from detect_nv12() are in 640x640 space and must be mapped
+        # back to 1920x1080, then scaled by self.scale_x/scale_y to output space.
+        self.VSE_ROI_REGIONS: list[tuple[int, int, int, int]] = [
+            (0,   60, 960, 960),  # ROI 0: left
+            (480, 60, 960, 960),  # ROI 1: centre (50% overlap)
+            (896, 60, 960, 960),  # ROI 2: right
+        ]
+        self.VSE_SCALE: float = 960.0 / 640.0  # 1.5 — 640x640 → 1920x1080 sensor space
+
         # Detection result cache for temporal integration
         self.detection_cache: list[list[dict]] = []  # [roi_0_dets, roi_1_dets, ...]
         self.cache_frame_number: int = -1  # Frame number when cache started
@@ -246,6 +262,32 @@ class YoloDetectorDaemon:
         except Exception as e:
             logger.debug(f"HW preprocessor init failed: {e}")
 
+    def _open_roi_readers(self) -> None:
+        """Open VSE ROI SHM readers for night camera.
+
+        Called lazily on first camera_id=1 frame.  The three SHM regions are
+        written by the C camera daemon via VSE Ch3-5 (640x640 pre-cropped NV12).
+        Falls back gracefully if the SHM is not yet available.
+        """
+        if self.roi_readers:
+            return  # Already opened
+
+        readers = open_roi_readers()
+        opened = []
+        for reader in readers:
+            if reader.open():
+                opened.append(reader)
+                logger.debug(f"Opened ROI SHM reader: {reader.shm_name}")
+            else:
+                logger.warning(f"ROI SHM not available: {reader.shm_name} — night VSE path disabled")
+                # Close any already-opened readers and bail out
+                for r in opened:
+                    r.close()
+                return
+
+        self.roi_readers = opened
+        logger.info(f"VSE ROI SHM readers opened: {[r.shm_name for r in self.roi_readers]}")
+
     def _get_active_zerocopy(self) -> ZeroCopySharedMemory | None:
         return self.shm_zerocopy
 
@@ -253,6 +295,9 @@ class YoloDetectorDaemon:
         """クリーンアップ"""
         if self.shm_zerocopy:
             self.shm_zerocopy.close()
+        for reader in self.roi_readers:
+            reader.close()
+        self.roi_readers = []
         if self.detection_writer:
             self.detection_writer.close()
         if self.stats["frames_processed"] > 0:
@@ -368,7 +413,9 @@ class YoloDetectorDaemon:
                         self.detection_cache = [[] for _ in self.night_roi_regions]
                         # Lower score_threshold for night camera (darker images = lower confidence)
                         self.detector.score_threshold = max(0.25, self.score_threshold - 0.15)
-                        logger.debug(f"Camera switched to {camera_id} [night ROI mode: {len(self.night_roi_regions)} regions, score_th={self.detector.score_threshold:.2f}]")
+                        # Open VSE ROI SHM readers (lazy — no-op if already open)
+                        self._open_roi_readers()
+                        logger.debug(f"Camera switched to {camera_id} [night ROI mode: {len(self.night_roi_regions)} regions, score_th={self.detector.score_threshold:.2f}, vse_roi={'yes' if self.roi_readers else 'fallback'}]")
 
                     # Update active camera after processing switch
                     self.active_camera = camera_id
@@ -399,6 +446,8 @@ class YoloDetectorDaemon:
                         # Initialize detection cache for 3 ROIs
                         self.detection_cache = [[] for _ in self.night_roi_regions]
                         self.roi_index = 0
+                        # Open VSE ROI SHM readers (lazy — no-op if already open)
+                        self._open_roi_readers()
                     else:
                         # Day camera or other resolutions: use original logic
                         self.night_roi_mode = False
@@ -473,11 +522,52 @@ class YoloDetectorDaemon:
                         self.stats["yolo_skipped_frames"] = self.stats.get("yolo_skipped_frames", 0) + 1
                     if run_yolo:
                         current_roi = self.roi_index
-                        detections = self.detector.detect_nv12_roi_720p(
-                            nv12_data=nv12_data,
-                            roi_index=current_roi,
-                            brightness_avg=zc_frame.brightness_avg,
-                        )
+
+                        # ── VSE ROI SHM path (preferred) ──────────────────────────
+                        # ROI SHM contains pre-cropped 640x640 NV12 from VSE Ch3-5.
+                        # No CPU crop needed; read directly and call detect_nv12().
+                        vse_detections = None
+                        roi_hb_buf = None
+                        if self.roi_readers and len(self.roi_readers) == 3:
+                            roi_reader = self.roi_readers[current_roi]
+                            if roi_reader.wait_for_frame(timeout_sec=0.05):
+                                roi_frame = roi_reader.get_frame()
+                                if roi_frame is not None:
+                                    try:
+                                        roi_y_arr, roi_uv_arr, roi_hb_buf = import_nv12_graph_buf(
+                                            raw_buf_data=roi_frame.hb_mem_buf_data,
+                                            expected_plane_sizes=roi_frame.plane_size,
+                                        )
+                                        # Combine planes (zero-copy if contiguous)
+                                        roi_y_size = roi_frame.width * roi_frame.height
+                                        if len(roi_y_arr) == roi_y_size + len(roi_uv_arr):
+                                            roi_nv12 = roi_y_arr  # contiguous — full NV12 view
+                                        else:
+                                            roi_nv12 = np.concatenate([roi_y_arr, roi_uv_arr])
+                                        vse_detections = self.detector.detect_nv12(
+                                            nv12_data=roi_nv12,
+                                            width=roi_frame.width,
+                                            height=roi_frame.height,
+                                            brightness_avg=roi_frame.brightness_avg,
+                                        )
+                                    except Exception as e:
+                                        logger.warning(f"VSE ROI SHM import failed (roi={current_roi}): {e}")
+                                        if roi_hb_buf is not None:
+                                            roi_hb_buf.release()
+                                            roi_hb_buf = None
+                            else:
+                                logger.debug(f"VSE ROI SHM timeout (roi={current_roi}), falling back")
+
+                        # ── Fallback: CPU crop from yolo_zc 1280x720 ──────────────
+                        if vse_detections is None:
+                            detections = self.detector.detect_nv12_roi_720p(
+                                nv12_data=nv12_data,
+                                roi_index=current_roi,
+                                brightness_avg=zc_frame.brightness_avg,
+                            )
+                        else:
+                            detections = vse_detections
+
                         if current_roi == 0:
                             self.cache_frame_number = zc_frame.frame_number
                             self.cache_timestamp = zc_frame.timestamp_sec
@@ -485,21 +575,57 @@ class YoloDetectorDaemon:
                         cycle_complete = (self.roi_index == 0)
                     else:
                         cycle_complete = False
+                        roi_hb_buf = None
 
-                    # Release buffer
+                    # Release main yolo_zc buffer (motion detection used it above)
                     hb_mem_buffer.release()
-
+                    # Release ROI buffer if we used VSE path
+                    if roi_hb_buf is not None:
+                        roi_hb_buf.release()
 
                     if run_yolo:
-                        # Convert YOLO detections to namedtuples
-                        yolo_dicts = [
-                            DetDict(
-                                class_name=det.class_name.value,
-                                confidence=det.confidence,
-                                bbox=DetBbox(x=det.bbox.x, y=det.bbox.y, w=det.bbox.w, h=det.bbox.h),
-                            )
-                            for det in detections
-                        ]
+                        # Convert YOLO detections to namedtuples.
+                        # VSE path: detections are in 640x640 space; add the VSE ROI origin
+                        #           (mapped 1920x1080 → 1280x720) to get 1280x720 coords.
+                        # Fallback path: detect_nv12_roi_720p already returns 1280x720 coords.
+                        if vse_detections is not None:
+                            # VSE path: 640x640 → 1280x720 output space.
+                            #
+                            # Math: VSE crops a 960x960 region from the 1920x1080 sensor,
+                            # then scales to 640x640.  The combined end-to-end scale from
+                            # detection coords (640x640) to 1280x720 output is:
+                            #
+                            #   scale = (960/640) * (1280/1920) = 1.5 * (2/3) = 1.0  (x)
+                            #   scale = (960/640) * ( 720/1080) = 1.5 * (2/3) = 1.0  (y)
+                            #
+                            # So det.x/y/w/h are already in 1280x720 units — we only need
+                            # to add the ROI origin mapped from 1920x1080 → 1280x720.
+                            roi_sx, roi_sy, _, _ = self.VSE_ROI_REGIONS[current_roi]
+                            roi_ox = int(roi_sx * (1280.0 / 1920.0))  # sensor → output x
+                            roi_oy = int(roi_sy * (720.0 / 1080.0))   # sensor → output y
+                            yolo_dicts = [
+                                DetDict(
+                                    class_name=det.class_name.value,
+                                    confidence=det.confidence,
+                                    bbox=DetBbox(
+                                        x=det.bbox.x + roi_ox,
+                                        y=det.bbox.y + roi_oy,
+                                        w=det.bbox.w,
+                                        h=det.bbox.h,
+                                    ),
+                                )
+                                for det in detections
+                            ]
+                        else:
+                            # Fallback path: coords already in 1280x720 space
+                            yolo_dicts = [
+                                DetDict(
+                                    class_name=det.class_name.value,
+                                    confidence=det.confidence,
+                                    bbox=DetBbox(x=det.bbox.x, y=det.bbox.y, w=det.bbox.w, h=det.bbox.h),
+                                )
+                                for det in detections
+                            ]
 
                         # Accumulate YOLO ROI results
                         self.detection_cache[current_roi] = yolo_dicts

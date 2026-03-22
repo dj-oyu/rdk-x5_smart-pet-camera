@@ -56,6 +56,10 @@ HB_MEM_GRAPHIC_BUF_SIZE = 160
 SHM_NAME_YOLO_ZC = "/pet_camera_yolo_zc"
 SHM_NAME_DETECTIONS = os.getenv("SHM_NAME_DETECTIONS", "/pet_camera_detections")
 MAX_DETECTIONS = 10
+SHM_NAME_ROI_ZC_0 = "/pet_camera_roi_zc_0"
+SHM_NAME_ROI_ZC_1 = "/pet_camera_roi_zc_1"
+SHM_NAME_ROI_ZC_2 = "/pet_camera_roi_zc_2"
+NUM_ROI_REGIONS = 3
 
 
 # ============================================================================
@@ -212,6 +216,12 @@ class ZeroCopySharedMemory:
 
         ret = librt.sem_timedwait(addressof(sem_buf), addressof(timespec_buf))
         return ret == 0
+
+
+def open_roi_readers() -> list["ZeroCopySharedMemory"]:
+    """Open all 3 ROI SHM readers for night camera."""
+    names = [SHM_NAME_ROI_ZC_0, SHM_NAME_ROI_ZC_1, SHM_NAME_ROI_ZC_2]
+    return [ZeroCopySharedMemory(name) for name in names]
 
 
 # ============================================================================
