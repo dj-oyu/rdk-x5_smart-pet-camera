@@ -352,109 +352,61 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
           has_pending_yolo_frame = true;
 
           if (frame_number == 0) {
-            // === DIAGNOSTIC: Dump ALL fields of hb_mem_graphic_buf_t ===
-            // This is critical for diagnosing hb_mem_import failures on the consumer side.
+            // Compact diagnostic for hb_mem_import debugging on the consumer side.
             const hb_mem_graphic_buf_t *gb = &yolo_frame.buffer;
-
             LOG_DEBUG(Pipeline_log_header,
-                     "=== hb_mem_graphic_buf_t DUMP (sizeof=%zu) ===",
-                     sizeof(hb_mem_graphic_buf_t));
+                      "YOLO frame#0 buf(sz=%zu): %dx%d fmt=%d planes=%d "
+                      "stride=%d vstride=%d contig=%d flags=%ld "
+                      "fd={%d,%d,%d} share_id={%d,%d,%d} "
+                      "size={%lu,%lu,%lu} offset={%lu,%lu,%lu} "
+                      "phys={0x%lx,0x%lx,0x%lx} virt={0x%lx,0x%lx,0x%lx}",
+                      sizeof(hb_mem_graphic_buf_t),
+                      gb->width, gb->height, gb->format, gb->plane_cnt,
+                      gb->stride, gb->vstride, gb->is_contig, (long)gb->flags,
+                      gb->fd[0], gb->fd[1], gb->fd[2],
+                      gb->share_id[0], gb->share_id[1], gb->share_id[2],
+                      (unsigned long)gb->size[0], (unsigned long)gb->size[1],
+                      (unsigned long)gb->size[2],
+                      (unsigned long)gb->offset[0], (unsigned long)gb->offset[1],
+                      (unsigned long)gb->offset[2],
+                      (unsigned long)gb->phys_addr[0], (unsigned long)gb->phys_addr[1],
+                      (unsigned long)gb->phys_addr[2],
+                      (unsigned long)gb->virt_addr[0], (unsigned long)gb->virt_addr[1],
+                      (unsigned long)gb->virt_addr[2]);
+            // Raw hex of first 160 bytes for cross-checking with Python side
+            const uint8_t *r = (const uint8_t *)gb;
             LOG_DEBUG(Pipeline_log_header,
-                     "  fd[3]          = {%d, %d, %d}",
-                     gb->fd[0], gb->fd[1], gb->fd[2]);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  plane_cnt      = %d", gb->plane_cnt);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  format         = %d", gb->format);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  width          = %d", gb->width);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  height         = %d", gb->height);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  stride         = %d", gb->stride);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  vstride        = %d", gb->vstride);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  is_contig      = %d", gb->is_contig);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  share_id[3]    = {%d, %d, %d}",
-                     gb->share_id[0], gb->share_id[1], gb->share_id[2]);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  flags          = %ld", (long)gb->flags);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  size[3]        = {%lu, %lu, %lu}",
-                     (unsigned long)gb->size[0],
-                     (unsigned long)gb->size[1],
-                     (unsigned long)gb->size[2]);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  virt_addr[3]   = {0x%lx, 0x%lx, 0x%lx}",
-                     (unsigned long)gb->virt_addr[0],
-                     (unsigned long)gb->virt_addr[1],
-                     (unsigned long)gb->virt_addr[2]);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  phys_addr[3]   = {0x%lx, 0x%lx, 0x%lx}",
-                     (unsigned long)gb->phys_addr[0],
-                     (unsigned long)gb->phys_addr[1],
-                     (unsigned long)gb->phys_addr[2]);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  offset[3]      = {%lu, %lu, %lu}",
-                     (unsigned long)gb->offset[0],
-                     (unsigned long)gb->offset[1],
-                     (unsigned long)gb->offset[2]);
-
-            // Also dump raw hex of first 64 bytes for cross-checking with Python side
-            const uint8_t *raw = (const uint8_t *)gb;
-            LOG_DEBUG(Pipeline_log_header,
-                     "  raw[0..15]     = %02x %02x %02x %02x %02x %02x %02x %02x "
-                     "%02x %02x %02x %02x %02x %02x %02x %02x",
-                     raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
-                     raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14], raw[15]);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  raw[16..31]    = %02x %02x %02x %02x %02x %02x %02x %02x "
-                     "%02x %02x %02x %02x %02x %02x %02x %02x",
-                     raw[16], raw[17], raw[18], raw[19], raw[20], raw[21], raw[22], raw[23],
-                     raw[24], raw[25], raw[26], raw[27], raw[28], raw[29], raw[30], raw[31]);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  raw[32..47]    = %02x %02x %02x %02x %02x %02x %02x %02x "
-                     "%02x %02x %02x %02x %02x %02x %02x %02x",
-                     raw[32], raw[33], raw[34], raw[35], raw[36], raw[37], raw[38], raw[39],
-                     raw[40], raw[41], raw[42], raw[43], raw[44], raw[45], raw[46], raw[47]);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  raw[48..63]    = %02x %02x %02x %02x %02x %02x %02x %02x "
-                     "%02x %02x %02x %02x %02x %02x %02x %02x",
-                     raw[48], raw[49], raw[50], raw[51], raw[52], raw[53], raw[54], raw[55],
-                     raw[56], raw[57], raw[58], raw[59], raw[60], raw[61], raw[62], raw[63]);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  raw[64..79]    = %02x %02x %02x %02x %02x %02x %02x %02x "
-                     "%02x %02x %02x %02x %02x %02x %02x %02x",
-                     raw[64], raw[65], raw[66], raw[67], raw[68], raw[69], raw[70], raw[71],
-                     raw[72], raw[73], raw[74], raw[75], raw[76], raw[77], raw[78], raw[79]);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  raw[80..95]    = %02x %02x %02x %02x %02x %02x %02x %02x "
-                     "%02x %02x %02x %02x %02x %02x %02x %02x",
-                     raw[80], raw[81], raw[82], raw[83], raw[84], raw[85], raw[86], raw[87],
-                     raw[88], raw[89], raw[90], raw[91], raw[92], raw[93], raw[94], raw[95]);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  raw[96..111]   = %02x %02x %02x %02x %02x %02x %02x %02x "
-                     "%02x %02x %02x %02x %02x %02x %02x %02x",
-                     raw[96], raw[97], raw[98], raw[99], raw[100], raw[101], raw[102], raw[103],
-                     raw[104], raw[105], raw[106], raw[107], raw[108], raw[109], raw[110], raw[111]);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  raw[112..127]  = %02x %02x %02x %02x %02x %02x %02x %02x "
-                     "%02x %02x %02x %02x %02x %02x %02x %02x",
-                     raw[112], raw[113], raw[114], raw[115], raw[116], raw[117], raw[118], raw[119],
-                     raw[120], raw[121], raw[122], raw[123], raw[124], raw[125], raw[126], raw[127]);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  raw[128..143]  = %02x %02x %02x %02x %02x %02x %02x %02x "
-                     "%02x %02x %02x %02x %02x %02x %02x %02x",
-                     raw[128], raw[129], raw[130], raw[131], raw[132], raw[133], raw[134], raw[135],
-                     raw[136], raw[137], raw[138], raw[139], raw[140], raw[141], raw[142], raw[143]);
-            LOG_DEBUG(Pipeline_log_header,
-                     "  raw[144..159]  = %02x %02x %02x %02x %02x %02x %02x %02x "
-                     "%02x %02x %02x %02x %02x %02x %02x %02x",
-                     raw[144], raw[145], raw[146], raw[147], raw[148], raw[149], raw[150], raw[151],
-                     raw[152], raw[153], raw[154], raw[155], raw[156], raw[157], raw[158], raw[159]);
-            LOG_DEBUG(Pipeline_log_header, "=== END hb_mem_graphic_buf_t DUMP ===");
+                      "YOLO frame#0 raw[0..159]: "
+                      "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
+                      "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
+                      "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
+                      "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
+                      "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
+                      "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
+                      "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
+                      "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
+                      "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
+                      "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
+                      r[0],r[1],r[2],r[3],r[4],r[5],r[6],r[7],
+                      r[8],r[9],r[10],r[11],r[12],r[13],r[14],r[15],
+                      r[16],r[17],r[18],r[19],r[20],r[21],r[22],r[23],
+                      r[24],r[25],r[26],r[27],r[28],r[29],r[30],r[31],
+                      r[32],r[33],r[34],r[35],r[36],r[37],r[38],r[39],
+                      r[40],r[41],r[42],r[43],r[44],r[45],r[46],r[47],
+                      r[48],r[49],r[50],r[51],r[52],r[53],r[54],r[55],
+                      r[56],r[57],r[58],r[59],r[60],r[61],r[62],r[63],
+                      r[64],r[65],r[66],r[67],r[68],r[69],r[70],r[71],
+                      r[72],r[73],r[74],r[75],r[76],r[77],r[78],r[79],
+                      r[80],r[81],r[82],r[83],r[84],r[85],r[86],r[87],
+                      r[88],r[89],r[90],r[91],r[92],r[93],r[94],r[95],
+                      r[96],r[97],r[98],r[99],r[100],r[101],r[102],r[103],
+                      r[104],r[105],r[106],r[107],r[108],r[109],r[110],r[111],
+                      r[112],r[113],r[114],r[115],r[116],r[117],r[118],r[119],
+                      r[120],r[121],r[122],r[123],r[124],r[125],r[126],r[127],
+                      r[128],r[129],r[130],r[131],r[132],r[133],r[134],r[135],
+                      r[136],r[137],r[138],r[139],r[140],r[141],r[142],r[143],
+                      r[144],r[145],r[146],r[147],r[148],r[149],r[150],r[151],
+                      r[152],r[153],r[154],r[155],r[156],r[157],r[158],r[159]);
           }
         } else {
           // Consumer busy (timeout) - release current frame, keep pending as-is

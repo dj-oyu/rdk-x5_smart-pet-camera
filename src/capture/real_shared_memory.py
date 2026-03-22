@@ -5,6 +5,7 @@ Provides zero-copy frame access via hb_mem share_id.
 Matches shared_memory.h structure layout.
 """
 
+import ctypes
 import mmap
 import os
 import time
@@ -256,8 +257,9 @@ class DetectionWriter:
         for i, det in enumerate(detections[:MAX_DETECTIONS]):
             c_detection = c_det.detections[i]
             name_bytes = det["class_name"].encode("utf-8")[:31]
-            for j, b in enumerate(name_bytes):
-                c_detection.class_name[j] = b
+            ctypes.memmove(c_detection.class_name, name_bytes, len(name_bytes))
+            # bytes beyond len(name_bytes) up to index 31 are already zero
+            # because CLatestDetectionResult() zero-initialises its buffer
             c_detection.confidence = det["confidence"]
             c_detection.bbox.x = det["bbox"]["x"]
             c_detection.bbox.y = det["bbox"]["y"]
