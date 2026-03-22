@@ -230,56 +230,15 @@ COCO_CLASS_NAMES = [
 # COCO class ID → DetectionClass マッピング
 COCO_TO_DETECTION_CLASS = {
     0: DetectionClass.PERSON,  # person
-    14: DetectionClass.BIRD,  # bird
     15: DetectionClass.CAT,  # cat
     16: DetectionClass.DOG,  # dog
-    24: DetectionClass.BACKPACK,  # backpack
-    25: DetectionClass.UMBRELLA,  # umbrella
-    26: DetectionClass.HANDBAG,  # handbag
-    28: DetectionClass.SUITCASE,  # suitcase
-    39: DetectionClass.BOTTLE,  # bottle
-    40: DetectionClass.WINE_GLASS,  # wine glass
     41: DetectionClass.CUP,  # cup
-    42: DetectionClass.FORK,  # fork
-    43: DetectionClass.KNIFE,  # knife
-    44: DetectionClass.SPOON,  # spoon
     45: DetectionClass.FOOD_BOWL,  # bowl → food_bowl
-    46: DetectionClass.BANANA,  # banana
-    47: DetectionClass.APPLE,  # apple
-    48: DetectionClass.SANDWICH,  # sandwich
-    49: DetectionClass.ORANGE,  # orange
-    50: DetectionClass.BROCCOLI,  # broccoli
-    51: DetectionClass.CARROT,  # carrot
-    52: DetectionClass.HOT_DOG,  # hot dog
-    53: DetectionClass.PIZZA,  # pizza
-    54: DetectionClass.DONUT,  # donut
-    55: DetectionClass.CAKE,  # cake
     56: DetectionClass.CHAIR,  # chair
-    57: DetectionClass.COUCH,  # couch
-    58: DetectionClass.POTTED_PLANT,  # potted plant
-    59: DetectionClass.BED,  # bed
-    60: DetectionClass.DINING_TABLE,  # dining table
-    61: DetectionClass.TOILET,  # toilet
-    62: DetectionClass.TV,  # tv
-    63: DetectionClass.LAPTOP,  # laptop
-    64: DetectionClass.MOUSE,  # mouse
-    65: DetectionClass.REMOTE,  # remote
-    66: DetectionClass.KEYBOARD,  # keyboard
-    67: DetectionClass.CELL_PHONE,  # cell phone
-    68: DetectionClass.MICROWAVE,  # microwave
-    69: DetectionClass.OVEN,  # oven
-    70: DetectionClass.TOASTER,  # toaster
-    71: DetectionClass.SINK,  # sink
-    72: DetectionClass.REFRIGERATOR,  # refrigerator
-    73: DetectionClass.BOOK,  # book
-    74: DetectionClass.CLOCK,  # clock
-    75: DetectionClass.VASE,  # vase
-    77: DetectionClass.TEDDY_BEAR,  # teddy bear
-    78: DetectionClass.HAIR_DRIER,  # hair drier
-    79: DetectionClass.TOOTHBRUSH,  # toothbrush
-    # dishは複数のbowlを検出する場合などに使用
-    # または別途カスタムモデルで定義
 }
+
+# 対象クラスの列インデックス (np.max/argmaxを対象列のみに限定する最適化用)
+_TARGET_CLASS_COLS = np.array(sorted(COCO_TO_DETECTION_CLASS.keys()), dtype=np.intp)
 
 
 logger = logging.getLogger(__name__)
@@ -399,6 +358,12 @@ class YoloDetector:
         # YOLO26用グリッドの事前計算
         if self.model_type == "yolo26":
             self._init_yolo26_grids()
+
+        # COCOクラスIDの有効マスク (80クラス分、事前計算)
+        self._coco_valid_mask = np.array(
+            [i in COCO_TO_DETECTION_CLASS for i in range(80)],
+            dtype=bool,
+        )
 
         # 統計情報
         self._total_detections = 0
@@ -1066,13 +1031,14 @@ class YoloDetector:
         ]
 
         dbboxes_list, ids_list, scores_list = [], [], []
-        total_candidates = 0
 
         for idx, (cls, bbox, stride, grid) in enumerate(
             zip(clses, bboxes, self.strides, self.grids)
         ):
-            # スコアフィルタリング
-            max_scores = np.max(cls, axis=1)
+            # 対象クラスのみでmax (各列はstrided viewでコピーなし)
+            max_scores = cls[:, _TARGET_CLASS_COLS[0]].copy()
+            for col in _TARGET_CLASS_COLS[1:]:
+                np.maximum(max_scores, cls[:, col], out=max_scores)
             bbox_selected = np.flatnonzero(max_scores >= self.conf_thres_raw)
 
             # Log stride info only once (first call)
@@ -1081,16 +1047,17 @@ class YoloDetector:
                     f"  stride={stride}: {len(bbox_selected)}/{len(max_scores)} candidates "
                     f"(threshold={self.conf_thres_raw:.2f}, score_thres={self.score_threshold:.2f})"
                 )
-            total_candidates += len(bbox_selected)
 
             if len(bbox_selected) == 0:
                 continue
 
-            # クラスID取得
-            ids_list.append(np.argmax(cls[bbox_selected, :], axis=1))
+            # argmaxは候補のみ (少数)
+            v_id = _TARGET_CLASS_COLS[np.argmax(cls[bbox_selected][:, _TARGET_CLASS_COLS], axis=1)]
 
-            # Sigmoid計算でスコア変換
-            scores_list.append(1 / (1 + np.exp(-max_scores[bbox_selected])))
+            ids_list.append(v_id)
+
+            # Sigmoid (フィルタ後の少数候補のみ)
+            scores_list.append(1.0 / (1.0 + np.exp(-max_scores[bbox_selected])))
 
             # DFL: dist2bbox (ltrb2xyxy)
             ltrb_selected = np.sum(
@@ -1111,67 +1078,46 @@ class YoloDetector:
         scores = np.concatenate(scores_list, axis=0)
         ids = np.concatenate(ids_list, axis=0)
 
-        # xywh形式に変換（NMS用）
-        hw = dbboxes[:, 2:4] - dbboxes[:, 0:2]
-        xyhw2 = np.hstack([dbboxes[:, 0:2], hw])
+        # xyxy → xywh (in-place)
+        xywh = dbboxes.copy()
+        xywh[:, 2] -= xywh[:, 0]  # w = x2 - x1
+        xywh[:, 3] -= xywh[:, 1]  # h = y2 - y1
 
-        # クラス別NMS（検出されたクラスのみ処理、CPU負荷削減）
-        detections = []
-        nms_stats = {}
+        # Class-aware NMS: クラスIDでX座標をオフセットし、1回のNMSで全クラス処理
+        xywh[:, 0] += ids.astype(np.float32) * 4096.0
 
-        # 実際に検出されたクラスのみ処理（80クラス全てではなく）
-        unique_classes = np.unique(ids)
+        indices = cv2.dnn.NMSBoxes(
+            xywh, scores,
+            self.score_threshold, self.nms_threshold,
+        )
 
-        for class_id in unique_classes:
-            # マッピング対象外のクラスはNMS前にスキップ（CPU負荷削減）
-            detection_class = self._map_coco_to_detection_class(class_id)
-            if detection_class is None:
-                continue
+        if len(indices) == 0:
+            return []
 
-            id_indices = ids == class_id
+        # NMS結果からDetectionオブジェクトを構築
+        detections: list[Detection] = []
+        kept_indices = indices.flatten()
 
-            # OpenCVのNMS
-            indices = cv2.dnn.NMSBoxes(
-                xyhw2[id_indices, :],
-                scores[id_indices],
-                self.score_threshold,
-                self.nms_threshold,
-            )
+        for indic in kept_indices:
+            x1, y1, x2, y2 = dbboxes[indic]
 
-            num_before_nms = np.sum(id_indices)
-            num_after_nms = len(indices)
+            # letterbox座標→元画像座標に変換
+            x1 = int((x1 - x_shift) / x_scale)
+            y1 = int((y1 - y_shift) / y_scale)
+            x2 = int((x2 - x_shift) / x_scale)
+            y2 = int((y2 - y_shift) / y_scale)
 
-            if num_after_nms > 0:
-                nms_stats[class_id] = (num_before_nms, num_after_nms)
+            # クリッピング
+            x1 = max(0, min(x1, orig_w))
+            x2 = max(0, min(x2, orig_w))
+            y1 = max(0, min(y1, orig_h))
+            y2 = max(0, min(y2, orig_h))
 
-            if len(indices) == 0:
-                continue
-
-            for indic in indices:
-                x1, y1, x2, y2 = dbboxes[id_indices, :][indic]
-
-                # letterbox座標→元画像座標に変換
-                x1 = int((x1 - x_shift) / x_scale)
-                y1 = int((y1 - y_shift) / y_scale)
-                x2 = int((x2 - x_shift) / x_scale)
-                y2 = int((y2 - y_shift) / y_scale)
-
-                # クリッピング
-                x1 = max(0, min(x1, orig_w))
-                x2 = max(0, min(x2, orig_w))
-                y1 = max(0, min(y1, orig_h))
-                y2 = max(0, min(y2, orig_h))
-
-                # BoundingBox作成（x, y, w, h形式）
-                bbox = BoundingBox(x=x1, y=y1, w=x2 - x1, h=y2 - y1)
-
-                detections.append(
-                    Detection(
-                        class_name=detection_class,
-                        confidence=float(scores[id_indices][indic]),
-                        bbox=bbox,
-                    )
-                )
+            detections.append(Detection(
+                class_name=COCO_TO_DETECTION_CLASS[int(ids[indic])],
+                confidence=float(scores[indic]),
+                bbox=BoundingBox(x=x1, y=y1, w=x2 - x1, h=y2 - y1),
+            ))
 
         # Mark as logged after first call
         if not self._postprocess_debug_logged:
@@ -1229,15 +1175,16 @@ class YoloDetector:
             bbox_data = outputs[bbox_idx].reshape(-1, 4)
             cls_data = outputs[cls_idx].reshape(-1, num_classes)
 
-            # スコアフィルタリング (logitのまま比較)
-            max_scores = np.max(cls_data, axis=1)
+            # 対象クラスのみでmax (各列はstrided viewでコピーなし)
+            max_scores = cls_data[:, _TARGET_CLASS_COLS[0]].copy()
+            for col in _TARGET_CLASS_COLS[1:]:
+                np.maximum(max_scores, cls_data[:, col], out=max_scores)
             mask = max_scores >= self.conf_thres_raw
 
-            num_candidates = np.sum(mask)
             # Log stride info only once (first call)
             if not self._postprocess_debug_logged:
                 logger.debug(
-                    f"  stride={stride}: {num_candidates}/{len(max_scores)} candidates"
+                    f"  stride={stride}: {np.sum(mask)}/{len(max_scores)} candidates"
                 )
 
             if not np.any(mask):
@@ -1246,18 +1193,19 @@ class YoloDetector:
             # マスク適用
             grid = self.grids_yolo26[stride][mask]
             v_box = bbox_data[mask]
-            v_score = 1 / (1 + np.exp(-max_scores[mask]))  # sigmoid
-            v_id = np.argmax(cls_data[mask], axis=1)
+            v_score_logit = max_scores[mask]
+            # argmaxは候補のみ (少数) → subset抽出+argmaxのコストは無視できる
+            v_id = _TARGET_CLASS_COLS[np.argmax(cls_data[mask][:, _TARGET_CLASS_COLS], axis=1)]
 
-            # YOLO26デコード: (grid ± box) * stride
-            # bbox format: [left, top, right, bottom] (grid相対)
-            xyxy = np.hstack([
-                (grid - v_box[:, :2]),
-                (grid + v_box[:, 2:])
-            ]) * stride
+            # sigmoid (フィルタ後の少数候補のみ)
+            v_score = 1.0 / (1.0 + np.exp(-v_score_logit))
 
-            # [x1, y1, x2, y2, score, class_id] の形式で格納
-            dets.append(np.hstack([xyxy, v_score[:, None], v_id[:, None]]))
+            # YOLO26デコード: (grid ± box) * stride → xyxy
+            x1y1 = (grid - v_box[:, :2]) * stride
+            x2y2 = (grid + v_box[:, 2:]) * stride
+
+            # [x1, y1, x2, y2, score, class_id] — 1回のhstackで構築
+            dets.append(np.hstack([x1y1, x2y2, v_score[:, None], v_id[:, None].astype(np.float32)]))
 
         if not dets:
             return []
@@ -1265,60 +1213,52 @@ class YoloDetector:
         # 全スケールを結合
         all_dets = np.concatenate(dets, axis=0)
 
-        # クラス別NMS
+        # xyxy → xywh 変換 (in-place)
+        all_dets[:, 2] -= all_dets[:, 0]  # w = x2 - x1
+        all_dets[:, 3] -= all_dets[:, 1]  # h = y2 - y1
+
+        # Class-aware NMS: クラスIDでY座標をオフセットし、1回のNMSで全クラス処理
+        # オフセットは画像サイズ(640)より十分大きい値を使用
+        class_ids = all_dets[:, 5].astype(np.int32)
+        offsets = class_ids.astype(np.float32) * 4096.0
+        xywh_offset = all_dets[:, :4].copy()
+        xywh_offset[:, 0] += offsets  # x座標にオフセット加算
+
+        indices = cv2.dnn.NMSBoxes(
+            xywh_offset, all_dets[:, 4],
+            self.score_threshold, self.nms_threshold,
+        )
+
+        if len(indices) == 0:
+            return []
+
+        # NMS結果からDetectionオブジェクトを構築
         detections: list[Detection] = []
-        nms_stats: dict[int, tuple[int, int]] = {}
+        kept = all_dets[indices.flatten()]
+        kept_ids = class_ids[indices.flatten()]
 
-        unique_classes = np.unique(all_dets[:, 5].astype(int))
+        for j in range(len(kept)):
+            d = kept[j]
+            cid = int(kept_ids[j])
+            detection_class = COCO_TO_DETECTION_CLASS[cid]  # 事前フィルタ済み
 
-        for class_id in unique_classes:
-            # マッピング対象外のクラスはスキップ
-            detection_class = self._map_coco_to_detection_class(class_id)
-            if detection_class is None:
-                continue
+            # xywh → xyxy に戻して座標変換: letterbox → 元画像
+            x1 = int((d[0] - x_shift) / x_scale)
+            y1 = int((d[1] - y_shift) / y_scale)
+            x2 = int((d[0] + d[2] - x_shift) / x_scale)
+            y2 = int((d[1] + d[3] - y_shift) / y_scale)
 
-            cls_mask = all_dets[:, 5].astype(int) == class_id
-            cls_dets = all_dets[cls_mask]
+            # クリッピング
+            x1 = max(0, min(x1, orig_w))
+            x2 = max(0, min(x2, orig_w))
+            y1 = max(0, min(y1, orig_h))
+            y2 = max(0, min(y2, orig_h))
 
-            # xyxy → xywh (NMS用)
-            xywh = cls_dets[:, :4].copy()
-            xywh[:, 2:] -= xywh[:, :2]  # w = x2 - x1, h = y2 - y1
-
-            indices = cv2.dnn.NMSBoxes(
-                xywh.tolist(),
-                cls_dets[:, 4].tolist(),
-                self.score_threshold,
-                self.nms_threshold
-            )
-
-            num_before_nms = len(cls_dets)
-            num_after_nms = len(indices) if len(indices) > 0 else 0
-
-            if num_after_nms > 0:
-                nms_stats[class_id] = (num_before_nms, num_after_nms)
-
-            if len(indices) == 0:
-                continue
-
-            for idx in indices.flatten():
-                d = cls_dets[idx]
-                # 座標変換: letterbox → 元画像
-                x1 = int((d[0] - x_shift) / x_scale)
-                y1 = int((d[1] - y_shift) / y_scale)
-                x2 = int((d[2] - x_shift) / x_scale)
-                y2 = int((d[3] - y_shift) / y_scale)
-
-                # クリッピング
-                x1 = max(0, min(x1, orig_w))
-                x2 = max(0, min(x2, orig_w))
-                y1 = max(0, min(y1, orig_h))
-                y2 = max(0, min(y2, orig_h))
-
-                detections.append(Detection(
-                    class_name=detection_class,
-                    confidence=float(d[4]),
-                    bbox=BoundingBox(x=x1, y=y1, w=x2 - x1, h=y2 - y1),
-                ))
+            detections.append(Detection(
+                class_name=detection_class,
+                confidence=float(d[4]),
+                bbox=BoundingBox(x=x1, y=y1, w=x2 - x1, h=y2 - y1),
+            ))
 
         # Mark as logged after first call
         if not self._postprocess_debug_logged:

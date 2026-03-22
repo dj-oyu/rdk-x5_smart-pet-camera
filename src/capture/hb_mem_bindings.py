@@ -778,6 +778,10 @@ def import_nv12_graph_buf(
 
     Returns:
         Tuple of (y_array, uv_array, buffer_handle)
+        - If Y/UV planes are contiguous in memory, y_array covers the full
+          NV12 region (Y+UV) as a single zero-copy view. uv_array is a slice
+          of the same buffer. This avoids np.concatenate in callers.
+        - If non-contiguous, y_array and uv_array are separate views.
         Caller must call buffer_handle.release() when done.
     """
     buf = HbMemGraphicBuffer(raw_buf_data)
@@ -785,25 +789,50 @@ def import_nv12_graph_buf(
         # Invalidate cache before reading
         buf.invalidate_cache()
 
-        y_arr = buf.get_plane_array(0)
-        uv_arr = buf.get_plane_array(1)
+        y_vaddr = buf._virt_addr[0]
+        uv_vaddr = buf._virt_addr[1]
+        y_size = buf._size[0]
+        uv_size = buf._size[1]
 
         # One-time frame data diagnostic (first import only)
         if not hasattr(import_nv12_graph_buf, '_diag_done'):
             import_nv12_graph_buf._diag_done = True
-            y_mean = float(np.mean(y_arr))
-            y_std = float(np.std(y_arr))
+            y_arr_diag = buf.get_plane_array(0)
+            y_mean = float(np.mean(y_arr_diag))
+            y_std = float(np.std(y_arr_diag))
             logger.debug(f"Frame data diagnostic: Y plane mean={y_mean:.1f}, std={y_std:.1f}")
+
+        # Check if Y and UV planes are contiguous in virtual memory
+        if uv_vaddr == y_vaddr + y_size:
+            # Contiguous: create single NV12 view (zero-copy, no concatenate needed)
+            nv12_size = y_size + uv_size
+            ArrayType = ctypes.c_uint8 * nv12_size
+            nv12_arr = np.ctypeslib.as_array(ArrayType.from_address(y_vaddr))
+            uv_arr = nv12_arr[y_size:]  # slice view, no copy
+            if not hasattr(import_nv12_graph_buf, '_contiguous_logged'):
+                import_nv12_graph_buf._contiguous_logged = True
+                logger.debug(f"NV12 contiguous buffer: Y+UV={nv12_size} bytes, zero-copy view")
+            y_arr = nv12_arr
+        else:
+            # Non-contiguous: separate views (fallback)
+            y_arr = buf.get_plane_array(0)
+            uv_arr = buf.get_plane_array(1)
+            if not hasattr(import_nv12_graph_buf, '_contiguous_logged'):
+                import_nv12_graph_buf._contiguous_logged = True
+                logger.debug(
+                    f"NV12 non-contiguous buffer: Y@0x{y_vaddr:x}+{y_size}, "
+                    f"UV@0x{uv_vaddr:x}+{uv_size} (will require concatenate)"
+                )
 
         # Validate sizes match expected
         if expected_plane_sizes:
-            if len(y_arr) != expected_plane_sizes[0]:
+            if y_size != expected_plane_sizes[0]:
                 logger.warning(
-                    f"Y plane size mismatch: got {len(y_arr)}, expected {expected_plane_sizes[0]}"
+                    f"Y plane size mismatch: got {y_size}, expected {expected_plane_sizes[0]}"
                 )
-            if len(expected_plane_sizes) > 1 and len(uv_arr) != expected_plane_sizes[1]:
+            if len(expected_plane_sizes) > 1 and uv_size != expected_plane_sizes[1]:
                 logger.warning(
-                    f"UV plane size mismatch: got {len(uv_arr)}, expected {expected_plane_sizes[1]}"
+                    f"UV plane size mismatch: got {uv_size}, expected {expected_plane_sizes[1]}"
                 )
 
         return y_arr, uv_arr, buf
