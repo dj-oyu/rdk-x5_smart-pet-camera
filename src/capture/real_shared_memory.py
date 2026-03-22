@@ -221,7 +221,17 @@ class ZeroCopySharedMemory:
 def open_roi_readers() -> list["ZeroCopySharedMemory"]:
     """Open all 3 ROI SHM readers for night camera."""
     names = [SHM_NAME_ROI_ZC_0, SHM_NAME_ROI_ZC_1, SHM_NAME_ROI_ZC_2]
-    return [ZeroCopySharedMemory(name) for name in names]
+    readers = []
+    for name in names:
+        r = ZeroCopySharedMemory(name)
+        if r.open():
+            readers.append(r)
+        else:
+            # Cleanup already-opened readers
+            for opened in readers:
+                opened.close()
+            return []
+    return readers
 
 
 # ============================================================================
