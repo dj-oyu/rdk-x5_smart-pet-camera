@@ -309,7 +309,8 @@ type DetectionBroadcaster struct {
 	stopped          bool
 	lastEventVersion int // Track last sent version to avoid duplicates
 	onChange         chan<- struct{}
-	onDetection      func() // Callback when detection with objects occurs
+	onDetection      func()               // Callback when detection with objects occurs
+	onDetectionData  func(*DetectionResult) // Callback with detection data
 
 	// Rate monitoring
 	broadcastCount  int
@@ -497,14 +498,25 @@ func (db *DetectionBroadcaster) run() {
 	}
 }
 
+// SetOnDetectionData sets a callback that receives the full detection result.
+func (db *DetectionBroadcaster) SetOnDetectionData(callback func(*DetectionResult)) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.onDetectionData = callback
+}
+
 // processAndBroadcast pre-serializes detection result to both formats and broadcasts
 func (db *DetectionBroadcaster) processAndBroadcast(det *DetectionResult) {
-	// Notify callback (used for recording thumbnail timestamp)
+	// Notify callbacks
 	db.mu.Lock()
 	callback := db.onDetection
+	dataCallback := db.onDetectionData
 	db.mu.Unlock()
 	if callback != nil {
 		callback()
+	}
+	if dataCallback != nil {
+		dataCallback(det)
 	}
 
 	// Rate monitoring: log every 5 seconds

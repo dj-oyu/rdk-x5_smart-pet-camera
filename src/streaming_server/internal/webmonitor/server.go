@@ -35,6 +35,7 @@ type Server struct {
 	statusBroadcaster     *StatusBroadcaster
 	connectionBroadcaster *ConnectionBroadcaster
 	comicCapture          *ComicCapture
+	detectionHistory      *DetectionHistory
 
 	// Per-session MJPEG stream tracking: cancel old stream when same browser reconnects
 	mjpegStreamsMu sync.Mutex
@@ -90,10 +91,15 @@ func NewServer(cfg Config) *Server {
 	}
 
 	recorder := NewRecorder(cfg.RecordingOutputPath, streamShmName)
+	detectionHistory := NewDetectionHistory(24 * time.Hour)
 
 	// Wire up detection callback for recording thumbnail
 	detectionBroadcaster.SetOnDetection(func() {
 		recorder.NotifyDetection()
+	})
+	// Wire up detection history recording
+	detectionBroadcaster.SetOnDetectionData(func(det *DetectionResult) {
+		detectionHistory.Record(det)
 	})
 
 	// Initialize comic capture with its own SHM reader (independent version tracking)
@@ -117,6 +123,7 @@ func NewServer(cfg Config) *Server {
 		statusBroadcaster:     statusBroadcaster,
 		connectionBroadcaster: connectionBroadcaster,
 		comicCapture:          comicCapture,
+		detectionHistory:      detectionHistory,
 		mjpegStreams:          make(map[string]mjpegStreamEntry),
 	}
 }
@@ -146,8 +153,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/comics", s.handleComicsList)
 	mux.HandleFunc("/api/comics/", s.handleComicServe)
 	mux.HandleFunc("/api/comic-capture", s.handleComicCaptureNow)
+	mux.HandleFunc("/api/detections/history", s.handleDetectionHistory)
 
 	return mux
+}
+
+func (s *Server) handleDetectionHistory(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	records := s.detectionHistory.Records()
+	json.NewEncoder(w).Encode(records)
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
