@@ -1,6 +1,6 @@
 use crate::db::{PhotoFilter, PhotoStore};
 use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex};
 pub struct McpState {
     pub store: Arc<Mutex<PhotoStore>>,
     pub photos_dir: PathBuf,
+    pub base_url: Option<String>,
+    pub is_tls: bool,
 }
 
 // --- JSON-RPC types ---
@@ -55,6 +57,7 @@ impl JsonRpcResponse {
 
 pub async fn handle_mcp(
     State(state): State<McpState>,
+    headers: HeaderMap,
     Json(req): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
     // Notifications (no id) get 202 Accepted
@@ -63,15 +66,32 @@ pub async fn handle_mcp(
     }
 
     let id = req.id.unwrap();
+    let base_url = resolve_base_url(&state, &headers);
 
     let resp = match req.method.as_str() {
         "initialize" => handle_initialize(id),
         "tools/list" => handle_tools_list(id),
-        "tools/call" => handle_tools_call(state, id, req.params),
+        "tools/call" => handle_tools_call(state, id, req.params, base_url),
         _ => JsonRpcResponse::error(id, -32601, format!("Method not found: {}", req.method)),
     };
 
     Json(resp).into_response()
+}
+
+/// Resolve base URL: PUBLIC_URL env > Host header > relative path fallback
+fn resolve_base_url(state: &McpState, headers: &HeaderMap) -> Option<String> {
+    if state.base_url.is_some() {
+        return state.base_url.clone();
+    }
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(header::HOST))
+        .and_then(|v| v.to_str().ok())?;
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(if state.is_tls { "https" } else { "http" });
+    Some(format!("{scheme}://{host}"))
 }
 
 fn handle_initialize(id: Value) -> JsonRpcResponse {
@@ -92,7 +112,7 @@ fn handle_tools_list(id: Value) -> JsonRpcResponse {
         "tools": [
             {
                 "name": "get_recent_photos",
-                "description": "Get recent pet photo metadata (caption, timestamp, pet_id, behavior). Returns newest photos first with DB IDs. Images can be downloaded via GET /mcp/photos/{id}.",
+                "description": "Get recent pet photo metadata (caption, timestamp, pet_id, behavior). Returns newest photos first. Each entry includes a download URL for the photo image.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -113,17 +133,17 @@ fn handle_tools_list(id: Value) -> JsonRpcResponse {
     }))
 }
 
-fn handle_tools_call(state: McpState, id: Value, params: Option<Value>) -> JsonRpcResponse {
+fn handle_tools_call(state: McpState, id: Value, params: Option<Value>, base_url: Option<String>) -> JsonRpcResponse {
     let params = params.unwrap_or(json!({}));
     let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
 
     match tool_name {
-        "get_recent_photos" => call_get_recent_photos(state, id, &params),
+        "get_recent_photos" => call_get_recent_photos(state, id, &params, base_url),
         _ => JsonRpcResponse::error(id, -32602, format!("Unknown tool: {tool_name}")),
     }
 }
 
-fn call_get_recent_photos(state: McpState, id: Value, params: &Value) -> JsonRpcResponse {
+fn call_get_recent_photos(state: McpState, id: Value, params: &Value, base_url: Option<String>) -> JsonRpcResponse {
     let empty = json!({});
     let args = params.get("arguments").unwrap_or(&empty);
     let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(20).min(50).max(1);
@@ -145,9 +165,13 @@ fn call_get_recent_photos(state: McpState, id: Value, params: &Value) -> JsonRpc
                 let pet = photo.pet_id.as_deref().unwrap_or("?");
                 let behavior = photo.behavior.as_deref().unwrap_or("?");
                 let ts = photo.captured_at.format("%Y-%m-%d %H:%M");
+                let url = match &base_url {
+                    Some(base) => format!("{}/mcp/photos/{}", base.trim_end_matches('/'), photo.id),
+                    None => format!("/mcp/photos/{}", photo.id),
+                };
                 lines.push(format!(
-                    "#{} | {} | {} | {} | \"{}\"",
-                    photo.id, ts, pet, behavior, caption
+                    "#{} | {} | {} | {} | \"{}\" | {}",
+                    photo.id, ts, pet, behavior, caption, url
                 ));
             }
             let text = lines.join("\n");
@@ -220,6 +244,8 @@ mod tests {
         McpState {
             store: Arc::new(Mutex::new(store)),
             photos_dir,
+            base_url: None,
+            is_tls: false,
         }
     }
 
@@ -322,6 +348,7 @@ mod tests {
         assert!(text.contains("chatora"));
         assert!(text.contains("mike"));
         assert!(text.contains("Chatora resting"));
+        assert!(text.contains("/mcp/photos/"));
     }
 
     #[tokio::test]
@@ -410,5 +437,38 @@ mod tests {
             "params": {"name": "nonexistent_tool", "arguments": {}}
         })).await;
         assert!(resp["error"]["message"].as_str().unwrap().contains("Unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn mcp_photos_url_from_host_header() {
+        let state = test_state();
+        {
+            let store = state.store.lock().unwrap();
+            store.insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), Some("chatora")).unwrap();
+            store.update_vlm_result("a.jpg", true, "cap", "resting").unwrap();
+        }
+        let app = test_router(state);
+        let body = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": 1,
+            "params": {"name": "get_recent_photos", "arguments": {"limit": 1}}
+        })).unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/mcp")
+                    .header("content-type", "application/json")
+                    .header("host", "example.com:8082")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let resp: Value = serde_json::from_slice(&bytes).unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("http://example.com:8082/mcp/photos/"));
     }
 }
