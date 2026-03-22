@@ -75,14 +75,6 @@ async fn main() {
     };
 
     let (event_tx, _) = tokio::sync::broadcast::channel(64);
-    let app_context = AppContext::new(repository, args.photos_dir.clone(), event_tx);
-
-    let watcher = PhotoWatcher::new(app_context.clone(), vlm_config);
-    tokio::spawn(async move {
-        watcher.run().await;
-    });
-
-    let app = server::router(app_context);
 
     let bind_addr: SocketAddr = args
         .addr
@@ -95,6 +87,25 @@ async fn main() {
         (Some(c), Some(k)) => Some((c, k)),
         _ => find_tls_certs(),
     };
+    let base_url = std::env::var("PUBLIC_URL").ok();
+    if let Some(ref url) = base_url {
+        info!("PUBLIC_URL: {url}");
+    }
+
+    let app_context = AppContext::new(
+        repository,
+        args.photos_dir.clone(),
+        event_tx,
+        base_url,
+        tls.is_some(),
+    );
+
+    let watcher = PhotoWatcher::new(app_context.clone(), vlm_config);
+    tokio::spawn(async move {
+        watcher.run().await;
+    });
+
+    let app = server::router(app_context);
 
     match tls {
         Some((cert, key)) => {

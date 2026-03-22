@@ -14,10 +14,16 @@ pub trait EventRepositoryPort: Send + Sync {
         pet_id: Option<&str>,
     ) -> AppResult<i64>;
     async fn get_event_by_source(&self, source_filename: &str) -> AppResult<Option<EventSummary>>;
+    async fn get_event_by_id(&self, id: i64) -> AppResult<Option<EventSummary>>;
     async fn list_events(&self, query: EventQuery) -> AppResult<(Vec<EventSummary>, i64)>;
     async fn list_pending_sources(&self, max_attempts: i32) -> AppResult<Vec<String>>;
-    async fn apply_observation(&self, source_filename: &str, is_valid: bool, summary: &str, behavior: &str)
-        -> AppResult<usize>;
+    async fn apply_observation(
+        &self,
+        source_filename: &str,
+        is_valid: bool,
+        summary: &str,
+        behavior: &str,
+    ) -> AppResult<usize>;
     async fn override_event_validity(&self, source_filename: &str, is_valid: bool) -> AppResult<usize>;
     async fn record_observation_failure(&self, source_filename: &str, error: &str) -> AppResult<usize>;
     async fn activity_stats(&self) -> AppResult<ActivityStats>;
@@ -66,6 +72,13 @@ impl EventRepositoryPort for PhotoStoreRepository {
                 filename: source_filename.to_string(),
                 reply,
             })
+            .await
+            .map(|photo| photo.map(EventSummary::from))
+    }
+
+    async fn get_event_by_id(&self, id: i64) -> AppResult<Option<EventSummary>> {
+        self.db
+            .request(|reply| DbCommand::GetPhotoById { id, reply })
             .await
             .map(|photo| photo.map(EventSummary::from))
     }

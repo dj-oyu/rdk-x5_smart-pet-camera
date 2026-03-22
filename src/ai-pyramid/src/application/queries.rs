@@ -14,6 +14,10 @@ impl EventQueries {
         self.repository.get_event_by_source(source_filename).await
     }
 
+    pub async fn get_event_by_id(&self, id: i64) -> AppResult<Option<EventSummary>> {
+        self.repository.get_event_by_id(id).await
+    }
+
     pub async fn list_events(&self, query: EventQuery) -> AppResult<(Vec<EventSummary>, i64)> {
         self.repository.list_events(query).await
     }
