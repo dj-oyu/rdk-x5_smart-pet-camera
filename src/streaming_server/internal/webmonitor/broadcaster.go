@@ -366,8 +366,8 @@ func (db *DetectionBroadcaster) run() {
 		time.Sleep(1 * time.Second)
 	}
 
-	// Enter polling mode at ~30 FPS
-	logger.Info("DetectionBroadcaster", "Entering polling mode (~30 FPS)")
+	// Enter event-driven mode via SHM semaphore
+	logger.Info("DetectionBroadcaster", "Entering semaphore-driven mode")
 
 	idleCount := 0
 
@@ -405,13 +405,11 @@ func (db *DetectionBroadcaster) run() {
 			idleCount = 0
 		}
 
-		// Poll at ~30 FPS for detection updates
-		// NOTE: Semaphore-based approach was removed because:
-		// - SHM stores only latest detection (not a queue)
-		// - Multiple sem_posts accumulate while processing
-		// - Version check prevents re-broadcast, causing events to be skipped
-		time.Sleep(33 * time.Millisecond) // ~30 FPS
-		// Semaphore signaled (or timeout) - read and broadcast
+		// Wait for detection update via semaphore (event-driven).
+		// Replaces 33ms polling: blocks until Python detector posts sem,
+		// or 100ms timeout (to re-check stop/client state).
+		// Accumulated sem_posts are harmless — version check below skips duplicates.
+		db.shm.WaitDetectionUpdate(100) // 100ms timeout
 		db.monitor.mu.Lock()
 		db.monitor.refreshFromSharedMemoryLocked()
 
