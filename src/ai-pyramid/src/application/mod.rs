@@ -74,6 +74,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ingest_source_photo_publishes_pet_event() {
+        let context = test_context();
+        let commands = context.observation_commands();
+        let mut rx = context.subscribe();
+
+        commands
+            .ingest_source_photo(ObservationInput {
+                source_filename: "comic_20260321_104532_mike.jpg".into(),
+                captured_at: dt(2026, 3, 21, 10, 45, 32),
+                pet_id: Some("mike".into()),
+            })
+            .await
+            .unwrap();
+
+        let received = rx.try_recv().unwrap();
+        assert_eq!(received.source_filename, "comic_20260321_104532_mike.jpg");
+        assert_eq!(received.pet_id.as_deref(), Some("mike"));
+    }
+
+    #[tokio::test]
     async fn apply_observation_publishes_pet_event() {
         let context = test_context();
         let commands = context.observation_commands();
@@ -87,6 +107,7 @@ mod tests {
             })
             .await
             .unwrap();
+        let _ = rx.try_recv().unwrap();
 
         let event = commands
             .apply_observation(ObservationResult {

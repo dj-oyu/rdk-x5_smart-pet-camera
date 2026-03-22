@@ -20,6 +20,7 @@ export function App() {
   const [stats, setStats] = useState<ActivityStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [refreshTick, setRefreshTick] = useState(0);
 
   useEffect(() => {
     writeQueryToLocation(query);
@@ -57,16 +58,13 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [query]);
+  }, [query, refreshTick]);
 
   useEffect(() => {
     const source = new EventSource("/api/events");
     source.addEventListener("event", () => {
-      setQuery((current) => ({ ...current }));
+      setRefreshTick((current) => current + 1);
     });
-    source.onerror = () => {
-      source.close();
-    };
     return () => source.close();
   }, []);
 
