@@ -98,6 +98,23 @@ impl PhotoStore {
         )
     }
 
+    pub fn set_validation_override(&self, filename: &str, is_valid: bool) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE photos SET is_valid = ?1 WHERE filename = ?2",
+            params![is_valid, filename],
+        )
+    }
+
+    pub fn get_vlm_attempts(&self, filename: &str) -> rusqlite::Result<Option<i32>> {
+        self.conn
+            .query_row(
+                "SELECT vlm_attempts FROM photos WHERE filename = ?1",
+                params![filename],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
     /// Return filenames that need VLM processing (is_valid IS NULL, attempts < max).
     pub fn list_pending_filenames(&self, max_attempts: i32) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(

@@ -1,4 +1,5 @@
 use clap::Parser;
+use pet_album::application::{AppContext, PhotoStoreRepository};
 use pet_album::db::PhotoStore;
 use pet_album::ingest::watcher::PhotoWatcher;
 use pet_album::server;
@@ -64,9 +65,13 @@ async fn main() {
 
     std::fs::create_dir_all(&args.photos_dir).expect("failed to create photos directory");
 
-    let store = PhotoStore::open(&args.db_path).expect("failed to open database");
-    store.migrate().expect("failed to migrate database");
-    let store = Arc::new(Mutex::new(store));
+    let app_store = PhotoStore::open(&args.db_path).expect("failed to open database");
+    app_store.migrate().expect("failed to migrate database");
+    let repository = PhotoStoreRepository::shared(app_store);
+
+    let server_store = PhotoStore::open(&args.db_path).expect("failed to open database for server");
+    server_store.migrate().expect("failed to migrate database for server");
+    let store = Arc::new(Mutex::new(server_store));
 
     info!("Database: {}", args.db_path);
     info!("Photos dir: {}", args.photos_dir.display());
@@ -78,15 +83,8 @@ async fn main() {
         timeout: Duration::from_secs(30),
     };
 
-    // Broadcast channel: watcher notifies SSE clients when photos are processed
+    // Broadcast channel used by the existing HTTP/SSE layer.
     let (event_tx, _) = tokio::sync::broadcast::channel::<server::PhotoEvent>(64);
-
-    let watcher = PhotoWatcher::new(
-        args.photos_dir.clone(), Arc::clone(&store), vlm_config, event_tx.clone(),
-    );
-    tokio::spawn(async move {
-        watcher.run().await;
-    });
 
     let bind_addr: SocketAddr = args
         .addr
@@ -105,6 +103,33 @@ async fn main() {
     if let Some(ref url) = base_url {
         info!("PUBLIC_URL: {url}");
     }
+
+    let app_context = AppContext::new(
+        repository,
+        args.photos_dir.clone(),
+        tokio::sync::broadcast::channel(64).0,
+        base_url.clone(),
+        tls.is_some(),
+    );
+
+    let mut app_events = app_context.subscribe();
+    let server_events = event_tx.clone();
+    tokio::spawn(async move {
+        while let Ok(event) = app_events.recv().await {
+            let _ = server_events.send(server::PhotoEvent {
+                filename: event.source_filename,
+                is_valid: event.is_valid,
+                caption: event.summary,
+                behavior: event.behavior,
+                pet_id: event.pet_id,
+            });
+        }
+    });
+
+    let watcher = PhotoWatcher::new(app_context, vlm_config);
+    tokio::spawn(async move {
+        watcher.run().await;
+    });
 
     let app_state = server::AppState {
         store,
