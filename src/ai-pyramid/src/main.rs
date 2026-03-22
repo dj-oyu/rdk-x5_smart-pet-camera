@@ -88,13 +88,6 @@ async fn main() {
         watcher.run().await;
     });
 
-    let app_state = server::AppState {
-        store,
-        photos_dir: args.photos_dir,
-        event_tx,
-    };
-    let app = server::router(app_state);
-
     let bind_addr: SocketAddr = args
         .addr
         .strip_prefix(':')
@@ -107,6 +100,20 @@ async fn main() {
         (Some(c), Some(k)) => Some((c, k)),
         _ => find_tls_certs(),
     };
+
+    let base_url = std::env::var("PUBLIC_URL").ok();
+    if let Some(ref url) = base_url {
+        info!("PUBLIC_URL: {url}");
+    }
+
+    let app_state = server::AppState {
+        store,
+        photos_dir: args.photos_dir,
+        event_tx,
+        base_url,
+        is_tls: tls.is_some(),
+    };
+    let app = server::router(app_state);
 
     match tls {
         Some((cert, key)) => {
