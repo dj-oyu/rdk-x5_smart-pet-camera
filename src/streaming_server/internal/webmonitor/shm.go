@@ -123,51 +123,10 @@ static int hw_jpeg_encode(const uint8_t* nv12_data, int width, int height,
     return 0;
 }
 
-// Constants from single source of truth
-#include "shm_constants.h"
-
-// Frame/SharedFrameBuffer removed — using ZeroCopyFrameBuffer now
-
-typedef struct {
-    int x;
-    int y;
-    int w;
-    int h;
-} BoundingBox;
-
-typedef struct {
-    char class_name[32];
-    float confidence;
-    BoundingBox bbox;
-} Detection;
-
-typedef struct {
-    uint64_t frame_number;
-    double timestamp;
-    int num_detections;
-    Detection detections[MAX_DETECTIONS];
-    volatile uint32_t version;
-    sem_t detection_update_sem;
-} LatestDetectionResult;
-
-// ZeroCopy frame buffer for MJPEG (matching shared_memory.h)
-typedef struct {
-    uint64_t frame_number;
-    struct timespec timestamp;
-    int camera_id;
-    int width, height;
-    float brightness_avg;
-    int32_t share_id[ZEROCOPY_MAX_PLANES];
-    uint64_t plane_size[ZEROCOPY_MAX_PLANES];
-    int32_t plane_cnt;
-    uint8_t hb_mem_buf_data[HB_MEM_GRAPHIC_BUF_SIZE];
-    volatile uint32_t version;
-} ZeroCopyFrame;
-
-typedef struct {
-    uint8_t new_frame_sem[32];
-    ZeroCopyFrame frame;
-} ZeroCopyFrameBuffer;
+// All frame/buffer structs from single source of truth.
+// CGO holds pointers to sem_t-containing structs but never accesses
+// sem_t fields directly — all sem operations go through C functions.
+#include "shared_memory.h"
 
 static ZeroCopyFrameBuffer* open_frame_zc(const char* name) {
     int fd = shm_open(name, O_RDWR, 0666);

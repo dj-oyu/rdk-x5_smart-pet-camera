@@ -16,7 +16,10 @@ package shm
 #include <stdio.h>
 #include <hb_mem_mgr.h>
 
-#include "shm_constants.h"
+// Frame and buffer structs from single source of truth.
+// CGO can hold pointers to sem_t-containing structs — it just cannot
+// access sem_t fields directly. All sem operations go through C functions.
+#include "shared_memory.h"
 
 static int g_hb_mem_initialized = 0;
 static void ensure_hb_mem_init(void) {
@@ -30,23 +33,6 @@ static void ensure_hb_mem_init(void) {
 #ifndef EINVAL
 #define EINVAL 22
 #endif
-
-// H265ZeroCopyFrame matching shared_memory.h
-typedef struct {
-    uint64_t frame_number;
-    struct timespec timestamp;
-    int camera_id;
-    int width, height;
-    uint32_t data_size;
-    uint8_t hb_mem_buf_data[48];  // Full hb_mem_common_buf_t
-    volatile uint32_t version;
-} H265ZeroCopyFrame;
-
-typedef struct {
-    uint8_t new_frame_sem[32];   // sem_t
-    uint8_t consumed_sem[32];    // sem_t (also acts as ready signal)
-    H265ZeroCopyFrame frame;
-} H265ZeroCopyBuffer;
 
 // Open H265 zero-copy SHM
 H265ZeroCopyBuffer* open_h265_zc(const char* name) {
