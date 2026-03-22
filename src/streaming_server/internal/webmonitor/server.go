@@ -663,7 +663,15 @@ func (s *Server) handleComicCaptureNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filename, err := s.comicCapture.CaptureComic()
+	// Read optional message from request body
+	var reqBody struct {
+		Message string `json:"message"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&reqBody)
+	}
+
+	filename, err := s.comicCapture.CaptureComic(reqBody.Message)
 	if err != nil {
 		writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusInternalServerError)
 		return
