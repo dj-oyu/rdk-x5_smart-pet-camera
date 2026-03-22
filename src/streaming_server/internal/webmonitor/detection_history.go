@@ -1,6 +1,10 @@
 package webmonitor
 
 import (
+	"encoding/gob"
+	"errors"
+	"io/fs"
+	"os"
 	"sync"
 	"time"
 )
@@ -68,4 +72,60 @@ func (h *DetectionHistory) Records() []DetectionHistoryRecord {
 	out := make([]DetectionHistoryRecord, len(h.records))
 	copy(out, h.records)
 	return out
+}
+
+// Save writes all records to a gob file atomically (temp + rename).
+func (h *DetectionHistory) Save(path string) error {
+	h.mu.RLock()
+	records := make([]DetectionHistoryRecord, len(h.records))
+	copy(records, h.records)
+	h.mu.RUnlock()
+
+	if len(records) == 0 {
+		return nil
+	}
+
+	tmp := path + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	if err := gob.NewEncoder(f).Encode(records); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// Load reads records from a gob file, keeping only those within the retention window.
+func (h *DetectionHistory) Load(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	defer f.Close()
+
+	var records []DetectionHistoryRecord
+	if err := gob.NewDecoder(f).Decode(&records); err != nil {
+		return err
+	}
+
+	cutoff := float64(time.Now().Unix()) - h.window.Seconds()
+	trimIdx := 0
+	for trimIdx < len(records) && records[trimIdx].Timestamp < cutoff {
+		trimIdx++
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = records[trimIdx:]
+	return nil
 }
