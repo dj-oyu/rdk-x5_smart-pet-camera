@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
 	"net/http"
 	"sync"
 	"time"
@@ -16,6 +18,18 @@ import (
 // Cached timezone for overlay rendering (avoid allocation per frame)
 var jstTimezone = time.FixedZone("JST", 9*3600)
 
+// labelCache holds pre-rendered RGBA label images, keyed by text.
+// Re-rendered only when detection version changes.
+type labelCache struct {
+	labels  []cachedLabel
+	version int
+}
+
+type cachedLabel struct {
+	img  *image.RGBA
+	x, y int // Position on NV12 frame
+}
+
 // FrameBroadcaster manages fanout of JPEG frames to multiple clients.
 type FrameBroadcaster struct {
 	mu                 sync.Mutex
@@ -27,6 +41,7 @@ type FrameBroadcaster struct {
 	stopped            bool
 	onChange           chan<- struct{} // Notifies connection count changes
 	frameBroadcastBuf  []chan []byte   // Reusable snapshot slice to avoid per-broadcast allocation
+	ttLabelCache       labelCache     // TrueType label cache (re-rendered on detection change)
 }
 
 // NewFrameBroadcaster creates a broadcaster that generates overlay frames and fans them out.
@@ -155,14 +170,15 @@ func (fb *FrameBroadcaster) generateOverlay() []byte {
 	}
 
 	var rects []overlayRect
-	var texts []overlayText
 
-	// Stats text (white on black)
+	// Stats text (bitmap — ASCII only, fast)
 	timeStr := frame.Timestamp.In(jstTimezone).Format("2006/01/02 15:04:05")
 	stats := fmt.Sprintf("Frame: %d  Time: %s", frame.FrameNumber, timeStr)
-	texts = append(texts, overlayText{x: 10, y: 10, text: stats, textY: 235, bgY: 16, scale: 2})
+	statsTexts := []overlayText{
+		{x: 10, y: 10, text: stats, textY: 235, bgY: 16, scale: 2},
+	}
 
-	// Detection bboxes + labels
+	// Detection bboxes (C bitmap — fast rect drawing)
 	for _, det := range detections {
 		bx := det.BBox.X * frame.Width / 1280
 		by := det.BBox.Y * frame.Height / 720
@@ -173,23 +189,64 @@ func (fb *FrameBroadcaster) generateOverlay() []byte {
 			YVal: 200, UVal: 44, VVal: 21,
 			Thickness: 3,
 		})
-
-		label := fmt.Sprintf("%.2f", det.Confidence)
-		labelY := by - 20
-		labelX := bx
-		if labelY < 5 {
-			labelY = by + bh + 5
-		}
-		if labelY > frame.Height-20 {
-			labelY = frame.Height - 20
-		}
-		if labelX < 4 {
-			labelX = 4
-		}
-		texts = append(texts, overlayText{x: labelX, y: labelY, text: label, textY: 200, bgY: 16, scale: 2})
 	}
 
-	drawOverlay(frame.Data, frame.Width, frame.Height, rects, texts)
+	// Draw stats + bboxes via C bitmap (fast path)
+	drawOverlay(frame.Data, frame.Width, frame.Height, rects, statsTexts)
+
+	// TrueType labels: re-render only when detection version changes
+	detVersion := 0
+	if fb.monitor.latestDetection != nil {
+		detVersion = fb.monitor.latestDetection.Version
+	}
+
+	if len(detections) == 0 {
+		fb.ttLabelCache.labels = fb.ttLabelCache.labels[:0]
+		fb.ttLabelCache.version = 0
+	} else if detVersion != fb.ttLabelCache.version {
+		// Re-render label cache
+		fb.ttLabelCache.labels = fb.ttLabelCache.labels[:0]
+		fb.ttLabelCache.version = detVersion
+
+		for _, det := range detections {
+			bx := det.BBox.X * frame.Width / 1280
+			by := det.BBox.Y * frame.Height / 720
+			bh := det.BBox.H * frame.Height / 720
+
+			label := fmt.Sprintf("%s %.0f%%", det.ClassName, det.Confidence*100)
+			labelImg := RenderLabel(label,
+				color.White,
+				color.RGBA{R: 0, G: 0, B: 0, A: 180},
+				16, // 16pt for MJPEG overlay
+			)
+			if labelImg == nil {
+				continue
+			}
+
+			labelY := by - labelImg.Bounds().Dy() - 2
+			if labelY < 2 {
+				labelY = by + bh + 2
+			}
+			if labelY > frame.Height-labelImg.Bounds().Dy() {
+				labelY = frame.Height - labelImg.Bounds().Dy()
+			}
+			labelX := bx
+			if labelX < 2 {
+				labelX = 2
+			}
+
+			fb.ttLabelCache.labels = append(fb.ttLabelCache.labels, cachedLabel{
+				img: labelImg,
+				x:   labelX,
+				y:   labelY,
+			})
+		}
+	}
+
+	// Blend cached TrueType labels onto NV12 (fast: ~0.2ms for typical 3-5 labels)
+	for _, cl := range fb.ttLabelCache.labels {
+		blendRGBAOnNV12(frame.Data, frame.Width, frame.Height, cl.img, cl.x, cl.y)
+	}
 
 	jpegData, err := nv12ToJPEG(frame.Data, frame.Width, frame.Height)
 	if err != nil {

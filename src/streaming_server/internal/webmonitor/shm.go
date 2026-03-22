@@ -352,9 +352,11 @@ type frameSnapshot struct {
 	Data        []byte // NV12 pixel data
 }
 
+const frameBufSize = 768 * 432 * 3 / 2 // Max NV12 frame size
+
+
 type shmReader struct {
 	frameShm      *C.ZeroCopyFrameBuffer
-	frameBuf      []byte // Reusable NV12 import buffer
 	detectionShm  *C.LatestDetectionResult
 	detectionName string
 	lastDetVer    uint32
@@ -370,7 +372,6 @@ func newSHMReader(frameName, detectionName string) (*shmReader, error) {
 
 	r := &shmReader{
 		frameShm:      frame,
-		frameBuf:      make([]byte, 768*432*3/2), // 768x432 NV12
 		detectionName: detectionName,
 	}
 
@@ -446,16 +447,18 @@ func (r *shmReader) LatestFrame() (*frameSnapshot, bool) {
 		return nil, false
 	}
 
+	buf := make([]byte, frameBufSize)
 	var outW, outH C.int
+
 	dataSize := int(C.import_zc_nv12(&cFrame,
-		(*C.uint8_t)(unsafe.Pointer(&r.frameBuf[0])),
-		C.int(len(r.frameBuf)), &outW, &outH))
+		(*C.uint8_t)(unsafe.Pointer(&buf[0])),
+		C.int(len(buf)), &outW, &outH))
+
 	if dataSize <= 0 {
 		return nil, false
 	}
 
-	data := make([]byte, dataSize)
-	copy(data, r.frameBuf[:dataSize])
+	data := buf[:dataSize]
 
 	timestamp := time.Unix(
 		int64(cFrame.timestamp.tv_sec),

@@ -341,8 +341,148 @@ a { color: inherit; }
     background: linear-gradient(145deg, #ff8080, #cc4444);
 }
 
+/* Active state when input is open */
+.btn-capture.capture-active::before {
+    background: linear-gradient(145deg, #2a4a6a, #1a3a5a);
+    box-shadow:
+        inset 0 2px 4px rgba(0, 0, 0, 0.5),
+        0 0 10px rgba(100, 180, 255, 0.5);
+}
+
+/* Capture bubble (text input dropdown) */
+.capture-wrapper {
+    position: relative;
+    display: inline-flex;
+}
+
+.capture-bubble {
+    position: absolute;
+    top: calc(100% + 10px);
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    background: var(--panel, rgba(10, 14, 28, 0.92));
+    border: 1px solid rgba(100, 160, 255, 0.3);
+    border-radius: 12px;
+    box-shadow:
+        0 4px 16px rgba(0, 0, 0, 0.6),
+        0 0 12px rgba(80, 140, 220, 0.15);
+    backdrop-filter: blur(8px);
+    z-index: 100;
+    white-space: nowrap;
+    animation: bubble-appear 0.2s ease-out;
+}
+
+@keyframes bubble-appear {
+    from {
+        opacity: 0;
+        transform: translateX(-50%) translateY(-6px) scale(0.95);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0) scale(1);
+    }
+}
+
+.capture-bubble-arrow {
+    position: absolute;
+    top: -6px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 12px;
+    height: 6px;
+    overflow: hidden;
+}
+
+.capture-bubble-arrow::before {
+    content: "";
+    position: absolute;
+    bottom: 0;
+    left: 50%;
+    transform: translateX(-50%) rotate(45deg);
+    width: 8px;
+    height: 8px;
+    background: var(--panel, rgba(10, 14, 28, 0.92));
+    border: 1px solid rgba(100, 160, 255, 0.3);
+    border-right: none;
+    border-bottom: none;
+}
+
+.capture-input {
+    width: 200px;
+    padding: 6px 10px;
+    border: 1px solid rgba(100, 160, 255, 0.25);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.06);
+    color: #e0e8f0;
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+.capture-input::placeholder {
+    color: rgba(160, 180, 210, 0.5);
+}
+
+.capture-input:focus {
+    border-color: rgba(100, 180, 255, 0.6);
+    box-shadow: 0 0 6px rgba(80, 160, 255, 0.2);
+}
+
+.capture-send {
+    width: 32px;
+    height: 32px;
+    border: none;
+    border-radius: 50%;
+    background: linear-gradient(145deg, #2a5aaa, #1a3a7a);
+    color: white;
+    font-size: 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: transform 0.15s, box-shadow 0.15s;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+
+.capture-send:hover {
+    transform: scale(1.1);
+    box-shadow: 0 3px 10px rgba(50, 120, 220, 0.4);
+}
+
+.capture-send:active {
+    transform: scale(0.95);
+}
+
+/* Capturing state: pulse the button */
+.btn-capture.capture-capturing {
+    animation: capture-pulse 1s infinite;
+}
+
+@keyframes capture-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
 /* Mobile responsive */
 @media (max-width: 600px) {
+    .capture-bubble {
+        left: auto;
+        right: -20px;
+        transform: none;
+    }
+    .capture-bubble-arrow {
+        left: auto;
+        right: 30px;
+        transform: none;
+    }
+    .capture-input {
+        width: 150px;
+        font-size: 12px;
+    }
     .btn-capture {
         width: 40px;
         height: 40px;
