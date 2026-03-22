@@ -1,23 +1,6 @@
 import { useRef, useEffect, useCallback } from 'preact/hooks';
 import type { Detection, DetectionEvent, StatusEvent } from '../lib/protobuf';
-
-const COLORS: Record<string, string> = {
-  cat: '#00FF00',
-  dog: '#00C8FF',
-  bird: '#FF9600',
-  food_bowl: '#00A5FF',
-  water_bowl: '#0078FF',
-  motion: '#FF00FF',
-  dish: '#FF0000',
-  person: '#FFFF00',
-  book: '#00FFFF',
-  cell_phone: '#FF00FF',
-  chair: '#8CB4FF',
-  couch: '#B48CFF',
-  tv: '#C8FF78',
-  laptop: '#C8C8FF',
-  remote: '#FFC878',
-};
+import { classHex } from '../lib/detection-classes';
 
 const STALE_THRESHOLD_MS = 1500;
 
@@ -82,7 +65,7 @@ export function useBBoxOverlay(videoRef: preact.RefObject<HTMLVideoElement | nul
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       for (const det of detectionsRef.current) {
-        const color = COLORS[det.class_name] || '#FFFFFF';
+        const color = classHex(det.class_name);
         const scaleX = canvas.width / 1280;
         const scaleY = canvas.height / 720;
         const x = det.bbox.x * scaleX;

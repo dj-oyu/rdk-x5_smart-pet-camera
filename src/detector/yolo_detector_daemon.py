@@ -470,23 +470,31 @@ class YoloDetectorDaemon:
                     motion_dicts = []
                     if self.prev_y_plane is not None and self.motion_cooldown <= 0:
                         diff = cv2.absdiff(y_small_denoised, self.prev_y_plane)
+                        # GaussianBlur on diff suppresses grain noise (p95=5) while
+                        # preserving real motion (blur_max 38-56 for cat movement)
+                        diff = cv2.GaussianBlur(diff, (7, 7), 0)
+                        if self.stats["frames_processed"] % 100 == 0:
+                            logger.info("motion_diff max=%d mean=%.1f p95=%d",
+                                        diff.max(), diff.mean(), int(np.percentile(diff, 95)))
+
+                        frame_pixels = motion_w * motion_h
                         _, thresh = cv2.threshold(diff, 15, 255, cv2.THRESH_BINARY)
-                        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-                        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-                        merge_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
-                        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, merge_kernel)
+                        close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+                        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, close_kernel)
                         contours, _ = cv2.findContours(
                             thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
                         )
-                        min_area = motion_w * motion_h * 0.002  # 0.2% of frame
+                        min_area = frame_pixels * 0.001  # 0.1% of frame
+                        min_perimeter = (motion_w + motion_h) * 0.06  # ~60px at 640x360
                         for cnt in contours:
                             area = cv2.contourArea(cnt)
-                            if area < min_area:
+                            perimeter = cv2.arcLength(cnt, True)
+                            if area < min_area and perimeter < min_perimeter:
                                 continue
                             x, y, w, h = cv2.boundingRect(cnt)
-                            if w < 15 or h < 15:
+                            if w < 10 or h < 10:
                                 continue
-                            confidence = min(1.0, area / (motion_w * motion_h * 0.05))
+                            confidence = min(1.0, area / (frame_pixels * 0.05))
                             # Scale bbox back to full frame coordinates
                             motion_dicts.append(DetDict(
                                 class_name="motion",
@@ -663,7 +671,29 @@ class YoloDetectorDaemon:
                         self.detection_cache = [[] for _ in self.night_roi_regions]
                         detection_dicts = scaled_dicts
                     else:
-                        detection_dicts = []
+                        # YOLO skipped — still write motion-only detections
+                        if motion_dicts:
+                            scaled_motion = [
+                                DetDict(
+                                    class_name=d.class_name,
+                                    confidence=d.confidence,
+                                    bbox=DetBbox(
+                                        x=int(d.bbox.x * self.scale_x),
+                                        y=int(d.bbox.y * self.scale_y),
+                                        w=int(d.bbox.w * self.scale_x),
+                                        h=int(d.bbox.h * self.scale_y),
+                                    ),
+                                )
+                                for d in motion_dicts
+                            ]
+                            self.detection_writer.write_detection_result(
+                                frame_number=self.cache_frame_number,
+                                timestamp_sec=self.cache_timestamp,
+                                detections=[_det_to_dict(d) for d in scaled_motion],
+                            )
+                            detection_dicts = scaled_motion
+                        else:
+                            detection_dicts = []
 
                     # Stats
                     self.stats["frames_processed"] += 1

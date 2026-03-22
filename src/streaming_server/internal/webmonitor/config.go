@@ -21,7 +21,8 @@ type Config struct {
 	RecordingOutputPath string
 	TLSCertFile         string
 	TLSKeyFile          string
-	JPEGQuality         int // JPEG encoding quality (1-100, default 85)
+	JPEGQuality          int    // JPEG encoding quality (1-100, default 85)
+	DetectionHistoryPath string // gob file for persisting detection history across restarts
 }
 
 // DefaultConfig returns a config aligned with the existing Flask monitor behavior.
@@ -39,6 +40,7 @@ func DefaultConfig() Config {
 		DetectionInterval:   33 * time.Millisecond,
 		MJPEGInterval:       33 * time.Millisecond,
 		RecordingOutputPath: "./recordings",
-		JPEGQuality:         65,
+		JPEGQuality:          65,
+		DetectionHistoryPath: filepath.Join("recordings", "detection_history.gob"),
 	}
 }

@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback } from 'preact/hooks';
 import { useVideoPlayer } from './components/VideoPlayer';
 import { VideoControls } from './components/VideoControls';
 import { RecordingsModal } from './components/RecordingsModal';
-import { useSidebar, SidebarView, type MobileTab } from './components/Sidebar';
+import { useSidebar, TrackingView, AlbumView, type MobileTab } from './components/Sidebar';
 import { MobileTabBar } from './components/MobileTabBar';
 import { useSSE } from './hooks/useSSE';
 import { useRecording } from './hooks/useRecording';
@@ -67,58 +67,71 @@ function App() {
   return (
     <div class="app">
       <div class="main-content">
-        <div class={`video-container ${mobileTab !== 'live' ? 'mobile-hidden' : ''}`}>
-          <div id="video-panel">
-            <div
-              id="webrtc-view"
-              style={{
-                position: 'relative',
-                width: '100%',
-                display: videoPlayer.mode === 'webrtc' ? 'block' : 'none',
-              }}
-            >
-              <video
-                ref={videoPlayer.videoRef}
-                autoplay
-                playsinline
-                muted
+        <div class="left-column">
+          <div class={`video-container ${mobileTab !== 'live' ? 'mobile-hidden' : ''}`}>
+            <div id="video-panel">
+              <div
+                id="webrtc-view"
                 style={{
+                  position: 'relative',
                   width: '100%',
-                  height: 'auto',
-                  display: 'block',
-                  background: '#000',
-                  borderRadius: '8px 8px 0 0',
+                  display: videoPlayer.mode === 'webrtc' ? 'block' : 'none',
                 }}
-              />
-              <canvas
-                ref={videoPlayer.canvasRef}
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  width: '100%',
-                  height: '100%',
-                  pointerEvents: 'none',
-                }}
-              />
+              >
+                <video
+                  ref={videoPlayer.videoRef}
+                  autoplay
+                  playsinline
+                  muted
+                  style={{
+                    width: '100%',
+                    height: 'auto',
+                    display: 'block',
+                    background: '#000',
+                    borderRadius: '8px 8px 0 0',
+                  }}
+                />
+                <canvas
+                  ref={videoPlayer.canvasRef}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    height: '100%',
+                    pointerEvents: 'none',
+                  }}
+                />
+              </div>
+              <div id="mjpeg-view" style={{ display: videoPlayer.mode === 'mjpeg' ? 'block' : 'none' }}>
+                <img
+                  ref={videoPlayer.mjpegRef}
+                  alt="Camera stream"
+                  style={{ width: '100%', height: 'auto', borderRadius: '8px 8px 0 0' }}
+                />
+              </div>
             </div>
-            <div id="mjpeg-view" style={{ display: videoPlayer.mode === 'mjpeg' ? 'block' : 'none' }}>
-              <img
-                ref={videoPlayer.mjpegRef}
-                alt="Camera stream"
-                style={{ width: '100%', height: 'auto', borderRadius: '8px 8px 0 0' }}
-              />
-            </div>
+            <VideoControls
+              mode={videoPlayer.mode}
+              onSwitchWebRTC={videoPlayer.switchToWebRTC}
+              onSwitchMJPEG={videoPlayer.switchToMJPEG}
+              recording={recordingState}
+              onToggleRecording={toggleRecording}
+              onOpenRecordings={() => setRecordingsOpen(true)}
+              viewerCount={viewerCount}
+            />
           </div>
-          <VideoControls
-            mode={videoPlayer.mode}
-            onSwitchWebRTC={videoPlayer.switchToWebRTC}
-            onSwitchMJPEG={videoPlayer.switchToMJPEG}
-            recording={recordingState}
-            onToggleRecording={toggleRecording}
-            onOpenRecordings={() => setRecordingsOpen(true)}
-            viewerCount={viewerCount}
-          />
+          <div class={mobileTab === 'album' ? 'mobile-hidden' : ''}>
+            <TrackingView
+              canvasRef={sidebar.canvasRef}
+              ganttCanvasRef={sidebar.ganttCanvasRef}
+              legendEntries={sidebar.legendEntries}
+            />
+          </div>
+        </div>
+
+        <div class={`sidebar ${mobileTab === 'tracking' ? 'mobile-hidden' : ''}`}>
+          <AlbumView />
         </div>
 
         <RecordingsModal
@@ -142,8 +155,6 @@ function App() {
             </div>
           </div>
         )}
-
-        <SidebarView {...sidebar} mobileTab={mobileTab} />
       </div>
       <MobileTabBar activeTab={mobileTab} onTabChange={setMobileTab} />
     </div>
