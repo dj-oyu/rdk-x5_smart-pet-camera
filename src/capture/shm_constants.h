@@ -34,10 +34,10 @@
 #define NUM_CAMERAS 2                                     // DAY=0, NIGHT=1
 
 // ROI zero-copy SHM names (night camera pre-cropped 640x640 regions)
+// RDK X5 VSE supports max 5 output channels (Ch0-4). Ch3-4 used for ROI.
 #define SHM_NAME_ROI_ZC_0  "/pet_camera_roi_zc_0"
 #define SHM_NAME_ROI_ZC_1  "/pet_camera_roi_zc_1"
-#define SHM_NAME_ROI_ZC_2  "/pet_camera_roi_zc_2"
-#define NUM_ROI_REGIONS     3
+#define NUM_ROI_REGIONS     2
 
 // Zero-copy constants
 #define ZEROCOPY_MAX_PLANES 2                             // NV12: Y + UV

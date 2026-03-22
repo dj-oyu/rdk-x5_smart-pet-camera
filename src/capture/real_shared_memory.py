@@ -58,8 +58,7 @@ SHM_NAME_DETECTIONS = os.getenv("SHM_NAME_DETECTIONS", "/pet_camera_detections")
 MAX_DETECTIONS = 10
 SHM_NAME_ROI_ZC_0 = "/pet_camera_roi_zc_0"
 SHM_NAME_ROI_ZC_1 = "/pet_camera_roi_zc_1"
-SHM_NAME_ROI_ZC_2 = "/pet_camera_roi_zc_2"
-NUM_ROI_REGIONS = 3
+NUM_ROI_REGIONS = 2
 
 
 # ============================================================================
@@ -220,7 +219,7 @@ class ZeroCopySharedMemory:
 
 def open_roi_readers() -> list["ZeroCopySharedMemory"]:
     """Open all 3 ROI SHM readers for night camera."""
-    names = [SHM_NAME_ROI_ZC_0, SHM_NAME_ROI_ZC_1, SHM_NAME_ROI_ZC_2]
+    names = [SHM_NAME_ROI_ZC_0, SHM_NAME_ROI_ZC_1]
     readers = []
     for name in names:
         r = ZeroCopySharedMemory(name)

@@ -259,21 +259,21 @@ int vio_create(vio_context_t *ctx, int camera_index,
     // Channels 3-5: Night camera ROI crops (only for camera_index=1)
     // ROI regions on 1920x1080 input, output 640x640 for direct YOLO input
     // Equivalent to Python's 1280x720 ROIs scaled to sensor resolution
-    vse_ochn_attr_t vse_ochn_attr_roi[3];
+    vse_ochn_attr_t vse_ochn_attr_roi[NUM_ROI_REGIONS];
     if (camera_index == 1) {
         int scale_x = ctx->sensor_width;   // 1920
         int scale_y = ctx->sensor_height;  // 1080
         // ROI definitions (sensor coordinates)
-        // Original 1280x720 ROIs: (0,40,640,640), (320,40,640,640), (640,40,640,640)
-        // Scale: 1920/1280=1.5, 1080/720=1.5
-        // ROI must fit within sensor bounds and be even-aligned
-        // Sensor: 1920x1080. Keep ROIs within safe margin.
-        struct { int x, y, w, h; } rois[3] = {
-            {0,   60, 960, 960},
-            {480, 60, 960, 960},
-            {896, 60, 960, 960},   // x+w=1856 < 1920 (margin for alignment)
+        // RDK X5 VSE: max 5 output channels (Ch0-4). Ch3-4 for 2 ROI crops.
+        // 2 ROIs with 50% overlap to cover full width:
+        //   ROI 0: left  (0, 60, 960, 960) → covers x: 0-960
+        //   ROI 1: right (960, 60, 960, 960) → covers x: 960-1920
+        // Together covers full 1920px width with no gap.
+        struct { int x, y, w, h; } rois[NUM_ROI_REGIONS] = {
+            {0,   60, 960, 960},   // Left half
+            {960, 60, 960, 960},   // Right half (x+w=1920, exact sensor width)
         };
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < NUM_ROI_REGIONS; i++) {
             // Clamp ROI to sensor bounds
             int roi_x = rois[i].x;
             int roi_y = rois[i].y;
@@ -289,7 +289,8 @@ int vio_create(vio_context_t *ctx, int camera_index,
                 .bit_width = 8,
             };
         }
-        LOG_INFO("VIO", "VSE Ch3-5 (Night ROI): 3x 640x640 from %dx%d", scale_x, scale_y);
+        LOG_INFO("VIO", "VSE Ch3-%d (Night ROI): %dx 640x640 from %dx%d",
+                 3 + NUM_ROI_REGIONS - 1, NUM_ROI_REGIONS, scale_x, scale_y);
     }
 
     ret = hbn_vnode_open(HB_VSE, 0, AUTO_ALLOC_ID, &ctx->vse_handle);
@@ -322,9 +323,9 @@ int vio_create(vio_context_t *ctx, int camera_index,
     ret = hbn_vnode_set_ochn_buf_attr(ctx->vse_handle, 2, &alloc_attr);
     if (ret != 0) goto error_cleanup;
 
-    // Set Channels 3-5 for night ROI crops
+    // Set Channels 3-4 for night ROI crops (2 channels, VSE max=5)
     if (camera_index == 1) {
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < NUM_ROI_REGIONS; i++) {
             ret = hbn_vnode_set_ochn_attr(ctx->vse_handle, 3 + i, &vse_ochn_attr_roi[i]);
             if (ret != 0) {
                 LOG_WARN("VIO", "VSE Ch%d ROI setup failed: %d (skipping)", 3 + i, ret);
