@@ -34,8 +34,22 @@ from ctypes import (
 from typing import Optional
 import numpy as np
 import logging
+import struct
 
 logger = logging.getLogger(__name__)
+
+# Cache for ctypes array types keyed by size — avoids re-creating the same
+# type object on every frame, which is measurably expensive.
+_ARRAY_TYPE_CACHE: dict[int, type] = {}
+
+
+def _get_array_type(size: int) -> type:
+    t = _ARRAY_TYPE_CACHE.get(size)
+    if t is None:
+        t = ctypes.c_uint8 * size
+        _ARRAY_TYPE_CACHE[size] = t
+    return t
+
 
 # ============================================================================
 # D-Robotics SDK Structures (from hb_mem_mgr.h)
@@ -326,8 +340,7 @@ class HbMemBuffer:
         vaddr = int(self._buf.virt_addr)
 
         # Create ctypes array type and instance from address
-        ArrayType = ctypes.c_uint8 * size
-        arr = ArrayType.from_address(vaddr)
+        arr = _get_array_type(size).from_address(vaddr)
 
         # Create numpy array as view (no copy)
         np_arr = np.ctypeslib.as_array(arr)
@@ -468,14 +481,13 @@ class HbMemGraphicBuffer:
                 "hb_mem module not initialized - call init_module() first"
             )
 
-        import struct as struct_mod
         L = _GRAPH_BUF_LAYOUT
 
         # Extract key fields from raw buffer for import logic
-        share_ids = list(struct_mod.unpack_from("<3i", raw_buf_data, L["share_id"]))
-        plane_cnt_in = struct_mod.unpack_from("<i", raw_buf_data, L["plane_cnt"])[0]
-        sizes = list(struct_mod.unpack_from("<3Q", raw_buf_data, L["size"]))
-        phys_addrs = list(struct_mod.unpack_from("<3Q", raw_buf_data, L["phys_addr"]))
+        share_ids = list(struct.unpack_from("<3i", raw_buf_data, L["share_id"]))
+        plane_cnt_in = struct.unpack_from("<i", raw_buf_data, L["plane_cnt"])[0]
+        sizes = list(struct.unpack_from("<3Q", raw_buf_data, L["size"]))
+        phys_addrs = list(struct.unpack_from("<3Q", raw_buf_data, L["phys_addr"]))
 
         is_contiguous = (plane_cnt_in >= 2 and share_ids[1] == 0)
 
@@ -499,8 +511,6 @@ class HbMemGraphicBuffer:
         plane_cnt: int,
     ) -> None:
         """Import contiguous NV12 buffer via hb_mem_import_com_buf."""
-        import struct as struct_mod
-
         total_size = sum(sizes[:plane_cnt])
 
         # Build input common buffer (corrected layout: fd@0, share_id@4, flags@8, size@16, ...)
@@ -544,24 +554,23 @@ class HbMemGraphicBuffer:
         plane_cnt: int,
     ) -> None:
         """Import multi-buffer graphic buffer via hb_mem_import_graph_buf."""
-        import struct as struct_mod
         L = _GRAPH_BUF_LAYOUT
 
         # Create mutable input buffer from raw bytes
-        in_buf = (ctypes.c_uint8 * self.HB_MEM_GRAPHIC_BUF_SIZE)(*raw_buf_data)
+        in_buf = _get_array_type(self.HB_MEM_GRAPHIC_BUF_SIZE)(*raw_buf_data)
 
         # Clear process-local fields invalid in consumer process
-        struct_mod.pack_into("<3i", in_buf, L["fd"], 0, 0, 0)
-        struct_mod.pack_into("<3Q", in_buf, L["virt_addr"], 0, 0, 0)
+        struct.pack_into("<3i", in_buf, L["fd"], 0, 0, 0)
+        struct.pack_into("<3Q", in_buf, L["virt_addr"], 0, 0, 0)
 
-        self._out_buf = (ctypes.c_uint8 * self.HB_MEM_GRAPHIC_BUF_SIZE)()
+        self._out_buf = _get_array_type(self.HB_MEM_GRAPHIC_BUF_SIZE)()
 
         ret = lib.hb_mem_import_graph_buf(
             ctypes.addressof(in_buf),
             ctypes.addressof(self._out_buf),
         )
         if ret != 0:
-            phys_info = list(struct_mod.unpack_from("<3Q", raw_buf_data, L["phys_addr"]))
+            phys_info = list(struct.unpack_from("<3Q", raw_buf_data, L["phys_addr"]))
             raise RuntimeError(
                 f"hb_mem_import_graph_buf failed: {ret} "
                 f"(share_id={share_ids[:plane_cnt]}, plane_cnt={plane_cnt}, "
@@ -573,11 +582,11 @@ class HbMemGraphicBuffer:
         # Extract fields from output buffer using verified layout
         out_bytes = bytes(self._out_buf)
 
-        self._fd = list(struct_mod.unpack_from("<3i", out_bytes, L["fd"]))
-        self._virt_addr = list(struct_mod.unpack_from("<3Q", out_bytes, L["virt_addr"]))
-        self._phys_addr = list(struct_mod.unpack_from("<3Q", out_bytes, L["phys_addr"]))
-        self._size = list(struct_mod.unpack_from("<3Q", out_bytes, L["size"]))
-        self._plane_cnt = struct_mod.unpack_from("<i", out_bytes, L["plane_cnt"])[0]
+        self._fd = list(struct.unpack_from("<3i", out_bytes, L["fd"]))
+        self._virt_addr = list(struct.unpack_from("<3Q", out_bytes, L["virt_addr"]))
+        self._phys_addr = list(struct.unpack_from("<3Q", out_bytes, L["phys_addr"]))
+        self._size = list(struct.unpack_from("<3Q", out_bytes, L["size"]))
+        self._plane_cnt = struct.unpack_from("<i", out_bytes, L["plane_cnt"])[0]
 
         # For contiguous buffers (share_id[1]==0), compute UV virt_addr from Y offset
         if self._plane_cnt >= 2 and self._virt_addr[1] == 0 and self._virt_addr[0] != 0:
@@ -597,9 +606,8 @@ class HbMemGraphicBuffer:
     @property
     def stride(self) -> int:
         """Buffer stride (from raw descriptor)."""
-        import struct as struct_mod
         if self._out_buf:
-            return struct_mod.unpack_from("<i", bytes(self._out_buf), _GRAPH_BUF_LAYOUT["stride"])[0]
+            return struct.unpack_from("<i", bytes(self._out_buf), _GRAPH_BUF_LAYOUT["stride"])[0]
         return 0
 
     def invalidate_cache(self, plane: int = -1) -> None:
@@ -647,8 +655,7 @@ class HbMemGraphicBuffer:
         if vaddr == 0 or size == 0:
             raise RuntimeError(f"Plane {plane} has no data (vaddr=0x{vaddr:x}, size={size})")
 
-        ArrayType = ctypes.c_uint8 * size
-        arr = ArrayType.from_address(vaddr)
+        arr = _get_array_type(size).from_address(vaddr)
         return np.ctypeslib.as_array(arr)
 
     def release(self) -> None:
@@ -778,6 +785,10 @@ def import_nv12_graph_buf(
 
     Returns:
         Tuple of (y_array, uv_array, buffer_handle)
+        - If Y/UV planes are contiguous in memory, y_array covers the full
+          NV12 region (Y+UV) as a single zero-copy view. uv_array is a slice
+          of the same buffer. This avoids np.concatenate in callers.
+        - If non-contiguous, y_array and uv_array are separate views.
         Caller must call buffer_handle.release() when done.
     """
     buf = HbMemGraphicBuffer(raw_buf_data)
@@ -785,25 +796,49 @@ def import_nv12_graph_buf(
         # Invalidate cache before reading
         buf.invalidate_cache()
 
-        y_arr = buf.get_plane_array(0)
-        uv_arr = buf.get_plane_array(1)
+        y_vaddr = buf._virt_addr[0]
+        uv_vaddr = buf._virt_addr[1]
+        y_size = buf._size[0]
+        uv_size = buf._size[1]
 
         # One-time frame data diagnostic (first import only)
         if not hasattr(import_nv12_graph_buf, '_diag_done'):
             import_nv12_graph_buf._diag_done = True
-            y_mean = float(np.mean(y_arr))
-            y_std = float(np.std(y_arr))
+            y_arr_diag = buf.get_plane_array(0)
+            y_mean = float(np.mean(y_arr_diag))
+            y_std = float(np.std(y_arr_diag))
             logger.debug(f"Frame data diagnostic: Y plane mean={y_mean:.1f}, std={y_std:.1f}")
+
+        # Check if Y and UV planes are contiguous in virtual memory
+        if uv_vaddr == y_vaddr + y_size:
+            # Contiguous: create single NV12 view (zero-copy, no concatenate needed)
+            nv12_size = y_size + uv_size
+            nv12_arr = np.ctypeslib.as_array(_get_array_type(nv12_size).from_address(y_vaddr))
+            uv_arr = nv12_arr[y_size:]  # slice view, no copy
+            if not hasattr(import_nv12_graph_buf, '_contiguous_logged'):
+                import_nv12_graph_buf._contiguous_logged = True
+                logger.debug(f"NV12 contiguous buffer: Y+UV={nv12_size} bytes, zero-copy view")
+            y_arr = nv12_arr
+        else:
+            # Non-contiguous: separate views (fallback)
+            y_arr = buf.get_plane_array(0)
+            uv_arr = buf.get_plane_array(1)
+            if not hasattr(import_nv12_graph_buf, '_contiguous_logged'):
+                import_nv12_graph_buf._contiguous_logged = True
+                logger.debug(
+                    f"NV12 non-contiguous buffer: Y@0x{y_vaddr:x}+{y_size}, "
+                    f"UV@0x{uv_vaddr:x}+{uv_size} (will require concatenate)"
+                )
 
         # Validate sizes match expected
         if expected_plane_sizes:
-            if len(y_arr) != expected_plane_sizes[0]:
+            if y_size != expected_plane_sizes[0]:
                 logger.warning(
-                    f"Y plane size mismatch: got {len(y_arr)}, expected {expected_plane_sizes[0]}"
+                    f"Y plane size mismatch: got {y_size}, expected {expected_plane_sizes[0]}"
                 )
-            if len(expected_plane_sizes) > 1 and len(uv_arr) != expected_plane_sizes[1]:
+            if len(expected_plane_sizes) > 1 and uv_size != expected_plane_sizes[1]:
                 logger.warning(
-                    f"UV plane size mismatch: got {len(uv_arr)}, expected {expected_plane_sizes[1]}"
+                    f"UV plane size mismatch: got {uv_size}, expected {expected_plane_sizes[1]}"
                 )
 
         return y_arr, uv_arr, buf
