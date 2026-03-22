@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <signal.h>
+#include <pthread.h>
 #include "vio_lowlevel.h"
 #include "encoder_lowlevel.h"
 #include "encoder_thread.h"
@@ -42,8 +43,15 @@ typedef struct {
     // MJPEG NV12 zero-copy (Go web_monitor)
     ZeroCopyFrameBuffer *shm_mjpeg_zc;
 
+    // Night camera ROI SHM (NULL for day camera)
+    ZeroCopyFrameBuffer* shm_roi_zc[NUM_ROI_REGIONS];
+
     // Shared state (same process, no SHM needed)
     volatile int *active_camera;
+
+    // Condition variable for inactive camera blocking
+    pthread_mutex_t switch_mutex;
+    pthread_cond_t switch_cond;
 
     // Runtime control
     volatile bool *running_flag;           // External running flag
