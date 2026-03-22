@@ -1,5 +1,5 @@
 use crate::db::{PhotoFilter, PhotoStore};
-use axum::extract::{Path, State};
+use axum::extract::{OriginalUri, Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -57,6 +57,7 @@ impl JsonRpcResponse {
 
 pub async fn handle_mcp(
     State(state): State<McpState>,
+    OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     Json(req): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
@@ -66,7 +67,7 @@ pub async fn handle_mcp(
     }
 
     let id = req.id.unwrap();
-    let base_url = resolve_base_url(&state, &headers);
+    let base_url = resolve_base_url(&state, &headers, &uri);
 
     let resp = match req.method.as_str() {
         "initialize" => handle_initialize(id),
@@ -78,20 +79,22 @@ pub async fn handle_mcp(
     Json(resp).into_response()
 }
 
-/// Resolve base URL: PUBLIC_URL env > Host header > relative path fallback
-fn resolve_base_url(state: &McpState, headers: &HeaderMap) -> Option<String> {
+/// Resolve base URL: PUBLIC_URL env > URI authority (HTTP/2) > Host header (HTTP/1.1) > X-Forwarded-Host
+fn resolve_base_url(state: &McpState, headers: &HeaderMap, uri: &axum::http::Uri) -> Option<String> {
     if state.base_url.is_some() {
         return state.base_url.clone();
     }
-    let host = headers
-        .get("x-forwarded-host")
-        .or_else(|| headers.get(header::HOST))
-        .and_then(|v| v.to_str().ok())?;
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
+    // HTTP/2: authority is in URI; HTTP/1.1: authority is in Host header
+    let host_str = uri
+        .authority()
+        .map(|a| a.as_str().to_string())
+        .or_else(|| headers.get(header::HOST).and_then(|v| v.to_str().ok()).map(String::from))
+        .or_else(|| headers.get("x-forwarded-host").and_then(|v| v.to_str().ok()).map(String::from))?;
+    let scheme = uri
+        .scheme_str()
+        .or_else(|| headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok()))
         .unwrap_or(if state.is_tls { "https" } else { "http" });
-    Some(format!("{scheme}://{host}"))
+    Some(format!("{scheme}://{host_str}"))
 }
 
 fn handle_initialize(id: Value) -> JsonRpcResponse {
