@@ -267,13 +267,30 @@ def test_roi_vs_crop_comparison(duration_sec: float = 10.0):
     last_roi_version = [0] * num_rois
     start = time.monotonic()
 
+    # Debug: check first read
+    first_frame = yolo_zc.get_frame()
+    if first_frame is None:
+        logger.warning("  yolo_zc.get_frame() returned None — SHM may not have data yet")
+    else:
+        logger.info(
+            f"  yolo_zc initial read: version={first_frame.version}, "
+            f"frame_number={first_frame.frame_number}, camera_id={first_frame.camera_id}, "
+            f"{first_frame.width}x{first_frame.height}"
+        )
+        last_yolo_version = first_frame.version
+
+    poll_count = 0
+    new_frame_count = 0
+
     while time.monotonic() - start < duration_sec:
         # Version-based polling (semaphore is consumed by detector daemon)
         time.sleep(0.05)  # ~20 fps polling
+        poll_count += 1
         full_frame = yolo_zc.get_frame()
         if full_frame is None or full_frame.version == last_yolo_version:
             continue
         last_yolo_version = full_frame.version
+        new_frame_count += 1
 
         if full_frame.camera_id != 1:
             skipped_day += 1
@@ -345,11 +362,15 @@ def test_roi_vs_crop_comparison(duration_sec: float = 10.0):
         if comparisons % 10 == 0:
             logger.info(f"  Progress: {comparisons} compared, {matches} match so far...")
 
+    logger.info(f"  Debug: polled={poll_count}, new_frames={new_frame_count}, skipped_day={skipped_day}, comparisons={comparisons}")
+
     if comparisons == 0:
         if skipped_day > 0:
             logger.warning(f"  SKIP: Day camera was active ({skipped_day} frames). Run at night for comparison.")
+        elif new_frame_count == 0:
+            logger.warning(f"  SKIP: yolo_zc version never changed in {poll_count} polls (detector may hold lock)")
         else:
-            logger.warning("  SKIP: No frames received for comparison")
+            logger.warning(f"  SKIP: Got {new_frame_count} night frames but no ROI matches")
         return True
 
     match_rate = matches / comparisons * 100
