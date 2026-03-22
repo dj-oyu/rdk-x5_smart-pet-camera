@@ -3,14 +3,15 @@ import { useState, useEffect, useCallback } from 'preact/hooks';
 import { useVideoPlayer } from './components/VideoPlayer';
 import { VideoControls } from './components/VideoControls';
 import { RecordingsModal } from './components/RecordingsModal';
-import { useSidebar, SidebarView } from './components/Sidebar';
+import { useSidebar, SidebarView, type MobileTab } from './components/Sidebar';
+import { MobileTabBar } from './components/MobileTabBar';
 import { useSSE } from './hooks/useSSE';
 import { useRecording } from './hooks/useRecording';
 import type { StatusEvent } from './lib/protobuf';
 
 function App() {
-  const [statusBadge, setStatusBadge] = useState('Waiting for data...');
   const [viewerCount, setViewerCount] = useState('-');
+  const [mobileTab, setMobileTab] = useState<MobileTab>('live');
   const [recordingsOpen, setRecordingsOpen] = useState(false);
   const [thumbnailPreview, setThumbnailPreview] = useState<{ url: string; name: string } | null>(null);
 
@@ -22,11 +23,6 @@ function App() {
 
   const onStatus = useCallback(
     (data: StatusEvent) => {
-      if (data.shared_memory) {
-        setStatusBadge(
-          data.shared_memory.has_detection ? 'Receiving detections' : 'Live stream active',
-        );
-      }
       sidebar.updateTrajectory(data.latest_detection);
     },
     [sidebar.updateTrajectory],
@@ -70,17 +66,8 @@ function App() {
 
   return (
     <div class="app">
-      <div class="header">
-        <div class="title">Smart Pet Camera Monitor</div>
-        <span class="badge badge-secondary">{statusBadge}</span>
-        <div class="viewer-count">
-          <span class="viewer-icon">👁</span>
-          <span>{viewerCount}</span>
-        </div>
-      </div>
-
       <div class="main-content">
-        <div class="video-container">
+        <div class={`video-container ${mobileTab !== 'live' ? 'mobile-hidden' : ''}`}>
           <div id="video-panel">
             <div
               id="webrtc-view"
@@ -130,6 +117,7 @@ function App() {
             recording={recordingState}
             onToggleRecording={toggleRecording}
             onOpenRecordings={() => setRecordingsOpen(true)}
+            viewerCount={viewerCount}
           />
         </div>
 
@@ -155,8 +143,9 @@ function App() {
           </div>
         )}
 
-        <SidebarView {...sidebar} />
+        <SidebarView {...sidebar} mobileTab={mobileTab} />
       </div>
+      <MobileTabBar activeTab={mobileTab} onTabChange={setMobileTab} />
     </div>
   );
 }

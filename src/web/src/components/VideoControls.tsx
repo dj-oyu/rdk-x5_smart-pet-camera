@@ -8,6 +8,7 @@ interface Props {
   recording: RecordingState;
   onToggleRecording: () => void;
   onOpenRecordings: () => void;
+  viewerCount: string;
 }
 
 type CaptureState = 'idle' | 'input' | 'capturing' | 'ok' | 'error';
@@ -19,6 +20,7 @@ export function VideoControls({
   recording,
   onToggleRecording,
   onOpenRecordings,
+  viewerCount,
 }: Props) {
   const [captureState, setCaptureState] = useState<CaptureState>('idle');
   const [captionText, setCaptionText] = useState('');
@@ -28,18 +30,6 @@ export function VideoControls({
   useEffect(() => {
     if (captureState === 'input' && inputRef.current) {
       inputRef.current.focus();
-    }
-  }, [captureState]);
-
-  const handleCaptureClick = useCallback(() => {
-    if (captureState === 'capturing') return;
-    if (captureState === 'idle') {
-      // First click: open text input bubble
-      setCaptureState('input');
-    } else if (captureState === 'input') {
-      // Second click (on button): close without capturing
-      setCaptureState('idle');
-      setCaptionText('');
     }
   }, [captureState]);
 
@@ -64,6 +54,16 @@ export function VideoControls({
     setCaptionText('');
     setTimeout(() => setCaptureState('idle'), 3000);
   }, [captionText]);
+
+  const handleCaptureClick = useCallback(() => {
+    if (captureState === 'capturing') return;
+    if (captureState === 'idle') {
+      setCaptureState('input');
+    } else if (captureState === 'input') {
+      // Second click: capture immediately (Escape to cancel)
+      doCapture();
+    }
+  }, [captureState, doCapture]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -106,22 +106,28 @@ export function VideoControls({
 
   return (
     <div class="video-controls">
-      <div class="view-toggle">
-        <button type="button" class={mode === 'webrtc' ? 'active' : ''} onClick={onSwitchWebRTC}>
-          WebRTC
-        </button>
-        <button type="button" class={mode === 'mjpeg' ? 'active' : ''} onClick={onSwitchMJPEG}>
-          MJPEG
-        </button>
+      <div class="controls-secondary">
+        <div class="view-toggle">
+          <button type="button" class={mode === 'webrtc' ? 'active' : ''} onClick={onSwitchWebRTC}>
+            HD
+          </button>
+          <button type="button" class={mode === 'mjpeg' ? 'active' : ''} onClick={onSwitchMJPEG}>
+            Lite
+          </button>
+        </div>
       </div>
-      <div class="record-controls">
+      <div class="viewer-count">
+        <span class="viewer-icon">👁</span>
+        <span>{viewerCount}</span>
+      </div>
+      <div class="controls-primary">
         <button class="btn-recordings" title="Recordings" onClick={onOpenRecordings}>
           <span class="recordings-icon" />
         </button>
         <div class="capture-wrapper">
           <button
             class={captureBtnClass}
-            title={captureState === 'input' ? 'Cancel' : '4-panel comic capture'}
+            title={captureState === 'input' ? 'Capture now' : '4-panel comic capture'}
             onClick={handleCaptureClick}
             disabled={captureState === 'capturing'}
           >
