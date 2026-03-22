@@ -23,8 +23,6 @@
     padding: 8px;
   }
   a { color: inherit; }
-
-  /* Filters */
   .filters {
     display: flex;
     gap: 5px;
@@ -48,8 +46,6 @@
     border-color: rgba(110,231,255,0.3);
     color: var(--accent);
   }
-
-  /* Gallery layout */
   .gallery-wrap {
     position: relative;
   }
@@ -59,13 +55,11 @@
     gap: 16px;
     padding-bottom: 8px;
   }
-
   .load-sentinel { flex-shrink: 0; width: 1px; }
   .gallery-spacer {
     flex-shrink: 0;
     width: calc(50% - 110px);
   }
-
   .card {
     position: relative;
     flex-shrink: 0;
@@ -91,8 +85,6 @@
     aspect-ratio: 836/494;
     object-fit: cover;
   }
-
-  /* Badges — always visible on card */
   .card-badges {
     position: absolute;
     top: 4px;
@@ -111,8 +103,6 @@
   .badge.mike { background: rgba(255,138,128,0.3); color: #ff8a80; }
   .badge.chatora { background: rgba(255,183,77,0.3); color: #ffb74d; }
   .badge.other-badge { background: rgba(110,231,255,0.2); color: var(--accent); }
-
-  /* Footer — hidden by default, shown on active (center) card */
   .card-footer {
     display: flex;
     justify-content: space-between;
@@ -132,8 +122,6 @@
     opacity: 1;
   }
   .card-footer .behavior { font-size: 10px; opacity: 0.7; }
-
-  /* Overlay caption on hover */
   .card-overlay {
     position: absolute;
     inset: 0;
@@ -152,10 +140,7 @@
     color: rgba(255,255,255,0.85);
     line-height: 1.3;
   }
-
   .empty { padding: 20px 0; color: var(--text-muted); font-size: 13px; }
-
-  /* Lightbox */
   .lightbox {
     display: none;
     position: fixed;
@@ -173,8 +158,6 @@
     object-fit: contain;
     border-radius: 8px;
   }
-
-  /* Right edge glow — elliptical bloom at the newest edge */
   .gallery-wrap::after {
     content: "";
     position: absolute;
@@ -191,8 +174,6 @@
     transition: opacity 0.4s;
   }
   .gallery-wrap.at-end::after { opacity: 1; }
-
-  /* ── Carousel mode: body = horizontal scroll container ── */
   body.carousel {
     overflow-x: auto;
     overflow-y: hidden;
@@ -215,8 +196,6 @@
   body.carousel .gallery-spacer { display: none; }
   body.carousel .gallery-wrap::after { display: none; }
   body.carousel .gallery-wrap { margin-left: -8px; margin-right: -8px; }
-
-  /* ── Grid mode (standalone / wide iframe on mobile) ── */
   body.grid-mode .gallery {
     flex-wrap: wrap-reverse;
     width: auto;
@@ -247,7 +226,6 @@
     transition: background 0.15s;
   }
   .show-more-btn:hover { background: rgba(255,255,255,0.1); color: var(--text-main); }
-
   @media (hover: none) { .card-overlay { opacity: 1; } }
 </style>
 </head>
@@ -260,32 +238,32 @@
 </div>
 
 {% if total == 0 %}
-<div class="empty">No photos</div>
+<div class="empty">No events</div>
 {% else %}
 <div class="gallery-wrap">
 <div class="gallery" id="gallery">
   <div class="gallery-spacer"></div>
   <div class="load-sentinel" id="load-sentinel"></div>
-  {% for photo in photos %}
-  <div class="card {{ photo.status_class() }}" data-id="{{ photo.id }}"
-       data-date="{{ photo.captured_at }}"
-       data-pet="{{ photo.pet_id_display() }}"
-       data-behavior="{{ photo.behavior_display() }}"
-       data-caption="{{ photo.caption_display() }}"
-       onclick="showLightbox('/api/photos/{{ photo.filename }}', this.dataset)">
-    <img src="/api/photos/{{ photo.filename }}" alt="{{ photo.filename }}" loading="lazy">
+  {% for event in events %}
+  <div class="card {{ event.status_class() }}" data-id="{{ event.id }}"
+       data-date="{{ event.observed_at }}"
+       data-pet="{{ event.pet_id_display() }}"
+       data-behavior="{{ event.behavior_display() }}"
+       data-caption="{{ event.summary_display() }}"
+       onclick="showLightbox('/api/photos/{{ event.source_filename }}', this.dataset)">
+    <img src="/api/photos/{{ event.source_filename }}" alt="{{ event.source_filename }}" loading="lazy">
     <div class="card-badges">
-      {% if !photo.pet_id_display().is_empty() %}
-      <span class="badge {{ photo.pet_id_display() }}{% if photo.pet_id_display() == "other" %} other-badge{% endif %}">{{ photo.pet_id_display() }}</span>
+      {% if !event.pet_id_display().is_empty() %}
+      <span class="badge {{ event.pet_id_display() }}{% if event.pet_id_display() == "other" %} other-badge{% endif %}">{{ event.pet_id_display() }}</span>
       {% endif %}
     </div>
     <div class="card-overlay">
-      <div class="card-overlay-bg">{{ photo.caption_display() }}</div>
+      <div class="card-overlay-bg">{{ event.summary_display() }}</div>
     </div>
     <div class="card-footer">
-      <span>{{ photo.captured_at }}</span>
-      {% if !photo.behavior_display().is_empty() %}
-      <span class="behavior">{{ photo.behavior_display() }}</span>
+      <span>{{ event.observed_at }}</span>
+      {% if !event.behavior_display().is_empty() %}
+      <span class="behavior">{{ event.behavior_display() }}</span>
       {% endif %}
     </div>
   </div>
@@ -300,7 +278,6 @@
 </div>
 
 <script>
-// Layout: carousel everywhere, except iframe mobile (wide) → grid
 var inIframe = (function() {
   try { return window.self !== window.top; } catch(e) { return true; }
 })();
@@ -319,8 +296,6 @@ function showLightbox(src, meta) {
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') document.getElementById('lightbox').classList.remove('show');
 });
-
-// Carousel: mouse wheel → horizontal scroll (body is the scroll container)
 (function() {
   if (!document.body.classList.contains('carousel')) return;
   var scrollEl = document.scrollingElement || document.documentElement;
@@ -328,12 +303,10 @@ document.addEventListener('keydown', function(e) {
   var wrap = document.querySelector('.gallery-wrap');
   if (!g) return;
   var bounceTimer = null;
-
   function updateEdge() {
     var atEnd = scrollEl.scrollLeft >= scrollEl.scrollWidth - scrollEl.clientWidth - 2;
     if (wrap) wrap.classList.toggle('at-end', atEnd);
   }
-
   document.addEventListener('wheel', function(e) {
     e.preventDefault();
     scrollEl.scrollLeft += e.deltaY * 0.3;
@@ -350,18 +323,13 @@ document.addEventListener('keydown', function(e) {
       }, 150);
     }
   }, { passive: false });
-
-  // Start at right (newest)
   scrollEl.scrollLeft = scrollEl.scrollWidth;
   updateEdge();
   document.addEventListener('scroll', updateEdge);
 })();
-
-// Center-card detection — only the center card shows its footer (carousel only)
 (function() {
   if (!document.body.classList.contains('carousel')) return;
   var scrollEl = document.scrollingElement || document.documentElement;
-
   var activeCard = null;
   function updateActive() {
     var cards = document.querySelectorAll('.card');
@@ -381,15 +349,13 @@ document.addEventListener('keydown', function(e) {
   document.addEventListener('scroll', updateActive);
   requestAnimationFrame(updateActive);
 })();
-
-// Incremental loading — older images load as user scrolls left
 (function() {
   var gallery = document.getElementById('gallery');
   var sentinel = document.getElementById('load-sentinel');
   if (!gallery || !sentinel) return;
 
   var total = {{ total }};
-  var loaded = {{ photos.len() }};
+  var loaded = {{ events.len() }};
   var loading = false;
   var params = new URLSearchParams(window.location.search);
   var isCarousel = document.body.classList.contains('carousel');
@@ -402,150 +368,70 @@ document.addEventListener('keydown', function(e) {
     return url;
   }
 
-  function statusClass(v) {
-    if (v === true) return 'valid';
-    if (v === false) return 'invalid';
+  function statusClass(status) {
+    if (status === 'valid') return 'valid';
+    if (status === 'invalid') return 'invalid';
     return 'pending';
   }
 
-  function createCard(p) {
+  function createCard(e) {
     var div = document.createElement('div');
-    div.className = 'card ' + statusClass(p.is_valid);
-    div.dataset.date = p.captured_at || '';
-    div.dataset.pet = p.pet_id || '';
-    div.dataset.behavior = p.behavior || '';
-    div.dataset.caption = p.caption || '';
-    div.onclick = function() { showLightbox('/api/photos/' + p.filename, div.dataset); };
-    var pid = p.pet_id || '';
+    div.className = 'card ' + statusClass(e.status);
+    div.dataset.date = e.observed_at || '';
+    div.dataset.pet = e.pet_id || '';
+    div.dataset.behavior = e.behavior || '';
+    div.dataset.caption = e.summary || '';
+    div.onclick = function() { showLightbox('/api/photos/' + e.source_filename, div.dataset); };
+    var pid = e.pet_id || '';
     var pidBadge = pid ? '<span class="badge ' + pid + (pid === 'other' ? ' other-badge' : '') + '">' + pid + '</span>' : '';
-    var cap = p.caption ? p.caption.replace(/</g, '&lt;') : '';
-    var beh = p.behavior ? '<span class="behavior">' + p.behavior + '</span>' : '';
+    var behavior = e.behavior || '';
+    var summary = e.summary || '';
     div.innerHTML =
-      '<img src="/api/photos/' + p.filename + '" loading="lazy">' +
+      '<img src="/api/photos/' + e.source_filename + '" loading="lazy">' +
       '<div class="card-badges">' + pidBadge + '</div>' +
-      '<div class="card-overlay"><div class="card-overlay-bg">' + cap + '</div></div>' +
-      '<div class="card-footer"><span>' + (p.captured_at||'') + '</span>' + beh + '</div>';
+      '<div class="card-overlay"><div class="card-overlay-bg">' + summary + '</div></div>' +
+      '<div class="card-footer"><span>' + (e.observed_at || '') + '</span>' +
+      (behavior ? '<span class="behavior">' + behavior + '</span>' : '') +
+      '</div>';
     return div;
   }
 
-  function loadMore() {
+  async function loadMore() {
     if (loading || loaded >= total) return;
     loading = true;
-    var prevScrollWidth = isCarousel ? scrollEl.scrollWidth : 0;
-    var prevScrollLeft = isCarousel ? scrollEl.scrollLeft : 0;
-    fetch(buildUrl(loaded, 20))
-      .then(function(r) { return r.json(); })
-      .then(function(data) {
-        var ref = sentinel.nextSibling;
-        (data.photos || []).forEach(function(p) {
-          gallery.insertBefore(createCard(p), ref);
-        });
-        loaded += (data.photos || []).length;
-        if (isCarousel) {
-          var added = scrollEl.scrollWidth - prevScrollWidth;
-          scrollEl.scrollLeft = prevScrollLeft + added;
-        }
-        loading = false;
-      })
-      .catch(function() { loading = false; });
-  }
-
-  // Observe sentinel — use viewport (root: null) for carousel, since body scrolls
-  var obs = new IntersectionObserver(function(entries) {
-    if (entries[0].isIntersecting) loadMore();
-  }, { rootMargin: '0px 0px 0px 300px' });
-  obs.observe(sentinel);
-})();
-
-// Grid mode: show only newest 6, "show more" reveals older
-(function() {
-  if (!document.body.classList.contains('grid-mode')) return;
-  var gallery = document.getElementById('gallery');
-  if (!gallery) return;
-  var GRID_PAGE = 6;
-  var cards = gallery.querySelectorAll('.card');
-  if (cards.length <= GRID_PAGE) return;
-
-  // Hide older cards (first in DOM = oldest, wrap-reverse puts newest on top)
-  for (var i = 0; i < cards.length - GRID_PAGE; i++) {
-    cards[i].classList.add('grid-hidden');
-  }
-
-  var btn = document.createElement('button');
-  btn.className = 'show-more-btn';
-  btn.textContent = 'もっと見る';
-  btn.onclick = function() {
-    var hidden = gallery.querySelectorAll('.grid-hidden');
-    var toShow = Math.min(GRID_PAGE, hidden.length);
-    for (var i = hidden.length - toShow; i < hidden.length; i++) {
-      hidden[i].classList.remove('grid-hidden');
-    }
-    if (gallery.querySelectorAll('.grid-hidden').length === 0) {
-      btn.remove();
-    }
-  };
-  document.querySelector('.gallery-wrap').insertAdjacentElement('afterend', btn);
-})();
-
-// Notify parent iframe of content height
-(function() {
-  function sendHeight() {
-    var h = document.body.scrollHeight;
-    window.parent.postMessage({ type: 'album-height', height: h }, '*');
-  }
-  sendHeight();
-  new MutationObserver(sendHeight).observe(document.body, { childList: true, subtree: true });
-  window.addEventListener('resize', sendHeight);
-  document.querySelectorAll('img').forEach(function(img) {
-    img.addEventListener('load', sendHeight);
-  });
-})();
-
-// SSE: live photo updates — new card slides in from right
-(function() {
-  var gallery = document.getElementById('gallery');
-  if (!gallery) return;
-  var isCarousel = document.body.classList.contains('carousel');
-  var scrollEl = document.scrollingElement || document.documentElement;
-
-  var es = new EventSource('/api/events');
-  es.addEventListener('photo', function(e) {
-    var p;
-    try { p = JSON.parse(e.data); } catch(_) { return; }
-    if (!p.is_valid) return;
-
-    if (gallery.querySelector('[data-filename="' + p.filename + '"]')) return;
-
-    var div = document.createElement('div');
-    div.className = 'card';
-    div.setAttribute('data-filename', p.filename);
-    div.dataset.pet = p.pet_id || '';
-    div.dataset.behavior = p.behavior || '';
-    div.dataset.caption = p.caption || '';
-    div.onclick = function() { showLightbox('/api/photos/' + p.filename, div.dataset); };
-    var pid = p.pet_id || '';
-    var pidBadge = pid ? '<span class="badge ' + pid + (pid === 'other' ? ' other-badge' : '') + '">' + pid + '</span>' : '';
-    var cap = p.caption ? p.caption.replace(/</g, '&lt;') : '';
-    var beh = p.behavior ? '<span class="behavior">' + p.behavior + '</span>' : '';
-    div.innerHTML =
-      '<img src="/api/photos/' + p.filename + '" loading="lazy">' +
-      '<div class="card-badges">' + pidBadge + '</div>' +
-      '<div class="card-overlay"><div class="card-overlay-bg">' + cap + '</div></div>' +
-      '<div class="card-footer"><span>' + (p.filename.match(/\d{8}_\d{6}/)||[''])[0].replace(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/,'$1/$2/$3 $4:$5') + '</span>' + beh + '</div>';
-
-    div.style.opacity = '0';
-    div.style.transform = 'translateX(40px) scale(0.95)';
-    div.style.transition = 'opacity 0.4s, transform 0.4s';
-    gallery.appendChild(div);
-
-    requestAnimationFrame(function() {
-      if (isCarousel) scrollEl.scrollLeft = scrollEl.scrollWidth;
-      requestAnimationFrame(function() {
-        div.style.opacity = '1';
-        div.style.transform = 'translateX(0) scale(1)';
+    try {
+      var res = await fetch(buildUrl(loaded, 20));
+      if (!res.ok) return;
+      var data = await res.json();
+      (data.events || []).forEach(function(e) {
+        gallery.insertBefore(createCard(e), gallery.children[1]);
       });
+      loaded += (data.events || []).length;
+    } finally {
+      loading = false;
+    }
+  }
+
+  if (isCarousel) {
+    document.addEventListener('scroll', function() {
+      if (scrollEl.scrollLeft < 600) loadMore();
     });
-  });
+  } else {
+    var shown = 20;
+    var cards = Array.prototype.slice.call(document.querySelectorAll('.card'));
+    cards.slice(shown).forEach(function(card) { card.classList.add('grid-hidden'); });
+    if (cards.length > shown) {
+      var btn = document.createElement('button');
+      btn.className = 'show-more-btn';
+      btn.textContent = 'Show more';
+      btn.onclick = function() {
+        shown += 20;
+        cards.slice(0, shown).forEach(function(card) { card.classList.remove('grid-hidden'); });
+        if (shown >= cards.length) btn.remove();
+      };
+      gallery.parentNode.appendChild(btn);
+    }
+  }
 })();
 </script>
 </body>
