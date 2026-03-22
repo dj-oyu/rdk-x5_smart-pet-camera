@@ -18,14 +18,15 @@ var jstTimezone = time.FixedZone("JST", 9*3600)
 
 // FrameBroadcaster manages fanout of JPEG frames to multiple clients.
 type FrameBroadcaster struct {
-	mu       sync.Mutex
-	clients  map[int]chan []byte
-	nextID   int
-	shm      *shmReader
-	monitor  *Monitor
-	stop     chan struct{}
-	stopped  bool
-	onChange chan<- struct{} // Notifies connection count changes
+	mu                 sync.Mutex
+	clients            map[int]chan []byte
+	nextID             int
+	shm                *shmReader
+	monitor            *Monitor
+	stop               chan struct{}
+	stopped            bool
+	onChange           chan<- struct{} // Notifies connection count changes
+	frameBroadcastBuf  []chan []byte   // Reusable snapshot slice to avoid per-broadcast allocation
 }
 
 // NewFrameBroadcaster creates a broadcaster that generates overlay frames and fans them out.
@@ -199,15 +200,18 @@ func (fb *FrameBroadcaster) generateOverlay() []byte {
 
 func (fb *FrameBroadcaster) broadcast(data []byte) {
 	fb.mu.Lock()
-	defer fb.mu.Unlock()
+	fb.frameBroadcastBuf = fb.frameBroadcastBuf[:0]
+	for _, ch := range fb.clients {
+		fb.frameBroadcastBuf = append(fb.frameBroadcastBuf, ch)
+	}
+	fb.mu.Unlock()
 
-	for id, ch := range fb.clients {
+	for _, ch := range fb.frameBroadcastBuf {
 		select {
 		case ch <- data:
 			// Sent successfully
 		default:
 			// Client too slow, skip this frame for this client
-			_ = id // Just to note we're intentionally skipping
 		}
 	}
 }
@@ -257,6 +261,8 @@ type DetectionBroadcaster struct {
 	// Empty detection monitoring (observability for 0-detection case)
 	emptyUpdateCount int
 	lastEmptyLogTime time.Time
+
+	detectionBroadcastBuf []chan *SerializedEvent // Reusable snapshot slice to avoid per-broadcast allocation
 }
 
 // NewDetectionBroadcaster creates a broadcaster for detection events.
@@ -533,15 +539,18 @@ func convertDetectionsToProto(detections []Detection) []*pb.Detection {
 
 func (db *DetectionBroadcaster) broadcast(event *SerializedEvent) {
 	db.mu.Lock()
-	defer db.mu.Unlock()
+	db.detectionBroadcastBuf = db.detectionBroadcastBuf[:0]
+	for _, ch := range db.clients {
+		db.detectionBroadcastBuf = append(db.detectionBroadcastBuf, ch)
+	}
+	db.mu.Unlock()
 
-	for id, ch := range db.clients {
+	for _, ch := range db.detectionBroadcastBuf {
 		select {
 		case ch <- event:
 			// Sent successfully
 		default:
 			// Client too slow, skip this event for this client
-			_ = id
 		}
 	}
 }

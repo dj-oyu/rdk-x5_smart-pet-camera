@@ -79,6 +79,9 @@ func streamMJPEGFromChannel(w http.ResponseWriter, r *http.Request, frameCh <-ch
 	w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=frame")
 	w.Header().Set("Cache-Control", "no-cache")
 
+	var buf bytes.Buffer
+	buf.Grow(128 * 1024) // Pre-allocate 128KB for typical JPEG frame
+
 	for {
 		var jpegData []byte
 		select {
@@ -100,13 +103,12 @@ func streamMJPEGFromChannel(w http.ResponseWriter, r *http.Request, frameCh <-ch
 			jpegData = cachedBlankJPEG
 		}
 
-		// Write frame in single syscall for TCP efficiency
-		const headerPrefix = "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
-		buf := make([]byte, 0, len(headerPrefix)+10+4+len(jpegData)+2)
-		buf = fmt.Appendf(buf, "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(jpegData))
-		buf = append(buf, jpegData...)
-		buf = append(buf, "\r\n"...)
-		if _, err := w.Write(buf); err != nil {
+		// Write frame in single syscall for TCP efficiency; reuse buffer to avoid per-frame allocation
+		buf.Reset()
+		fmt.Fprintf(&buf, "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len(jpegData))
+		buf.Write(jpegData)
+		buf.WriteString("\r\n")
+		if _, err := w.Write(buf.Bytes()); err != nil {
 			logger.Debug("MJPEG", "Client disconnected: %v", err)
 			return
 		}

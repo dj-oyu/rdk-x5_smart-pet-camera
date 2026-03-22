@@ -51,6 +51,9 @@ type Server struct {
 
 	// Channels for goroutine communication
 	recorderChan chan *types.VideoFrame
+
+	// Pool for recorder frame buffers — avoids per-frame heap allocation
+	recorderBufPool sync.Pool
 }
 
 func main() {
@@ -138,6 +141,13 @@ func NewServer() (*Server, error) {
 		recorder:     rec,
 		httpServer:   httpServer,
 		recorderChan: make(chan *types.VideoFrame, 60),
+		recorderBufPool: sync.Pool{
+			New: func() interface{} {
+				// Pre-allocate 512KB — typical H.265 frame size
+				buf := make([]byte, 0, 512*1024)
+				return &buf
+			},
+		},
 	}
 
 	// Setup HTTP routes
@@ -259,13 +269,20 @@ func (s *Server) readFrames() {
 
 		// Recorder: copy before SendFrame (VPU buffer freed on next ReadLatest)
 		if s.recorder.IsRecording() {
-			dataCopy := make([]byte, len(frame.Data))
-			copy(dataCopy, frame.Data)
+			bufPtr := s.recorderBufPool.Get().(*[]byte)
+			buf := (*bufPtr)[:0]
+			if cap(buf) < len(frame.Data) {
+				buf = make([]byte, len(frame.Data))
+			} else {
+				buf = buf[:len(frame.Data)]
+			}
+			copy(buf, frame.Data)
 			recFrame := *frame
-			recFrame.Data = dataCopy
+			recFrame.Data = buf
 			select {
 			case s.recorderChan <- &recFrame:
 			default:
+				s.recorderBufPool.Put(&buf)
 				s.metrics.RecorderFramesDropped.Add(1)
 			}
 		}
@@ -289,6 +306,7 @@ func (s *Server) distributeRecorder() {
 			if s.recorder.SendFrame(frame) {
 				s.metrics.RecorderFramesSent.Add(1)
 			}
+			s.recorderBufPool.Put(&frame.Data) // return buffer to pool
 
 			// Update recording metrics
 			status := s.recorder.GetStatus()

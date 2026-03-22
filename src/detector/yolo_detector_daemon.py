@@ -10,6 +10,8 @@ import sys
 import time
 import signal
 import logging
+import queue
+import threading
 from collections import namedtuple
 from pathlib import Path
 
@@ -132,6 +134,7 @@ class YoloDetectorDaemon:
             "frames_processed": 0,
             "total_detections": 0,
             "avg_inference_time_ms": 0.0,
+            "yolo_skipped_frames": 0,
         }
 
         self.running = True
@@ -169,16 +172,28 @@ class YoloDetectorDaemon:
         self.night_collect_interval: int = 150  # Collect every N frames during motion
 
     def _save_night_frame(self, nv12_data, width: int, height: int, frame_number: int) -> None:
-        """Save NV12 frame for future fine-tuning data collection."""
+        """Enqueue NV12 frame for async saving (fine-tuning data collection)."""
         try:
-            self.night_collect_dir.mkdir(parents=True, exist_ok=True)
-            path = self.night_collect_dir / f"night_{frame_number:08d}_{width}x{height}.nv12"
-            with open(path, "wb") as f:
-                f.write(bytes(nv12_data))
-            self.night_collect_count += 1
-            logger.debug(f"Saved night frame: {path.name} ({self.night_collect_count}/{self.night_collect_max})")
-        except Exception as e:
-            logger.warning(f"Failed to save night frame: {e}")
+            self._save_queue.put_nowait((bytes(nv12_data), width, height, frame_number))
+        except queue.Full:
+            pass  # Drop if queue full
+
+    def _save_worker(self) -> None:
+        """Worker thread: drain the save queue and write frames to disk."""
+        while True:
+            item = self._save_queue.get()
+            if item is None:
+                break
+            nv12_data, width, height, frame_number = item
+            try:
+                self.night_collect_dir.mkdir(parents=True, exist_ok=True)
+                path = self.night_collect_dir / f"night_{frame_number:08d}_{width}x{height}.nv12"
+                with open(path, "wb") as f:
+                    f.write(nv12_data)
+                self.night_collect_count += 1
+                logger.debug(f"Saved night frame: {path.name} ({self.night_collect_count}/{self.night_collect_max})")
+            except Exception as e:
+                logger.warning(f"Night frame save failed: {e}")
 
     def setup(self) -> None:
         """セットアップ"""
@@ -257,6 +272,11 @@ class YoloDetectorDaemon:
 
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
+
+        # Async night frame save queue + worker thread
+        self._save_queue: queue.Queue = queue.Queue(maxsize=10)
+        self._save_thread = threading.Thread(target=self._save_worker, daemon=True)
+        self._save_thread.start()
 
         logger.debug("Starting detection loop")
 
@@ -447,7 +467,10 @@ class YoloDetectorDaemon:
                     self.prev_y_plane = y_small_denoised
 
                     # YOLO ROI detection (every 3rd frame — motion runs every frame)
-                    run_yolo = (self.stats["frames_processed"] % 3 == 0)
+                    # Skip YOLO when scene is static (no motion detected or in cooldown)
+                    run_yolo = (self.stats["frames_processed"] % 3 == 0) and (self.motion_cooldown > 0 or len(motion_dicts) > 0)
+                    if not run_yolo:
+                        self.stats["yolo_skipped_frames"] = self.stats.get("yolo_skipped_frames", 0) + 1
                     if run_yolo:
                         current_roi = self.roi_index
                         detections = self.detector.detect_nv12_roi_720p(
@@ -540,7 +563,8 @@ class YoloDetectorDaemon:
                             f"det={self.stats['total_detections']}(mot={mot},yolo={yolo}) "
                             f"inf={self.stats['avg_inference_time_ms']:.0f}ms "
                             f"cam={self.active_camera} "
-                            f"bright={zc_frame.brightness_avg:.1f}"
+                            f"bright={zc_frame.brightness_avg:.1f} "
+                            f"yolo_skipped={self.stats['yolo_skipped_frames']}"
                         )
 
                     if is_debug and cycle_complete and detection_dicts:

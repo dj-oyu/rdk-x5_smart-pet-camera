@@ -7,6 +7,7 @@
 #include "isp_brightness.h"
 #include "logger.h"
 #include <hbn_isp_api.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -45,6 +46,10 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
 
   // Active camera pointer (shared variable in same process, no SHM)
   pipeline->active_camera = active_camera;
+
+  // Condition variable for inactive camera blocking
+  pthread_mutex_init(&pipeline->switch_mutex, NULL);
+  pthread_cond_init(&pipeline->switch_cond, NULL);
 
   // Initialize memory manager
   ret = hb_mem_module_open();
@@ -182,11 +187,21 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag) {
   while (*running_flag) {
     int ret;
 
-    // Non-active pipeline: sleep and skip everything
+    // Non-active pipeline: block on condition variable and skip everything
     bool write_active = pipeline->active_camera &&
                         *pipeline->active_camera == pipeline->camera_index;
     if (!write_active) {
-      usleep(100000); // 100ms
+      pthread_mutex_lock(&pipeline->switch_mutex);
+      // Wait with 500ms timeout to periodically re-check running_flag
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      ts.tv_nsec += 500 * 1000000;  // 500ms
+      if (ts.tv_nsec >= 1000000000) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000;
+      }
+      pthread_cond_timedwait(&pipeline->switch_cond, &pipeline->switch_mutex, &ts);
+      pthread_mutex_unlock(&pipeline->switch_mutex);
       continue;
     }
 
@@ -564,6 +579,10 @@ void pipeline_destroy(camera_pipeline_t *pipeline) {
     shm_zerocopy_close(pipeline->shm_mjpeg_zc);
     pipeline->shm_mjpeg_zc = NULL;
   }
+
+  // Destroy condition variable for inactive camera blocking
+  pthread_mutex_destroy(&pipeline->switch_mutex);
+  pthread_cond_destroy(&pipeline->switch_cond);
 
   // Close memory manager
   hb_mem_module_close();
