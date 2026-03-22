@@ -272,20 +272,12 @@ class YoloDetectorDaemon:
         if self.roi_readers:
             return  # Already opened
 
-        readers = open_roi_readers()
-        opened = []
-        for reader in readers:
-            if reader.open():
-                opened.append(reader)
-                logger.debug(f"Opened ROI SHM reader: {reader.shm_name}")
-            else:
-                logger.warning(f"ROI SHM not available: {reader.shm_name} — night VSE path disabled")
-                # Close any already-opened readers and bail out
-                for r in opened:
-                    r.close()
-                return
+        readers = open_roi_readers()  # Returns already-opened readers, or [] on failure
+        if not readers:
+            logger.warning("ROI SHM not available — night VSE path disabled")
+            return
 
-        self.roi_readers = opened
+        self.roi_readers = readers
         logger.info(f"VSE ROI SHM readers opened: {[r.shm_name for r in self.roi_readers]}")
 
     def _get_active_zerocopy(self) -> ZeroCopySharedMemory | None:
