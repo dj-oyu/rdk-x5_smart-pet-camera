@@ -33,6 +33,7 @@ type Client struct {
 type Server struct {
 	clients    map[string]*Client
 	clientsMu  sync.RWMutex
+	clientsBuf []*Client
 	config     webrtc.Configuration
 	maxClients int
 	api        *webrtc.API
@@ -234,10 +235,11 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 // Blocks until all WriteSample calls complete (frame.Data must stay valid).
 func (s *Server) SendFrame(frame *types.VideoFrame) {
 	s.clientsMu.RLock()
-	clients := make([]*Client, 0, len(s.clients))
+	s.clientsBuf = s.clientsBuf[:0]
 	for _, c := range s.clients {
-		clients = append(clients, c)
+		s.clientsBuf = append(s.clientsBuf, c)
 	}
+	clients := s.clientsBuf
 	s.clientsMu.RUnlock()
 
 	if len(clients) == 0 {
