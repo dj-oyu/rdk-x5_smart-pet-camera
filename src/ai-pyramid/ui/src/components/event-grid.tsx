@@ -5,6 +5,7 @@ type EventGridProps = {
   events: EventSummary[];
   loading: boolean;
   error: string | null;
+  onOpenEvent: (event: EventSummary) => void;
 };
 
 function formatObservedAt(value: string): string {
@@ -12,7 +13,7 @@ function formatObservedAt(value: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
-export function EventGrid({ events, loading, error }: EventGridProps) {
+export function EventGrid({ events, loading, error, onOpenEvent }: EventGridProps) {
   if (loading) {
     return <div class="empty-state">Loading events...</div>;
   }
@@ -27,25 +28,56 @@ export function EventGrid({ events, loading, error }: EventGridProps) {
 
   return (
     <section class="event-grid">
-      {events.map((event) => (
-        <article class={`event-card ${event.status}`} key={event.id}>
-          <a href={photoUrl(event.source_filename)} target="_blank" rel="noreferrer">
-            <img src={photoUrl(event.source_filename)} alt={event.summary ?? event.source_filename} loading="lazy" />
-          </a>
-          <div class="event-card-body">
-            <div class="event-meta-row">
-              <span class={`status-pill ${event.status}`}>{event.status}</span>
-              {event.pet_id ? <span class="pet-pill">{event.pet_id}</span> : null}
+      {events.map((event, index) => {
+        const featured = index === 0;
+        return (
+          <article class={`event-card ${event.status} ${featured ? "featured" : "history"}`} key={event.id}>
+            <a
+              href={photoUrl(event.source_filename)}
+              target="_blank"
+              rel="noreferrer"
+              onClick={(clickEvent) => {
+                clickEvent.preventDefault();
+                onOpenEvent(event);
+              }}
+            >
+              <div class="event-image-shell">
+                <img
+                  src={photoUrl(event.source_filename)}
+                  alt={event.summary ?? event.source_filename}
+                  loading={featured ? "eager" : "lazy"}
+                  fetchPriority={featured ? "high" : "auto"}
+                />
+                {featured ? (
+                  <div class="event-image-overlay">
+                    <span class="event-kicker">Latest</span>
+                    <span class="event-overlay-time">{formatObservedAt(event.observed_at)}</span>
+                    <div class="event-meta-row overlay-meta-row featured-meta-overlay">
+                      {event.pet_id ? <span class="pet-pill">{event.pet_id}</span> : <span class="pet-pill muted">unknown</span>}
+                      <span class={`status-pill ${event.status}`}>{event.status}</span>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </a>
+            <div class="event-card-body">
+              <p class={`event-summary ${featured ? "featured-summary" : "history-summary"}`}>
+                {event.summary ?? "No summary yet."}
+              </p>
+              {!featured ? (
+                <div class="event-meta-row history-meta-row">
+                  <span class="meta-text">{event.pet_id ?? "unknown"}</span>
+                  <span class={`status-pill ${event.status}`}>{event.status}</span>
+                </div>
+              ) : null}
+              <footer>
+                <span class="event-behavior">{event.behavior ?? "Unclassified"}</span>
+                <span>{formatObservedAt(event.observed_at)}</span>
+              </footer>
             </div>
-            <h2>{event.behavior ?? "Unclassified"}</h2>
-            <p>{event.summary ?? "No summary yet."}</p>
-            <footer>
-              <span>{formatObservedAt(event.observed_at)}</span>
-              <span>{event.source_filename}</span>
-            </footer>
-          </div>
-        </article>
-      ))}
+          </article>
+        );
+      })}
     </section>
   );
 }

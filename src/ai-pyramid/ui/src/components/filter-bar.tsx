@@ -7,7 +7,7 @@ type FilterBarProps = {
 };
 
 const STATUS_OPTIONS: Array<{ value: StatusFilter; label: string }> = [
-  { value: "all", label: "All events" },
+  { value: "all", label: "All" },
   { value: "valid", label: "Confirmed" },
   { value: "pending", label: "Pending" },
   { value: "invalid", label: "Rejected" }

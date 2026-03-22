@@ -1389,12 +1389,20 @@ a { color: inherit; }
 }
 
 /* Album iframe */
-.album-iframe {
+.album-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+}
+.album-panel .album-iframe {
     width: 100%;
-    min-height: 70vh;
+    height: min(76vh, 820px);
+    min-height: 560px;
     border: none;
-    border-radius: 8px;
-    background: rgba(0, 0, 0, 0.28);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.42);
+    display: block;
 }
 .album-offline {
     padding: 20px 0;
@@ -1601,8 +1609,9 @@ a { color: inherit; }
     .sidebar {
         min-width: 0;
     }
-    .album-iframe {
-        min-height: 70vh;
+    .album-panel .album-iframe {
+        height: min(70vh, 760px);
+        min-height: 520px;
     }
     .trajectory-card,
     .gantt-card,

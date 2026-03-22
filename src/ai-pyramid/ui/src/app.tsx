@@ -5,6 +5,7 @@ import { StatsStrip } from "./components/stats-strip";
 import {
   fetchEvents,
   fetchStats,
+  photoUrl,
   readQueryFromLocation,
   writeQueryToLocation,
   type ActivityStats,
@@ -81,23 +82,40 @@ export function App() {
   }
 
   return (
-    <main class="app-shell">
-      <header class="hero">
-        <div>
-          <p class="eyebrow">Smart Pet Camera</p>
-          <h1>Event feed, not just a photo roll.</h1>
-          <p class="hero-copy">
-            The backend already models observations and activity. This UI reads that event stream directly.
-          </p>
-        </div>
-        <div class="hero-aside">
-          <span>Live status</span>
-          <strong>{subtitle}</strong>
-        </div>
-      </header>
-      <StatsStrip stats={stats} />
-      <FilterBar query={query} onStatusChange={handleStatusChange} onPetChange={handlePetChange} />
-      <EventGrid events={events} loading={loading} error={error} />
+    <main class="app-shell compact-shell">
+      <div class="compact-bar">
+        <strong>Recent Events</strong>
+        <span>{subtitle}</span>
+      </div>
+      <EventGrid
+        events={events}
+        loading={loading}
+        error={error}
+        onOpenEvent={(event) => {
+          const src = new URL(photoUrl(event.source_filename), window.location.origin).toString();
+          if (window.parent !== window) {
+            window.parent.postMessage(
+              {
+                type: "album-lightbox",
+                src,
+                meta: {
+                  date: new Date(event.observed_at).toLocaleString(),
+                  pet: event.pet_id ?? undefined,
+                  behavior: event.behavior ?? undefined,
+                  caption: event.summary ?? undefined,
+                },
+              },
+              "*",
+            );
+            return;
+          }
+          window.open(src, "_blank", "noopener,noreferrer");
+        }}
+      />
+      <section class="secondary-stack">
+        <FilterBar query={query} onStatusChange={handleStatusChange} onPetChange={handlePetChange} />
+        <StatsStrip stats={stats} />
+      </section>
     </main>
   );
 }
