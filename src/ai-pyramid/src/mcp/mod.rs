@@ -129,6 +129,12 @@ fn handle_tools_list(id: Value) -> JsonRpcResponse {
                                 "type": "string",
                                 "description": "Filter by pet: \"chatora\", \"mike\"",
                                 "enum": ["chatora", "mike"]
+                            },
+                            "status": {
+                                "type": "string",
+                                "description": "Optional status filter. Defaults to all statuses.",
+                                "enum": ["all", "valid", "pending", "invalid"],
+                                "default": "all"
                             }
                         }
                     }
@@ -163,9 +169,18 @@ async fn call_get_recent_photos(
     let args = params.get("arguments").unwrap_or(&empty);
     let limit = args.get("limit").and_then(|value| value.as_i64()).unwrap_or(20).clamp(1, 50);
     let pet_id = args.get("pet_id").and_then(|value| value.as_str()).map(String::from);
+    let status = match args.get("status").and_then(|value| value.as_str()) {
+        Some("valid") => EventStatusFilter::Valid,
+        Some("pending") => EventStatusFilter::Pending,
+        Some("invalid") => EventStatusFilter::Invalid,
+        Some("all") | None => EventStatusFilter::All,
+        Some(_) => {
+            return JsonRpcResponse::error(id, -32602, "Invalid status: expected one of all, valid, pending, invalid".to_string())
+        }
+    };
 
     let query = EventQuery {
-        status: EventStatusFilter::Valid,
+        status,
         pet_id: pet_id.filter(|value| !value.is_empty()),
         limit: Some(limit),
         offset: None,
@@ -405,6 +420,74 @@ mod tests {
         assert!(text.contains("mike"));
         assert!(text.contains("Chatora resting"));
         assert!(text.contains("/mcp/photos/"));
+    }
+
+    #[tokio::test]
+    async fn mcp_get_recent_photos_defaults_to_all_statuses() {
+        let state = test_state();
+        state
+            .observation_commands()
+            .ingest_source_photo(ObservationInput {
+                source_filename: "pending.jpg".into(),
+                captured_at: dt(2026, 3, 21, 9, 0, 0),
+                pet_id: Some("mike".into()),
+            })
+            .await
+            .unwrap();
+        seed_valid_event(&state, "valid.jpg", "chatora", "cap a", "resting").await;
+
+        let app = test_router(state);
+        let response = post_jsonrpc(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "id": 30,
+                "params": {
+                    "name": "get_recent_photos",
+                    "arguments": {"limit": 10}
+                }
+            }),
+        )
+        .await;
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("2 photos"));
+        assert!(text.contains("mike"));
+        assert!(text.contains("cap a"));
+    }
+
+    #[tokio::test]
+    async fn mcp_get_recent_photos_filter_valid_status() {
+        let state = test_state();
+        state
+            .observation_commands()
+            .ingest_source_photo(ObservationInput {
+                source_filename: "pending.jpg".into(),
+                captured_at: dt(2026, 3, 21, 9, 0, 0),
+                pet_id: Some("mike".into()),
+            })
+            .await
+            .unwrap();
+        seed_valid_event(&state, "valid.jpg", "chatora", "cap a", "resting").await;
+
+        let app = test_router(state);
+        let response = post_jsonrpc(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "id": 31,
+                "params": {
+                    "name": "get_recent_photos",
+                    "arguments": {"limit": 10, "status": "valid"}
+                }
+            }),
+        )
+        .await;
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("1 photos"));
+        assert!(!text.contains("mike"));
+        assert!(text.contains("cap a"));
     }
 
     #[tokio::test]
