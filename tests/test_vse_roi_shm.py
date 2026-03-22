@@ -253,7 +253,17 @@ def test_roi_vs_crop_comparison(duration_sec: float = 10.0):
 
     try:
         detector = YoloDetector(model_path=model_path, auto_download=False)
-        logger.info(f"  Loaded model: {Path(model_path).name}")
+        # Set SW preprocessor (daemon uses HWPreprocessor, test needs SW fallback)
+        from detection.yolo_detector import Preprocessor
+        class SWPreprocessor(Preprocessor):
+            def __init__(self, det):
+                self._det = det
+            def letterbox(self, nv12_array, width, height, pad_top, pad_bottom):
+                return self._det._letterbox_nv12(nv12_array, width, height, pad_top, pad_bottom)
+            def crop_roi(self, nv12_array, width, height, roi_x, roi_y, roi_w, roi_h):
+                return self._det._crop_nv12_roi(nv12_array, width, height, roi_x, roi_y, roi_w, roi_h)
+        detector.preprocessor = SWPreprocessor(detector)
+        logger.info(f"  Loaded model: {Path(model_path).name} (SW preprocessor)")
     except Exception as e:
         logger.error(f"  FAIL: Cannot load YOLO model — {e}")
         return False
