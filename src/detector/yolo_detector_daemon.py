@@ -290,7 +290,13 @@ class YoloDetectorDaemon:
                         raw_buf_data=zc_frame.hb_mem_buf_data,
                         expected_plane_sizes=zc_frame.plane_size,
                     )
-                    nv12_data = np.concatenate([y_arr, uv_arr])
+                    # If contiguous, y_arr already covers full NV12 (zero-copy)
+                    # If non-contiguous, must concatenate (fallback)
+                    y_size = zc_frame.width * zc_frame.height
+                    if len(y_arr) == y_size + len(uv_arr):
+                        nv12_data = y_arr  # zero-copy view
+                    else:
+                        nv12_data = np.concatenate([y_arr, uv_arr])
                     if hasattr(self.detector.preprocessor, 'set_hb_mem_buffer'):
                         self.detector.preprocessor.set_hb_mem_buffer(hb_mem_buffer)
                 except Exception as e:
