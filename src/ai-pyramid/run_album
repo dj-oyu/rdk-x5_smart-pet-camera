@@ -1,8 +1,8 @@
 #!/bin/bash
 # Usage:
 #   ./run_album              # download latest artifact + run
-#   ./run_album --debug      # cargo build (debug) + run with test data
-#   ./run_album --local      # cargo build --release + run
+#   ./run_album --debug      # frontend build (if ui/package.json exists) + cargo build + run with test data
+#   ./run_album --local      # frontend build (if ui/package.json exists) + cargo build --release + run
 set -e
 cd "$(dirname "$0")"
 
@@ -11,7 +11,29 @@ MODE="artifact"
 PHOTOS_DIR="data/photos"
 DB_PATH="data/pet-album.db"
 VLM_URL="http://localhost:8000"
+UI_DIR="ui"
+UI_BUILD_SCRIPT="build"
 EXTRA=()
+
+ensure_ui() {
+  if [ ! -f "$UI_DIR/package.json" ]; then
+    echo "[ui] $UI_DIR/package.json not found, skipping frontend build"
+    return
+  fi
+
+  if ! command -v bun >/dev/null 2>&1; then
+    echo "[ui] bun is required when $UI_DIR/package.json exists"
+    exit 1
+  fi
+
+  if [ ! -d "$UI_DIR/node_modules" ]; then
+    echo "[ui] bun install"
+    (cd "$UI_DIR" && bun install)
+  fi
+
+  echo "[ui] bun run $UI_BUILD_SCRIPT"
+  (cd "$UI_DIR" && bun run "$UI_BUILD_SCRIPT")
+}
 
 for arg in "$@"; do
   case $arg in
@@ -39,10 +61,12 @@ case $MODE in
     echo "[deploy] $(ls -lh "$BIN" | awk '{print $5}') downloaded"
     ;;
   local)
+    ensure_ui
     echo "[build] cargo build --release"
     cargo build --release
     ;;
   debug)
+    ensure_ui
     echo "[build] cargo build (debug)"
     cargo build
     BIN="./target/debug/pet-album"
