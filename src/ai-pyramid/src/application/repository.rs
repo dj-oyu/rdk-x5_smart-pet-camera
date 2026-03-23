@@ -24,8 +24,16 @@ pub trait EventRepositoryPort: Send + Sync {
         summary: &str,
         behavior: &str,
     ) -> AppResult<usize>;
-    async fn override_event_validity(&self, source_filename: &str, is_valid: bool) -> AppResult<usize>;
-    async fn record_observation_failure(&self, source_filename: &str, error: &str) -> AppResult<usize>;
+    async fn override_event_validity(
+        &self,
+        source_filename: &str,
+        is_valid: bool,
+    ) -> AppResult<usize>;
+    async fn record_observation_failure(
+        &self,
+        source_filename: &str,
+        error: &str,
+    ) -> AppResult<usize>;
     async fn activity_stats(&self) -> AppResult<ActivityStats>;
     async fn get_observation_attempts(&self, source_filename: &str) -> AppResult<Option<i32>>;
     async fn ingest_with_detections(
@@ -38,6 +46,8 @@ pub trait EventRepositoryPort: Send + Sync {
     async fn get_detections(&self, photo_id: i64) -> AppResult<Vec<Detection>>;
     async fn update_detection_override(&self, detection_id: i64, pet_id: &str) -> AppResult<usize>;
     async fn update_pet_id(&self, source_filename: &str, pet_id: &str) -> AppResult<usize>;
+    async fn distinct_behaviors(&self) -> AppResult<Vec<String>>;
+    async fn captions_for_date(&self, date: &str) -> AppResult<Vec<String>>;
 }
 
 pub type SharedEventRepository = Arc<dyn EventRepositoryPort>;
@@ -130,7 +140,11 @@ impl EventRepositoryPort for PhotoStoreRepository {
             .await
     }
 
-    async fn override_event_validity(&self, source_filename: &str, is_valid: bool) -> AppResult<usize> {
+    async fn override_event_validity(
+        &self,
+        source_filename: &str,
+        is_valid: bool,
+    ) -> AppResult<usize> {
         self.db
             .request(|reply| DbCommand::OverrideValidation {
                 filename: source_filename.to_string(),
@@ -140,7 +154,11 @@ impl EventRepositoryPort for PhotoStoreRepository {
             .await
     }
 
-    async fn record_observation_failure(&self, source_filename: &str, error: &str) -> AppResult<usize> {
+    async fn record_observation_failure(
+        &self,
+        source_filename: &str,
+        error: &str,
+    ) -> AppResult<usize> {
         self.db
             .request(|reply| DbCommand::RecordVlmFailure {
                 filename: source_filename.to_string(),
@@ -205,6 +223,21 @@ impl EventRepositoryPort for PhotoStoreRepository {
             .request(|reply| DbCommand::UpdatePetId {
                 filename: source_filename.to_string(),
                 pet_id: pet_id.to_string(),
+                reply,
+            })
+            .await
+    }
+
+    async fn distinct_behaviors(&self) -> AppResult<Vec<String>> {
+        self.db
+            .request(|reply| DbCommand::DistinctBehaviors { reply })
+            .await
+    }
+
+    async fn captions_for_date(&self, date: &str) -> AppResult<Vec<String>> {
+        self.db
+            .request(|reply| DbCommand::CaptionsForDate {
+                date: date.to_string(),
                 reply,
             })
             .await

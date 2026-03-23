@@ -7,7 +7,8 @@ pub struct ComicMeta {
 }
 
 pub fn parse_comic_filename(name: &str) -> Result<ComicMeta, String> {
-    let stem = name.strip_suffix(".jpg")
+    let stem = name
+        .strip_suffix(".jpg")
         .or_else(|| name.strip_suffix(".jpeg"))
         .or_else(|| name.strip_suffix(".JPG"))
         .ok_or_else(|| format!("not a JPEG: {name}"))?;
@@ -38,7 +39,10 @@ pub fn parse_comic_filename(name: &str) -> Result<ComicMeta, String> {
         None
     };
 
-    Ok(ComicMeta { captured_at, pet_id })
+    Ok(ComicMeta {
+        captured_at,
+        pet_id,
+    })
 }
 
 #[cfg(test)]
@@ -47,8 +51,10 @@ mod tests {
     use chrono::NaiveDate;
 
     fn dt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(y, m, d).unwrap()
-            .and_hms_opt(h, mi, s).unwrap()
+        NaiveDate::from_ymd_opt(y, m, d)
+            .unwrap()
+            .and_hms_opt(h, mi, s)
+            .unwrap()
     }
 
     #[test]

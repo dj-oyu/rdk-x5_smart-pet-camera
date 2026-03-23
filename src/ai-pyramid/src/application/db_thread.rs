@@ -103,6 +103,13 @@ pub(crate) enum DbCommand {
         pet_id: String,
         reply: oneshot::Sender<AppResult<usize>>,
     },
+    DistinctBehaviors {
+        reply: oneshot::Sender<AppResult<Vec<String>>>,
+    },
+    CaptionsForDate {
+        date: String,
+        reply: oneshot::Sender<AppResult<Vec<String>>>,
+    },
 }
 
 fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
@@ -113,7 +120,10 @@ fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
                 captured_at,
                 pet_id,
                 reply,
-            } => send_reply(reply, store.insert(&filename, captured_at, pet_id.as_deref())),
+            } => send_reply(
+                reply,
+                store.insert(&filename, captured_at, pet_id.as_deref()),
+            ),
             DbCommand::GetPhoto { filename, reply } => {
                 send_reply(reply, store.get_by_filename(&filename))
             }
@@ -155,7 +165,12 @@ fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
                 reply,
             } => send_reply(
                 reply,
-                store.ingest_with_detections(&filename, captured_at, pet_id.as_deref(), &detections),
+                store.ingest_with_detections(
+                    &filename,
+                    captured_at,
+                    pet_id.as_deref(),
+                    &detections,
+                ),
             ),
             DbCommand::GetDetections { photo_id, reply } => {
                 send_reply(reply, store.get_detections(photo_id))
@@ -164,12 +179,19 @@ fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
                 detection_id,
                 pet_id,
                 reply,
-            } => send_reply(reply, store.update_detection_override(detection_id, &pet_id)),
+            } => send_reply(
+                reply,
+                store.update_detection_override(detection_id, &pet_id),
+            ),
             DbCommand::UpdatePetId {
                 filename,
                 pet_id,
                 reply,
             } => send_reply(reply, store.update_pet_id(&filename, &pet_id)),
+            DbCommand::DistinctBehaviors { reply } => send_reply(reply, store.distinct_behaviors()),
+            DbCommand::CaptionsForDate { date, reply } => {
+                send_reply(reply, store.captions_for_date(&date))
+            }
         }
     }
 }

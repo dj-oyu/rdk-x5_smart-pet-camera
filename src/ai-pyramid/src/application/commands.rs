@@ -1,4 +1,6 @@
-use crate::application::{AppResult, ObservationInput, ObservationResult, PetEvent, SharedEventRepository};
+use crate::application::{
+    AppResult, ObservationInput, ObservationResult, PetEvent, SharedEventRepository,
+};
 use crate::db::DetectionInput;
 use chrono::NaiveDateTime;
 use tokio::sync::broadcast;
@@ -14,13 +16,20 @@ impl ObservationCommands {
         repository: SharedEventRepository,
         event_tx: broadcast::Sender<PetEvent>,
     ) -> Self {
-        Self { repository, event_tx }
+        Self {
+            repository,
+            event_tx,
+        }
     }
 
     pub async fn ingest_source_photo(&self, input: ObservationInput) -> AppResult<i64> {
         let id = self
             .repository
-            .store_source_photo(&input.source_filename, input.captured_at, input.pet_id.as_deref())
+            .store_source_photo(
+                &input.source_filename,
+                input.captured_at,
+                input.pet_id.as_deref(),
+            )
             .await?;
         let _ = self.event_tx.send(PetEvent {
             source_filename: input.source_filename,
@@ -32,7 +41,10 @@ impl ObservationCommands {
         Ok(id)
     }
 
-    pub async fn apply_observation(&self, result: ObservationResult) -> AppResult<Option<PetEvent>> {
+    pub async fn apply_observation(
+        &self,
+        result: ObservationResult,
+    ) -> AppResult<Option<PetEvent>> {
         self.repository
             .apply_observation(
                 &result.source_filename,
@@ -57,7 +69,11 @@ impl ObservationCommands {
         Ok(Some(event))
     }
 
-    pub async fn override_event_validity(&self, source_filename: &str, is_valid: bool) -> AppResult<bool> {
+    pub async fn override_event_validity(
+        &self,
+        source_filename: &str,
+        is_valid: bool,
+    ) -> AppResult<bool> {
         let updated = self
             .repository
             .override_event_validity(source_filename, is_valid)
@@ -65,8 +81,14 @@ impl ObservationCommands {
         Ok(updated > 0)
     }
 
-    pub async fn record_observation_failure(&self, source_filename: &str, error: &str) -> AppResult<usize> {
-        self.repository.record_observation_failure(source_filename, error).await
+    pub async fn record_observation_failure(
+        &self,
+        source_filename: &str,
+        error: &str,
+    ) -> AppResult<usize> {
+        self.repository
+            .record_observation_failure(source_filename, error)
+            .await
     }
 
     pub async fn ingest_with_detections(
@@ -81,8 +103,14 @@ impl ObservationCommands {
             .await
     }
 
-    pub async fn update_detection_override(&self, detection_id: i64, pet_id: &str) -> AppResult<usize> {
-        self.repository.update_detection_override(detection_id, pet_id).await
+    pub async fn update_detection_override(
+        &self,
+        detection_id: i64,
+        pet_id: &str,
+    ) -> AppResult<usize> {
+        self.repository
+            .update_detection_override(detection_id, pet_id)
+            .await
     }
 
     pub async fn update_pet_id(&self, source_filename: &str, pet_id: &str) -> AppResult<usize> {

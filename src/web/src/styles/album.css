@@ -574,3 +574,234 @@ button {
     transform: translateY(0);
   }
 }
+
+/* === Standalone Mode === */
+
+.standalone-shell {
+  width: min(1280px, calc(100vw - 32px));
+  padding: 0 0 32px;
+}
+
+.standalone-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 16px;
+}
+
+.standalone-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.search-input {
+  flex: 1;
+  max-width: 320px;
+  padding: 7px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.66);
+  font-size: 13px;
+  color: var(--text);
+  outline: none;
+  transition: border-color 120ms;
+}
+
+.search-input:focus {
+  border-color: rgba(79, 156, 255, 0.4);
+}
+
+.standalone-body {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 20px;
+  align-items: start;
+}
+
+.standalone-sidebar {
+  position: sticky;
+  top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.standalone-sidebar .filter-bar {
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 10px;
+}
+
+.standalone-sidebar .filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.standalone-sidebar .filter-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+
+.standalone-sidebar .filter-cluster,
+.standalone-sidebar .pet-filter,
+.standalone-sidebar .behavior-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.standalone-main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.standalone-main .stats-strip {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.standalone-main .event-grid {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+/* Pagination */
+.pagination {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.pagination-btn {
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(255, 255, 255, 0.66);
+  color: var(--accent);
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: 120ms ease;
+}
+
+.pagination-btn:hover:not(:disabled) {
+  background: rgba(79, 156, 255, 0.1);
+  border-color: rgba(79, 156, 255, 0.28);
+}
+
+.pagination-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.pagination-info {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Daily Summary */
+.daily-summary {
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.52);
+  padding: 10px;
+}
+
+.daily-summary-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.daily-summary-header strong {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.daily-summary-date {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.6);
+  padding: 2px 6px;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.daily-summary-body {
+  font-size: 12px;
+  line-height: 1.55;
+  color: #334155;
+}
+
+.daily-summary-text {
+  margin: 0;
+}
+
+.daily-summary-count {
+  display: block;
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.daily-summary-loading {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.daily-summary-error {
+  color: var(--bad);
+}
+
+/* Standalone responsive */
+@media (max-width: 1024px) {
+  .standalone-main .event-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .standalone-shell {
+    width: min(100vw - 12px, 100%);
+  }
+
+  .standalone-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .search-input {
+    max-width: none;
+  }
+
+  .standalone-body {
+    grid-template-columns: 1fr;
+  }
+
+  .standalone-sidebar {
+    position: static;
+  }
+
+  .standalone-main .event-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .standalone-main .stats-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
