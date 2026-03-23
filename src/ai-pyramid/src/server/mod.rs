@@ -385,7 +385,27 @@ async fn handle_sse(
 }
 
 async fn handle_pet_names(State(state): State<AppState>) -> impl IntoResponse {
-    Json(state.pet_names)
+    match state.queries().distinct_pet_ids().await {
+        Ok(ids) => {
+            let map: HashMap<String, String> = ids
+                .into_iter()
+                .map(|id| {
+                    let display = state
+                        .pet_names
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| id.clone());
+                    (id, display)
+                })
+                .collect();
+            Json(map).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
 }
 
 async fn handle_behaviors(State(state): State<AppState>) -> impl IntoResponse {
@@ -909,7 +929,27 @@ mod tests {
 
     #[tokio::test]
     async fn pet_names_endpoint() {
-        let app = router(test_state());
+        let state = test_state();
+        // Insert photos so distinct_pet_ids returns results
+        let commands = state.context.observation_commands();
+        commands
+            .ingest_source_photo(crate::application::ObservationInput {
+                source_filename: "a.jpg".into(),
+                captured_at: dt(2026, 3, 21, 10, 0, 0),
+                pet_id: Some("mike".into()),
+            })
+            .await
+            .unwrap();
+        commands
+            .ingest_source_photo(crate::application::ObservationInput {
+                source_filename: "b.jpg".into(),
+                captured_at: dt(2026, 3, 21, 11, 0, 0),
+                pet_id: Some("chatora".into()),
+            })
+            .await
+            .unwrap();
+
+        let app = router(state);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -926,6 +966,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
+        // Display names from AppState.pet_names override
         assert_eq!(json["mike"], "Mike");
         assert_eq!(json["chatora"], "Chatora");
     }

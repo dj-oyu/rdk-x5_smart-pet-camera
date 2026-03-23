@@ -46,6 +46,10 @@ impl EventQueries {
         self.repository.get_detections(photo_id).await
     }
 
+    pub async fn distinct_pet_ids(&self) -> AppResult<Vec<String>> {
+        self.repository.distinct_pet_ids().await
+    }
+
     pub async fn distinct_behaviors(&self) -> AppResult<Vec<String>> {
         self.repository.distinct_behaviors().await
     }
