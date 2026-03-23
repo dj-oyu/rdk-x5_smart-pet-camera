@@ -409,6 +409,16 @@ impl PhotoStore {
         )
     }
 
+    pub fn distinct_pet_ids(&self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT pet_id FROM photos WHERE pet_id IS NOT NULL AND pet_id != '' ORDER BY pet_id",
+        )?;
+        let ids = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(ids)
+    }
+
     pub fn distinct_behaviors(&self) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT behavior FROM photos WHERE behavior IS NOT NULL AND behavior != '' ORDER BY behavior",
