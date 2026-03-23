@@ -35,8 +35,8 @@ Go実装への移行時に実施した基本最適化。
 ### MJPEGゼロコピー
 
 ```
-Before: C側 memcpy(3MB) + Go側 copy(3MB) = 6MB × 30fps = 180MB/秒
-After:  C側 ポインタ返却 + Go側 描画時のみcopy(3MB) = 90MB/秒（50%削減）
+Before: C側 memcpy(3MB) + Go側 copy(3MB) = 6MB x 30fps = 180MB/秒
+After:  C側 share_id via SHM + Go側 hb_mem_import = ゼロコピー
 ```
 
 **実装**:
