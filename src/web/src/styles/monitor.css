@@ -132,7 +132,7 @@ a { color: inherit; }
     background: linear-gradient(145deg, rgba(35,47,76,0.9), rgba(11,16,30,0.9));
     border-radius: 14px 14px 0 0;
     overflow: hidden;
-    min-height: 380px;
+    aspect-ratio: 16 / 9;
     border: 1px solid rgba(255,255,255,0.06);
     border-bottom: none;
 }
@@ -1424,7 +1424,7 @@ a { color: inherit; }
 .album-lightbox {
     position: fixed;
     inset: 0;
-    z-index: 200;
+    z-index: 1050;
     display: flex;
     justify-content: center;
     align-items: center;
@@ -1554,7 +1554,7 @@ a { color: inherit; }
     }
     #video-panel {
         border-radius: 0;
-        min-height: 0;
+        aspect-ratio: auto;
     }
     .video-controls {
         border-radius: 0;

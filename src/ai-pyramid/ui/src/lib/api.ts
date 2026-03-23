@@ -121,8 +121,18 @@ export function readQueryFromLocation(): EventQuery {
   };
 }
 
+export function isEmbedded(): { embedded: boolean; host: string | null } {
+  const params = new URLSearchParams(window.location.search);
+  const embed = params.get("embed");
+  return { embedded: embed !== null, host: embed };
+}
+
 export function writeQueryToLocation(query: EventQuery): void {
   const params = buildParams(query);
+  const embed = new URLSearchParams(window.location.search).get("embed");
+  if (embed) {
+    params.set("embed", embed);
+  }
   const search = params.toString();
   const url = search ? `/app?${search}` : "/app";
   window.history.replaceState({}, "", url);
