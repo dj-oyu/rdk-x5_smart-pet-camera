@@ -1424,7 +1424,7 @@ a { color: inherit; }
 .album-lightbox {
     position: fixed;
     inset: 0;
-    z-index: 200;
+    z-index: 1050;
     display: flex;
     justify-content: center;
     align-items: center;
