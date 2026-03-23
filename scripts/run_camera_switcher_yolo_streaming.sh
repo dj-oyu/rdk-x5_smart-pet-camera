@@ -304,6 +304,12 @@ cleanup() {
   for pid in "${PIDS[@]:-}"; do
     if [[ -n "${pid:-}" ]] && kill -0 "${pid}" >/dev/null 2>&1; then
       kill "${pid}" >/dev/null 2>&1 || true
+    fi
+  done
+  # Wait for graceful shutdown (web_monitor saves detection history on SIGTERM)
+  sleep 3
+  for pid in "${PIDS[@]:-}"; do
+    if [[ -n "${pid:-}" ]]; then
       wait "${pid}" >/dev/null 2>&1 || true
     fi
   done
@@ -380,7 +386,7 @@ if [[ "${RUN_DETECTOR}" -eq 1 ]]; then
       --model-path "${YOLO_MODEL_PATH}" \
       --score-threshold "${YOLO_SCORE_THRESHOLD}" \
       --nms-threshold "${YOLO_NMS_THRESHOLD}" \
-      --log-level "${LOG_LEVEL}" 2>&1 | tee /tmp/yolo_detector.log
+      --log-level "${LOG_LEVEL}" &>/tmp/yolo_detector.log
   ) &
   PIDS+=("$!")
 fi
@@ -410,7 +416,7 @@ if [[ "${RUN_MONITOR}" -eq 1 ]]; then
       -fps 30 \
       -jpeg-quality "${JPEG_QUALITY}" \
       -log-level "${LOG_LEVEL}" \
-      ${TLS_ARGS} ${HTTP_ONLY_ARGS} 2>&1 | tee /tmp/web_monitor.log
+      ${TLS_ARGS} ${HTTP_ONLY_ARGS} &>/tmp/web_monitor.log
   ) &
   PIDS+=("$!")
 fi
@@ -426,7 +432,7 @@ if [[ "${RUN_STREAMING}" -eq 1 ]]; then
       -pprof ":${PPROF_PORT}" \
       -record-path "${RECORDING_PATH}" \
       -max-clients "${STREAMING_MAX_CLIENTS}" \
-      -log-level "${LOG_LEVEL}" 2>&1 | tee /tmp/streaming_server.log
+      -log-level "${LOG_LEVEL}" &>/tmp/streaming_server.log
   ) &
   PIDS+=("$!")
 fi
@@ -445,5 +451,9 @@ echo "Press Ctrl+C to stop"
 echo "========================================"
 
 if [[ "${#PIDS[@]}" -gt 0 ]]; then
+  # Stream all logs to terminal (tail is not in PIDS, so cleanup won't wait on it)
+  tail -f /tmp/camera_switcher.log /tmp/yolo_detector.log /tmp/web_monitor.log /tmp/streaming_server.log 2>/dev/null &
+  TAIL_PID=$!
   wait -n "${PIDS[@]}"
+  kill "${TAIL_PID}" 2>/dev/null || true
 fi
