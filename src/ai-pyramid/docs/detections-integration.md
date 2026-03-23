@@ -301,14 +301,14 @@ UV散布度閾値のキャリブレーションに使用できるテストデー
 
 detections API 導入前に保存された comic 画像には bbox 情報がない。これらの画像に対して後追いで YOLO 検出を実行し、detections テーブルに登録する。
 
-### rdk-x5 側仕様: `POST /detect` (port 8082)
+### rdk-x5 側仕様: `POST /detect` (port 8083)
 
 rdk-x5 の YOLO detector daemon が HTTP エンドポイントを提供する。デーモンのメインループ (SHM フレーム処理) と並行して動作。
 
 #### リクエスト
 
 ```
-POST http://rdk-x5:8082/detect
+POST http://rdk-x5:8083/detect
 Content-Type: application/json
 
 {
@@ -316,7 +316,7 @@ Content-Type: application/json
 }
 ```
 
-- ポート 8082 は Tailscale ACL `tcp:8080-8999` の範囲内
+- ポート 8083 は Tailscale ACL `tcp:8080-8999` の範囲内
 - rdk-x5 が `image_url` から JPEG をダウンロードして検出 (base64不要)
 - ai-pyramid の `GET /api/photos/{filename}` をそのまま指定可能
 - 画像サイズ制限なし (内部で 640x640 にletterbox)
@@ -407,7 +407,7 @@ while read f; do
   echo "Processing: $f"
 
   # rdk-x5 で検出 (rdk-x5 が ai-pyramid から画像を直接ダウンロード)
-  DETECT=$(curl -sf -X POST http://rdk-x5:8082/detect \
+  DETECT=$(curl -sf -X POST http://rdk-x5:8083/detect \
     -H 'Content-Type: application/json' \
     -d "{\"image_url\":\"http://ai-pyramid:3000/api/photos/$f\"}")
 

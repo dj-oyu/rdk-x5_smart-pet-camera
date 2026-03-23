@@ -339,7 +339,7 @@ class YoloDetectorDaemon:
         """シグナルハンドラ"""
         self.running = False
 
-    def _start_detect_api(self, port: int = 8082) -> None:
+    def _start_detect_api(self, port: int = 8083) -> None:
         """Start HTTP /detect endpoint on a background thread.
 
         Accepts an image URL, downloads the JPEG, runs YOLO detection,
@@ -418,7 +418,11 @@ class YoloDetectorDaemon:
                 pass  # suppress per-request logging
 
         def serve():
-            server = HTTPServer(("0.0.0.0", port), DetectHandler)
+            try:
+                server = HTTPServer(("0.0.0.0", port), DetectHandler)
+            except OSError as e:
+                logger.error(f"Detect API failed to bind port {port}: {e}")
+                return
             server.daemon_threads = True
             logger.info(f"Detect API listening on :{port}")
             server.serve_forever()
@@ -438,7 +442,7 @@ class YoloDetectorDaemon:
         self._save_thread = threading.Thread(target=self._save_worker, daemon=True)
         self._save_thread.start()
 
-        # HTTP detection API (separate thread, port 8082)
+        # HTTP detection API (separate thread, port 8083)
         self._start_detect_api()
 
         logger.debug("Starting detection loop")
