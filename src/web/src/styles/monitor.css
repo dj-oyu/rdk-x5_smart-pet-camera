@@ -1421,6 +1421,14 @@ a { color: inherit; }
     opacity: 1;
     color: var(--accent);
 }
+@keyframes lightbox-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+@keyframes lightbox-img-in {
+    from { opacity: 0; transform: scale(0.9); }
+    to   { opacity: 1; transform: scale(1); }
+}
 .album-lightbox {
     position: fixed;
     inset: 0;
@@ -1431,12 +1439,14 @@ a { color: inherit; }
     background: rgba(0, 0, 0, 0.92);
     backdrop-filter: blur(8px);
     cursor: pointer;
+    animation: lightbox-in 0.15s ease-out;
 }
 .album-lightbox img {
     max-width: 92%;
     max-height: 80vh;
     object-fit: contain;
     border-radius: 8px;
+    animation: lightbox-img-in 0.2s ease-out;
 }
 .album-lightbox-meta {
     position: fixed;
