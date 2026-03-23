@@ -46,37 +46,26 @@ go build -o ../../build/webmonitor ./cmd/webmonitor
 
 ### Event-Driven Detection Pipeline
 
-```
-┌─────────────────────────┐
-│ Python Detection Daemon │
-│ (yolo_detector_daemon)  │
-└───────────┬─────────────┘
-            │ write detection + sem_post()
-            ↓
-┌─────────────────────────┐
-│ Shared Memory (C)       │
-│ /pet_camera_detections  │
-│ - Detection data        │
-│ - Version counter       │
-│ - Semaphore ←───────────┼─── Event notification
-└───────────┬─────────────┘
-            │ sem_wait() blocks
-            ↓
-┌─────────────────────────┐
-│ DetectionBroadcaster    │
-│ (Go)                    │
-│ - Wakes on semaphore    │
-│ - Reads detection       │
-│ - Converts to Protobuf  │
-└───────────┬─────────────┘
-            │ broadcast
-            ↓
-┌─────────────────────────┐
-│ Transport Layer         │
-│ - JSON (default)        │ ──→ Browser (EventSource)
-│ - Protobuf (opt-in)     │ ──→ IoT Device
-│ - (Future) MQTT         │ ──→ MQTT Subscribers
-└─────────────────────────┘
+```mermaid
+graph TD
+    detector["Python Detection Daemon<br/>(yolo_detector_daemon)"]
+    shm["Shared Memory (C)<br/>/pet_camera_detections<br/>- Detection data<br/>- Version counter<br/>- Semaphore (Event notification)"]
+    broadcaster["DetectionBroadcaster (Go)<br/>- Wakes on semaphore<br/>- Reads detection<br/>- Converts to Protobuf"]
+    json["JSON (default)"]
+    protobuf["Protobuf (opt-in)"]
+    mqtt["(Future) MQTT"]
+    browser["Browser (EventSource)"]
+    iot["IoT Device"]
+    mqttsub["MQTT Subscribers"]
+
+    detector -->|"write detection + sem_post()"| shm
+    shm -->|"sem_wait() blocks"| broadcaster
+    broadcaster -->|"broadcast"| json
+    broadcaster -->|"broadcast"| protobuf
+    broadcaster -->|"broadcast"| mqtt
+    json --> browser
+    protobuf --> iot
+    mqtt --> mqttsub
 ```
 
 ### Key Features

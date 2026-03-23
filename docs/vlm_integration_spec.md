@@ -25,25 +25,25 @@
 
 ### 1.3 システム構成
 
-```
-┌──────────────────────────────────┐    ┌──────────────────────────────────┐
-│  RDK X5                          │    │  M5Stack AI Pyramid              │
-│  rdk-x5.tail848eb5.ts.net        │    │  m5stack-ai-pyramid.tail848eb5   │
-│                                   │    │                .ts.net           │
-│  Camera → YOLO検出                │    │  VLM推論エンジン (NPU 24TOPS)    │
-│  Streaming Server (Go)            │    │  個体識別モジュール              │
-│    :8080 HTTPS (MJPEG/SSE/REST)  │    │  行動解析パイプライン            │
-│    :8081 HTTP  (WebRTC内部)       │    │  行動ログDB (SQLite)            │
-│                                   │    │  行動ログAPI (HTTP :8090)       │
-│  Monitor UI (HTTPS)               │    │                                  │
-│    → 全API: :8080 経由             │    │                                  │
-│    → WebRTC: :8080がProxy→:8081   │    │                                  │
-│    → 行動ログ: :8080がProxy→:8090 │    │                                  │
-│                                   │    │                                  │
-│  [既存] 映像配信・検出             │    │  [新規] VLM解析・ログ管理        │
-└──────────────────────────────────┘    └──────────────────────────────────┘
-         │  Tailscale (WireGuard暗号化)         │
-         └──────────────────────────────────────┘
+```mermaid
+graph LR
+    subgraph RDK["RDK X5<br/>rdk-x5.tail848eb5.ts.net"]
+        CAM["Camera → YOLO"]
+        GO["Streaming Server (Go)<br/>:8080 HTTPS (MJPEG/SSE/REST)<br/>:8081 HTTP (WebRTC)"]
+        UI["Monitor UI (HTTPS)<br/>All API via :8080<br/>WebRTC: :8080 Proxy → :8081<br/>Behavior log: :8080 Proxy → :8090"]
+        EXISTING["Existing: Video streaming / Detection"]
+    end
+
+    subgraph PYRAMID["M5Stack AI Pyramid<br/>m5stack-ai-pyramid.tail848eb5.ts.net"]
+        VLM["VLM Engine (NPU 24TOPS)"]
+        IDENTIFY["Pet Identification Module"]
+        PIPELINE["Behavior Analysis Pipeline"]
+        DB["Behavior Log DB (SQLite)"]
+        API["Behavior Log API (HTTP :8090)"]
+        NEW["New: VLM Analysis / Log Management"]
+    end
+
+    RDK -- "Tailscale (WireGuard)" --> PYRAMID
 ```
 
 ### 1.4 HTTPS要件
@@ -84,32 +84,20 @@ Browser (HTTPS)
 
 ### 2.1 全体フロー
 
-```
-[rdk-x5]                              [m5stack-ai-pyramid]
+```mermaid
+graph TD
+    MJPEG["rdk-x5<br/>GET /stream (MJPEG)"] -->|"Frame capture"| FRAME["Frame Acquisition<br/>(Periodic capture)"]
+    SSE["rdk-x5<br/>GET /api/detections/stream (SSE)"] -->|"Detection events"| EVENT["YOLO Detection Event Receiver"]
 
-GET /stream (MJPEG) ───────────────→  フレーム取得 (定期キャプチャ)
-GET /api/detections/stream (SSE) ──→  YOLO検出イベント受信
-                                            │
-                                            ▼
-                                       ┌─────────────┐
-                                       │  トリガー判定  │
-                                       │  (検出あり時)  │
-                                       └──────┬──────┘
-                                              │
-                                              ▼
-                                       ┌─────────────┐
-                                       │  VLM推論     │
-                                       │  (画像+検出)  │
-                                       └──────┬──────┘
-                                              │
-                                              ▼
-                                       ┌─────────────┐
-                                       │  行動ログDB   │
-                                       │  (SQLite)    │
-                                       └──────┬──────┘
-                                              │
-  [Browser]                                   │  [rdk-x5 Go Server]
-  https://rdk-x5:8080/api/vlm/* ──→ Proxy ──→ http://m5stack-ai-pyramid:8090/api/*
+    FRAME --> TRIGGER["Trigger Decision<br/>(On detection)"]
+    EVENT --> TRIGGER
+
+    TRIGGER --> VLMINF["VLM Inference<br/>(Image + Detection)"]
+    VLMINF --> LOGDB["Behavior Log DB<br/>(SQLite)"]
+
+    BROWSER["Browser<br/>https://rdk-x5:8080/api/vlm/*"] -->|Proxy| GOPROXY["rdk-x5 Go Server"]
+    GOPROXY -->|Forward| LOGAPI["http://m5stack-ai-pyramid:8090/api/*"]
+    LOGDB --> LOGAPI
 ```
 
 ### 2.2 トリガー方式
@@ -538,47 +526,17 @@ CREATE TABLE daily_summary (
 
 ### 5.1 コンポーネント構成
 
-```
-┌─────────────────────────────────────────────────┐
-│  AX8850 VLM行動解析サーバー                       │
-│                                                   │
-│  ┌──────────────────────────────────────────┐    │
-│  │  Camera Client                           │    │
-│  │  - MJPEGフレーム取得                      │    │
-│  │  - SSE検出イベント受信                    │    │
-│  └──────────┬───────────────────────────────┘    │
-│             │                                     │
-│  ┌──────────▼───────────────────────────────┐    │
-│  │  Trigger Controller                      │    │
-│  │  - 検出トリガー判定                       │    │
-│  │  - 定期スナップショット                   │    │
-│  │  - レート制限 (推論間隔管理)              │    │
-│  └──────────┬───────────────────────────────┘    │
-│             │                                     │
-│  ┌──────────▼───────────────────────────────┐    │
-│  │  VLM Inference Engine                    │    │
-│  │  - NPU推論 (24 TOPS INT8)               │    │
-│  │  - プロンプト構築                         │    │
-│  │  - レスポンスパース                       │    │
-│  │  - 個体識別                              │    │
-│  └──────────┬───────────────────────────────┘    │
-│             │                                     │
-│  ┌──────────▼───────────────────────────────┐    │
-│  │  Behavior Log Store                      │    │
-│  │  - SQLite永続化                          │    │
-│  │  - サムネイル保存                         │    │
-│  │  - 日次サマリー集計                       │    │
-│  │  - 7日間ローテーション                    │    │
-│  └──────────┬───────────────────────────────┘    │
-│             │                                     │
-│  ┌──────────▼───────────────────────────────┐    │
-│  │  REST API Server (:8090)                 │    │
-│  │  - 行動ログ配信                          │    │
-│  │  - サマリー・トレンド                     │    │
-│  │  - SSEリアルタイム通知                    │    │
-│  │  - CORS対応                              │    │
-│  └──────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph AX8850["AX8850 VLM Behavior Analysis Server"]
+        CC["Camera Client<br/>MJPEG frame capture<br/>SSE detection event receiver"]
+        TC["Trigger Controller<br/>Detection trigger decision<br/>Periodic snapshot<br/>Rate limiting"]
+        VLM["VLM Inference Engine<br/>NPU inference (24 TOPS INT8)<br/>Prompt construction<br/>Response parsing<br/>Pet identification"]
+        BLS["Behavior Log Store<br/>SQLite persistence<br/>Thumbnail storage<br/>Daily summary aggregation<br/>7-day rotation"]
+        REST["REST API Server (:8090)<br/>Behavior log delivery<br/>Summary / Trends<br/>SSE realtime notification<br/>CORS support"]
+    end
+
+    CC --> TC --> VLM --> BLS --> REST
 ```
 
 ### 5.2 VLMモデル要件
@@ -922,37 +880,28 @@ message DailySummary {
 
 ### B. ネットワーク構成図
 
+```mermaid
+graph TD
+    subgraph TS["Tailscale Network (tail848eb5)<br/>WireGuard Encrypted Tunnel"]
+        subgraph RDK["rdk-x5.tail848eb5.ts.net"]
+            HTTPS[":8080 HTTPS<br/>Monitor UI<br/>MJPEG / SSE / REST<br/>Proxy /api/webrtc/*<br/>Proxy /api/vlm/*"]
+            WEBRTC[":8081 HTTP (internal)<br/>WebRTC Streaming"]
+        end
+
+        subgraph M5["m5stack-ai-pyramid.tail848eb5.ts.net"]
+            MJPEG_IN["MJPEG Capture (HTTP)"]
+            SSE_IN["SSE Detection Receiver (HTTP)"]
+            LOGAPI[":8090 Behavior Log API (HTTP)"]
+        end
+
+        BROWSER["Browser (PC / iPhone Safari)<br/>https://rdk-x5:8080/*<br/>/stream (MJPEG)<br/>/api/webrtc/offer (Proxy)<br/>/api/vlm/* (Proxy)"]
+    end
+
+    BROWSER -- "HTTPS only" --> HTTPS
+    HTTPS -- "MJPEG" --> MJPEG_IN
+    HTTPS -- "SSE" --> SSE_IN
+    HTTPS -- "Proxy /api/vlm/*" --> LOGAPI
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│  Tailscale Network (tail848eb5)                                   │
-│  WireGuard暗号化トンネル                                           │
-│                                                                    │
-│  ┌─────────────────────────┐   ┌──────────────────────┐          │
-│  │ rdk-x5                  │   │ m5stack-ai-pyramid    │          │
-│  │ .tail848eb5.ts.net      │   │ .tail848eb5.ts.net    │          │
-│  │                         │   │                      │          │
-│  │ :8080 HTTPS             │──►│ MJPEG取得 (HTTP)     │          │
-│  │   Monitor UI            │──►│ SSE検出受信 (HTTP)    │          │
-│  │   MJPEG/SSE/REST        │   │                      │          │
-│  │   Proxy /api/webrtc/*   │   │ :8090 行動ログAPI     │          │
-│  │   Proxy /api/vlm/* ─────┼──►│  (HTTP)              │          │
-│  │                         │   │                      │          │
-│  │ :8081 HTTP (内部)       │   │                      │          │
-│  │   WebRTC Streaming      │   │                      │          │
-│  └─────────────────────────┘   └──────────────────────┘          │
-│         ▲                                                         │
-│         │ HTTPS only                                              │
-│         │                                                         │
-│  ┌──────┴──────────────────────┐                                 │
-│  │ Browser (PC / iPhone Safari) │                                 │
-│  │                              │                                 │
-│  │ https://rdk-x5:8080/*       │  ← 全通信がここに集約            │
-│  │   /stream (MJPEG)           │                                 │
-│  │   /api/webrtc/offer (Proxy) │                                 │
-│  │   /api/vlm/* (Proxy)        │                                 │
-│  └──────────────────────────────┘                                 │
-│                                                                    │
-│  ※ rdk-x5 のみ外部share → ブラウザはrdk-x5だけ知っていればよい     │
-│  ※ m5stack-ai-pyramid はshare不要（rdk-x5がProxy）                │
-└──────────────────────────────────────────────────────────────────┘
-```
+
+> **Note**: Only rdk-x5 is shared externally. The browser only needs to know rdk-x5. m5stack-ai-pyramid does not need to be shared (rdk-x5 acts as proxy).
+

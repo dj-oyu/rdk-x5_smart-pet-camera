@@ -29,18 +29,27 @@ This package provides two complementary Go servers:
 
 ## Architecture
 
-```
-Camera Daemon (C)
-    ├─ H.264 Stream SHM ──→ WebRTC Server (Go:8081)
-    │                        ├─ WebRTC (Browser)
-    │                        └─ H.264 Recording
-    │
-    ├─ MJPEG Frame SHM ──→ Web Monitor (Go:8080)
-    │                       ├─ MJPEG Stream (Browser)
-    │                       └─ WebRTC Proxy
-    │
-    └─ Detection SHM ──────→ Web Monitor (Go:8080)
-         (Semaphore-based)   └─ SSE Detections (JSON/Protobuf)
+```mermaid
+graph LR
+    cam["Camera Daemon (C)"]
+    webrtc_srv["WebRTC Server<br/>(Go:8081)"]
+    webmon["Web Monitor<br/>(Go:8080)"]
+    webrtc_out["WebRTC (Browser)"]
+    h264_rec["H.264 Recording"]
+    mjpeg_out["MJPEG Stream (Browser)"]
+    webrtc_proxy["WebRTC Proxy"]
+    sse["SSE Detections<br/>(JSON/Protobuf)"]
+
+    cam -->|"H.264 Stream SHM"| webrtc_srv
+    webrtc_srv --> webrtc_out
+    webrtc_srv --> h264_rec
+
+    cam -->|"MJPEG Frame SHM"| webmon
+    webmon --> mjpeg_out
+    webmon --> webrtc_proxy
+
+    cam -->|"Detection SHM<br/>(Semaphore-based)"| webmon
+    webmon --> sse
 ```
 
 ### Components
@@ -425,10 +434,16 @@ protoc --go_out=. --go_opt=module=github.com/dj-oyu/rdk-x5_smart-pet-camera/stre
 
 The Protocol Buffers architecture is designed for future MQTT integration:
 
-```
-DetectionBroadcaster (Go)
-    ├─ SSE Clients (JSON/Protobuf)
-    └─ MQTT Publisher (Protobuf) → MQTT Broker → IoT Devices
+```mermaid
+graph LR
+    db["DetectionBroadcaster (Go)"]
+    sse["SSE Clients<br/>(JSON/Protobuf)"]
+    mqtt_pub["MQTT Publisher<br/>(Protobuf)"]
+    broker["MQTT Broker"]
+    iot["IoT Devices"]
+
+    db --> sse
+    db --> mqtt_pub --> broker --> iot
 ```
 
 **Benefits**:
