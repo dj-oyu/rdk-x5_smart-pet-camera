@@ -186,12 +186,18 @@ NV12 bbox領域 (2px刻みサンプリング)
 ### 現在の閾値
 
 ```go
-const scatterThreshold = 5.0  // TODO: テストデータでキャリブレーション
+const scatterThreshold = 5.0
 ```
 
-テストデータでの実測値:
-- mike panel: scatter = 7.83
-- chatora panel: scatter = 4.90
+YOLO-bbox ベースの実測値 (33サンプル):
+
+| ソース | mike | chatora |
+|--------|------|---------|
+| Video bbox (n=22) | mean=6.20, min=5.81 | mean=2.48, max=3.93 |
+| Comic panels (n=6) | 6.72-7.15 | 3.74-4.17 |
+| Go NV12 (テスト) | 7.83 | 4.90 |
+
+Go/Python の NV12 変換で ~0.9 のオフセットあり。閾値 5.0 は両方で分離可能。
 
 ### Future: 閾値の自動キャリブレーション
 
@@ -286,3 +292,152 @@ UV散布度閾値のキャリブレーションに使用できるテストデー
 |--------|---------|
 | mike | `src/streaming_server/internal/webmonitor/testdata/mike.jpg` |
 | chatora | `src/streaming_server/internal/webmonitor/testdata/chatora.jpg` |
+
+---
+
+## Backfill: 既存comic画像の後追い検出
+
+### Why
+
+detections API 導入前に保存された comic 画像には bbox 情報がない。これらの画像に対して後追いで YOLO 検出を実行し、detections テーブルに登録する。
+
+### rdk-x5 側仕様: `POST /detect` (port 8082)
+
+rdk-x5 の YOLO detector daemon が HTTP エンドポイントを提供する。デーモンのメインループ (SHM フレーム処理) と並行して動作。
+
+#### リクエスト
+
+```
+POST http://rdk-x5:8082/detect
+Content-Type: application/json
+
+{
+  "image_url": "http://ai-pyramid:3000/api/photos/comic_20260321_104532_chatora.jpg"
+}
+```
+
+- ポート 8082 は Tailscale ACL `tcp:8080-8999` の範囲内
+- rdk-x5 が `image_url` から JPEG をダウンロードして検出 (base64不要)
+- ai-pyramid の `GET /api/photos/{filename}` をそのまま指定可能
+- 画像サイズ制限なし (内部で 640x640 にletterbox)
+- タイムアウト: 画像ダウンロード 10秒
+
+#### レスポンス
+
+```json
+{
+  "detections": [
+    {
+      "class_name": "cat",
+      "confidence": 0.85,
+      "bbox": {"x": 146, "y": 147, "w": 89, "h": 89}
+    },
+    {
+      "class_name": "cup",
+      "confidence": 0.62,
+      "bbox": {"x": 300, "y": 100, "w": 80, "h": 60}
+    }
+  ],
+  "width": 848,
+  "height": 496
+}
+```
+
+- bbox 座標は**入力画像座標** (comic なら 848x496 空間)
+- comic 画像をそのまま送れば、返却 bbox はそのまま comic 座標として DB に保存可能
+- `width`, `height` は入力画像の元サイズ
+
+#### 前処理パイプライン (rdk-x5内部)
+
+```
+HTTP GET image_url → JPEG bytes
+  → cv2.imdecode() → BGR
+  → letterbox 640x640 (aspect ratio保持 + padding)
+  → BGR→NV12 (I420経由でUV interleave)
+  → YoloDetector.detect_nv12() (BPU INT8推論)
+  → bbox座標をletterbox逆変換 → 元画像座標
+```
+
+- **CLAHE不要**: comic JPEG は ISP処理済み可視光画像
+- **score_threshold**: デーモンの設定値を使用 (デフォルト 0.25)
+- **NMS**: class-aware NMS (IoU=0.7) がdetector内部で適用済み
+
+#### 対応 YOLO クラス
+
+| COCO ID | class_name | 備考 |
+|---------|-----------|------|
+| 0 | `person` | |
+| 15 | `cat` | pet_id 判定対象 |
+| 16 | `dog` | cat重複時は誤検出の可能性 |
+| 41 | `cup` | |
+| 45 | `bowl` | COCO "bowl" → `food_bowl` |
+| 56 | `chair` | |
+
+これ以外の COCO クラスはフィルタされ、レスポンスに含まれない。
+
+#### エラー
+
+| HTTP Status | 条件 |
+|-------------|------|
+| 400 | JSON パース失敗、`image_url` 欠落 |
+| 502 | 画像ダウンロード失敗 (URL不正、タイムアウト、接続拒否) |
+| 500 | JPEG デコード失敗、BPU推論エラー |
+
+#### 性能
+
+- BPU推論: ~9ms (YOLOv11n)
+- 前処理 (JPEG decode + letterbox + NV12変換): ~5-10ms
+- 合計: **~15-20ms/画像**
+- メインループの SHM フレーム処理と GIL で排他されるため、リアルタイム検出に若干の遅延影響あり
+
+### ai-pyramid 側: backfill 手順
+
+新規 API やスクリプトは不要。既存 API の組み合わせ + shell ワンライナーで実行。
+
+#### 手順 (ai-pyramid 実機上で実行)
+
+```bash
+# 1. detections が空の photo を検索
+# 2. 各 photo を rdk-x5 で検出
+# 3. 結果を ingest API で DB に INSERT
+
+sqlite3 data/pet-album.db \
+  "SELECT p.filename FROM photos p LEFT JOIN detections d ON d.photo_id=p.id WHERE d.id IS NULL" | \
+while read f; do
+  echo "Processing: $f"
+
+  # rdk-x5 で検出 (rdk-x5 が ai-pyramid から画像を直接ダウンロード)
+  DETECT=$(curl -sf -X POST http://rdk-x5:8082/detect \
+    -H 'Content-Type: application/json' \
+    -d "{\"image_url\":\"http://ai-pyramid:3000/api/photos/$f\"}")
+
+  [ -z "$DETECT" ] && echo "  SKIP (detect failed)" && continue
+
+  # detect レスポンスを ingest 形式に変換して投入
+  echo "$DETECT" | jq --arg f "$f" '{
+    filename: $f,
+    captured_at: ($f | capture("comic_(?<d>[0-9]{8})_(?<t>[0-9]{6})") |
+      "\(.d[0:4])-\(.d[4:6])-\(.d[6:8])T\(.t[0:2]):\(.t[2:4]):\(.t[4:6])"),
+    pet_id: ($f | capture("_(?<p>[a-z]+)\\.jpg$") | .p),
+    detections: [.detections[] | {
+      bbox_x: .bbox.x, bbox_y: .bbox.y, bbox_w: .bbox.w, bbox_h: .bbox.h,
+      yolo_class: .class_name,
+      confidence: .confidence,
+      detected_at: ($f | capture("comic_(?<d>[0-9]{8})_(?<t>[0-9]{6})") |
+        "\(.d[0:4])-\(.d[4:6])-\(.d[6:8])T\(.t[0:2]):\(.t[2:4]):\(.t[4:6])")
+    }]
+  }' | curl -sf -X POST http://localhost:3000/api/photos/ingest \
+    -H 'Content-Type: application/json' -d @- > /dev/null
+
+  echo "  OK ($(echo "$DETECT" | jq '.detections | length') detections)"
+  sleep 0.2  # rdk-x5 メインループへの影響軽減
+done
+```
+
+#### 注意事項
+
+- `pet_class` = NULL (元フレームの NV12 がないため UV scatter 不可)
+- `panel_index` = NULL (backfill ではパネル情報なし)
+- `jq` が必要 (`apt install jq`)
+- rdk-x5 の detector daemon が起動中である必要あり
+- `sleep 0.2` で BPU 負荷を分散 (リアルタイム検出への影響軽減)
