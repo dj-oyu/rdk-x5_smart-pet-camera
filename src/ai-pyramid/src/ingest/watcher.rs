@@ -26,7 +26,10 @@ impl PhotoWatcher {
         let entries = match std::fs::read_dir(self.app.photos_dir()) {
             Ok(entries) => entries,
             Err(error) => {
-                warn!("Cannot read photos dir {}: {error}", self.app.photos_dir().display());
+                warn!(
+                    "Cannot read photos dir {}: {error}",
+                    self.app.photos_dir().display()
+                );
                 return;
             }
         };
@@ -40,7 +43,12 @@ impl PhotoWatcher {
                 continue;
             }
             if let Ok(meta) = parse_comic_filename(&name)
-                && queries.get_event_by_source(&name).await.ok().flatten().is_none()
+                && queries
+                    .get_event_by_source(&name)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_none()
                 && commands
                     .ingest_source_photo(ObservationInput {
                         source_filename: name.clone(),
@@ -61,7 +69,10 @@ impl PhotoWatcher {
         match queries.list_pending_sources(MAX_VLM_ATTEMPTS).await {
             Ok(names) => {
                 if !names.is_empty() {
-                    info!("Rescan: {} pending sources queued for observation", names.len());
+                    info!(
+                        "Rescan: {} pending sources queued for observation",
+                        names.len()
+                    );
                 }
                 for name in names {
                     let _ = tx.try_send(name);
@@ -129,7 +140,13 @@ impl PhotoWatcher {
                                 continue;
                             }
                         };
-                        if queries.get_event_by_source(&name).await.ok().flatten().is_none() {
+                        if queries
+                            .get_event_by_source(&name)
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_none()
+                        {
                             match commands
                                 .ingest_source_photo(ObservationInput {
                                     source_filename: name.clone(),

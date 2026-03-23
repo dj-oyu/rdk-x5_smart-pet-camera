@@ -16,6 +16,8 @@ pub struct EventQuery {
     pub pet_id: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    pub search: Option<String>,
+    pub behavior: Option<String>,
 }
 
 impl Default for EventQuery {
@@ -25,6 +27,8 @@ impl Default for EventQuery {
             pet_id: None,
             limit: None,
             offset: None,
+            search: None,
+            behavior: None,
         }
     }
 }
@@ -41,6 +45,8 @@ impl EventQuery {
             pet_id: self.pet_id.clone(),
             limit: self.limit,
             offset: self.offset,
+            search: self.search.clone(),
+            behavior: self.behavior.clone(),
         }
     }
 }

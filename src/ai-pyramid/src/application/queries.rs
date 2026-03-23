@@ -1,4 +1,6 @@
-use crate::application::{ActivityStats, AppResult, EventQuery, EventSummary, SharedEventRepository};
+use crate::application::{
+    ActivityStats, AppResult, EventQuery, EventSummary, SharedEventRepository,
+};
 use crate::db::Detection;
 
 #[derive(Clone)]
@@ -11,7 +13,10 @@ impl EventQueries {
         Self { repository }
     }
 
-    pub async fn get_event_by_source(&self, source_filename: &str) -> AppResult<Option<EventSummary>> {
+    pub async fn get_event_by_source(
+        &self,
+        source_filename: &str,
+    ) -> AppResult<Option<EventSummary>> {
         self.repository.get_event_by_source(source_filename).await
     }
 
@@ -32,10 +37,20 @@ impl EventQueries {
     }
 
     pub async fn get_observation_attempts(&self, source_filename: &str) -> AppResult<Option<i32>> {
-        self.repository.get_observation_attempts(source_filename).await
+        self.repository
+            .get_observation_attempts(source_filename)
+            .await
     }
 
     pub async fn get_detections(&self, photo_id: i64) -> AppResult<Vec<Detection>> {
         self.repository.get_detections(photo_id).await
+    }
+
+    pub async fn distinct_behaviors(&self) -> AppResult<Vec<String>> {
+        self.repository.distinct_behaviors().await
+    }
+
+    pub async fn captions_for_date(&self, date: &str) -> AppResult<Vec<String>> {
+        self.repository.captions_for_date(date).await
     }
 }
