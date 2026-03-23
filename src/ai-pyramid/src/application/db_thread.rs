@@ -1,5 +1,5 @@
 use crate::application::AppResult;
-use crate::db::{Photo, PhotoFilter, PhotoStore, Stats};
+use crate::db::{Detection, DetectionInput, Photo, PhotoFilter, PhotoStore, Stats};
 use chrono::NaiveDateTime;
 use std::sync::mpsc;
 use std::thread;
@@ -82,6 +82,27 @@ pub(crate) enum DbCommand {
         filename: String,
         reply: oneshot::Sender<AppResult<Option<i32>>>,
     },
+    IngestWithDetections {
+        filename: String,
+        captured_at: NaiveDateTime,
+        pet_id: Option<String>,
+        detections: Vec<DetectionInput>,
+        reply: oneshot::Sender<AppResult<i64>>,
+    },
+    GetDetections {
+        photo_id: i64,
+        reply: oneshot::Sender<AppResult<Vec<Detection>>>,
+    },
+    UpdateDetectionOverride {
+        detection_id: i64,
+        pet_id: String,
+        reply: oneshot::Sender<AppResult<usize>>,
+    },
+    UpdatePetId {
+        filename: String,
+        pet_id: String,
+        reply: oneshot::Sender<AppResult<usize>>,
+    },
 }
 
 fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
@@ -126,6 +147,29 @@ fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
             DbCommand::GetVlmAttempts { filename, reply } => {
                 send_reply(reply, store.get_vlm_attempts(&filename))
             }
+            DbCommand::IngestWithDetections {
+                filename,
+                captured_at,
+                pet_id,
+                detections,
+                reply,
+            } => send_reply(
+                reply,
+                store.ingest_with_detections(&filename, captured_at, pet_id.as_deref(), &detections),
+            ),
+            DbCommand::GetDetections { photo_id, reply } => {
+                send_reply(reply, store.get_detections(photo_id))
+            }
+            DbCommand::UpdateDetectionOverride {
+                detection_id,
+                pet_id,
+                reply,
+            } => send_reply(reply, store.update_detection_override(detection_id, &pet_id)),
+            DbCommand::UpdatePetId {
+                filename,
+                pet_id,
+                reply,
+            } => send_reply(reply, store.update_pet_id(&filename, &pet_id)),
         }
     }
 }

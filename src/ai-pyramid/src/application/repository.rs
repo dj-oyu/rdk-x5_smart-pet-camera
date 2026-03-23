@@ -1,6 +1,6 @@
 use crate::application::db_thread::{Database, DbCommand};
 use crate::application::{ActivityStats, AppResult, EventQuery, EventSummary};
-use crate::db::PhotoStore;
+use crate::db::{Detection, DetectionInput, PhotoStore};
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
 use std::sync::Arc;
@@ -28,6 +28,16 @@ pub trait EventRepositoryPort: Send + Sync {
     async fn record_observation_failure(&self, source_filename: &str, error: &str) -> AppResult<usize>;
     async fn activity_stats(&self) -> AppResult<ActivityStats>;
     async fn get_observation_attempts(&self, source_filename: &str) -> AppResult<Option<i32>>;
+    async fn ingest_with_detections(
+        &self,
+        source_filename: &str,
+        captured_at: NaiveDateTime,
+        pet_id: Option<&str>,
+        detections: &[DetectionInput],
+    ) -> AppResult<i64>;
+    async fn get_detections(&self, photo_id: i64) -> AppResult<Vec<Detection>>;
+    async fn update_detection_override(&self, detection_id: i64, pet_id: &str) -> AppResult<usize>;
+    async fn update_pet_id(&self, source_filename: &str, pet_id: &str) -> AppResult<usize>;
 }
 
 pub type SharedEventRepository = Arc<dyn EventRepositoryPort>;
@@ -151,6 +161,50 @@ impl EventRepositoryPort for PhotoStoreRepository {
         self.db
             .request(|reply| DbCommand::GetVlmAttempts {
                 filename: source_filename.to_string(),
+                reply,
+            })
+            .await
+    }
+
+    async fn ingest_with_detections(
+        &self,
+        source_filename: &str,
+        captured_at: NaiveDateTime,
+        pet_id: Option<&str>,
+        detections: &[DetectionInput],
+    ) -> AppResult<i64> {
+        self.db
+            .request(|reply| DbCommand::IngestWithDetections {
+                filename: source_filename.to_string(),
+                captured_at,
+                pet_id: pet_id.map(str::to_string),
+                detections: detections.to_vec(),
+                reply,
+            })
+            .await
+    }
+
+    async fn get_detections(&self, photo_id: i64) -> AppResult<Vec<Detection>> {
+        self.db
+            .request(|reply| DbCommand::GetDetections { photo_id, reply })
+            .await
+    }
+
+    async fn update_detection_override(&self, detection_id: i64, pet_id: &str) -> AppResult<usize> {
+        self.db
+            .request(|reply| DbCommand::UpdateDetectionOverride {
+                detection_id,
+                pet_id: pet_id.to_string(),
+                reply,
+            })
+            .await
+    }
+
+    async fn update_pet_id(&self, source_filename: &str, pet_id: &str) -> AppResult<usize> {
+        self.db
+            .request(|reply| DbCommand::UpdatePetId {
+                filename: source_filename.to_string(),
+                pet_id: pet_id.to_string(),
                 reply,
             })
             .await

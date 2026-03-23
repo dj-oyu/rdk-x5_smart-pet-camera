@@ -1,4 +1,6 @@
 use crate::application::{AppResult, ObservationInput, ObservationResult, PetEvent, SharedEventRepository};
+use crate::db::DetectionInput;
+use chrono::NaiveDateTime;
 use tokio::sync::broadcast;
 
 #[derive(Clone)]
@@ -65,5 +67,25 @@ impl ObservationCommands {
 
     pub async fn record_observation_failure(&self, source_filename: &str, error: &str) -> AppResult<usize> {
         self.repository.record_observation_failure(source_filename, error).await
+    }
+
+    pub async fn ingest_with_detections(
+        &self,
+        source_filename: &str,
+        captured_at: NaiveDateTime,
+        pet_id: Option<&str>,
+        detections: &[DetectionInput],
+    ) -> AppResult<i64> {
+        self.repository
+            .ingest_with_detections(source_filename, captured_at, pet_id, detections)
+            .await
+    }
+
+    pub async fn update_detection_override(&self, detection_id: i64, pet_id: &str) -> AppResult<usize> {
+        self.repository.update_detection_override(detection_id, pet_id).await
+    }
+
+    pub async fn update_pet_id(&self, source_filename: &str, pet_id: &str) -> AppResult<usize> {
+        self.repository.update_pet_id(source_filename, pet_id).await
     }
 }
