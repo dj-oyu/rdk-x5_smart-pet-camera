@@ -342,13 +342,17 @@ class YoloDetectorDaemon:
     def _start_detect_api(self, port: int = 8082) -> None:
         """Start HTTP /detect endpoint on a background thread.
 
-        Accepts JPEG images (base64), runs YOLO detection, returns JSON.
+        Accepts an image URL, downloads the JPEG, runs YOLO detection,
+        returns JSON. Designed for ai-pyramid to request detection on
+        existing comic images via its photo serve API.
+
         Shares the same YoloDetector instance as the main SHM loop.
         BPU inference is naturally serialized by the GIL.
         """
-        import base64
         import json
         from http.server import HTTPServer, BaseHTTPRequestHandler
+        from urllib.request import urlopen, Request
+        from urllib.error import URLError
 
         detector = self.detector
 
@@ -361,14 +365,23 @@ class YoloDetectorDaemon:
                 try:
                     length = int(self.headers.get("Content-Length", 0))
                     body = json.loads(self.rfile.read(length))
-                    jpeg_bytes = base64.b64decode(body["image_base64"])
+                    image_url = body["image_url"]
                 except (json.JSONDecodeError, KeyError, Exception) as e:
                     self.send_error(400, str(e))
                     return
 
+                # Download JPEG from image_url
+                try:
+                    req = Request(image_url, headers={"Accept": "image/jpeg"})
+                    with urlopen(req, timeout=10) as resp:
+                        jpeg_bytes = resp.read()
+                except (URLError, Exception) as e:
+                    self.send_error(502, f"Failed to fetch image: {e}")
+                    return
+
                 try:
                     nv12, orig_w, orig_h, scale, pad_x, pad_y = jpeg_to_yolo_nv12(jpeg_bytes)
-                    detections = detector.detect_nv12(nv12, 640, 640)
+                    detections = detector.detect_nv12_readonly(nv12, 640, 640)
 
                     # Map bbox from 640x640 letterbox back to original image coords
                     result = []
@@ -377,7 +390,6 @@ class YoloDetectorDaemon:
                         y = int((d.bbox.y - pad_y) / scale)
                         w = int(d.bbox.w / scale)
                         h = int(d.bbox.h / scale)
-                        # Clamp to image bounds
                         x = max(0, x)
                         y = max(0, y)
                         w = min(w, orig_w - x)
@@ -388,16 +400,16 @@ class YoloDetectorDaemon:
                             "bbox": {"x": x, "y": y, "w": w, "h": h},
                         })
 
-                    resp = json.dumps({
+                    resp_body = json.dumps({
                         "detections": result,
                         "width": orig_w,
                         "height": orig_h,
                     }).encode()
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(resp)))
+                    self.send_header("Content-Length", str(len(resp_body)))
                     self.end_headers()
-                    self.wfile.write(resp)
+                    self.wfile.write(resp_body)
                 except Exception as e:
                     logger.warning(f"Detect API error: {e}")
                     self.send_error(500, str(e))
