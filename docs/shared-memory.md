@@ -6,10 +6,10 @@
 
 ### 設計原則
 
-1. **両カメラのフレームが常に取得可能** - active/inactiveに関係なく
-2. **アクティブカメラは共有メモリで公開** - シグナル不要
+1. **アクティブカメラのみがSHMに書き込み** - 非activeはcond_waitでブロック
+2. **カメラ切り替えはプロセス内共有変数** - SHMもシグナルも不要
 3. **brightnessはZeroCopyFrameに含める** - 別途shm_brightness不要
-4. **NV12もH.264もzero-copyで取得可能**
+4. **NV12もH.265もzero-copyで取得可能**
 
 ---
 
@@ -19,115 +19,108 @@
 
 | 名前 | 用途 |
 |------|------|
-| `/pet_camera_control` | active_camera_index（0=DAY, 1=NIGHT） |
-| `/pet_camera_zc_0` | DAYカメラ NV12 ZeroCopyFrame（常に更新） |
-| `/pet_camera_zc_1` | NIGHTカメラ NV12 ZeroCopyFrame（常に更新） |
-| `/pet_camera_h264_zc_0` | DAYカメラ H.264 ZeroCopyFrame（active時のみ） |
-| `/pet_camera_h264_zc_1` | NIGHTカメラ H.264 ZeroCopyFrame（active時のみ） |
-| `/pet_camera_stream` | H.264出力（従来通りmemcpy、~30KB/frame） |
-| `/pet_camera_detections` | YOLO検出結果 |
+| `/pet_camera_h265_zc` | H.265ストリーム ゼロコピー (encoder → Go streaming) |
+| `/pet_camera_yolo_zc` | YOLO入力 ゼロコピー (統合、旧zc_0/zc_1を置換) |
+| `/pet_camera_detections` | YOLO検出結果 (Python detector → Go web_monitor) |
+| `/pet_camera_mjpeg_zc` | MJPEG NV12 ゼロコピー (camera → Go web_monitor) |
+| `/pet_camera_roi_zc_0` | 夜間ROI領域0 (640x640, NIGHTカメラのみ) |
+| `/pet_camera_roi_zc_1` | 夜間ROI領域1 (640x640, NIGHTカメラのみ) |
 
-### 現状のデータフローと問題
+定義元: `src/capture/shm_constants.h`
 
-```
-VIO Ch0 ──memcpy──▶ Active NV12 SHM ──▶ streaming-server
-    │
-    └──memcpy──▶ エンコーダキュー ──memcpy──▶ HWエンコーダ ──memcpy──▶ H.264 SHM
+### 現行のZero-Copyデータフロー
 
-VIO Ch1 ──memcpy──▶ YOLO SHM ──▶ YOLO daemon
+```mermaid
+graph LR
+    VIO["VIO (hbn_vflow)"]
+    enc["H.265 HW Encoder<br/>(hb_mm_mc)"]
+    h265["/pet_camera_h265_zc"]
+    yolo["/pet_camera_yolo_zc"]
+    mjpeg["/pet_camera_mjpeg_zc"]
+    go["Go streaming server"]
+    py["Python YOLO daemon"]
 
-問題: 約53MB/s のCPU memcpy
-```
-
-### Zero-Copy後のデータフロー
-
-```
-Camera 0/1
-    │
-    ▼
-VIO Ch0
-    ├─▶ share_id → ZeroCopy共有メモリ → Consumer (hb_mem_importで直接アクセス)
-    │
-    └─▶ HWエンコーダ (external_frame_buf, memcpy不要)
-          └─▶ H.264 SHM (memcpy ~30KB/frame - 許容)
+    VIO -->|"Ch0 share_id"| enc -->|"share_id"| h265 --> go
+    VIO -->|"Ch1 share_id"| yolo --> py
+    VIO -->|"Ch2 share_id"| mjpeg --> go
 ```
 
 **期待効果**:
 
 | 項目 | Before | After |
 |------|--------|-------|
-| YOLO memcpy | 10MB/s | **0** |
-| Active NV12 memcpy | 14MB/s | **0** |
-| MJPEG memcpy | 14MB/s | **0** (Ch2廃止) |
-| エンコーダ入力 memcpy | 14MB/s | **0** |
-| H.264出力 memcpy | 1MB/s | 1MB/s (維持) |
-| **合計** | **~53MB/s** | **~1MB/s** |
+| YOLO memcpy | 10MB/s | **0** (share_id) |
+| Active NV12 memcpy | 14MB/s | **0** (share_id) |
+| MJPEG memcpy | 14MB/s | **0** (share_id) |
+| エンコーダ入力 memcpy | 14MB/s | memcpy維持 (VPU所有バッファ) |
+| H.265出力 memcpy | 1MB/s | **0** (share_id) |
+| **合計** | **~53MB/s** | **~14MB/s** |
 
 ---
 
 ## データ構造
 
-### ZeroCopyFrame (NV12用)
+### ZeroCopyFrame (NV12用, `shared_memory.h`)
 
 ```c
-#define NUM_CAMERAS 2
 #define ZEROCOPY_MAX_PLANES 2
+#define HB_MEM_GRAPHIC_BUF_SIZE 160  // sizeof(hb_mem_graphic_buf_t)
 
 typedef struct {
-    // Frame metadata
     uint64_t frame_number;
     struct timespec timestamp;
-    int width;
-    int height;
-
-    // Brightness
+    int camera_id;
+    int width, height;
     float brightness_avg;
-    uint8_t correction_applied;
-
-    // VIO buffer (hb_mem_graphic_buf_t から取得)
     int32_t share_id[ZEROCOPY_MAX_PLANES];
     uint64_t plane_size[ZEROCOPY_MAX_PLANES];
-    uint64_t phys_addr[ZEROCOPY_MAX_PLANES];  // エンコーダ用
     int32_t plane_cnt;
-
-    // または完全なバッファ記述子を埋め込み（推奨）
-    // hb_mem_graphic_buf_t buffer;  // 160 bytes
-
-    // Sync
+    uint8_t hb_mem_buf_data[HB_MEM_GRAPHIC_BUF_SIZE]; // hb_mem_graphic_buf_t 全体を埋め込み
     volatile uint32_t version;
-    volatile uint8_t consumed;
 } ZeroCopyFrame;
 
 typedef struct {
-    volatile int active_camera_index;
-    sem_t new_frame_sem[NUM_CAMERAS];
-    sem_t consumed_sem[NUM_CAMERAS];
-    ZeroCopyFrame frames[NUM_CAMERAS];
-} ZeroCopyDualFrameBuffer;
+    sem_t new_frame_sem;
+    ZeroCopyFrame frame;
+} ZeroCopyFrameBuffer;
 ```
 
-### ZeroCopyH264Frame
+### H265ZeroCopyFrame (H.265ビットストリーム用)
 
 ```c
+#define HB_MEM_COM_BUF_SIZE 48  // sizeof(hb_mem_common_buf_t)
+
 typedef struct {
     uint64_t frame_number;
     struct timespec timestamp;
-    int32_t share_id;           // H.264バッファのshare_id
-    uint64_t size;              // H.264データサイズ
-    uint8_t is_keyframe;        // IDRフレームか
+    int camera_id;
+    int width, height;
+    uint32_t data_size;
+    uint8_t hb_mem_buf_data[HB_MEM_COM_BUF_SIZE]; // hb_mem_common_buf_t 全体
     volatile uint32_t version;
-    volatile uint8_t consumed;
-} ZeroCopyH264Frame;
+} H265ZeroCopyFrame;
+
+typedef struct {
+    sem_t new_frame_sem;
+    sem_t consumed_sem;     // Initially 0: encoder skips until Go posts first consumed
+    H265ZeroCopyFrame frame;
+} H265ZeroCopyBuffer;
 ```
 
 ### LatestDetectionResult (検出結果用)
 
 ```c
 typedef struct {
+    char class_name[32];
+    float confidence;
+    DetectionBBox bbox;
+} DetectionEntry;
+
+typedef struct {
     uint64_t frame_number;
-    struct timespec timestamp;
+    double timestamp;
     int num_detections;
-    Detection detections[MAX_DETECTIONS];
+    DetectionEntry detections[MAX_DETECTIONS];
     volatile uint32_t version;      // アトミック更新用
     sem_t detection_update_sem;     // イベント通知用セマフォ
 } LatestDetectionResult;
@@ -156,7 +149,7 @@ sem_init(&shm->detection_update_sem, 1, 0);
 
 // 2. データ書き込み + セマフォ通知
 shm->num_detections = count;
-memcpy(shm->detections, detections, sizeof(Detection) * count);
+memcpy(shm->detections, detections, sizeof(DetectionEntry) * count);
 __atomic_fetch_add(&shm->version, 1, __ATOMIC_SEQ_CST);
 sem_post(&shm->detection_update_sem);
 ```
@@ -189,31 +182,28 @@ while (!stopped) {
 }
 ```
 
-### カメラ切り替えのセマフォ設計
+### カメラ切り替え設計
 
-```
-/pet_camera_control:
-  - active_camera_index
-  - sem_t wakeup_sem[2]          カメラ起床用
-  - sem_t brightness_req_sem     brightness要求用 (DAY向け)
-  - sem_t brightness_updated_sem switcher通知用
+現在の実装ではSHMベースのカメラ制御は廃止され、プロセス内共有変数 (`volatile int g_active_camera`) + `pthread_cond_broadcast` で切り替えを行う。
 
-DAY カメラ:
-  active時:  sem_wait(&new_frame_sem) → process_frame()
-  inactive時: sem_timedwait(&brightness_req_sem, 2秒) → write_brightness()
+```mermaid
+graph TD
+    switcher["switcher_thread<br/>ISP brightness 読み取り"]
+    var["g_active_camera<br/>(volatile int)"]
+    day["DAY pipeline thread"]
+    night["NIGHT pipeline thread"]
 
-NIGHT カメラ:
-  active時:  sem_wait(&new_frame_sem) → process_frame()
-  inactive時: sem_wait(&wakeup_sem[NIGHT]) → vio_stop()でスリープ
-
-camera_switcher:
-  active_camera_index書き換え → sem_post(&wakeup_sem[new_camera])
+    switcher -->|"判定 → 書き込み"| var
+    var -->|"active → フル稼働"| day
+    var -->|"inactive → cond_wait"| night
+    switcher -->|"pthread_cond_broadcast"| day
+    switcher -->|"pthread_cond_broadcast"| night
 ```
 
 | Active Camera | DAYカメラ | NIGHTカメラ |
 |---------------|----------|------------|
-| DAY | フル稼働 (30fps, NV12+H.264) | 完全スリープ (CPU 0%) |
-| NIGHT | brightnessのみ (2秒おき) | フル稼働 (30fps, NV12+H.264) |
+| DAY | フル稼働 (30fps, NV12+H.265) | cond_waitでブロック (CPU 0%) |
+| NIGHT | cond_waitでブロック (CPU 0%) | フル稼働 (30fps, NV12+H.265) |
 
 ---
 
@@ -258,7 +248,7 @@ typedef struct hb_mem_graphic_buf_t {
 
 ### Import API
 
-**重要**: share_idだけでのインポートはSDKが対応していない。必ず`phys_addr`と`size`等のメタデータが必要。
+**重要**: `share_id` だけでのインポートはSDKが対応していない。必ず `phys_addr` と `size` 等のメタデータが必要。そのため `ZeroCopyFrame` に `hb_mem_graphic_buf_t` 全体 (160 bytes) を `hb_mem_buf_data` フィールドとして埋め込んでいる。
 
 #### 推奨パス: hb_mem_import_graph_buf
 
@@ -270,16 +260,19 @@ Producer側で`hb_mem_graphic_buf_t`全体を共有メモリに書き込み、Co
 
 #### インポートフロー（Python YOLO daemon）
 
-```
-HbMemGraphicBuffer.__init__(raw_buf_data)
-  │
-  ├─ try: _import_graph_buf()  ← 常にまず試行 (SDK推奨パス)
-  │   ├─ 成功 → contiguousの場合はUV virt_addr補正
-  │   └─ RuntimeError
-  │       ├─ is_contiguous=True → _import_contiguous() (フォールバック)
-  │       └─ is_contiguous=False → raise (リカバリ不可)
-  │
-  └─ 結果: fd, virt_addr, size, plane_cnt が設定
+```mermaid
+graph TD
+    init["HbMemGraphicBuffer.__init__(raw_buf_data)"]
+    try_graph["_import_graph_buf()<br/>SDK推奨パス"]
+    success["成功<br/>contiguous の場合は UV virt_addr 補正"]
+    fallback["_import_contiguous()<br/>フォールバック"]
+    fail["raise RuntimeError<br/>リカバリ不可"]
+    result["fd, virt_addr, size, plane_cnt 設定完了"]
+
+    init --> try_graph
+    try_graph -->|成功| success --> result
+    try_graph -->|RuntimeError + contiguous| fallback --> result
+    try_graph -->|RuntimeError + non-contiguous| fail
 ```
 
 ### Python ctypes定義
@@ -331,26 +324,30 @@ class hb_mem_graphic_buf_t(Structure):
 
 ### VIOバッファ
 
-```
-getframe() → share_id取得 → Consumer処理 → consumed通知 → releaseframe()
-                                   │
-                             66ms以内に完了必要
+```mermaid
+graph LR
+    A["vio_get_frame()"] --> B["share_id 取得"]
+    B --> C["Consumer 処理<br/>(66ms以内)"]
+    C --> D["consumed 通知"]
+    D --> E["vio_release_frame()"]
 ```
 
 ### エンコーダ出力バッファ
 
-```
-dequeue_output() → fd→share_id → Consumer処理 → consumed通知 → queue_output()
+```mermaid
+graph LR
+    A["hb_mm_mc_dequeue_output()"] --> B["share_id via SHM"]
+    B --> C["Consumer 処理"]
+    C --> D["consumed 通知"]
+    D --> E["hb_mm_mc_queue_output()"]
 ```
 
 ### カメラ切り替え
 
-```
-1. camera_switcher: active_camera_index を更新（共有メモリ書き換え）
-2. カメラデーモン: 次のループで確認
-3. Consumer: 次フレームから新しいカメラを使用
-4. 遅延ゼロ（シグナル伝搬なし）
-```
+1. `switcher_thread`: `g_active_camera` を更新 (プロセス内共有変数)
+2. `pthread_cond_broadcast` で全パイプラインスレッドを起床
+3. 各パイプライン: 次ループで `active_camera` を確認し、非activeならcond_waitに戻る
+4. Consumer: 次フレームから新しいカメラのデータを使用
 
 ---
 

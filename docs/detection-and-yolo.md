@@ -23,14 +23,19 @@ RDK X5 (D-Robotics Sunrise 5, BPU Bayes-e 10 TOPS, シングルコア) 上で YO
 
 ### 日中カメラ (camera_id=0)
 
-```
-センサー 1920x1080 RAW10
-  -> ISP NV12
-  -> VSE Ch0: 配信・録画用メイン映像
-  -> VSE Ch1: 640x360 NV12 (ハードウェア縮小, 16:9)
-  -> Python letterbox_nv12(): 上下140px黒帯 -> 640x640
-  -> BPU YOLO11n 推論 (~9ms)
-  -> 後処理 + NMS -> 検出結果 SHM
+```mermaid
+graph LR
+    sensor["センサー<br/>1920x1080 RAW10"]
+    isp["ISP NV12"]
+    ch0["VSE Ch0<br/>配信・録画"]
+    ch1["VSE Ch1<br/>640x360 NV12"]
+    lb["letterbox_nv12()<br/>上下140px黒帯 → 640x640"]
+    bpu["BPU YOLO11n<br/>(~9ms)"]
+    nms["後処理 + NMS"]
+    shm["検出結果 SHM"]
+
+    sensor --> isp --> ch0
+    isp --> ch1 --> lb --> bpu --> nms --> shm
 ```
 
 - レターボックス: 640x360 -> 640x640 (Y=16黒, UV=128中間), `shift=((input_h - h) // 2, 0.0)` で bbox 座標補正（640x360入力時は140.0）
@@ -38,10 +43,15 @@ RDK X5 (D-Robotics Sunrise 5, BPU Bayes-e 10 TOPS, シングルコア) 上で YO
 
 ### 夜間カメラ (camera_id=1) - ROI モード
 
-```
-センサー 1920x1080 -> VSE Ch1: 1280x720 NV12
-  -> 3 ROI (640x640) をラウンドロビンで推論
-  -> 3フレーム周期で全ROI結果を統合 -> 検出結果 SHM
+```mermaid
+graph LR
+    sensor["センサー<br/>1920x1080"]
+    ch1["VSE Ch1<br/>1280x720 NV12"]
+    roi["3 ROI (640x640)<br/>ラウンドロビン推論"]
+    merge["3フレーム周期<br/>全ROI結果統合"]
+    shm["検出結果 SHM"]
+
+    sensor --> ch1 --> roi --> merge --> shm
 ```
 
 | パラメータ | 値 | 理由 |
@@ -64,17 +74,17 @@ ROI 座標:
 
 ### 共有メモリ構成
 
-| 名前 | 形式 | 解像度 | 用途 |
-|------|------|--------|------|
-| `/pet_camera_active_frame` | NV12 | 1080p/480p | 配信・録画メイン映像 |
-| `/pet_camera_stream` | H.264 | 1080p/480p | WebRTC 配信・H.264録画 |
-| `/pet_camera_yolo_input` | NV12 | 640x640 (日中) / 1280x720 (夜間) | BPU推論用 (VSE直送) |
-| `/pet_camera_detections` | struct | 552 bytes | 検出結果 (CLatestDetectionResult) |
-| `/pet_camera_debug_view` | NV12 | 640x640 | GPU フィルタ適用後の確認映像 |
+| 名前 | 形式 | 用途 |
+|------|------|------|
+| `/pet_camera_h265_zc` | H.265 zero-copy | WebRTC 配信・H.265録画 |
+| `/pet_camera_yolo_zc` | NV12 zero-copy | BPU推論用 (VSE直送, 統合) |
+| `/pet_camera_detections` | struct | 検出結果 (CLatestDetectionResult) |
+| `/pet_camera_mjpeg_zc` | NV12 zero-copy | MJPEG配信用 |
+| `/pet_camera_roi_zc_0`, `roi_zc_1` | NV12 zero-copy | 夜間ROI 640x640 (NIGHTのみ) |
 
 ### 検出結果の表示
 
-WebMonitor (`src/monitor/web_monitor.py`) が検出 SHM を読み取り、BBox を合成して MJPEG ストリーミング。
+Go web_monitor (`src/streaming_server/cmd/web_monitor/`) が検出 SHM を読み取り、BBox を合成して MJPEG ストリーミング。
 
 クラス別色分け: cat=緑, food_bowl=オレンジ, water_bowl=青。信頼度スコアをラベルに表示。
 
@@ -199,20 +209,13 @@ detector = YoloDetector(
 
 ## 6. 夜間検出
 
-### GPU (OpenCL) による夜間モード最適化
+### GPU (OpenCL) による夜間モード最適化 [実験済・未採用]
 
-暗所の低コントラスト映像に対し、GPU でリアルタイム補正を実施。
+> **注意**: GPU OpenCL フィルタは実験的に実装されたが、現在はコードベースから削除済み。夜間の画像補正はYOLO detector側のCLAHE前処理で代替している。以下は設計時の知見として残す。
 
 - **ガンマ補正**: Y平面 (輝度) を持ち上げ、暗部の特徴を抽出
 - **動き検出強調**: フレーム差分で動き領域の UV 平面を赤色に書き換え
 - **ゼロコピー転送**: `clEnqueueMapBuffer` でホスト-GPU間転送コスト最小化
-- **独立デバッグビュー**: `/pet_camera_debug_view` に書き出し、入力データとの競合回避
-
-実装ファイル:
-- `src/gpu_lib/filter_kernels.cl`: OpenCL カーネル
-- `src/gpu_lib/gpu_filter.c`: ゼロコピー転送
-
-起動: `./scripts/run_camera_switcher_yolo_streaming.sh --night-mode`
 
 ### 夜間カメラ ROI モード
 
@@ -228,8 +231,10 @@ detector = YoloDetector(
 
 | 機能 | ファイル | 状態 |
 |------|---------|------|
-| `detect_nv12_roi()` | `yolo_detector.py` | 実装済み・未使用 |
-| `get_roi_regions()` | `yolo_detector.py` | 実装済み・未使用 |
+| `detect_nv12_roi()` | `yolo_detector.py` | 実装済み・未使用 (640x640入力用) |
+| `get_roi_regions()` | `yolo_detector.py` | 実装済み・未使用 (640x640入力用) |
+| `detect_nv12_roi_720p()` | `yolo_detector.py` | 実装済み (1280x720入力、夜間3ROI用) |
+| `get_roi_regions_720p()` | `yolo_detector.py` | 実装済み (1280x720→3x640x640 ROI座標生成) |
 | 3パターン巡回 | `yolo_detector.py` | 実装済み・未使用 |
 | 時間統合 + NMS | `yolo_detector_daemon.py` | 実装済み・未使用 |
 | `--no-roi` フラグ | `yolo_detector_daemon.py` | 実装済み |
@@ -266,8 +271,8 @@ detector = YoloDetector(
 | YOLO 検出器 | `src/common/src/detection/yolo_detector.py` | BPU推論 + 後処理 (legacy/yolo26) |
 | 検出デーモン | `src/detector/yolo_detector_daemon.py` | SHM 読み取り -> 推論 -> 結果書き込み |
 | SHM ラッパー | `src/capture/real_shared_memory.py` | POSIX 共有メモリ Python アクセス |
-| GPU フィルタ | `src/gpu_lib/gpu_filter.c`, `filter_kernels.cl` | 夜間モード OpenCL 補正 |
-| WebMonitor | `src/monitor/web_monitor.py` | BBox 合成 + MJPEG ストリーミング |
+| GPU フィルタ | ~~`src/gpu_lib/`~~ | 削除済み (CLAHE前処理で代替) |
+| WebMonitor | `src/streaming_server/cmd/web_monitor/` | BBox 合成 + MJPEG ストリーミング (Go) |
 
 ---
 
