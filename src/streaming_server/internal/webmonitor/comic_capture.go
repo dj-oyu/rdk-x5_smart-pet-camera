@@ -9,6 +9,7 @@ package webmonitor
 */
 import "C"
 import (
+	"encoding/json"
 	"fmt"
 	"image/color"
 	"log"
@@ -472,6 +473,31 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 	if err := os.WriteFile(outPath, jpegData, 0644); err != nil {
 		log.Printf("[Comic] Failed to write %s: %v", filename, err)
 		return ""
+	}
+
+	// Save metadata sidecar with bbox coordinates for pet_id calibration.
+	// ai-pyramid can use this to re-analyze pet color from the original image.
+	type panelMeta struct {
+		Timestamp string      `json:"timestamp"`
+		BBox      *BoundingBox `json:"bbox,omitempty"`
+		PetClass  string      `json:"pet_class"`
+	}
+	type comicMeta struct {
+		PetID  string      `json:"pet_id"`
+		Panels []panelMeta `json:"panels"`
+	}
+	meta := comicMeta{PetID: petID}
+	for _, p := range panels {
+		meta.Panels = append(meta.Panels, panelMeta{
+			Timestamp: p.timestamp.Format(time.RFC3339),
+			BBox:      p.bbox,
+			PetClass:  p.petClass,
+		})
+	}
+	metaJSON, _ := json.Marshal(meta)
+	metaPath := strings.TrimSuffix(outPath, ".jpg") + ".json"
+	if err := os.WriteFile(metaPath, metaJSON, 0644); err != nil {
+		log.Printf("[Comic] Failed to write metadata %s: %v", metaPath, err)
 	}
 
 	cc.mu.Lock()
