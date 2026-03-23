@@ -764,8 +764,9 @@ class YoloDetectorDaemon:
                         merged_yolo = _suppress_dog_with_cat(merged_yolo)
 
                         # Keep YOLO alive while detections exist (static subject)
-                        if merged_yolo and self.motion_cooldown <= 1:
-                            self.motion_cooldown = 3
+                        if merged_yolo:
+                            self.motion_cooldown = 10
+                            self._roi_has_motion = True
 
                         all_dicts = self._motion_bboxes + merged_yolo
                         self._motion_bboxes = []
