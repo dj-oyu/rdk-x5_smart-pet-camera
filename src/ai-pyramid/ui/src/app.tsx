@@ -5,6 +5,7 @@ import { StatsStrip } from "./components/stats-strip";
 import {
   fetchEvents,
   fetchStats,
+  isEmbedded,
   photoUrl,
   readQueryFromLocation,
   writeQueryToLocation,
@@ -81,8 +82,10 @@ export function App() {
     setQuery((current) => ({ ...current, petId }));
   }
 
+  const embed = isEmbedded();
+
   return (
-    <main class="app-shell compact-shell">
+    <main class="app-shell compact-shell" data-embed={embed.embedded ? embed.host : undefined}>
       <div class="compact-bar">
         <strong>Recent Events</strong>
         <span>{subtitle}</span>
