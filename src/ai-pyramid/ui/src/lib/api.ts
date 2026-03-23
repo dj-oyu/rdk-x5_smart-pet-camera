@@ -94,6 +94,16 @@ export async function updateDetectionOverride(detectionId: number, petIdOverride
   }
 }
 
+export type PetNames = Record<string, string>;
+
+export async function fetchPetNames(): Promise<PetNames> {
+  const response = await fetch("/api/pet-names");
+  if (!response.ok) {
+    return {};
+  }
+  return response.json();
+}
+
 export function readQueryFromLocation(): EventQuery {
   const params = new URLSearchParams(window.location.search);
   const rawStatus = params.get("is_valid");

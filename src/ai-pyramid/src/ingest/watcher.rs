@@ -39,20 +39,18 @@ impl PhotoWatcher {
             if !is_jpeg(&name) {
                 continue;
             }
-            if let Ok(meta) = parse_comic_filename(&name) {
-                if queries.get_event_by_source(&name).await.ok().flatten().is_none() {
-                    if commands
-                        .ingest_source_photo(ObservationInput {
-                            source_filename: name.clone(),
-                            captured_at: meta.captured_at,
-                            pet_id: meta.pet_id,
-                        })
-                        .await
-                        .is_ok()
-                    {
-                        count += 1;
-                    }
-                }
+            if let Ok(meta) = parse_comic_filename(&name)
+                && queries.get_event_by_source(&name).await.ok().flatten().is_none()
+                && commands
+                    .ingest_source_photo(ObservationInput {
+                        source_filename: name.clone(),
+                        captured_at: meta.captured_at,
+                        pet_id: meta.pet_id,
+                    })
+                    .await
+                    .is_ok()
+            {
+                count += 1;
             }
         }
         info!("Initial scan: inserted {count} new source photos");
@@ -165,12 +163,12 @@ impl PhotoWatcher {
             let queries = app_for_rescan.event_queries();
             loop {
                 tokio::time::sleep(RESCAN_INTERVAL).await;
-                if let Ok(names) = queries.list_pending_sources(MAX_VLM_ATTEMPTS).await {
-                    if !names.is_empty() {
-                        info!("Periodic rescan: {} pending sources", names.len());
-                        for name in names {
-                            let _ = tx_for_rescan.try_send(name);
-                        }
+                if let Ok(names) = queries.list_pending_sources(MAX_VLM_ATTEMPTS).await
+                    && !names.is_empty()
+                {
+                    info!("Periodic rescan: {} pending sources", names.len());
+                    for name in names {
+                        let _ = tx_for_rescan.try_send(name);
                     }
                 }
             }

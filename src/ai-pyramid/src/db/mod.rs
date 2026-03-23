@@ -280,7 +280,7 @@ impl PhotoStore {
                 "SELECT id, filename, captured_at, caption, is_valid, pet_id, behavior
                  FROM photos WHERE filename = ?1",
                 params![filename],
-                |row| row_to_photo(row),
+                row_to_photo,
             )
             .optional()
     }
@@ -291,7 +291,7 @@ impl PhotoStore {
                 "SELECT id, filename, captured_at, caption, is_valid, pet_id, behavior
                  FROM photos WHERE id = ?1",
                 params![id],
-                |row| row_to_photo(row),
+                row_to_photo,
             )
             .optional()
     }
@@ -336,7 +336,7 @@ impl PhotoStore {
 
         let mut stmt = self.conn.prepare(&query_sql)?;
         let photos = stmt
-            .query_map(all_ref.as_slice(), |row| row_to_photo(row))?
+            .query_map(all_ref.as_slice(), row_to_photo)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok((photos, total))

@@ -128,10 +128,16 @@ async fn main() {
         watcher.run().await;
     });
 
+    let pet_names = server::load_pet_names();
+    if !pet_names.is_empty() {
+        info!("Pet names: {:?}", pet_names);
+    }
+
     let app_state = server::AppState {
         context: app_context,
         photos_dir: args.photos_dir,
         event_tx: sse_event_tx,
+        pet_names,
     };
     let app = server::router(app_state);
 

@@ -5,6 +5,7 @@ import { FilterBar } from "./components/filter-bar";
 import { StatsStrip } from "./components/stats-strip";
 import {
   fetchEvents,
+  fetchPetNames,
   fetchStats,
   photoUrl,
   readQueryFromLocation,
@@ -12,6 +13,7 @@ import {
   type ActivityStats,
   type EventQuery,
   type EventSummary,
+  type PetNames,
   type StatusFilter
 } from "./lib/api";
 
@@ -24,6 +26,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
   const [selectedEvent, setSelectedEvent] = useState<EventSummary | null>(null);
+  const [petNames, setPetNames] = useState<PetNames>({});
 
   useEffect(() => {
     writeQueryToLocation(query);
@@ -64,6 +67,10 @@ export function App() {
   }, [query, refreshTick]);
 
   useEffect(() => {
+    fetchPetNames().then(setPetNames);
+  }, []);
+
+  useEffect(() => {
     const source = new EventSource("/api/events");
     source.addEventListener("event", (message) => {
       setRefreshTick((current) => current + 1);
@@ -102,7 +109,7 @@ export function App() {
         />
       )}
       <section class="secondary-stack">
-        <FilterBar query={query} onStatusChange={handleStatusChange} onPetChange={handlePetChange} />
+        <FilterBar query={query} petNames={petNames} onStatusChange={handleStatusChange} onPetChange={handlePetChange} />
         <StatsStrip stats={stats} />
       </section>
     </main>
