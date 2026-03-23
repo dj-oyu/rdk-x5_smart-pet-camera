@@ -1,10 +1,12 @@
-import type { EventSummary } from "../lib/api";
+import { useEffect, useState } from "preact/hooks";
+import { isEmbedded, type EventSummary, type PetNames } from "../lib/api";
 import { photoUrl } from "../lib/api";
 
 type EventGridProps = {
   events: EventSummary[];
   loading: boolean;
   error: string | null;
+  petNames: PetNames;
   onOpenEvent: (event: EventSummary) => void;
 };
 
@@ -14,6 +16,7 @@ function formatObservedAt(value: string): string {
 }
 
 const inIframe = window.parent !== window;
+const embedded = isEmbedded().embedded;
 
 function notifyParentLightbox(event: EventSummary): void {
   const src = new URL(photoUrl(event.source_filename), window.location.origin).href;
@@ -29,7 +32,32 @@ function notifyParentLightbox(event: EventSummary): void {
   }, "*");
 }
 
-export function EventGrid({ events, loading, error, onOpenEvent }: EventGridProps) {
+function FeaturedOverlay({ event, petNames }: { event: EventSummary; petNames: PetNames }) {
+  const [faded, setFaded] = useState(false);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setFaded(true), 3000);
+    return () => clearTimeout(timer);
+  }, [event.id]);
+
+  return (
+    <div class={`event-image-overlay ${faded ? "overlay-faded" : ""}`}>
+      <span class="event-kicker">Latest</span>
+      <span class="event-overlay-time">{formatObservedAt(event.observed_at)}</span>
+      <div class="event-meta-row overlay-meta-row featured-meta-overlay">
+        {event.pet_id ? <span class="pet-pill">{petNames[event.pet_id] ?? event.pet_id}</span> : <span class="pet-pill muted">unknown</span>}
+        <span class={`status-pill ${event.status}`}>{event.status}</span>
+      </div>
+    </div>
+  );
+}
+
+function petDisplay(petId: string | null, petNames: PetNames): string {
+  if (!petId) return "unknown";
+  return petNames[petId] ?? petId;
+}
+
+export function EventGrid({ events, loading, error, petNames, onOpenEvent }: EventGridProps) {
   if (loading) {
     return <div class="empty-state">Loading events...</div>;
   }
@@ -45,7 +73,9 @@ export function EventGrid({ events, loading, error, onOpenEvent }: EventGridProp
   return (
     <section class="event-grid">
       {events.map((event, index) => {
-        const featured = index === 0;
+        // In compact/embedded mode: first card is featured
+        // In standalone mode: no featured card, uniform grid
+        const featured = embedded && index === 0;
         return (
           <article class={`event-card ${event.status} ${featured ? "featured" : "history"}`} key={event.id}>
             <a
@@ -68,28 +98,19 @@ export function EventGrid({ events, loading, error, onOpenEvent }: EventGridProp
                   loading={featured ? "eager" : "lazy"}
                   fetchPriority={featured ? "high" : "auto"}
                 />
-                {featured ? (
-                  <div class="event-image-overlay">
-                    <span class="event-kicker">Latest</span>
-                    <span class="event-overlay-time">{formatObservedAt(event.observed_at)}</span>
-                    <div class="event-meta-row overlay-meta-row featured-meta-overlay">
-                      {event.pet_id ? <span class="pet-pill">{event.pet_id}</span> : <span class="pet-pill muted">unknown</span>}
-                      <span class={`status-pill ${event.status}`}>{event.status}</span>
-                    </div>
-                  </div>
-                ) : null}
+                {featured && <FeaturedOverlay event={event} petNames={petNames} />}
               </div>
             </a>
             <div class="event-card-body">
               <p class={`event-summary ${featured ? "featured-summary" : "history-summary"}`}>
                 {event.summary ?? "No summary yet."}
               </p>
-              {!featured ? (
+              {!featured && (
                 <div class="event-meta-row history-meta-row">
-                  <span class="meta-text">{event.pet_id ?? "unknown"}</span>
+                  <span class="meta-text">{petDisplay(event.pet_id, petNames)}</span>
                   <span class={`status-pill ${event.status}`}>{event.status}</span>
                 </div>
-              ) : null}
+              )}
               <footer>
                 <span class="event-behavior">{event.behavior ?? "Unclassified"}</span>
                 <span>{formatObservedAt(event.observed_at)}</span>

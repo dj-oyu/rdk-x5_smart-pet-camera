@@ -317,12 +317,20 @@ export function AlbumView() {
   }, []);
 
   useEffect(() => {
+    if (lightboxSrc) {
+      document.body.classList.add('lightbox-active');
+    } else {
+      document.body.classList.remove('lightbox-active');
+    }
     if (!lightboxSrc) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setLightboxSrc(null);
     };
     window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
+    return () => {
+      window.removeEventListener('keydown', handler);
+      document.body.classList.remove('lightbox-active');
+    };
   }, [lightboxSrc]);
 
   return (
