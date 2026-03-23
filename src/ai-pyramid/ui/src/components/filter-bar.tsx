@@ -1,7 +1,8 @@
-import type { EventQuery, StatusFilter } from "../lib/api";
+import type { EventQuery, PetNames, StatusFilter } from "../lib/api";
 
 type FilterBarProps = {
   query: EventQuery;
+  petNames: PetNames;
   onStatusChange: (status: StatusFilter) => void;
   onPetChange: (petId: string) => void;
 };
@@ -13,13 +14,12 @@ const STATUS_OPTIONS: Array<{ value: StatusFilter; label: string }> = [
   { value: "invalid", label: "Rejected" }
 ];
 
-const PET_OPTIONS = [
-  { value: "", label: "All pets" },
-  { value: "chatora", label: "Chatora" },
-  { value: "mike", label: "Mike" }
-];
+export function FilterBar({ query, petNames, onStatusChange, onPetChange }: FilterBarProps) {
+  const petOptions = [
+    { value: "", label: "All pets" },
+    ...Object.entries(petNames).map(([id, name]) => ({ value: id, label: name })),
+  ];
 
-export function FilterBar({ query, onStatusChange, onPetChange }: FilterBarProps) {
   return (
     <section class="filter-bar">
       <div class="filter-cluster">
@@ -34,7 +34,7 @@ export function FilterBar({ query, onStatusChange, onPetChange }: FilterBarProps
         ))}
       </div>
       <div class="pet-filter">
-        {PET_OPTIONS.map((option) => (
+        {petOptions.map((option) => (
           <button
             type="button"
             class={option.value === query.petId ? "pet-chip active" : "pet-chip"}
