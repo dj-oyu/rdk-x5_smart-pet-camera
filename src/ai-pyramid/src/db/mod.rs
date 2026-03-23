@@ -247,10 +247,44 @@ impl PhotoStore {
     }
 
     pub fn update_detection_override(&self, detection_id: i64, pet_id: &str) -> rusqlite::Result<usize> {
-        self.conn.execute(
+        let updated = self.conn.execute(
             "UPDATE detections SET pet_id_override = ?1 WHERE id = ?2",
             params![pet_id, detection_id],
-        )
+        )?;
+        if updated > 0 {
+            // Update photo's pet_id by majority vote of cat detections
+            let photo_id: Option<i64> = self.conn.query_row(
+                "SELECT photo_id FROM detections WHERE id = ?1",
+                params![detection_id],
+                |row| row.get(0),
+            ).optional()?;
+            if let Some(pid) = photo_id {
+                self.update_pet_id_by_majority(pid)?;
+            }
+        }
+        Ok(updated)
+    }
+
+    /// Update photo's pet_id based on majority vote of cat detection overrides/classes.
+    fn update_pet_id_by_majority(&self, photo_id: i64) -> rusqlite::Result<()> {
+        // For each cat detection, use pet_id_override if set, else pet_class
+        let winner: Option<String> = self.conn.query_row(
+            "SELECT COALESCE(pet_id_override, pet_class) AS effective_pet
+             FROM detections
+             WHERE photo_id = ?1 AND yolo_class = 'cat' AND COALESCE(pet_id_override, pet_class) IS NOT NULL
+             GROUP BY effective_pet
+             ORDER BY COUNT(*) DESC
+             LIMIT 1",
+            params![photo_id],
+            |row| row.get(0),
+        ).optional()?;
+        if let Some(pet_id) = winner {
+            self.conn.execute(
+                "UPDATE photos SET pet_id = ?1 WHERE id = ?2",
+                params![pet_id, photo_id],
+            )?;
+        }
+        Ok(())
     }
 
     pub fn get_vlm_attempts(&self, filename: &str) -> rusqlite::Result<Option<i32>> {
@@ -548,5 +582,56 @@ mod tests {
         let (photos, total) = store.list(&PhotoFilter { is_pending: true, ..Default::default() }).unwrap();
         assert_eq!(total, 1);
         assert_eq!(photos[0].filename, "a.jpg");
+    }
+
+    #[test]
+    fn detection_override_updates_photo_pet_id_by_majority() {
+        let store = setup();
+        let ts = dt(2026, 3, 21, 10, 0, 0);
+        let detections = vec![
+            DetectionInput {
+                panel_index: Some(0),
+                bbox_x: 10, bbox_y: 20, bbox_w: 100, bbox_h: 150,
+                yolo_class: Some("cat".into()),
+                pet_class: Some("chatora".into()),
+                confidence: Some(0.9),
+                detected_at: "2026-03-21T10:00:00".into(),
+            },
+            DetectionInput {
+                panel_index: Some(1),
+                bbox_x: 430, bbox_y: 20, bbox_w: 100, bbox_h: 150,
+                yolo_class: Some("cat".into()),
+                pet_class: Some("chatora".into()),
+                confidence: Some(0.8),
+                detected_at: "2026-03-21T10:00:00".into(),
+            },
+            DetectionInput {
+                panel_index: Some(0),
+                bbox_x: 300, bbox_y: 100, bbox_w: 80, bbox_h: 60,
+                yolo_class: Some("cup".into()),
+                pet_class: None,
+                confidence: Some(0.6),
+                detected_at: "2026-03-21T10:00:00".into(),
+            },
+        ];
+        store.ingest_with_detections("test.jpg", ts, Some("chatora"), &detections).unwrap();
+
+        // Initially pet_id is chatora
+        let photo = store.get_by_filename("test.jpg").unwrap().unwrap();
+        assert_eq!(photo.pet_id.as_deref(), Some("chatora"));
+
+        // Override first cat detection to mike
+        store.update_detection_override(1, "mike").unwrap();
+        let photo = store.get_by_filename("test.jpg").unwrap().unwrap();
+        // 1 mike + 1 chatora → tie, first wins (mike by query order)
+        // but both have count=1, so ORDER BY COUNT(*) DESC LIMIT 1 picks one
+
+        // Override second cat detection to mike too → majority is mike
+        store.update_detection_override(2, "mike").unwrap();
+        let photo = store.get_by_filename("test.jpg").unwrap().unwrap();
+        assert_eq!(photo.pet_id.as_deref(), Some("mike"));
+
+        // cup detection override should not affect majority (yolo_class != cat)
+        // (cup detection id=3 is not a cat, so it's excluded from majority)
     }
 }
