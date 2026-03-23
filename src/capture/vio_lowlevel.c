@@ -359,10 +359,15 @@ int vio_create(vio_context_t *ctx, int camera_index,
     ret = hbn_vflow_bind_vnode(ctx->vflow_fd, ctx->isp_handle, 0, ctx->vse_handle, 0);
     if (ret != 0) goto error_cleanup;
 
-    // Attach camera to VIN
-    ret = hbn_camera_attach_to_vin(ctx->cam_fd, ctx->vin_handle);
+    // Attach camera to VIN (retry on failure — MIPI resource may not be released yet)
+    for (int attempt = 0; attempt < 5; attempt++) {
+        ret = hbn_camera_attach_to_vin(ctx->cam_fd, ctx->vin_handle);
+        if (ret == 0) break;
+        LOG_WARN("VIO", "hbn_camera_attach_to_vin failed: %d (attempt %d/5)", ret, attempt + 1);
+        usleep(500 * 1000);  // 500ms
+    }
     if (ret != 0) {
-        LOG_ERROR("VIO", "hbn_camera_attach_to_vin failed: %d", ret);
+        LOG_ERROR("VIO", "hbn_camera_attach_to_vin failed after retries: %d", ret);
         goto error_cleanup;
     }
 
