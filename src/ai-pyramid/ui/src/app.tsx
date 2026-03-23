@@ -1,4 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
+import { EventDetail } from "./components/event-detail";
 import { EventGrid } from "./components/event-grid";
 import { FilterBar } from "./components/filter-bar";
 import { StatsStrip } from "./components/stats-strip";
@@ -22,6 +23,7 @@ export function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
+  const [selectedEvent, setSelectedEvent] = useState<EventSummary | null>(null);
 
   useEffect(() => {
     writeQueryToLocation(query);
@@ -91,27 +93,14 @@ export function App() {
         events={events}
         loading={loading}
         error={error}
-        onOpenEvent={(event) => {
-          const src = new URL(photoUrl(event.source_filename), window.location.origin).toString();
-          if (window.parent !== window) {
-            window.parent.postMessage(
-              {
-                type: "album-lightbox",
-                src,
-                meta: {
-                  date: new Date(event.observed_at).toLocaleString(),
-                  pet: event.pet_id ?? undefined,
-                  behavior: event.behavior ?? undefined,
-                  caption: event.summary ?? undefined,
-                },
-              },
-              "*",
-            );
-            return;
-          }
-          window.open(src, "_blank", "noopener,noreferrer");
-        }}
+        onOpenEvent={(event) => setSelectedEvent(event)}
       />
+      {selectedEvent && (
+        <EventDetail
+          event={selectedEvent}
+          onClose={() => setSelectedEvent(null)}
+        />
+      )}
       <section class="secondary-stack">
         <FilterBar query={query} onStatusChange={handleStatusChange} onPetChange={handlePetChange} />
         <StatsStrip stats={stats} />

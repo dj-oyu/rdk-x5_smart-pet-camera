@@ -1,5 +1,5 @@
-use crate::application::{ActivityStats, EventSummary};
-use crate::db::{DetectionInput, PhotoFilter, PhotoStore};
+use crate::application::{AppContext, EventSummary, ObservationCommands, EventQueries};
+use crate::db::DetectionInput;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
@@ -10,7 +10,6 @@ use futures_util::stream::Stream;
 use include_dir::{include_dir, Dir};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
@@ -27,19 +26,27 @@ pub struct PhotoEvent {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub store: Arc<Mutex<PhotoStore>>,
+    pub context: AppContext,
     pub photos_dir: PathBuf,
     pub event_tx: tokio::sync::broadcast::Sender<PhotoEvent>,
-    pub base_url: Option<String>,
-    pub is_tls: bool,
+}
+
+impl AppState {
+    fn queries(&self) -> EventQueries {
+        self.context.event_queries()
+    }
+
+    fn commands(&self) -> ObservationCommands {
+        self.context.observation_commands()
+    }
 }
 
 pub fn router(state: AppState) -> Router {
     let mcp_state = crate::mcp::McpState {
-        store: state.store.clone(),
+        store: state.context.repository().clone(),
         photos_dir: state.photos_dir.clone(),
-        base_url: state.base_url.clone(),
-        is_tls: state.is_tls,
+        base_url: state.context.base_url().map(str::to_string),
+        is_tls: state.context.is_tls(),
     };
 
     let mcp_router = Router::new()
@@ -109,22 +116,16 @@ fn embedded_ui_response(path: Option<&str>) -> Response {
 
 // --- REST API ---
 
-
 async fn handle_photos_list(
     State(state): State<AppState>,
     Query(q): Query<PhotosQuery>,
 ) -> impl IntoResponse {
-    let filter = build_filter(&q);
-    let store = state.store.lock().unwrap();
-    match store.list(&filter) {
-        Ok((photos, total)) => {
-            let resp = PhotosResponse {
-                events: photos.into_iter().map(EventSummary::from).collect(),
-                total,
-            };
-            Json(resp).into_response()
+    let query = build_event_query(&q);
+    match state.queries().list_events(query).await {
+        Ok((events, total)) => {
+            Json(PhotosResponse { events, total }).into_response()
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }
 
@@ -164,27 +165,27 @@ async fn handle_photo_update(
     Json(body): Json<PhotoUpdate>,
 ) -> impl IntoResponse {
     let safe_name = sanitize_filename(&filename);
-    let store = state.store.lock().unwrap();
+    let queries = state.queries();
+    let commands = state.commands();
 
-    // Verify photo exists
-    match store.get_by_filename(&safe_name) {
+    match queries.get_event_by_source(&safe_name).await {
         Ok(None) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not found"}))).into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
         Ok(Some(_)) => {}
     }
 
     let mut updated = serde_json::json!({"ok": true});
 
     if let Some(is_valid) = body.is_valid {
-        if let Err(e) = store.set_validation_override(&safe_name, is_valid) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response();
+        if let Err(e) = commands.override_event_validity(&safe_name, is_valid).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
         }
         updated["is_valid"] = serde_json::json!(is_valid);
     }
 
     if let Some(ref pet_id) = body.pet_id {
-        if let Err(e) = store.update_pet_id(&safe_name, pet_id) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response();
+        if let Err(e) = commands.update_pet_id(&safe_name, pet_id).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
         }
         updated["pet_id"] = serde_json::json!(pet_id);
     }
@@ -218,20 +219,20 @@ async fn handle_ingest(
     };
 
     let safe_name = sanitize_filename(&body.filename);
-    let store = state.store.lock().unwrap();
+    let commands = state.commands();
 
-    match store.ingest_with_detections(
+    match commands.ingest_with_detections(
         &safe_name,
         captured_at,
         body.pet_id.as_deref(),
         &body.detections,
-    ) {
+    ).await {
         Ok(photo_id) => Json(serde_json::json!({
             "ok": true,
             "photo_id": photo_id,
             "detections_count": body.detections.len(),
         })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }
 
@@ -240,10 +241,9 @@ async fn handle_detections_get(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let store = state.store.lock().unwrap();
-    match store.get_detections(id) {
+    match state.queries().get_detections(id).await {
         Ok(dets) => Json(dets).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }
 
@@ -258,19 +258,17 @@ async fn handle_detection_update(
     Path(id): Path<i64>,
     Json(body): Json<DetectionUpdate>,
 ) -> impl IntoResponse {
-    let store = state.store.lock().unwrap();
-    match store.update_detection_override(id, &body.pet_id_override) {
+    match state.commands().update_detection_override(id, &body.pet_id_override).await {
         Ok(0) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "detection not found"}))).into_response(),
         Ok(_) => Json(serde_json::json!({"ok": true, "pet_id_override": body.pet_id_override})).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }
 
 async fn handle_stats(State(state): State<AppState>) -> impl IntoResponse {
-    let store = state.store.lock().unwrap();
-    match store.stats() {
-        Ok(stats) => Json(ActivityStats::from(stats)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    match state.queries().activity_stats().await {
+        Ok(stats) => Json(stats).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }
 
@@ -294,17 +292,19 @@ async fn handle_health() -> impl IntoResponse {
     Json(serde_json::json!({"ok": true}))
 }
 
-fn build_filter(q: &PhotosQuery) -> PhotoFilter {
+fn build_event_query(q: &PhotosQuery) -> crate::application::EventQuery {
+    use crate::application::EventStatusFilter;
     let is_pending = q.is_valid.as_deref() == Some("pending");
-    PhotoFilter {
-        is_valid: if is_pending { None } else {
-            q.is_valid.as_ref().and_then(|v| match v.as_str() {
-                "true" | "1" => Some(true),
-                "false" | "0" => Some(false),
-                _ => None,
-            })
+    crate::application::EventQuery {
+        status: if is_pending {
+            EventStatusFilter::Pending
+        } else {
+            match q.is_valid.as_deref() {
+                Some("true") | Some("1") => EventStatusFilter::Valid,
+                Some("false") | Some("0") => EventStatusFilter::Invalid,
+                _ => EventStatusFilter::All,
+            }
         },
-        is_pending,
         pet_id: q.pet_id.clone().filter(|s| !s.is_empty()),
         limit: q.limit,
         offset: q.offset,
@@ -321,6 +321,8 @@ fn sanitize_filename(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::PhotoStoreRepository;
+    use crate::db::PhotoStore;
     use axum::body::Body;
     use axum::http::Request;
     use chrono::NaiveDate;
@@ -334,16 +336,22 @@ mod tests {
     fn test_state() -> AppState {
         let store = PhotoStore::open_in_memory().unwrap();
         store.migrate().unwrap();
+        let repository = PhotoStoreRepository::shared(store);
         let td = tempfile::tempdir().unwrap();
         let photos_dir = td.path().to_path_buf();
         std::mem::forget(td);
         let (event_tx, _) = tokio::sync::broadcast::channel(16);
+        let context = AppContext::new(
+            repository,
+            photos_dir.clone(),
+            tokio::sync::broadcast::channel(64).0,
+            None,
+            false,
+        );
         AppState {
-            store: Arc::new(Mutex::new(store)),
+            context,
             photos_dir,
             event_tx,
-            base_url: None,
-            is_tls: false,
         }
     }
 
@@ -389,11 +397,19 @@ mod tests {
     #[tokio::test]
     async fn photos_list_returns_frontend_event_contract() {
         let state = test_state();
-        {
-            let store = state.store.lock().unwrap();
-            store.insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), Some("chatora")).unwrap();
-            store.update_vlm_result("a.jpg", true, "tabby cat resting", "resting").unwrap();
-        }
+        let commands = state.context.observation_commands();
+        commands.ingest_source_photo(crate::application::ObservationInput {
+            source_filename: "a.jpg".into(),
+            captured_at: dt(2026, 3, 21, 10, 0, 0),
+            pet_id: Some("chatora".into()),
+        }).await.unwrap();
+        commands.apply_observation(crate::application::ObservationResult {
+            source_filename: "a.jpg".into(),
+            is_valid: true,
+            summary: "tabby cat resting".into(),
+            behavior: "resting".into(),
+        }).await.unwrap();
+
         let app = router(state);
         let resp = app
             .oneshot(Request::builder().uri("/api/photos?is_valid=true").body(Body::empty()).unwrap())
@@ -435,10 +451,13 @@ mod tests {
     #[tokio::test]
     async fn stats_endpoint_returns_frontend_contract() {
         let state = test_state();
-        {
-            let store = state.store.lock().unwrap();
-            store.insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), None).unwrap();
-        }
+        let commands = state.context.observation_commands();
+        commands.ingest_source_photo(crate::application::ObservationInput {
+            source_filename: "a.jpg".into(),
+            captured_at: dt(2026, 3, 21, 10, 0, 0),
+            pet_id: None,
+        }).await.unwrap();
+
         let app = router(state);
         let resp = app
             .oneshot(Request::builder().uri("/api/stats").body(Body::empty()).unwrap())

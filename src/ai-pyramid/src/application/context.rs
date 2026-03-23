@@ -51,4 +51,8 @@ impl AppContext {
     pub fn subscribe(&self) -> broadcast::Receiver<PetEvent> {
         self.event_tx.subscribe()
     }
+
+    pub fn repository(&self) -> &SharedEventRepository {
+        &self.repository
+    }
 }

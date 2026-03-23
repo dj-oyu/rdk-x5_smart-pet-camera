@@ -1,4 +1,4 @@
-use crate::db::{PhotoFilter, PhotoStore};
+use crate::application::{EventQuery, EventStatusFilter, SharedEventRepository};
 use axum::extract::{OriginalUri, Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -6,11 +6,10 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub struct McpState {
-    pub store: Arc<Mutex<PhotoStore>>,
+    pub store: SharedEventRepository,
     pub photos_dir: PathBuf,
     pub base_url: Option<String>,
     pub is_tls: bool,
@@ -72,7 +71,7 @@ pub async fn handle_mcp(
     let resp = match req.method.as_str() {
         "initialize" => handle_initialize(id),
         "tools/list" => handle_tools_list(id),
-        "tools/call" => handle_tools_call(state, id, req.params, base_url),
+        "tools/call" => handle_tools_call(state, id, req.params, base_url).await,
         _ => JsonRpcResponse::error(id, -32601, format!("Method not found: {}", req.method)),
     };
 
@@ -84,7 +83,6 @@ fn resolve_base_url(state: &McpState, headers: &HeaderMap, uri: &axum::http::Uri
     if state.base_url.is_some() {
         return state.base_url.clone();
     }
-    // HTTP/2: authority is in URI; HTTP/1.1: authority is in Host header
     let host_str = uri
         .authority()
         .map(|a| a.as_str().to_string())
@@ -136,45 +134,44 @@ fn handle_tools_list(id: Value) -> JsonRpcResponse {
     }))
 }
 
-fn handle_tools_call(state: McpState, id: Value, params: Option<Value>, base_url: Option<String>) -> JsonRpcResponse {
+async fn handle_tools_call(state: McpState, id: Value, params: Option<Value>, base_url: Option<String>) -> JsonRpcResponse {
     let params = params.unwrap_or(json!({}));
     let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
 
     match tool_name {
-        "get_recent_photos" => call_get_recent_photos(state, id, &params, base_url),
+        "get_recent_photos" => call_get_recent_photos(state, id, &params, base_url).await,
         _ => JsonRpcResponse::error(id, -32602, format!("Unknown tool: {tool_name}")),
     }
 }
 
-fn call_get_recent_photos(state: McpState, id: Value, params: &Value, base_url: Option<String>) -> JsonRpcResponse {
+async fn call_get_recent_photos(state: McpState, id: Value, params: &Value, base_url: Option<String>) -> JsonRpcResponse {
     let empty = json!({});
     let args = params.get("arguments").unwrap_or(&empty);
     let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(20).min(50).max(1);
     let pet_id = args.get("pet_id").and_then(|v| v.as_str()).map(String::from);
 
-    let filter = PhotoFilter {
-        is_valid: Some(true),
+    let query = EventQuery {
+        status: EventStatusFilter::Valid,
         pet_id: pet_id.filter(|s| !s.is_empty()),
         limit: Some(limit),
-        ..Default::default()
+        offset: None,
     };
 
-    let store = state.store.lock().unwrap();
-    match store.list(&filter) {
-        Ok((photos, total)) => {
-            let mut lines = vec![format!("{} photos (total {total}):", photos.len())];
-            for photo in &photos {
-                let caption = photo.caption.as_deref().unwrap_or("");
-                let pet = photo.pet_id.as_deref().unwrap_or("?");
-                let behavior = photo.behavior.as_deref().unwrap_or("?");
-                let ts = photo.captured_at.format("%Y-%m-%d %H:%M");
+    match state.store.list_events(query).await {
+        Ok((events, total)) => {
+            let mut lines = vec![format!("{} photos (total {total}):", events.len())];
+            for event in &events {
+                let caption = event.summary.as_deref().unwrap_or("");
+                let pet = event.pet_id.as_deref().unwrap_or("?");
+                let behavior = event.behavior.as_deref().unwrap_or("?");
+                let ts = &event.observed_at;
                 let url = match &base_url {
-                    Some(base) => format!("{}/mcp/photos/{}", base.trim_end_matches('/'), photo.id),
-                    None => format!("/mcp/photos/{}", photo.id),
+                    Some(base) => format!("{}/mcp/photos/{}", base.trim_end_matches('/'), event.id),
+                    None => format!("/mcp/photos/{}", event.id),
                 };
                 lines.push(format!(
                     "#{} | {} | {} | {} | \"{}\" | {}",
-                    photo.id, ts, pet, behavior, caption, url
+                    event.id, ts, pet, behavior, caption, url
                 ));
             }
             let text = lines.join("\n");
@@ -192,13 +189,10 @@ pub async fn handle_mcp_photo_download(
     State(state): State<McpState>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let filename = {
-        let store = state.store.lock().unwrap();
-        match store.get_by_id(id) {
-            Ok(Some(photo)) => photo.filename,
-            Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response(),
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
-        }
+    let filename = match state.store.get_event_by_id(id).await {
+        Ok(Some(event)) => event.source_filename,
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
     };
 
     let safe_name = std::path::Path::new(&filename)
@@ -227,6 +221,8 @@ pub async fn handle_mcp_photo_download(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::PhotoStoreRepository;
+    use crate::db::PhotoStore;
     use axum::body::Body;
     use axum::http::Request;
     use axum::routing::{get, post};
@@ -241,11 +237,12 @@ mod tests {
     fn test_state() -> McpState {
         let store = PhotoStore::open_in_memory().unwrap();
         store.migrate().unwrap();
+        let repository = PhotoStoreRepository::shared(store);
         let td = tempfile::tempdir().unwrap();
         let photos_dir = td.path().to_path_buf();
         std::mem::forget(td);
         McpState {
-            store: Arc::new(Mutex::new(store)),
+            store: repository,
             photos_dir,
             base_url: None,
             is_tls: false,
@@ -273,6 +270,11 @@ mod tests {
             .unwrap();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn insert_test_photo(repo: &SharedEventRepository, filename: &str, ts: chrono::NaiveDateTime, pet_id: &str, caption: &str, behavior: &str) {
+        repo.store_source_photo(filename, ts, Some(pet_id)).await.unwrap();
+        repo.apply_observation(filename, true, caption, behavior).await.unwrap();
     }
 
     #[tokio::test]
@@ -329,13 +331,9 @@ mod tests {
     #[tokio::test]
     async fn mcp_get_recent_photos() {
         let state = test_state();
-        {
-            let store = state.store.lock().unwrap();
-            store.insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), Some("chatora")).unwrap();
-            store.insert("b.jpg", dt(2026, 3, 21, 11, 0, 0), Some("mike")).unwrap();
-            store.update_vlm_result("a.jpg", true, "Chatora resting", "resting").unwrap();
-            store.update_vlm_result("b.jpg", true, "Mike playing", "playing").unwrap();
-        }
+        insert_test_photo(&state.store, "a.jpg", dt(2026, 3, 21, 10, 0, 0), "chatora", "Chatora resting", "resting").await;
+        insert_test_photo(&state.store, "b.jpg", dt(2026, 3, 21, 11, 0, 0), "mike", "Mike playing", "playing").await;
+
         let app = test_router(state);
         let resp = post_jsonrpc(app, json!({
             "jsonrpc": "2.0",
@@ -357,13 +355,9 @@ mod tests {
     #[tokio::test]
     async fn mcp_get_recent_photos_filter_pet() {
         let state = test_state();
-        {
-            let store = state.store.lock().unwrap();
-            store.insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), Some("chatora")).unwrap();
-            store.insert("b.jpg", dt(2026, 3, 21, 11, 0, 0), Some("mike")).unwrap();
-            store.update_vlm_result("a.jpg", true, "cap a", "resting").unwrap();
-            store.update_vlm_result("b.jpg", true, "cap b", "playing").unwrap();
-        }
+        insert_test_photo(&state.store, "a.jpg", dt(2026, 3, 21, 10, 0, 0), "chatora", "cap a", "resting").await;
+        insert_test_photo(&state.store, "b.jpg", dt(2026, 3, 21, 11, 0, 0), "mike", "cap b", "playing").await;
+
         let app = test_router(state);
         let resp = post_jsonrpc(app, json!({
             "jsonrpc": "2.0",
@@ -385,10 +379,8 @@ mod tests {
         let state = test_state();
         let photo_data = b"fake jpeg data";
         std::fs::write(state.photos_dir.join("a.jpg"), photo_data).unwrap();
-        {
-            let store = state.store.lock().unwrap();
-            store.insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), Some("chatora")).unwrap();
-        }
+        state.store.store_source_photo("a.jpg", dt(2026, 3, 21, 10, 0, 0), Some("chatora")).await.unwrap();
+
         let app = test_router(state);
         let resp = app
             .oneshot(
@@ -445,11 +437,8 @@ mod tests {
     #[tokio::test]
     async fn mcp_photos_url_from_host_header() {
         let state = test_state();
-        {
-            let store = state.store.lock().unwrap();
-            store.insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), Some("chatora")).unwrap();
-            store.update_vlm_result("a.jpg", true, "cap", "resting").unwrap();
-        }
+        insert_test_photo(&state.store, "a.jpg", dt(2026, 3, 21, 10, 0, 0), "chatora", "cap", "resting").await;
+
         let app = test_router(state);
         let body = serde_json::to_vec(&json!({
             "jsonrpc": "2.0",
