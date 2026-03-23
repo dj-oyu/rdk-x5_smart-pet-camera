@@ -884,6 +884,34 @@ class YoloDetector:
 
         return detections
 
+    def detect_nv12_readonly(
+        self,
+        nv12_data: bytes | memoryview,
+        width: int,
+        height: int,
+    ) -> list[Detection]:
+        """Read-only detection: BPU inference + postprocess only.
+
+        No side effects — does not modify CLAHE cache, frame counters,
+        statistics, or any instance state. Safe to call from interrupt
+        context (e.g., HTTP /detect endpoint) while the main SHM loop
+        is running.
+
+        Input must be 640x640 NV12 (pre-letterboxed by caller).
+        """
+        nv12_array = np.frombuffer(nv12_data, dtype=np.uint8)
+
+        if width == self.input_w and height == self.input_h:
+            input_tensor = nv12_array
+            scale = (1.0, 1.0)
+            shift = (0.0, 0.0)
+            original_shape = (height, width)
+        else:
+            return []  # caller must letterbox to 640x640
+
+        outputs = self._forward(input_tensor)
+        return self._postprocess(outputs, scale, shift, original_shape)
+
     def _apply_clahe_nv12(
         self, nv12_array: np.ndarray, width: int, height: int,
         update_cache: bool = True,
