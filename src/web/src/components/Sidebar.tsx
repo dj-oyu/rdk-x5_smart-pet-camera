@@ -18,7 +18,7 @@ interface GanttRecord {
 const GANTT_WINDOW = 24 * 60 * 60; // 24 hours in seconds
 const GANTT_GAP_THRESHOLD = 30; // merge gaps shorter than 30s
 
-const ALBUM_URL = 'https://m5stack-ai-pyramid.tail848eb5.ts.net:8082/app';
+const ALBUM_URL = 'https://m5stack-ai-pyramid.tail848eb5.ts.net:8082/app?embed=petcamera';
 
 export function useSidebar() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
