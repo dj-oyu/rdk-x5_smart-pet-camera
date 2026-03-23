@@ -58,6 +58,9 @@ fn find_tls_certs() -> Option<(PathBuf, PathBuf)> {
 
 #[tokio::main]
 async fn main() {
+    // Load .env file if present (before parsing args and reading env vars)
+    let _ = dotenvy::dotenv();
+
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
