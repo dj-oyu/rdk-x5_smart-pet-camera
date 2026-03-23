@@ -34,6 +34,7 @@ from real_shared_memory import (
     open_roi_readers,
 )
 from detection.yolo_detector import YoloDetector
+from detection.image_utils import jpeg_to_yolo_nv12
 
 # hb_mem bindings (required for zero-copy)
 from hb_mem_bindings import init_module as hb_mem_init, import_nv12_graph_buf
@@ -338,6 +339,81 @@ class YoloDetectorDaemon:
         """シグナルハンドラ"""
         self.running = False
 
+    def _start_detect_api(self, port: int = 8082) -> None:
+        """Start HTTP /detect endpoint on a background thread.
+
+        Accepts JPEG images (base64), runs YOLO detection, returns JSON.
+        Shares the same YoloDetector instance as the main SHM loop.
+        BPU inference is naturally serialized by the GIL.
+        """
+        import base64
+        import json
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+
+        detector = self.detector
+
+        class DetectHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                if self.path != "/detect":
+                    self.send_error(404)
+                    return
+
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(length))
+                    jpeg_bytes = base64.b64decode(body["image_base64"])
+                except (json.JSONDecodeError, KeyError, Exception) as e:
+                    self.send_error(400, str(e))
+                    return
+
+                try:
+                    nv12, orig_w, orig_h, scale, pad_x, pad_y = jpeg_to_yolo_nv12(jpeg_bytes)
+                    detections = detector.detect_nv12(nv12, 640, 640)
+
+                    # Map bbox from 640x640 letterbox back to original image coords
+                    result = []
+                    for d in detections:
+                        x = int((d.bbox.x - pad_x) / scale)
+                        y = int((d.bbox.y - pad_y) / scale)
+                        w = int(d.bbox.w / scale)
+                        h = int(d.bbox.h / scale)
+                        # Clamp to image bounds
+                        x = max(0, x)
+                        y = max(0, y)
+                        w = min(w, orig_w - x)
+                        h = min(h, orig_h - y)
+                        result.append({
+                            "class_name": d.class_name.value,
+                            "confidence": round(d.confidence, 3),
+                            "bbox": {"x": x, "y": y, "w": w, "h": h},
+                        })
+
+                    resp = json.dumps({
+                        "detections": result,
+                        "width": orig_w,
+                        "height": orig_h,
+                    }).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(resp)))
+                    self.end_headers()
+                    self.wfile.write(resp)
+                except Exception as e:
+                    logger.warning(f"Detect API error: {e}")
+                    self.send_error(500, str(e))
+
+            def log_message(self, format, *args):
+                pass  # suppress per-request logging
+
+        def serve():
+            server = HTTPServer(("0.0.0.0", port), DetectHandler)
+            server.daemon_threads = True
+            logger.info(f"Detect API listening on :{port}")
+            server.serve_forever()
+
+        t = threading.Thread(target=serve, daemon=True)
+        t.start()
+
     def run(self) -> int:
         """メインループ"""
         import numpy as np
@@ -349,6 +425,9 @@ class YoloDetectorDaemon:
         self._save_queue: queue.Queue = queue.Queue(maxsize=10)
         self._save_thread = threading.Thread(target=self._save_worker, daemon=True)
         self._save_thread.start()
+
+        # HTTP detection API (separate thread, port 8082)
+        self._start_detect_api()
 
         logger.debug("Starting detection loop")
 
