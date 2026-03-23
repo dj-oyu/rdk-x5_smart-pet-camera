@@ -413,7 +413,7 @@ class YoloDetectorDaemon:
                     # Update active camera after processing switch
                     self.active_camera = camera_id
                     self.detector.clahe_enabled = (self.active_camera == 1)
-                    self.detector.clahe_frequency = 3 if self.active_camera == 1 else 1
+                    self.detector.clahe_frequency = 6 if self.active_camera == 1 else 1
                     if self.active_camera == 0:
                         self.detector._clahe_y_cache.clear()
 
