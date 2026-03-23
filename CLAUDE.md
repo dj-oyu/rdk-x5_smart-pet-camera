@@ -31,6 +31,8 @@
 | `pet-album-spec.md` | Album feature (iframe, AI Pyramid, rsync) |
 | `pet-album-mcp.md` | MCP integration spec |
 | `vlm_integration_spec.md` | VLM behavior analysis spec |
+| `src/ai-pyramid/docs/architecture.md` | ai-pyramid API, DB, application layer, UI 全体像 |
+| `src/ai-pyramid/docs/detections-integration.md` | YOLO detection → ai-pyramid 連携仕様 |
 | `hardware-specs.md` | GPU/VPU/BPU specs, nano2D/VSE/hbn_vflow benchmarks |
 | `hw-offload-roadmap.md` | H.265移行 + HWオフロード実装計画 |
 | `axmodel-conversion-guide.md` | Pulsar2 axmodel変換手順書 (Qwen3-VL/Qwen3.5) |
