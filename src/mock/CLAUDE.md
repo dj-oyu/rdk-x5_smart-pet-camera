@@ -18,6 +18,5 @@ uv run src/mock/main.py --detection-prob 0.7
 
 ## POSIX SHM Mocks (src/capture/)
 ```bash
-uv run src/capture/mock_camera_daemon.py   # 実POSIX SHMに書き込み
 uv run src/capture/mock_detector_daemon.py # 実POSIX SHMに検出書き込み
 ```

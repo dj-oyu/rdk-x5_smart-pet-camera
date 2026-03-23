@@ -92,7 +92,7 @@ MONITOR_PORT=9001 ./scripts/run_camera_switcher_dev.sh
 
 - `camera_daemon_drobotics` と `camera_switcher_daemon` をビルドし、旧プロセス/共有メモリをクリーンアップしてから `camera_switcher_daemon` を起動します。
 - `src/capture/mock_detector_daemon.py` を `uv run` で起動し、RealSharedMemory にダミー検出結果を書き込みます（現状の detector はモック実装のみ）。
-- `src/monitor/main.py --shm-type real` を `uv run` で起動し、`http://<host>:<port>/` でフレームと検出結果を確認できます。
+- Go web_monitor (`src/streaming_server/cmd/web_monitor/`) を起動し、`http://<host>:8080/` でフレームと検出結果を確認できます。
 - `Ctrl+C` で全プロセスを停止し、共有メモリも掃除されます。
 
 ## 使用方法
@@ -159,15 +159,9 @@ uv run src/capture/test_integration.py --max-frames 100
 モックから実機への切り替え:
 
 ```python
-# src/monitor/main.py の修正
-
-# Before (モック)
-from mock.shared_memory import MockSharedMemory
-shm = MockSharedMemory()
-
-# After (実機)
-from capture.real_shared_memory import RealSharedMemory
-shm = RealSharedMemory()
+# ゼロコピーSHM読み取り
+from capture.real_shared_memory import ZeroCopySharedMemory
+shm = ZeroCopySharedMemory()
 shm.open()
 ```
 
@@ -184,16 +178,9 @@ shm.open()
 ### Frame構造体
 
 ```c
-typedef struct {
-    uint64_t frame_number;      // フレーム番号
-    struct timespec timestamp;  // タイムスタンプ
-    int camera_id;              // カメラID (0 or 1)
-    int width;                  // 幅
-    int height;                 // 高さ
-    int format;                 // 0=JPEG, 1=NV12, 2=RGB
-    size_t data_size;           // データサイズ
-    uint8_t data[MAX_FRAME_SIZE]; // フレームデータ
-} Frame;
+// ゼロコピー設計: SHMにはメタデータ(share_id等)のみ格納
+// 実データはhb_mem_import経由でVPUメモリに直接アクセス
+// 詳細は shared_memory.h を参照
 ```
 
 ### 検出結果バッファ
