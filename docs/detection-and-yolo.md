@@ -288,7 +288,7 @@ detector = YoloDetector(
 # 手動起動
 ./build/camera_daemon_drobotics -C 1 -P 1 --daemon
 uv run src/detector/yolo_detector_daemon.py --yolo-model v11n
-uv run src/monitor/main.py --shm-type real --host 0.0.0.0 --port 8080
+./build/web_monitor --port 8080
 ```
 
 ---

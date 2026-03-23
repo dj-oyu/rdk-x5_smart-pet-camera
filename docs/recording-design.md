@@ -44,7 +44,6 @@ graph TD
 | `src/streaming_server/internal/webmonitor/server.go` | HTTP APIハンドラ（録画制御・一覧・ダウンロード・削除） |
 | `src/streaming_server/internal/webmonitor/config.go` | 設定（`RecordingOutputPath`, `H264ShmName`等） |
 | `src/streaming_server/internal/recorder/recorder.go` | WebRTCサーバー用チャネルベースレコーダー（別パス） |
-| `src/monitor/h264_recorder.py` | Python版レコーダー（レガシー、未使用） |
 | `src/web/src/hooks/useRecording.ts` | フロントエンド録画制御フック |
 | `src/web/src/components/VideoControls.tsx` | 録画ボタンUI |
 | `src/web/src/components/RecordingsModal.tsx` | 録画一覧モーダルUI |

@@ -19,8 +19,7 @@
   "extraPaths": [
     "src",
     "src/common/src",
-    "src/mock",
-    "src/monitor"
+    "src/mock"
   ],
   "reportUnusedFunction": false,
   "reportUnknownMemberType": false,

@@ -10,5 +10,5 @@ from common.types import Frame, Detection, DetectionResult
 
 ## PYTHONPATH
 ```bash
-PYTHONPATH=src:src/common/src:src/mock:src/monitor
+PYTHONPATH=src:src/common/src:src/mock
 ```
