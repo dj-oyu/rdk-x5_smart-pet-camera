@@ -7,8 +7,9 @@ RDK X5のPreact SPAからiframeで埋め込まれる独立Webアプリ。**Rust�
 ## Build & Test
 ```bash
 cd src/ai-pyramid
-cargo test          # 32 tests (filename, DB, VLM, server)
-cargo build         # dev build
+cd ui && bun install && bun run build && cd ..  # UI build (required before cargo build)
+cargo clippy        # lint (mandatory before build)
+cargo test          # 52 tests
 cargo build --release  # optimized (opt-level=z, LTO, strip)
 ```
 
@@ -51,24 +52,49 @@ ai-pyramid配下の変更をマージしたら、必ず以下を実行:
 ```
 src/ai-pyramid/
   src/
-    main.rs           # CLI entry point (clap), tokio runtime
-    lib.rs            # module exports
+    main.rs             # CLI entry point (clap), tokio runtime
+    lib.rs              # module exports
+    application/        # Domain layer (commands, queries, repository pattern)
+      commands.rs       # ObservationCommands (ingest, VLM, detection override)
+      queries.rs        # EventQueries (list, stats, detections)
+      repository.rs     # EventRepositoryPort + PhotoStoreRepository
+      db_thread.rs      # async-sync bridge (mpsc + DbCommand)
+      context.rs        # AppContext DI container
+      model.rs          # EventSummary, EventQuery, ActivityStats
+      event.rs          # PetEvent broadcast type
     ingest/
-      filename.rs     # parse comic_YYYYMMDD_HHMMSS_{pet_id}.jpg
-      watcher.rs      # fsnotify watch + VLM processing queue
-    db/mod.rs         # SQLite PhotoStore (rusqlite, in-memory for tests)
-    vlm/mod.rs        # OpenAI API client, prompt, JSON parser
-    server/mod.rs     # axum HTTP server, REST API, album template
-  templates/
-    album.html        # askama server-rendered photo grid
+      filename.rs       # parse comic_YYYYMMDD_HHMMSS_{pet_id}.jpg
+      watcher.rs        # fsnotify watch + VLM processing queue
+    db/mod.rs           # SQLite PhotoStore, migrations, majority vote
+    vlm/mod.rs          # OpenAI API client, prompt, JSON parser
+    server/mod.rs       # axum HTTP server, REST API, SSE, embedded SPA
+    mcp/mod.rs          # MCP JSON-RPC server (get_recent_photos tool)
+  ui/                   # Preact SPA (bun build → include_dir! で埋め込み)
+    src/
+      app.tsx           # Main app (state, SSE, routing)
+      components/
+        event-grid.tsx  # Photo card grid
+        event-detail.tsx # Modal: bbox overlay + pet_id correction
+        filter-bar.tsx  # Status + pet filters (dynamic from API)
+        stats-strip.tsx # Stats cards
+      lib/api.ts        # API client, types
 ```
+
+→ 詳細: `docs/architecture.md`
 
 ## Key Design Decisions
 - **pet_id**: NOT from VLM (chatora bias). From Go bbox color analysis → filename
 - **VLM**: is_valid (100%), caption, behavior only
 - **Memory**: ~35-50MB RSS target (2GB system RAM constraint)
-- **SQLite**: modernc.org/sqlite equivalent (rusqlite bundled)
+- **SQLite**: rusqlite bundled, WAL mode, single db_thread (no Mutex)
 - **Concurrency**: VLM worker = 1 (NPU exclusive resource)
+- **Detection override**: pet_id_override 更新時に photo の pet_id を cat detections の多数決で自動更新
+- **Pet names**: `PET_NAME_*` 環境変数で表示名マッピング (再起動で反映)
 
 ## Docs
-→ `docs/pet-album-spec.md`, `docs/vlm_integration_spec.md`
+| Doc | Scope |
+|-----|-------|
+| `docs/architecture.md` | API, DB schema, application layer, UI, integrations の全体像 |
+| `docs/pet-album-spec.md` | Album feature spec |
+| `docs/vlm_integration_spec.md` | VLM behavior analysis spec |
+| `docs/detections-integration.md` | YOLO detection → ai-pyramid 連携仕様 |
