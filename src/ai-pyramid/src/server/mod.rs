@@ -9,6 +9,7 @@ use axum::Router;
 use futures_util::stream::Stream;
 use include_dir::{include_dir, Dir};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
@@ -29,6 +30,19 @@ pub struct AppState {
     pub context: AppContext,
     pub photos_dir: PathBuf,
     pub event_tx: tokio::sync::broadcast::Sender<PhotoEvent>,
+    pub pet_names: HashMap<String, String>,
+}
+
+/// Load pet display names from environment variables.
+/// PET_NAME_MIKE=ミケ, PET_NAME_CHATORA=チャトラ, etc.
+pub fn load_pet_names() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for (key, value) in std::env::vars() {
+        if let Some(pet_id) = key.strip_prefix("PET_NAME_") {
+            map.insert(pet_id.to_ascii_lowercase(), value);
+        }
+    }
+    map
 }
 
 impl AppState {
@@ -62,6 +76,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/photos/ingest", post(handle_ingest))
         .route("/api/detections/{id}", get(handle_detections_get).patch(handle_detection_update))
         .route("/api/stats", get(handle_stats))
+        .route("/api/pet-names", get(handle_pet_names))
         .route("/api/events", get(handle_sse))
         .route("/health", get(handle_health))
         .with_state(state)
@@ -288,6 +303,10 @@ async fn handle_sse(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+async fn handle_pet_names(State(state): State<AppState>) -> impl IntoResponse {
+    Json(state.pet_names)
+}
+
 async fn handle_health() -> impl IntoResponse {
     Json(serde_json::json!({"ok": true}))
 }
@@ -352,6 +371,10 @@ mod tests {
             context,
             photos_dir,
             event_tx,
+            pet_names: HashMap::from([
+                ("mike".into(), "Mike".into()),
+                ("chatora".into(), "Chatora".into()),
+            ]),
         }
     }
 
@@ -500,5 +523,155 @@ mod tests {
         let text = String::from_utf8_lossy(&chunk);
         assert!(text.contains("event: event"));
         assert!(text.contains("\"filename\":\"a.jpg\""));
+    }
+
+    #[tokio::test]
+    async fn ingest_creates_photo_and_detections() {
+        let state = test_state();
+        let app = router(state);
+        let body = serde_json::json!({
+            "filename": "comic_20260321_104532_chatora.jpg",
+            "captured_at": "2026-03-21T10:45:32",
+            "pet_id": "chatora",
+            "detections": [
+                {
+                    "panel_index": 0,
+                    "bbox_x": 50, "bbox_y": 30, "bbox_w": 120, "bbox_h": 180,
+                    "yolo_class": "cat",
+                    "pet_class": "chatora",
+                    "confidence": 0.85,
+                    "detected_at": "2026-03-21T10:45:32"
+                },
+                {
+                    "panel_index": 0,
+                    "bbox_x": 300, "bbox_y": 100, "bbox_w": 80, "bbox_h": 60,
+                    "yolo_class": "cup",
+                    "confidence": 0.62,
+                    "detected_at": "2026-03-21T10:45:32"
+                }
+            ]
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/photos/ingest")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+        ).unwrap();
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["detections_count"], 2);
+        assert!(json["photo_id"].as_i64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn get_detections_returns_ingested_data() {
+        let state = test_state();
+        let commands = state.context.observation_commands();
+        commands.ingest_with_detections(
+            "test.jpg",
+            dt(2026, 3, 21, 10, 0, 0),
+            Some("mike"),
+            &[crate::db::DetectionInput {
+                panel_index: Some(0),
+                bbox_x: 10, bbox_y: 20, bbox_w: 100, bbox_h: 150,
+                yolo_class: Some("cat".into()),
+                pet_class: Some("mike".into()),
+                confidence: Some(0.9),
+                detected_at: "2026-03-21T10:00:00".into(),
+            }],
+        ).await.unwrap();
+
+        let app = router(state);
+        let resp = app
+            .oneshot(Request::builder().uri("/api/detections/1").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+        ).unwrap();
+        let dets = json.as_array().unwrap();
+        assert_eq!(dets.len(), 1);
+        assert_eq!(dets[0]["yolo_class"], "cat");
+        assert_eq!(dets[0]["pet_class"], "mike");
+        assert_eq!(dets[0]["bbox_x"], 10);
+    }
+
+    #[tokio::test]
+    async fn patch_detection_override() {
+        let state = test_state();
+        let commands = state.context.observation_commands();
+        commands.ingest_with_detections(
+            "test.jpg",
+            dt(2026, 3, 21, 10, 0, 0),
+            Some("chatora"),
+            &[crate::db::DetectionInput {
+                panel_index: Some(0),
+                bbox_x: 10, bbox_y: 20, bbox_w: 100, bbox_h: 150,
+                yolo_class: Some("cat".into()),
+                pet_class: Some("chatora".into()),
+                confidence: Some(0.8),
+                detected_at: "2026-03-21T10:00:00".into(),
+            }],
+        ).await.unwrap();
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/detections/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"pet_id_override":"mike"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+        ).unwrap();
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["pet_id_override"], "mike");
+    }
+
+    #[tokio::test]
+    async fn patch_detection_not_found() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/detections/999")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"pet_id_override":"mike"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn pet_names_endpoint() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(Request::builder().uri("/api/pet-names").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+        ).unwrap();
+        assert_eq!(json["mike"], "Mike");
+        assert_eq!(json["chatora"], "Chatora");
     }
 }

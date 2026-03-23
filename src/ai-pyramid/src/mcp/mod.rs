@@ -147,7 +147,7 @@ async fn handle_tools_call(state: McpState, id: Value, params: Option<Value>, ba
 async fn call_get_recent_photos(state: McpState, id: Value, params: &Value, base_url: Option<String>) -> JsonRpcResponse {
     let empty = json!({});
     let args = params.get("arguments").unwrap_or(&empty);
-    let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(20).min(50).max(1);
+    let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(20).clamp(1, 50);
     let pet_id = args.get("pet_id").and_then(|v| v.as_str()).map(String::from);
 
     let query = EventQuery {
