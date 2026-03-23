@@ -1432,21 +1432,21 @@ a { color: inherit; }
 .album-lightbox {
     position: fixed;
     inset: 0;
-    z-index: 1050;
+    z-index: 2000;
     display: flex;
     justify-content: center;
     align-items: center;
     background: rgba(0, 0, 0, 0.92);
     backdrop-filter: blur(8px);
     cursor: pointer;
-    animation: lightbox-in 0.15s ease-out;
+    animation: lightbox-in 0.15s ease-out both;
 }
 .album-lightbox img {
     max-width: 92%;
     max-height: 80vh;
     object-fit: contain;
     border-radius: 8px;
-    animation: lightbox-img-in 0.2s ease-out;
+    animation: lightbox-img-in 0.2s ease-out both;
 }
 .album-lightbox-meta {
     position: fixed;
