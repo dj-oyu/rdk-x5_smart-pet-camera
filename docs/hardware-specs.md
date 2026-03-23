@@ -400,13 +400,18 @@ sp_release_vio_module(vps);
 
 hbn_vflow はVIN→ISP→VSEをカーネル内でHW結合するが、**エンコーダー (`hb_mm_mc`) はvflowの外部**で動作する。
 
-```
-┌─── hbn_vflow (カーネルHW結合) ───┐
-│  VIN → ISP → VSE                 │
-└──────────────┬────────────────────┘
-               ↓ hbn_vnode_getframe() (ユーザー空間)
-               ↓ memcpy
-        hb_mm_mc encoder (H.264/H.265/JPEG)
+```mermaid
+graph TD
+    vflow["hbn_vflow<br/>(カーネルHW結合)"]
+    vin_isp_vse["VIN → ISP → VSE"]
+    getframe["hbn_vnode_getframe()<br/>(ユーザー空間)"]
+    memcpy["memcpy"]
+    encoder["hb_mm_mc encoder<br/>(H.264/H.265/JPEG)"]
+
+    vflow --- vin_isp_vse
+    vin_isp_vse --> getframe
+    getframe --> memcpy
+    memcpy --> encoder
 ```
 
 エンコーダーはvnodeではないため `hbn_vflow_bind_vnode()` で結合**不可**。`hbn_vnode_getframe()` で取り出し → `memcpy` → エンコーダー入力バッファの流れ。

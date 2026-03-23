@@ -4,108 +4,74 @@
 
 ### システム構成図 [実装済]
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                      Smart Pet Camera System                            │
-│                      (D-Robotics RDK X5)                                │
-│                                                                         │
-│  ┌───────────────────────────────────────────────────────────────────┐ │
-│  │                    Streaming Layer (Go)                            │ │
-│  │                                                                    │ │
-│  │  ┌────────────────────────┐  ┌────────────────────────────────┐  │ │
-│  │  │  Go WebRTC Server     │  │  Flask UI Proxy                │  │ │
-│  │  │  pion/webrtc v3       │  │  Preact SPA 配信               │  │ │
-│  │  │  :8081                │  │  :8080                         │  │ │
-│  │  │  - H.264 passthrough  │  │  - API プロキシ → :8081        │  │ │
-│  │  │  - MJPEG endpoint     │  │  - アルバム UI                 │  │ │
-│  │  │  - SPS/PPS cache      │  │                                │  │ │
-│  │  │  - 録画 (NAL capture) │  │                                │  │ │
-│  │  └───────────┬────────────┘  └────────────────────────────────┘  │ │
-│  └──────────────┼────────────────────────────────────────────────────┘ │
-│                 │ SHM読取                                               │
-│  ┌──────────────┼────────────────────────────────────────────────────┐ │
-│  │              │     Shared Memory Layer (9領域)                     │ │
-│  │              │                                                     │ │
-│  │  /pet_camera_stream (93MB ring)  ←── H.264 active output         │ │
-│  │  /pet_camera_mjpeg_frame (1.4MB) ←── MJPEG frame                 │ │
-│  │  /pet_camera_control (8B)        ←── active camera index          │ │
-│  │  /pet_camera_zc_0, zc_1 (~150B)  ←── zero-copy YUV (per camera) │ │
-│  │  /pet_camera_h264_zc_0, zc_1     ←── zero-copy H.264             │ │
-│  │  /pet_camera_detections (584B)   ←── YOLO detection results       │ │
-│  │  /pet_camera_brightness (108B)   ←── brightness metric            │ │
-│  └──────────────┼──────────────────────────┬─────────────────────────┘ │
-│                 │                          │ SHM読取                    │
-│  ┌──────────────┼──────────────┐  ┌───────┼──────────────────────┐    │
-│  │   Capture Layer (C)         │  │  Detection Layer (Python)    │    │
-│  │                             │  │                              │    │
-│  │  camera_switcher_daemon     │  │  YOLOv11n on BPU (INT8)     │    │
-│  │   ├─ camera_daemon DAY     │  │  8.9ms inference             │    │
-│  │   └─ camera_daemon NIGHT   │  │                              │    │
-│  │                             │  │  DAY: 640x360→letterbox→    │    │
-│  │  ISP/VIO → YUV capture     │  │       640x640               │    │
-│  │  libspcdev → H.264 encode  │  │  NIGHT: 1280x720→3 ROI     │    │
-│  │  600kbps / GOP 14          │  │         round-robin ~22fps  │    │
-│  │                             │  │                              │    │
-│  │  コミック自動キャプチャ      │  │  → /pet_camera_detections   │    │
-│  └──────────────┬──────────────┘  └──────────────────────────────┘    │
-│                 │                                                      │
-│  ┌──────────────┼──────────────────────────────────────────────────┐  │
-│  │              │      Hardware Layer                               │  │
-│  │  ┌──────────┴───┐              ┌──────────────┐                 │  │
-│  │  │  Camera 0    │              │  Camera 1    │                 │  │
-│  │  │ (Day Camera) │              │(Night Camera)│                 │  │
-│  │  │  MIPI CSI    │              │  MIPI CSI    │                 │  │
-│  │  └──────────────┘              └──────────────┘                 │  │
-│  │                                                                  │  │
-│  │  D-Robotics RDK X5: ARM Cortex-A55 8コア + BPU + ISP            │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-│                                                                         │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │                    将来: AI Pyramid [未実装]                      │  │
-│  │  iframe埋め込み、Tailscale経由リモートアクセス                     │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph system["Smart Pet Camera System<br/>(D-Robotics RDK X5)"]
+        subgraph streaming["Streaming Layer (Go)"]
+            webrtc["Go WebRTC Server<br/>pion/webrtc v4<br/>:8081<br/>- H.265 passthrough<br/>- MJPEG endpoint<br/>- VPS/SPS/PPS cache<br/>- 録画 (NAL capture)"]
+            webmonitor["Go web_monitor<br/>Preact SPA 配信<br/>:8080<br/>- API プロキシ → :8081<br/>- アルバム UI"]
+        end
+
+        subgraph shm["Shared Memory Layer (6領域)"]
+            h265zc["/pet_camera_h265_zc<br/>H.265 zero-copy"]
+            mjpegzc["/pet_camera_mjpeg_zc<br/>MJPEG NV12 zero-copy"]
+            yolozc["/pet_camera_yolo_zc<br/>YOLO input zero-copy"]
+            roizc["/pet_camera_roi_zc_0, roi_zc_1<br/>Night ROI 640x640"]
+            detections["/pet_camera_detections<br/>YOLO detection results"]
+        end
+
+        subgraph capture["Capture Layer (C)"]
+            daemon["camera_daemon_drobotics<br/>Single process, multi-thread<br/>- Pipeline thread x2 (DAY/NIGHT)<br/>- Switcher thread (brightness polling)<br/>- hbn_vflow → YUV capture<br/>- hb_mm_mc → H.265 encode<br/>- 600kbps / GOP=fps<br/>- コミック自動キャプチャ"]
+        end
+
+        subgraph detect["Detection Layer (Python)"]
+            yolo["YOLOv11n on BPU (INT8)<br/>8.9ms inference<br/>DAY: 640x360→letterbox→640x640<br/>NIGHT: ROI round-robin ~22fps<br/>→ /pet_camera_detections"]
+        end
+
+        subgraph hw["Hardware Layer"]
+            cam0["Camera 0<br/>(Day Camera)<br/>MIPI CSI"]
+            cam1["Camera 1<br/>(Night Camera)<br/>MIPI CSI"]
+            rdkx5["D-Robotics RDK X5: ARM Cortex-A55 8コア + BPU + ISP"]
+        end
+
+        future["将来: AI Pyramid 未実装<br/>iframe埋め込み、Tailscale経由リモートアクセス"]
+    end
+
+    webrtc -->|"SHM読取"| h265zc
+    webrtc -->|"SHM読取"| mjpegzc
+    webrtc -->|"SHM読取"| detections
+    daemon --> h265zc
+    daemon --> mjpegzc
+    daemon --> yolozc
+    daemon --> roizc
+    yolo -->|"SHM読取"| yolozc
+    yolo -->|"SHM読取"| roizc
+    yolo --> detections
+    cam0 --> daemon
+    cam1 --> daemon
 ```
 
 ---
 
 ## プロセスアーキテクチャ [実装済]
 
-### マルチプロセス構成
+### プロセス構成
 
-システムは3つの独立プロセス群で構成され、共有メモリ（SHM）で通信する：
+システムは3つの独立プロセスで構成され、共有メモリ（SHM）で通信する：
 
-```
-┌──────────────────────────┐
-│  camera_switcher_daemon  │ ← 親プロセス (C)
-│  (fork 2 children)       │
-│                          │
-│  ├─ camera_daemon DAY    │──→ SHM書込: zc_0, h264_zc_0, stream, mjpeg, brightness
-│  └─ camera_daemon NIGHT  │──→ SHM書込: zc_1, h264_zc_1, stream, mjpeg
-│                          │
-│  切替: SIGUSR1/SIGUSR2   │
-│  ポーリング: 250ms/5000ms │
-└────────────┬─────────────┘
-             │ SHM (9領域)
-             ↓
-┌──────────────────────────┐         ┌──────────────────────────┐
-│  YOLO Detector (Python)  │         │  Go Streaming Server     │
-│                          │         │                          │
-│  SHM読取: zc_0/zc_1     │         │  SHM読取: stream, mjpeg  │
-│  SHM書込: detections     │         │  SHM読取: detections     │
-│                          │         │                          │
-│  BPU推論 → detections    │         │  WebRTC :8081            │
-│  コミック自動キャプチャ    │         │  H.264 passthrough      │
-└──────────────────────────┘         │  SPS/PPS cache          │
-                                     │  録画 (NAL capture)      │
-                                     └──────────────────────────┘
-                                                  ↑
-                                     ┌──────────────────────────┐
-                                     │  Flask UI Proxy :8080    │
-                                     │  Preact SPA              │
-                                     │  APIプロキシ → :8081     │
-                                     │  アルバム機能             │
-                                     └──────────────────────────┘
+```mermaid
+graph TD
+    daemon["camera_daemon_drobotics<br/>Single process, multi-thread (C)<br/>- Pipeline thread DAY → SHM書込: yolo_zc, h265_zc, mjpeg_zc, roi_zc<br/>- Pipeline thread NIGHT → SHM書込: yolo_zc, h265_zc, mjpeg_zc, roi_zc<br/>- Switcher thread (brightness polling 250ms/5000ms)"]
+
+    detector["YOLO Detector (Python)<br/>SHM読取: yolo_zc, roi_zc<br/>SHM書込: detections<br/>BPU推論 → detections<br/>コミック自動キャプチャ"]
+
+    goserver["Go Streaming Server :8081<br/>SHM読取: h265_zc, mjpeg_zc, detections<br/>WebRTC H.265 passthrough<br/>VPS/SPS/PPS cache<br/>録画 (NAL capture)"]
+
+    webmonitor["Go web_monitor :8080<br/>Preact SPA<br/>APIプロキシ → :8081<br/>アルバム機能"]
+
+    daemon -->|"SHM (6領域)"| detector
+    daemon -->|"SHM (6領域)"| goserver
+    webmonitor --> goserver
 ```
 
 ### プロセス間通信（IPC）方式 [実装済]
@@ -125,64 +91,39 @@
 
 ## 共有メモリレイアウト [実装済]
 
-### 全9領域の詳細
+### 全6領域の詳細
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     共有メモリ全体像                              │
-│                                                                  │
-│  制御系:                                                         │
-│  ┌─────────────────────────────┐                                │
-│  │ /pet_camera_control    ~8B  │ active camera index             │
-│  └─────────────────────────────┘                                │
-│  ┌─────────────────────────────┐                                │
-│  │ /pet_camera_brightness ~108B│ brightness_avg per camera       │
-│  └─────────────────────────────┘                                │
-│                                                                  │
-│  ゼロコピーフレーム (per camera):                                 │
-│  ┌─────────────────────────────┐ ┌─────────────────────────────┐│
-│  │ /pet_camera_zc_0      ~150B │ │ /pet_camera_zc_1      ~150B ││
-│  │ (DAY YUV metadata)         │ │ (NIGHT YUV metadata)        ││
-│  └─────────────────────────────┘ └─────────────────────────────┘│
-│  ┌─────────────────────────────┐ ┌─────────────────────────────┐│
-│  │ /pet_camera_h264_zc_0      │ │ /pet_camera_h264_zc_1      ││
-│  │ (DAY H.264 metadata)      │ │ (NIGHT H.264 metadata)     ││
-│  └─────────────────────────────┘ └─────────────────────────────┘│
-│                                                                  │
-│  アクティブ出力 (active camera のみ書込):                         │
-│  ┌─────────────────────────────┐                                │
-│  │ /pet_camera_stream    ~93MB │ H.264 リングバッファ            │
-│  └─────────────────────────────┘                                │
-│  ┌─────────────────────────────┐                                │
-│  │ /pet_camera_mjpeg_frame     │ MJPEG最新フレーム (~1.4MB)     │
-│  │                      ~1.4MB │                                │
-│  └─────────────────────────────┘                                │
-│                                                                  │
-│  検出結果:                                                       │
-│  ┌─────────────────────────────┐                                │
-│  │ /pet_camera_detections ~584B│ YOLO bounding boxes            │
-│  └─────────────────────────────┘                                │
-└─────────────────────────────────────────────────────────────────┘
-```
+```mermaid
+graph TD
+    subgraph shm["共有メモリ全体像 (6領域)"]
+        subgraph zc["ゼロコピーフレーム"]
+            h265zc["/pet_camera_h265_zc<br/>H.265 stream zero-copy<br/>(encoder → Go streaming)"]
+            yolozc["/pet_camera_yolo_zc<br/>YOLO input zero-copy<br/>(camera → Python detector)"]
+            mjpegzc["/pet_camera_mjpeg_zc<br/>MJPEG NV12 zero-copy<br/>(camera → Go web_monitor)"]
+        end
 
-### 明るさSHM構造体
+        subgraph roi["Night ROI (VSE Ch3-4)"]
+            roizc0["/pet_camera_roi_zc_0<br/>ROI region 0 (640x640)"]
+            roizc1["/pet_camera_roi_zc_1<br/>ROI region 1 (640x640)"]
+        end
 
-```c
-typedef struct {
-    uint64_t frame_number;      // 8B
-    struct timespec timestamp;  // 16B
-    float brightness_avg;       // 4B  (0-255)
-    uint32_t brightness_lux;    // 4B
-    uint8_t brightness_zone;    // 1B  (0-3)
-    uint8_t correction_applied; // 1B
-    uint8_t _reserved[2];       // 2B
-} CameraBrightness;             // 36B per camera
+        subgraph det["検出結果"]
+            detections["/pet_camera_detections<br/>YOLO bounding boxes"]
+        end
+    end
 
-typedef struct {
-    volatile uint32_t version;           // 4B
-    CameraBrightness cameras[2];         // 72B
-    sem_t update_sem;                    // 32B
-} SharedBrightnessData;                  // ~108B total
+    daemon["camera_daemon_drobotics"] --> h265zc
+    daemon --> yolozc
+    daemon --> mjpegzc
+    daemon --> roizc0
+    daemon --> roizc1
+    detector["YOLO Detector"] --> detections
+    detector -.->|"読取"| yolozc
+    detector -.->|"読取"| roizc0
+    detector -.->|"読取"| roizc1
+    goserver["Go Streaming Server"] -.->|"読取"| h265zc
+    goserver -.->|"読取"| mjpegzc
+    goserver -.->|"読取"| detections
 ```
 
 ---
@@ -191,58 +132,47 @@ typedef struct {
 
 ### メインデータパス
 
-```
-Camera HW (MIPI CSI)
-    │
-    ↓
-ISP → Auto Exposure統計 → brightness_avg → /pet_camera_brightness
-    │
-    ↓
-VIO → YUVフレーム → /pet_camera_zc_{0,1} (zero-copy metadata)
-    │                      │
-    │                      ↓
-    │               YOLO Detector (Python)
-    │                 BPU INT8, 8.9ms
-    │                      │
-    │                      ↓
-    │               /pet_camera_detections
-    │                      │
-    │                      ↓
-    │               コミック自動キャプチャ (4コマ画像)
-    │
-    ↓
-libspcdev H.264 encode (600kbps, GOP=14)
-    │
-    ├─→ /pet_camera_h264_zc_{0,1} (zero-copy metadata)
-    │
-    ↓ (active camera only)
-/pet_camera_stream (93MB ring buffer)
-/pet_camera_mjpeg_frame (1.4MB)
-    │
-    ↓
-Go Streaming Server (pion/webrtc v3)
-    │
-    ├─→ WebRTC H.264 passthrough → ブラウザ
-    ├─→ MJPEG fallback → ブラウザ
-    └─→ H.264録画 (NAL capture, zero CPU overhead)
+```mermaid
+graph TD
+    camhw["Camera HW (MIPI CSI)"]
+    isp["ISP → Auto Exposure統計<br/>→ brightness_avg (in-process)"]
+    vio["hbn_vflow → YUVフレーム"]
+    yolozc["/pet_camera_yolo_zc<br/>(zero-copy metadata)"]
+    detector["YOLO Detector (Python)<br/>BPU INT8, 8.9ms"]
+    detshm["/pet_camera_detections"]
+    comic["コミック自動キャプチャ (4コマ画像)"]
+    encoder["hb_mm_mc H.265 encode<br/>(600kbps, GOP=fps)"]
+    h265zc["/pet_camera_h265_zc<br/>(zero-copy)"]
+    mjpegzc["/pet_camera_mjpeg_zc"]
+    goserver["Go Streaming Server<br/>(pion/webrtc v4)"]
+    webrtc["WebRTC H.265 passthrough → ブラウザ"]
+    mjpeg["MJPEG fallback → ブラウザ"]
+    recording["H.265録画<br/>(NAL capture, zero CPU overhead)"]
+
+    camhw --> isp --> vio
+    vio --> yolozc --> detector --> detshm --> comic
+    vio --> encoder
+    encoder --> h265zc
+    encoder --> mjpegzc
+    h265zc --> goserver
+    mjpegzc --> goserver
+    goserver --> webrtc
+    goserver --> mjpeg
+    goserver --> recording
 ```
 
 ### カメラ切り替えフロー
 
-```
-camera_daemon DAY
-  │ brightness書込 (active: 8フレーム毎, inactive: 64フレーム毎)
-  ↓
-/pet_camera_brightness
-  ↓
-camera_switcher_daemon (ポーリング: 250ms/5000ms)
-  │ 判定: DAY→NIGHT (< 50, 10秒), NIGHT→DAY (> 60, 10秒)
-  ↓
-SIGUSR1 (→DAY) / SIGUSR2 (→NIGHT) → camera_daemon
-  ↓
-active camera が /pet_camera_stream, /pet_camera_mjpeg_frame に書込開始
-  ↓
-Go Server: 15フレーム ウォームアップ (キーフレーム保証)
+```mermaid
+graph TD
+    day["Pipeline thread DAY<br/>ISP brightness読取 (in-process)"]
+    switcher["Switcher thread (ポーリング: 250ms/5000ms)<br/>判定: DAY→NIGHT brightness < 50, 10秒<br/>NIGHT→DAY brightness > 60, 10秒"]
+    activate["Active camera が<br/>/pet_camera_h265_zc, /pet_camera_mjpeg_zc に書込開始"]
+    warmup["Go Server: 15フレーム ウォームアップ<br/>(キーフレーム保証)"]
+
+    day -->|"brightness_avg"| switcher
+    switcher -->|"shared variable 切替"| activate
+    activate --> warmup
 ```
 
 ---
@@ -251,7 +181,7 @@ Go Server: 15フレーム ウォームアップ (キーフレーム保証)
 
 ### カメラキャプチャレイヤー
 - **言語**: C
-- **ハードウェアAPI**: D-Robotics libspcdev (ISP/VIO/Encoder)
+- **ハードウェアAPI**: D-Robotics hbn_vflow (ISP/VIO) / hb_mm_mc (H.265 Encoder)
 - **IPC**: POSIX共有メモリ + セマフォ
 - **関連ファイル**: `src/capture/`
 
@@ -263,14 +193,14 @@ Go Server: 15フレーム ウォームアップ (キーフレーム保証)
 
 ### ストリーミングレイヤー
 - **言語**: Go
-- **WebRTC**: pion/webrtc v3
-- **H.264**: パススルー（再エンコードなし）
+- **WebRTC**: pion/webrtc v4
+- **H.265**: パススルー（再エンコードなし）
 - **関連ファイル**: `src/streaming_server/`
 
 ### Web UIレイヤー
-- **サーバー**: Python/Flask (:8080)
+- **サーバー**: Go web_monitor (:8080)
 - **フロントエンド**: Preact SPA
-- **関連ファイル**: `src/streaming_server/` (Flask部分)
+- **関連ファイル**: `src/streaming_server/internal/webmonitor/`
 
 ### 共通モジュール
 - **Python型定義・共有ロジック**: `src/common/`
@@ -303,19 +233,22 @@ Go Server: 15フレーム ウォームアップ (キーフレーム保証)
 │
 ├── src/
 │   ├── capture/                   # カメラキャプチャ (C)
-│   │   ├── camera_switcher_daemon.c
-│   │   ├── camera_daemon.c
+│   │   ├── camera_daemon_main.c   # 統合デーモン (マルチスレッド)
 │   │   ├── camera_pipeline.c
+│   │   ├── camera_switcher.c
+│   │   ├── encoder_lowlevel.c     # hb_mm_mc H.265エンコーダ
+│   │   ├── vio_lowlevel.c         # hbn_vflow VIO制御
 │   │   ├── isp_brightness.c
 │   │   ├── shared_memory.c / .h
+│   │   ├── shm_constants.h        # SHM名・サイズ定義 (single source of truth)
 │   │   └── mock_camera_daemon.py  # テスト用モック
 │   │
 │   ├── detector/                  # 物体検出 (Python)
 │   │   └── YOLOv11n BPU推論
 │   │
-│   ├── streaming_server/          # Go WebRTC + Flask UI
+│   ├── streaming_server/          # Go WebRTC + web_monitor
 │   │   ├── Go WebRTCサーバー (:8081)
-│   │   └── Flask UIプロキシ (:8080)
+│   │   └── Go web_monitor (:8080)
 │   │
 │   ├── common/                    # 共有Python型・ロジック
 │   ├── mock/                      # モジュールモック
@@ -336,7 +269,7 @@ Go Server: 15フレーム ウォームアップ (キーフレーム保証)
 ```ini
 # カメラキャプチャ
 smart-pet-camera-capture.service
-  ExecStart: camera_switcher_daemon (fork → 2 camera_daemons)
+  ExecStart: camera_daemon_drobotics (single process, multi-thread)
 
 # 物体検出
 smart-pet-camera-detection.service
@@ -348,9 +281,9 @@ smart-pet-camera-streaming.service
   ExecStart: Go binary (:8081)
   After: capture.service
 
-# Web UI
+# Web UI (Go web_monitor)
 smart-pet-camera-ui.service
-  ExecStart: uv run Flask app (:8080)
+  ExecStart: Go web_monitor binary (:8080)
 ```
 
 ---
@@ -359,33 +292,31 @@ smart-pet-camera-ui.service
 
 ### プロセス構成
 
-```
-camera_switcher_daemon (親プロセス)
-    │
-    ├── fork() ──→ camera_daemon DAY  (子プロセス)
-    │                    │
-    │                    ├── ISPハードウェア (handle A)
-    │                    ├── /pet_camera_brightness に明るさ書き込み
-    │                    └── /pet_camera_stream に映像書き込み (active時)
-    │
-    └── fork() ──→ camera_daemon NIGHT (子プロセス)
-                         │
-                         ├── ISPハードウェア (handle B)
-                         └── /pet_camera_stream に映像書き込み (active時)
+```mermaid
+graph TD
+    daemon["camera_daemon_drobotics<br/>(単一プロセス, マルチスレッド)"]
+    day["Pipeline thread DAY<br/>ISPハードウェア (handle A)<br/>/pet_camera_h265_zc に映像書き込み (active時)<br/>/pet_camera_yolo_zc にYUV書き込み"]
+    night["Pipeline thread NIGHT<br/>ISPハードウェア (handle B)<br/>/pet_camera_h265_zc に映像書き込み (active時)<br/>/pet_camera_yolo_zc にYUV書き込み"]
+    switcher["Switcher thread<br/>ISP brightness直接読取<br/>active camera index 切替 (shared variable)"]
+
+    daemon --> day
+    daemon --> night
+    daemon --> switcher
+    switcher -.->|"brightness polling"| day
 ```
 
 ### 明るさ計算
 
 ISPハードウェアのAE (Auto Exposure) 統計を使用：
 
-```
-ISP AE Statistics (32x32 grid = 1024 zones)
-          ↓
-    raw_avg (~15-bit range: 10000-48000)
-          ↓
-    >> 7 (7-bit固定シフト)
-          ↓
-    brightness_avg (0-255)
+```mermaid
+graph TD
+    ae["ISP AE Statistics<br/>(32x32 grid = 1024 zones)"]
+    raw["raw_avg<br/>(~15-bit range: 10000-48000)"]
+    shift[">> 7 (7-bit固定シフト)"]
+    result["brightness_avg (0-255)"]
+
+    ae --> raw --> shift --> result
 ```
 
 ### 切り替え判定
@@ -395,7 +326,7 @@ ISP AE Statistics (32x32 grid = 1024 zones)
 | DAY→NIGHT | brightness < 50 | 10秒 | 250ms |
 | NIGHT→DAY | brightness > 60 | 10秒 | 5000ms |
 
-**シグナル制御**: SIGUSR1 (→DAY) / SIGUSR2 (→NIGHT)
+**切替制御**: Switcher thread が shared variable (active camera index) を更新
 
 詳細は `camera-and-isp.md` 参照。
 
@@ -425,7 +356,7 @@ if (shm_fd == -1 && errno == EEXIST) {
 ### 関連ファイル
 - `src/capture/shared_memory.c`: `shm_create_or_open_ex()`
 - `src/capture/camera_pipeline.c`: 共有メモリのopen/create処理
-- `src/capture/camera_switcher_daemon.c`: マルチカメラオーケストレーション
+- `src/capture/camera_daemon_main.c`: 統合デーモン（マルチスレッド）
 
 ---
 
@@ -447,7 +378,7 @@ if (shm_fd == -1 && errno == EEXIST) {
 |------|---------|------|
 | YOLO推論 | BPU使用 | GPU不使用、専用AI プロセッサ |
 | SRTP暗号化 | 不可 | データ転送コスト > 暗号化コスト |
-| H.264エンコード | libspcdev | 専用ハードウェアエンコーダ |
+| H.265エンコード | hb_mm_mc | 専用ハードウェアエンコーダ (VPU) |
 
 ---
 
@@ -471,7 +402,7 @@ if (shm_fd == -1 && errno == EEXIST) {
 このアーキテクチャは以下の原則に基づいて設計・実装されている：
 
 1. **ゼロコピーIPC**: 共有メモリによるプロセス間のゼロコピーデータ転送
-2. **ハードウェア活用**: BPU (YOLO), ISP (画像処理), libspcdev (H.264) の専用HW活用
+2. **ハードウェア活用**: BPU (YOLO), ISP (画像処理), hb_mm_mc (H.265) の専用HW活用
 3. **言語適材適所**: C (キャプチャ/エンコード), Python (AI推論), Go (WebRTC/ストリーミング)
-4. **パススルー設計**: H.264をカメラからブラウザまで再エンコードなしで配信
+4. **パススルー設計**: H.265をカメラからブラウザまで再エンコードなしで配信
 5. **信頼性**: セマフォ安全初期化、ヒステリシス付きカメラ切替、ウォームアップフレーム

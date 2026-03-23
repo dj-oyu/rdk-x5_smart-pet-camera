@@ -682,14 +682,18 @@ Both MJPEG and detection streams use a broadcaster pattern:
 
 The Protobuf-based architecture is designed for future MQTT integration:
 
-```
-DetectionBroadcaster (Go)
-    ├─ SSE Clients (JSON/Protobuf)
-    └─ MQTT Publisher (Protobuf)
-            ↓
-        MQTT Broker
-            ↓
-        IoT Devices
+```mermaid
+graph TD
+    db["DetectionBroadcaster (Go)"]
+    sse["SSE Clients<br/>(JSON/Protobuf)"]
+    mqtt_pub["MQTT Publisher<br/>(Protobuf)"]
+    broker["MQTT Broker"]
+    iot["IoT Devices"]
+
+    db --> sse
+    db --> mqtt_pub
+    mqtt_pub --> broker
+    broker --> iot
 ```
 
 **Benefits**:

@@ -6,22 +6,26 @@
 
 ## アーキテクチャ
 
-```
-Camera Daemon ──H.264 NALs──> /pet_camera_stream (POSIX SHM)
-                                      │
-                              Go H264Recorder (shm.Reader)
-                                      │
-                              POST /api/recording/start
-                                      ↓
-                              recordings/recording_YYYYMMDD_HHMMSS.h264
-                                      │
-                              POST /api/recording/stop
-                                      ↓
-                              nice -n 19 ffmpeg -c copy → .mp4
-                                      ↓
-                              ffmpeg -vframes 1 → サムネイル.jpg
-                                      ↓
-                              .h264 ソースファイル削除
+```mermaid
+graph TD
+    cam["Camera Daemon"]
+    shm["/pet_camera_stream<br/>(POSIX SHM)"]
+    recorder["Go H264Recorder<br/>(shm.Reader)"]
+    start["POST /api/recording/start"]
+    h264["recordings/recording_YYYYMMDD_HHMMSS.h264"]
+    stop["POST /api/recording/stop"]
+    mp4["nice -n 19 ffmpeg -c copy → .mp4"]
+    thumb["ffmpeg -vframes 1 → サムネイル.jpg"]
+    cleanup[".h264 ソースファイル削除"]
+
+    cam -->|"H.264 NALs"| shm
+    shm --> recorder
+    start --> recorder
+    recorder --> h264
+    stop --> h264
+    h264 --> mp4
+    mp4 --> thumb
+    thumb --> cleanup
 ```
 
 ### データソース
