@@ -114,13 +114,6 @@ MockDetector - 物体検出のモック
 - クラス別のサイズ・位置調整
 - 検出確率の制御
 
-### src/monitor/web_monitor.py
-WebMonitor - Webモニター
-
-- Flask + MJPEGストリーミング
-- BBox合成表示
-- リアルタイムFPS表示
-
 ### src/mock/main.py
 統合メインプログラム
 
@@ -140,16 +133,6 @@ uv run src/mock/main.py
 
 # 3. ランダムにBBoxが表示されることを確認
 ```
-
-### モニターだけを単体で使う場合
-
-モニターだけ別プロセスで立ち上げたい場合は、`MockSharedMemory` を使う `--shm-type mock` オプションを指定します。現状 `mock` のみ実装済みです。
-
-```bash
-uv run src/monitor/main.py --shm-type mock --host 0.0.0.0 --port 8080
-```
-
-実機向けのPOSIX shmは `/dev/shm/pet_camera_frames` `/dev/shm/pet_camera_detections` を想定しており、`src/capture/real_shared_memory.py` の `RealSharedMemory` が読み取り側になります。`--shm-type real` 追加実装で切り替えられる構造です。
 
 ### Webカメラでテスト
 

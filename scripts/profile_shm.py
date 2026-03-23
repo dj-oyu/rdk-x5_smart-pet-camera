@@ -27,7 +27,7 @@ import numpy as np
 # Add src/capture to sys.path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "capture"))
 try:
-    from real_shared_memory import RealSharedMemory, SHM_NAME_STREAM
+    from real_shared_memory import RealSharedMemory
 except ImportError:
     print("Error: Could not import RealSharedMemory. Ensure src/capture is in PYTHONPATH.")
     sys.exit(1)
@@ -501,8 +501,8 @@ Camera daemons receive signals from camera_switcher_daemon:
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--duration", type=float, default=5.0, help="Sampling duration in seconds")
-    parser.add_argument("--shm-name", type=str, default=SHM_NAME_STREAM,
-                        help=f"Shared memory name (default: {SHM_NAME_STREAM})")
+    parser.add_argument("--shm-name", type=str, default="/pet_camera_yolo_zc",
+                        help="Shared memory name (default: /pet_camera_yolo_zc)")
     parser.add_argument("--monitor-url", type=str, help="Optional HTTP URL to check (e.g. http://localhost:8080/api/status)")
     parser.add_argument("--save-iframes", action="store_true", help="Save NV12 I-frames as JPEG images")
     parser.add_argument("--output-dir", type=str, default="recordings",

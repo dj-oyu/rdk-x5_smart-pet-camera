@@ -30,7 +30,6 @@
 // Buffer sizes
 #define RING_BUFFER_SIZE 6                                // 200ms buffer at 30fps (MJPEG only)
 #define MAX_DETECTIONS 10                                 // Maximum detections per frame
-#define MAX_FRAME_SIZE (1920 * 1080 * 3 / 2)             // Max NV12 frame size (1080p)
 #define NUM_CAMERAS 2                                     // DAY=0, NIGHT=1
 
 // ROI zero-copy SHM names (night camera pre-cropped 640x640 regions)
