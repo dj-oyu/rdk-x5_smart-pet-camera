@@ -14,6 +14,7 @@ import (
 	"image/color"
 	"log"
 	"math/rand"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -22,6 +23,8 @@ import (
 	"time"
 	"unsafe"
 )
+
+var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 // NV12Frame holds an NV12 frame with dimensions.
 type NV12Frame struct {
@@ -48,8 +51,9 @@ type capturedPanel struct {
 	height      int
 	timestamp   time.Time
 	bbox        *BoundingBox
-	placeholder bool   // filled panel (wider crop to show context)
-	petClass    string // "mike", "chatora", "other", or "" if unknown
+	placeholder bool        // filled panel (wider crop to show context)
+	petClass    string      // "mike", "chatora", "other", or "" if unknown
+	detections  []Detection // all YOLO detections at capture time
 }
 
 type stitchRequest struct {
@@ -292,18 +296,25 @@ func (cc *ComicCapture) capturePanel(now time.Time) {
 		petClass = classifyPetColor(frame.Data, frame.Width, frame.Height, *cc.lastCatBBox)
 	}
 
+	// Snapshot all current YOLO detections
+	var dets []Detection
+	if det, ok := cc.src.LatestDetection(); ok {
+		dets = append([]Detection(nil), det.Detections...)
+	}
+
 	panel := capturedPanel{
-		nv12Data:  append([]byte(nil), frame.Data...),
-		width:     frame.Width,
-		height:    frame.Height,
-		timestamp: now,
-		bbox:      cc.lastCatBBox,
-		petClass:  petClass,
+		nv12Data:   append([]byte(nil), frame.Data...),
+		width:      frame.Width,
+		height:     frame.Height,
+		timestamp:  now,
+		bbox:       cc.lastCatBBox,
+		petClass:   petClass,
+		detections: dets,
 	}
 	cc.panels = append(cc.panels, panel)
 	cc.lastCaptureTime = now
 
-	log.Printf("[Comic] Panel %d captured (session=%s)", len(cc.panels), cc.sessionID)
+	log.Printf("[Comic] Panel %d captured (session=%s, %d detections)", len(cc.panels), cc.sessionID, len(dets))
 }
 
 // Layout constants for the comic grid.
@@ -366,6 +377,12 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 	cHeights := make([]C.int, numPanels)
 	cCrops := make([]C.comic_crop_t, numPanels)
 
+	// Track crop regions for coordinate mapping (frame → comic)
+	type cropRegion struct {
+		x, y, w, h int
+	}
+	cropRegions := make([]cropRegion, numPanels)
+
 	// Pin Go slices for CGo (required by Go runtime)
 	var pinner runtime.Pinner
 	defer pinner.Unpin()
@@ -376,6 +393,9 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 		cFrames[i] = (*C.uint8_t)(unsafe.Pointer(&p.nv12Data[0]))
 		cWidths[i] = C.int(p.width)
 		cHeights[i] = C.int(p.height)
+
+		// Default: full frame
+		cropRegions[i] = cropRegion{0, 0, p.width, p.height}
 
 		// Compute crop region
 		if p.bbox != nil && i > 0 {
@@ -402,6 +422,7 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 			if y0+expandH > p.height {
 				expandH = p.height - y0
 			}
+			cropRegions[i] = cropRegion{x0, y0, expandW, expandH}
 			cCrops[i] = C.comic_crop_t{
 				src_x: C.int(x0), src_y: C.int(y0),
 				src_w: C.int(expandW), src_h: C.int(expandH),
@@ -475,30 +496,96 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 		return ""
 	}
 
-	// Save metadata sidecar with bbox coordinates for pet_id calibration.
-	// ai-pyramid can use this to re-analyze pet color from the original image.
-	type panelMeta struct {
-		Timestamp string      `json:"timestamp"`
-		BBox      *BoundingBox `json:"bbox,omitempty"`
-		PetClass  string      `json:"pet_class"`
+	// Build ingest payload: map all YOLO detections to comic coordinates.
+	// Panel layout: 2x2 grid in 848x496 comic image.
+	panelOffsets := [4][2]int{
+		{comicMargin + comicBorder, comicMargin + comicBorder},                                                         // top-left
+		{comicMargin + comicBorder + comicPanelW + 2*comicBorder + comicGap, comicMargin + comicBorder},                // top-right
+		{comicMargin + comicBorder, comicMargin + comicBorder + comicPanelH + 2*comicBorder + comicGap},                // bottom-left
+		{comicMargin + comicBorder + comicPanelW + 2*comicBorder + comicGap, comicMargin + comicBorder + comicPanelH + 2*comicBorder + comicGap}, // bottom-right
 	}
-	type comicMeta struct {
-		PetID  string      `json:"pet_id"`
-		Panels []panelMeta `json:"panels"`
+
+	type ingestDetection struct {
+		PanelIndex *int    `json:"panel_index"`
+		BBoxX      int     `json:"bbox_x"`
+		BBoxY      int     `json:"bbox_y"`
+		BBoxW      int     `json:"bbox_w"`
+		BBoxH      int     `json:"bbox_h"`
+		YoloClass  string  `json:"yolo_class"`
+		PetClass   *string `json:"pet_class,omitempty"`
+		Confidence float64 `json:"confidence"`
+		DetectedAt string  `json:"detected_at"`
 	}
-	meta := comicMeta{PetID: petID}
-	for _, p := range panels {
-		meta.Panels = append(meta.Panels, panelMeta{
-			Timestamp: p.timestamp.Format(time.RFC3339),
-			BBox:      p.bbox,
-			PetClass:  p.petClass,
-		})
+	type ingestPayload struct {
+		Filename   string             `json:"filename"`
+		CapturedAt string             `json:"captured_at"`
+		PetID      string             `json:"pet_id"`
+		Detections []ingestDetection  `json:"detections"`
 	}
-	metaJSON, _ := json.Marshal(meta)
-	metaPath := strings.TrimSuffix(outPath, ".jpg") + ".json"
-	if err := os.WriteFile(metaPath, metaJSON, 0644); err != nil {
-		log.Printf("[Comic] Failed to write metadata %s: %v", metaPath, err)
+
+	payload := ingestPayload{
+		Filename:   filename,
+		CapturedAt: panels[0].timestamp.Format("2006-01-02T15:04:05"),
+		PetID:      petID,
 	}
+
+	for i := 0; i < numPanels && i < 4; i++ {
+		p := panels[i]
+		cr := cropRegions[i]
+		ox, oy := panelOffsets[i][0], panelOffsets[i][1]
+
+		// Scale factors: frame crop → comic panel
+		scaleX := float64(comicPanelW) / float64(cr.w)
+		scaleY := float64(comicPanelH) / float64(cr.h)
+
+		for _, det := range p.detections {
+			// Map frame bbox → comic coordinates
+			comicX := ox + int(float64(det.BBox.X-cr.x)*scaleX)
+			comicY := oy + int(float64(det.BBox.Y-cr.y)*scaleY)
+			comicW := int(float64(det.BBox.W) * scaleX)
+			comicH := int(float64(det.BBox.H) * scaleY)
+
+			// Skip detections outside the crop region
+			if comicX+comicW < ox || comicX > ox+comicPanelW ||
+				comicY+comicH < oy || comicY > oy+comicPanelH {
+				continue
+			}
+
+			// Clamp to panel bounds
+			if comicX < ox { comicW -= ox - comicX; comicX = ox }
+			if comicY < oy { comicH -= oy - comicY; comicY = oy }
+			if comicX+comicW > ox+comicPanelW { comicW = ox + comicPanelW - comicX }
+			if comicY+comicH > oy+comicPanelH { comicH = oy + comicPanelH - comicY }
+
+			panelIdx := i
+			d := ingestDetection{
+				PanelIndex: &panelIdx,
+				BBoxX:      comicX,
+				BBoxY:      comicY,
+				BBoxW:      comicW,
+				BBoxH:      comicH,
+				YoloClass:  det.ClassName,
+				Confidence: det.Confidence,
+				DetectedAt: p.timestamp.Format("2006-01-02T15:04:05"),
+			}
+			// pet_class only for cat/dog detections
+			if det.ClassName == "cat" || det.ClassName == "dog" {
+				pc := p.petClass
+				d.PetClass = &pc
+			}
+			payload.Detections = append(payload.Detections, d)
+		}
+	}
+
+	// Send to ai-pyramid ingest API (async, non-blocking)
+	go func() {
+		ingestJSON, err := json.Marshal(payload)
+		if err != nil {
+			log.Printf("[Comic] Failed to marshal ingest payload: %v", err)
+			return
+		}
+		sendIngestToAIPyramid(ingestJSON)
+	}()
 
 	cc.mu.Lock()
 	cc.recentComics = append(cc.recentComics, time.Now())
@@ -514,6 +601,32 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 
 	log.Printf("[Comic] Saved %s (%d panels, nano2D+HW JPEG)", filename, numPanels)
 	return filename
+}
+
+// sendIngestToAIPyramid sends detection metadata to ai-pyramid's ingest API.
+// Called asynchronously after comic save. Retries once on failure.
+func sendIngestToAIPyramid(payload []byte) {
+	const url = "http://ai-pyramid:3000/api/photos/ingest"
+	for attempt := 0; attempt < 2; attempt++ {
+		resp, err := httpClient.Post(url, "application/json", strings.NewReader(string(payload)))
+		if err != nil {
+			if attempt == 0 {
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			log.Printf("[Comic] Ingest API failed: %v", err)
+			return
+		}
+		resp.Body.Close()
+		if resp.StatusCode < 300 {
+			log.Printf("[Comic] Ingest API OK (%d)", resp.StatusCode)
+			return
+		}
+		log.Printf("[Comic] Ingest API status %d (attempt %d)", resp.StatusCode, attempt+1)
+		if attempt == 0 {
+			time.Sleep(2 * time.Second)
+		}
+	}
 }
 
 // CaptureComic triggers an immediate 4-panel comic capture using the exact
