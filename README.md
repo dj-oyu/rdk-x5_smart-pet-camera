@@ -251,7 +251,7 @@ smart-pet-camera/
 - **pyright** - 型付け強制（厳格な型チェック）
   ```bash
   # 型チェック実行
-  PYTHONPATH=src:src/common/src:src/mock:src/monitor uv run pyright src/
+  PYTHONPATH=src:src/common/src:src/mock uv run pyright src/
   ```
 
 #### テストフレームワーク
@@ -261,10 +261,10 @@ smart-pet-camera/
 #### 推奨開発フロー
 ```bash
 # 1. 型チェック
-PYTHONPATH=src:src/common/src:src/mock:src/monitor uv run pyright src/
+PYTHONPATH=src:src/common/src:src/mock uv run pyright src/
 
 # 2. リンター
-PYTHONPATH=src:src/common/src:src/mock:src/monitor uv run pylint src/
+PYTHONPATH=src:src/common/src:src/mock uv run pylint src/
 
 # 3. テスト実行
 uv run pytest tests/
@@ -286,7 +286,7 @@ uv run pytest tests/integration/
 uv run pytest --cov=src tests/
 
 # 型チェック
-PYTHONPATH=src:src/common/src:src/mock:src/monitor uv run pyright src/
+PYTHONPATH=src:src/common/src:src/mock uv run pyright src/
 ```
 
 ### コーディング規約

@@ -72,7 +72,7 @@ graph TD
 - リアルタイムFPS表示
 - HTML UI内蔵
 
-**ファイル**: `src/monitor/web_monitor.py` (389行) → 現在は Go web_monitor (`src/streaming_server/cmd/web_monitor/`) に移行済み
+**ファイル**: Go web_monitor (`src/streaming_server/cmd/web_monitor/`)
 
 #### ✅ Phase 0-6: 統合メインプログラム実装
 - 全モジュールの統合
