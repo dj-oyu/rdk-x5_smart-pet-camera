@@ -210,8 +210,11 @@ class YoloDetectorDaemon:
         self.cache_frame_number: int = -1  # Frame number when cache started
         self.cache_timestamp: float = 0.0  # Timestamp when cache started
 
-        # Night motion detection state
-        self.prev_y_plane: np.ndarray | None = None  # Previous Y plane for frame diff
+        # Night motion detection state (per-ROI Y plane cache)
+        self._prev_roi_y: dict[str, np.ndarray] = {}  # {"roi0": y_plane, "roi1": y_plane}
+        self._diff_acc: dict[str, np.ndarray] = {}  # temporal diff accumulator per ROI
+        self._motion_bboxes: list = []  # motion bbox buffer for next YOLO write
+        self._roi_has_motion: bool = False  # Any ROI had motion recently
         self.motion_cooldown: int = 0  # Frames to skip after motion detected
 
         # Night YOLO false positive filter (IR images cause frequent misdetections)
@@ -536,10 +539,9 @@ class YoloDetectorDaemon:
                         self.detector.score_threshold = max(0.25, self.score_threshold - 0.15)
                         # Open VSE ROI SHM readers (lazy — no-op if already open)
                         self._open_roi_readers()
-                        # detection_cache size matches active ROI count (VSE=2, fallback=3)
-                        active_roi_count = len(self.roi_readers) if self.roi_readers else len(self.night_roi_regions)
+                        active_roi_count = len(self.roi_readers)  # VSE only (2 ROIs)
                         self.detection_cache = [[] for _ in range(active_roi_count)]
-                        logger.debug(f"Camera switched to {camera_id} [night ROI mode: {active_roi_count} regions, score_th={self.detector.score_threshold:.2f}, vse_roi={'yes' if self.roi_readers else 'fallback'}]")
+                        logger.debug(f"Camera switched to {camera_id} [night ROI mode: {active_roi_count} VSE regions, score_th={self.detector.score_threshold:.2f}]")
 
                     # Update active camera after processing switch
                     self.active_camera = camera_id
@@ -572,9 +574,9 @@ class YoloDetectorDaemon:
                         self.roi_index = 0
                         # Open VSE ROI SHM readers (lazy — no-op if already open)
                         self._open_roi_readers()
-                        active_roi_count = len(self.roi_readers) if self.roi_readers else len(self.night_roi_regions)
+                        active_roi_count = len(self.roi_readers)  # VSE only (2 ROIs)
                         self.detection_cache = [[] for _ in range(active_roi_count)]
-                        logger.debug(f"Night camera ROI mode: {active_roi_count} regions")
+                        logger.debug(f"Night camera ROI mode: {active_roi_count} VSE regions")
                     else:
                         # Day camera or other resolutions: use original logic
                         self.night_roi_mode = False
@@ -592,156 +594,153 @@ class YoloDetectorDaemon:
 
                 # Run detection
                 if self.night_roi_mode:
-                    # Night camera: motion detection + YOLO hybrid
-                    y_size = zc_frame.width * zc_frame.height
+                    # Night camera: ROI-based motion + YOLO hybrid
+                    #
+                    # Every frame:  read 1 ROI (alternating), motion detect with
+                    #               temporal diff accumulation for dark-cat sensitivity
+                    # Every 2 frames (when motion active): YOLO on both ROIs
 
-                    # Motion detection on downscaled Y (640x360 = 1/4 pixels)
-                    y_plane = np.frombuffer(nv12_data[:y_size], dtype=np.uint8).reshape(
-                        zc_frame.height, zc_frame.width
-                    )
-                    motion_h, motion_w = zc_frame.height // 2, zc_frame.width // 2
-                    y_small = cv2.resize(y_plane, (motion_w, motion_h), interpolation=cv2.INTER_AREA)
-                    y_small_denoised = cv2.medianBlur(y_small, 3)
+                    # Release main yolo_zc buffer early (not needed for ROI path)
+                    hb_mem_buffer.release()
 
-                    motion_dicts = []
-                    if self.prev_y_plane is not None and self.motion_cooldown <= 0:
-                        diff = cv2.absdiff(y_small_denoised, self.prev_y_plane)
-                        # GaussianBlur on diff suppresses grain noise (p95=5) while
-                        # preserving real motion (blur_max 38-56 for cat movement)
-                        diff = cv2.GaussianBlur(diff, (7, 7), 0)
-                        if self.stats["frames_processed"] % 100 == 0:
-                            logger.info("motion_diff max=%d mean=%.1f p95=%d",
-                                        diff.max(), diff.mean(), int(np.percentile(diff, 95)))
-
-                        frame_pixels = motion_w * motion_h
-                        _, thresh = cv2.threshold(diff, 15, 255, cv2.THRESH_BINARY)
-                        close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-                        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, close_kernel)
-                        contours, _ = cv2.findContours(
-                            thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-                        )
-                        min_area = frame_pixels * 0.001  # 0.1% of frame
-                        min_perimeter = (motion_w + motion_h) * 0.06  # ~60px at 640x360
-                        for cnt in contours:
-                            area = cv2.contourArea(cnt)
-                            perimeter = cv2.arcLength(cnt, True)
-                            if area < min_area and perimeter < min_perimeter:
-                                continue
-                            x, y, w, h = cv2.boundingRect(cnt)
-                            if w < 10 or h < 10:
-                                continue
-                            confidence = min(1.0, area / (frame_pixels * 0.05))
-                            # Scale bbox back to full frame coordinates
-                            motion_dicts.append(DetDict(
-                                class_name="motion",
-                                confidence=float(confidence),
-                                bbox=DetBbox(x=x * 2, y=y * 2, w=w * 2, h=h * 2),
-                            ))
-                        if len(motion_dicts) > 5:
-                            motion_dicts = []
-                        if motion_dicts:
-                            self.motion_cooldown = 5
-                            # Collect frames for future fine-tuning
-                            if (self.night_collect_count < self.night_collect_max
-                                    and self.stats["frames_processed"] % self.night_collect_interval == 0):
-                                self._save_night_frame(nv12_data, zc_frame.width, zc_frame.height, zc_frame.frame_number)
-
-                    if self.motion_cooldown > 0:
-                        self.motion_cooldown -= 1
-                    self.prev_y_plane = y_small_denoised
-
-                    # YOLO ROI detection (every 3rd frame — motion runs every frame)
-                    # Skip YOLO when scene is static (no motion detected or in cooldown)
                     vse_active = bool(self.roi_readers)
-                    num_rois = len(self.roi_readers) if vse_active else len(self.night_roi_regions)
-                    run_yolo = (self.stats["frames_processed"] % max(num_rois, 1) == 0) and (self.motion_cooldown > 0 or len(motion_dicts) > 0)
+                    fp = self.stats["frames_processed"]
+
+                    # ── Per-frame motion detection on alternating ROI ──────────
+                    motion_detected_this_frame = False
+                    if vse_active:
+                        motion_roi_idx = fp & 1
+                        motion_reader = self.roi_readers[motion_roi_idx]
+                        if motion_reader.wait_for_frame(timeout_sec=0.02):
+                            mf = motion_reader.get_frame()
+                            if mf is not None:
+                                try:
+                                    m_y_arr, _, m_hb_buf = import_nv12_graph_buf(
+                                        raw_buf_data=mf.hb_mem_buf_data,
+                                        expected_plane_sizes=mf.plane_size,
+                                    )
+                                    m_y_size = mf.width * mf.height
+                                    y_plane = m_y_arr[:m_y_size].reshape(mf.height, mf.width)
+                                    y_denoised = cv2.medianBlur(y_plane, 3)
+
+                                    rkey = f"roi{motion_roi_idx}"
+                                    if rkey in self._prev_roi_y:
+                                        diff = cv2.absdiff(y_denoised, self._prev_roi_y[rkey])
+                                        diff = cv2.GaussianBlur(diff, (7, 7), 0)
+                                        diff[diff < 8] = 0  # cut IR noise floor
+
+                                        # Temporal sum accumulation (uint16 + right shift)
+                                        if rkey not in self._diff_acc:
+                                            self._diff_acc[rkey] = np.zeros_like(diff, dtype=np.uint16)
+                                        acc = self._diff_acc[rkey]
+                                        acc >>= 1
+                                        acc += diff.astype(np.uint16)
+
+                                        # Threshold + downscale for fast contour detection
+                                        acc_u8 = np.minimum(acc, 255).astype(np.uint8)
+                                        _, thresh = cv2.threshold(acc_u8, 30, 255, cv2.THRESH_BINARY)
+                                        thresh_small = cv2.resize(thresh, (320, 320), interpolation=cv2.INTER_NEAREST)
+                                        close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+                                        thresh_small = cv2.morphologyEx(thresh_small, cv2.MORPH_CLOSE, close_kernel)
+                                        contours, _ = cv2.findContours(
+                                            thresh_small, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                                        )
+
+                                        # Contours in 320x320 → scale 2x to 640 (=1280x720 output)
+                                        roi_sx, roi_sy, _, _ = self.VSE_ROI_REGIONS[motion_roi_idx]
+                                        roi_ox = int(roi_sx * (1280.0 / 1920.0))
+                                        roi_oy = int(roi_sy * (720.0 / 1080.0))
+                                        small_pixels = 320 * 320
+                                        min_area = small_pixels * 0.001
+                                        for cnt in contours:
+                                            area = cv2.contourArea(cnt)
+                                            if area < min_area:
+                                                continue
+                                            bx, by, bw, bh = cv2.boundingRect(cnt)
+                                            if bw < 5 or bh < 5:
+                                                continue
+                                            motion_detected_this_frame = True
+                                            self._motion_bboxes.append(DetDict(
+                                                class_name="motion",
+                                                confidence=min(1.0, area / (small_pixels * 0.05)),
+                                                bbox=DetBbox(
+                                                    x=bx * 2 + roi_ox,
+                                                    y=by * 2 + roi_oy,
+                                                    w=bw * 2,
+                                                    h=bh * 2,
+                                                ),
+                                            ))
+                                        if len(self._motion_bboxes) > 10:
+                                            self._motion_bboxes = self._motion_bboxes[-5:]
+
+                                    self._prev_roi_y[rkey] = y_denoised
+                                    m_hb_buf.release()
+                                except Exception as e:
+                                    logger.warning(f"Motion ROI read failed (roi={motion_roi_idx}): {e}")
+
+                    # Update motion cooldown
+                    if motion_detected_this_frame:
+                        self.motion_cooldown = 8
+                        self._roi_has_motion = True
+                    elif self.motion_cooldown > 0:
+                        self.motion_cooldown -= 1
+                        if self.motion_cooldown == 0:
+                            self._roi_has_motion = False
+
+                    # ── YOLO: both ROIs in one frame (every 2nd frame) ─────────
+                    run_yolo = vse_active and ((fp & 1) == 0) and (
+                        self.motion_cooldown > 0 or self._roi_has_motion
+                    )
                     if not run_yolo:
                         self.stats["yolo_skipped_frames"] = self.stats.get("yolo_skipped_frames", 0) + 1
-                    if run_yolo:
-                        current_roi = self.roi_index
 
-                        # ── VSE ROI SHM path (preferred) ──────────────────────────
-                        # ROI SHM contains pre-cropped 640x640 NV12 from VSE Ch3-4.
-                        # No CPU crop needed; read directly and call detect_nv12().
-                        vse_detections = None
-                        roi_hb_buf = None
-                        if vse_active:
-                            roi_reader = self.roi_readers[current_roi]
-                            if roi_reader.wait_for_frame(timeout_sec=0.05):
-                                roi_frame = roi_reader.get_frame()
-                                if roi_frame is not None:
-                                    try:
-                                        roi_y_arr, roi_uv_arr, roi_hb_buf = import_nv12_graph_buf(
-                                            raw_buf_data=roi_frame.hb_mem_buf_data,
-                                            expected_plane_sizes=roi_frame.plane_size,
-                                        )
-                                        # Combine planes (zero-copy if contiguous)
-                                        roi_y_size = roi_frame.width * roi_frame.height
-                                        if len(roi_y_arr) == roi_y_size + len(roi_uv_arr):
-                                            roi_nv12 = roi_y_arr  # contiguous — full NV12 view
-                                        else:
-                                            roi_nv12 = np.concatenate([roi_y_arr, roi_uv_arr])
-                                        vse_detections = self.detector.detect_nv12(
-                                            nv12_data=roi_nv12,
-                                            width=roi_frame.width,
-                                            height=roi_frame.height,
-                                            brightness_avg=roi_frame.brightness_avg,
-                                        )
-                                    except Exception as e:
-                                        logger.warning(f"VSE ROI SHM import failed (roi={current_roi}): {e}")
-                                        if roi_hb_buf is not None:
-                                            roi_hb_buf.release()
-                                            roi_hb_buf = None
+                    all_yolo_dicts = []
+                    roi_hb_bufs = []
+
+                    if run_yolo:
+                        self.cache_frame_number = zc_frame.frame_number
+                        self.cache_timestamp = zc_frame.timestamp_sec
+
+                        for roi_idx, roi_reader in enumerate(self.roi_readers):
+                            roi_hb_buf = None
+                            if not roi_reader.wait_for_frame(timeout_sec=0.05):
+                                logger.debug(f"VSE ROI SHM timeout (roi={roi_idx})")
+                                continue
+                            roi_frame = roi_reader.get_frame()
+                            if roi_frame is None:
+                                continue
+                            try:
+                                roi_y_arr, roi_uv_arr, roi_hb_buf = import_nv12_graph_buf(
+                                    raw_buf_data=roi_frame.hb_mem_buf_data,
+                                    expected_plane_sizes=roi_frame.plane_size,
+                                )
+                                roi_hb_bufs.append(roi_hb_buf)
+                            except Exception as e:
+                                logger.warning(f"VSE ROI SHM import failed (roi={roi_idx}): {e}")
+                                if roi_hb_buf is not None:
+                                    roi_hb_buf.release()
+                                continue
+
+                            # YOLO inference
+                            roi_y_size = roi_frame.width * roi_frame.height
+                            if len(roi_y_arr) == roi_y_size + len(roi_uv_arr):
+                                roi_nv12 = roi_y_arr
                             else:
-                                logger.debug(f"VSE ROI SHM timeout (roi={current_roi}), falling back")
-
-                        # ── Fallback: CPU crop from yolo_zc 1280x720 ──────────────
-                        if vse_detections is None:
-                            detections = self.detector.detect_nv12_roi_720p(
-                                nv12_data=nv12_data,
-                                roi_index=current_roi,
-                                brightness_avg=zc_frame.brightness_avg,
+                                roi_nv12 = np.concatenate([roi_y_arr, roi_uv_arr])
+                            detections = self.detector.detect_nv12(
+                                nv12_data=roi_nv12,
+                                width=roi_frame.width,
+                                height=roi_frame.height,
+                                brightness_avg=roi_frame.brightness_avg,
+                                clahe_cache_key=f"roi{roi_idx}",
                             )
-                        else:
-                            detections = vse_detections
 
-                        if current_roi == 0:
-                            self.cache_frame_number = zc_frame.frame_number
-                            self.cache_timestamp = zc_frame.timestamp_sec
-                        self.roi_index = (self.roi_index + 1) % num_rois
-                        cycle_complete = (self.roi_index == 0)
-                    else:
-                        cycle_complete = False
-                        roi_hb_buf = None
-
-                    # Release main yolo_zc buffer (motion detection used it above)
-                    hb_mem_buffer.release()
-                    # Release ROI buffer if we used VSE path
-                    if roi_hb_buf is not None:
-                        roi_hb_buf.release()
-
-                    if run_yolo:
-                        # Convert YOLO detections to namedtuples.
-                        # VSE path: detections are in 640x640 space; add the VSE ROI origin
-                        #           (mapped 1920x1080 → 1280x720) to get 1280x720 coords.
-                        # Fallback path: detect_nv12_roi_720p already returns 1280x720 coords.
-                        if vse_detections is not None:
-                            # VSE path: 640x640 → 1280x720 output space.
-                            #
-                            # Math: VSE crops a 960x960 region from the 1920x1080 sensor,
-                            # then scales to 640x640.  The combined end-to-end scale from
-                            # detection coords (640x640) to 1280x720 output is:
-                            #
-                            #   scale = (960/640) * (1280/1920) = 1.5 * (2/3) = 1.0  (x)
-                            #   scale = (960/640) * ( 720/1080) = 1.5 * (2/3) = 1.0  (y)
-                            #
-                            # So det.x/y/w/h are already in 1280x720 units — we only need
-                            # to add the ROI origin mapped from 1920x1080 → 1280x720.
-                            roi_sx, roi_sy, _, _ = self.VSE_ROI_REGIONS[current_roi]
-                            roi_ox = int(roi_sx * (1280.0 / 1920.0))  # sensor → output x
-                            roi_oy = int(roi_sy * (720.0 / 1080.0))   # sensor → output y
-                            yolo_dicts = [
-                                DetDict(
+                            # Convert to 1280x720 output coords
+                            roi_sx, roi_sy, _, _ = self.VSE_ROI_REGIONS[roi_idx]
+                            roi_ox = int(roi_sx * (1280.0 / 1920.0))
+                            roi_oy = int(roi_sy * (720.0 / 1080.0))
+                            for det in detections:
+                                all_yolo_dicts.append(DetDict(
                                     class_name=det.class_name.value,
                                     confidence=det.confidence,
                                     bbox=DetBbox(
@@ -750,41 +749,27 @@ class YoloDetectorDaemon:
                                         w=det.bbox.w,
                                         h=det.bbox.h,
                                     ),
-                                )
-                                for det in detections
-                            ]
-                        else:
-                            # Fallback path: coords already in 1280x720 space
-                            yolo_dicts = [
-                                DetDict(
-                                    class_name=det.class_name.value,
-                                    confidence=det.confidence,
-                                    bbox=DetBbox(x=det.bbox.x, y=det.bbox.y, w=det.bbox.w, h=det.bbox.h),
-                                )
-                                for det in detections
-                            ]
+                                ))
 
-                        # Accumulate YOLO ROI results
-                        self.detection_cache[current_roi] = yolo_dicts
+                        for buf in roi_hb_bufs:
+                            buf.release()
 
-                    if cycle_complete:
-                        # Merge YOLO ROI detections
-                        all_yolo = []
-                        for roi_dets in self.detection_cache:
-                            all_yolo.extend(roi_dets)
-                        merged_yolo = apply_cross_roi_nms(all_yolo, iou_threshold=0.5)
-
-                        # Filter night YOLO false positives (IR-caused misdetections)
+                    if run_yolo:
+                        # Merge YOLO detections across ROIs
+                        merged_yolo = apply_cross_roi_nms(all_yolo_dicts, iou_threshold=0.5)
                         merged_yolo = [
                             d for d in merged_yolo
                             if d.class_name not in self.night_fp_classes
                         ]
                         merged_yolo = _suppress_dog_with_cat(merged_yolo)
 
-                        # Combine: motion + YOLO results
-                        all_dicts = motion_dicts + merged_yolo
+                        # Keep YOLO alive while detections exist (static subject)
+                        if merged_yolo and self.motion_cooldown <= 1:
+                            self.motion_cooldown = 3
 
-                        # Scale to output coordinates
+                        all_dicts = self._motion_bboxes + merged_yolo
+                        self._motion_bboxes = []
+
                         scaled_dicts = [
                             DetDict(
                                 class_name=d.class_name,
@@ -806,38 +791,15 @@ class YoloDetectorDaemon:
                                 detections=[_det_to_dict(d) for d in scaled_dicts],
                             )
 
-                        self.detection_cache = [[] for _ in self.detection_cache]
                         detection_dicts = scaled_dicts
                     else:
-                        # YOLO skipped — still write motion-only detections
-                        if motion_dicts:
-                            scaled_motion = [
-                                DetDict(
-                                    class_name=d.class_name,
-                                    confidence=d.confidence,
-                                    bbox=DetBbox(
-                                        x=int(d.bbox.x * self.scale_x),
-                                        y=int(d.bbox.y * self.scale_y),
-                                        w=int(d.bbox.w * self.scale_x),
-                                        h=int(d.bbox.h * self.scale_y),
-                                    ),
-                                )
-                                for d in motion_dicts
-                            ]
-                            self.detection_writer.write_detection_result(
-                                frame_number=self.cache_frame_number,
-                                timestamp_sec=self.cache_timestamp,
-                                detections=[_det_to_dict(d) for d in scaled_motion],
-                            )
-                            detection_dicts = scaled_motion
-                        else:
-                            detection_dicts = []
+                        detection_dicts = []
 
                     # Stats
                     self.stats["frames_processed"] += 1
                     timing = self.detector.get_last_timing()
                     self.stats["avg_inference_time_ms"] = timing["total"] * 1000
-                    if cycle_complete:
+                    if run_yolo:
                         self.stats["total_detections"] += len(detection_dicts)
 
                     # Periodic stats log
@@ -853,7 +815,7 @@ class YoloDetectorDaemon:
                             f"yolo_skipped={self.stats['yolo_skipped_frames']}"
                         )
 
-                    if is_debug and cycle_complete and detection_dicts:
+                    if is_debug and run_yolo and detection_dicts:
                         classes = ",".join(d.class_name for d in detection_dicts)
                         logger.debug(f"#{self.stats['frames_processed']}: {classes}")
 

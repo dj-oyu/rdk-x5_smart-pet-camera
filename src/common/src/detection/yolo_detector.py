@@ -744,6 +744,7 @@ class YoloDetector:
         width: int,
         height: int,
         brightness_avg: float = -1.0,
+        clahe_cache_key: str = "",
     ) -> list[Detection]:
         """
         NV12フォーマットのフレームから物体検出を実行（高速パス）
@@ -769,11 +770,14 @@ class YoloDetector:
         start_prep = time.perf_counter()
 
         self._clahe_frame_counter += 1
-        cache_key = (width, height)
+        # Use clahe_cache_key to distinguish VSE ROI images that share the
+        # same (width, height).  Without this, ROI 0's cached Y plane would
+        # be reused for ROI 1, causing ghost/mirror detections.
+        cache_key = (width, height, clahe_cache_key)
         cache_exists = cache_key in self._clahe_y_cache
         update_clahe = self.clahe_enabled and (
             self._clahe_frame_counter % self.clahe_frequency == 0
-            or not cache_exists  # cold start: populate cache on first frame
+            or not cache_exists
         )
         use_clahe_cache = self.clahe_enabled and not update_clahe and cache_exists
 
