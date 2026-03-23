@@ -106,6 +106,7 @@ async fn main() {
         pet_event_tx,
         base_url,
         tls.is_some(),
+        vlm_config.clone(),
     );
 
     // Bridge PetEvent → PhotoEvent for SSE

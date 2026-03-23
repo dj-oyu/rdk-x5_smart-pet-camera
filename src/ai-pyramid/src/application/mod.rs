@@ -9,7 +9,10 @@ mod repository;
 pub use commands::ObservationCommands;
 pub use context::AppContext;
 pub use event::PetEvent;
-pub use model::{ActivityStats, EventQuery, EventStatus, EventStatusFilter, EventSummary, ObservationInput, ObservationResult};
+pub use model::{
+    ActivityStats, EventQuery, EventStatus, EventStatusFilter, EventSummary, ObservationInput,
+    ObservationResult,
+};
 pub use queries::EventQueries;
 pub use repository::{EventRepositoryPort, PhotoStoreRepository, SharedEventRepository};
 
@@ -35,7 +38,14 @@ mod tests {
         store.migrate().unwrap();
         let repository = PhotoStoreRepository::shared(store);
         let (event_tx, _) = broadcast::channel(16);
-        AppContext::new(repository, PathBuf::from("data/photos"), event_tx, None, false)
+        AppContext::new(
+            repository,
+            PathBuf::from("data/photos"),
+            event_tx,
+            None,
+            false,
+            crate::vlm::VlmConfig::default(),
+        )
     }
 
     #[tokio::test]
@@ -57,13 +67,25 @@ mod tests {
             .await
             .unwrap();
 
-        let before = queries.get_observation_attempts("comic_test.jpg").await.unwrap().unwrap();
+        let before = queries
+            .get_observation_attempts("comic_test.jpg")
+            .await
+            .unwrap()
+            .unwrap();
         let updated = commands
             .override_event_validity("comic_test.jpg", true)
             .await
             .unwrap();
-        let after = queries.get_observation_attempts("comic_test.jpg").await.unwrap().unwrap();
-        let event = queries.get_event_by_source("comic_test.jpg").await.unwrap().unwrap();
+        let after = queries
+            .get_observation_attempts("comic_test.jpg")
+            .await
+            .unwrap()
+            .unwrap();
+        let event = queries
+            .get_event_by_source("comic_test.jpg")
+            .await
+            .unwrap()
+            .unwrap();
 
         assert!(updated);
         assert_eq!(before, 1);

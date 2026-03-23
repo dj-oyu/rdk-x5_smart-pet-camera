@@ -1,18 +1,18 @@
-use crate::application::{AppContext, EventSummary, ObservationCommands, EventQueries};
+use crate::application::{AppContext, EventQueries, EventSummary, ObservationCommands};
 use crate::db::DetectionInput;
-use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Json, Response};
-use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::routing::{get, post};
 use axum::Router;
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Json, Response};
+use axum::routing::{get, post};
 use futures_util::stream::Stream;
-use include_dir::{include_dir, Dir};
+use include_dir::{Dir, include_dir};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 
 static EMBEDDED_UI: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
 
@@ -65,17 +65,28 @@ pub fn router(state: AppState) -> Router {
 
     let mcp_router = Router::new()
         .route("/mcp", post(crate::mcp::handle_mcp))
-        .route("/mcp/photos/{id}", get(crate::mcp::handle_mcp_photo_download))
+        .route(
+            "/mcp/photos/{id}",
+            get(crate::mcp::handle_mcp_photo_download),
+        )
         .with_state(mcp_state);
 
     Router::new()
         .route("/app", get(handle_embedded_app))
         .route("/app/{*path}", get(handle_embedded_asset))
         .route("/api/photos", get(handle_photos_list))
-        .route("/api/photos/{filename}", get(handle_photo_serve).patch(handle_photo_update))
+        .route(
+            "/api/photos/{filename}",
+            get(handle_photo_serve).patch(handle_photo_update),
+        )
         .route("/api/photos/ingest", post(handle_ingest))
-        .route("/api/detections/{id}", get(handle_detections_get).patch(handle_detection_update))
+        .route(
+            "/api/detections/{id}",
+            get(handle_detections_get).patch(handle_detection_update),
+        )
         .route("/api/stats", get(handle_stats))
+        .route("/api/behaviors", get(handle_behaviors))
+        .route("/api/daily-summary", post(handle_daily_summary))
         .route("/api/pet-names", get(handle_pet_names))
         .route("/api/events", get(handle_sse))
         .route("/health", get(handle_health))
@@ -89,6 +100,8 @@ struct PhotosQuery {
     pet_id: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
+    search: Option<String>,
+    behavior: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -137,10 +150,12 @@ async fn handle_photos_list(
 ) -> impl IntoResponse {
     let query = build_event_query(&q);
     match state.queries().list_events(query).await {
-        Ok((events, total)) => {
-            Json(PhotosResponse { events, total }).into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+        Ok((events, total)) => Json(PhotosResponse { events, total }).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
     }
 }
 
@@ -152,7 +167,11 @@ async fn handle_photo_serve(
     let path = state.photos_dir.join(&safe_name);
 
     if !path.exists() {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not found"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "not found"})),
+        )
+            .into_response();
     }
 
     match tokio::fs::read(&path).await {
@@ -163,7 +182,8 @@ async fn handle_photo_serve(
                 (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
             ],
             data,
-        ).into_response(),
+        )
+            .into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "read error").into_response(),
     }
 }
@@ -184,8 +204,20 @@ async fn handle_photo_update(
     let commands = state.commands();
 
     match queries.get_event_by_source(&safe_name).await {
-        Ok(None) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not found"}))).into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "not found"})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
         Ok(Some(_)) => {}
     }
 
@@ -193,20 +225,32 @@ async fn handle_photo_update(
 
     if let Some(is_valid) = body.is_valid {
         if let Err(e) = commands.override_event_validity(&safe_name, is_valid).await {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
         }
         updated["is_valid"] = serde_json::json!(is_valid);
     }
 
     if let Some(ref pet_id) = body.pet_id {
         if let Err(e) = commands.update_pet_id(&safe_name, pet_id).await {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
         }
         updated["pet_id"] = serde_json::json!(pet_id);
     }
 
     if body.is_valid.is_none() && body.pet_id.is_none() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "is_valid or pet_id required"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "is_valid or pet_id required"})),
+        )
+            .into_response();
     }
 
     Json(updated).into_response()
@@ -225,29 +269,47 @@ async fn handle_ingest(
     State(state): State<AppState>,
     Json(body): Json<IngestRequest>,
 ) -> impl IntoResponse {
-    let captured_at = match chrono::NaiveDateTime::parse_from_str(&body.captured_at, "%Y-%m-%dT%H:%M:%S") {
-        Ok(dt) => dt,
-        Err(_) => match chrono::NaiveDateTime::parse_from_str(&body.captured_at, "%Y-%m-%dT%H:%M:%S%.f") {
+    let captured_at =
+        match chrono::NaiveDateTime::parse_from_str(&body.captured_at, "%Y-%m-%dT%H:%M:%S") {
             Ok(dt) => dt,
-            Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("invalid captured_at: {e}")}))).into_response(),
-        },
-    };
+            Err(_) => match chrono::NaiveDateTime::parse_from_str(
+                &body.captured_at,
+                "%Y-%m-%dT%H:%M:%S%.f",
+            ) {
+                Ok(dt) => dt,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": format!("invalid captured_at: {e}")})),
+                    )
+                        .into_response();
+                }
+            },
+        };
 
     let safe_name = sanitize_filename(&body.filename);
     let commands = state.commands();
 
-    match commands.ingest_with_detections(
-        &safe_name,
-        captured_at,
-        body.pet_id.as_deref(),
-        &body.detections,
-    ).await {
+    match commands
+        .ingest_with_detections(
+            &safe_name,
+            captured_at,
+            body.pet_id.as_deref(),
+            &body.detections,
+        )
+        .await
+    {
         Ok(photo_id) => Json(serde_json::json!({
             "ok": true,
             "photo_id": photo_id,
             "detections_count": body.detections.len(),
-        })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
     }
 }
 
@@ -258,7 +320,11 @@ async fn handle_detections_get(
 ) -> impl IntoResponse {
     match state.queries().get_detections(id).await {
         Ok(dets) => Json(dets).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
     }
 }
 
@@ -273,17 +339,34 @@ async fn handle_detection_update(
     Path(id): Path<i64>,
     Json(body): Json<DetectionUpdate>,
 ) -> impl IntoResponse {
-    match state.commands().update_detection_override(id, &body.pet_id_override).await {
-        Ok(0) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "detection not found"}))).into_response(),
-        Ok(_) => Json(serde_json::json!({"ok": true, "pet_id_override": body.pet_id_override})).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    match state
+        .commands()
+        .update_detection_override(id, &body.pet_id_override)
+        .await
+    {
+        Ok(0) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "detection not found"})),
+        )
+            .into_response(),
+        Ok(_) => Json(serde_json::json!({"ok": true, "pet_id_override": body.pet_id_override}))
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
     }
 }
 
 async fn handle_stats(State(state): State<AppState>) -> impl IntoResponse {
     match state.queries().activity_stats().await {
         Ok(stats) => Json(stats).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
     }
 }
 
@@ -291,20 +374,94 @@ async fn handle_sse(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
     let rx = state.event_tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|result| {
-        match result {
-            Ok(photo_event) => {
-                let json = serde_json::to_string(&photo_event).unwrap_or_default();
-                Some(Ok(Event::default().event("event").data(json)))
-            }
-            Err(_) => None,
+    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
+        Ok(photo_event) => {
+            let json = serde_json::to_string(&photo_event).unwrap_or_default();
+            Some(Ok(Event::default().event("event").data(json)))
         }
+        Err(_) => None,
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 async fn handle_pet_names(State(state): State<AppState>) -> impl IntoResponse {
     Json(state.pet_names)
+}
+
+async fn handle_behaviors(State(state): State<AppState>) -> impl IntoResponse {
+    match state.queries().distinct_behaviors().await {
+        Ok(behaviors) => Json(behaviors).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct DailySummaryRequest {
+    date: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DailySummaryResponse {
+    date: String,
+    summary: String,
+    photo_count: usize,
+}
+
+async fn handle_daily_summary(
+    State(state): State<AppState>,
+    Json(body): Json<DailySummaryRequest>,
+) -> impl IntoResponse {
+    let date = body
+        .date
+        .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
+
+    let captions = match state.queries().captions_for_date(&date).await {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
+    if captions.is_empty() {
+        return Json(DailySummaryResponse {
+            date,
+            summary: "No observations for this date.".into(),
+            photo_count: 0,
+        })
+        .into_response();
+    }
+
+    let photo_count = captions.len();
+
+    // Use VLM to summarize the day's observations (text-only, no image)
+    let vlm_config = state.context.vlm_config();
+    let vlm_client = crate::vlm::VlmClient::new(vlm_config);
+    match vlm_client.summarize_day(&captions).await {
+        Ok(summary) => Json(DailySummaryResponse {
+            date,
+            summary,
+            photo_count,
+        })
+        .into_response(),
+        Err(e) => {
+            // Fallback: return captions list
+            let fallback = format!("{photo_count} observations recorded. VLM unavailable: {e}");
+            Json(DailySummaryResponse {
+                date,
+                summary: fallback,
+                photo_count,
+            })
+            .into_response()
+        }
+    }
 }
 
 async fn handle_health() -> impl IntoResponse {
@@ -327,6 +484,8 @@ fn build_event_query(q: &PhotosQuery) -> crate::application::EventQuery {
         pet_id: q.pet_id.clone().filter(|s| !s.is_empty()),
         limit: q.limit,
         offset: q.offset,
+        search: q.search.clone().filter(|s| !s.is_empty()),
+        behavior: q.behavior.clone().filter(|s| !s.is_empty()),
     }
 }
 
@@ -349,7 +508,10 @@ mod tests {
     use tower::util::ServiceExt;
 
     fn dt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> chrono::NaiveDateTime {
-        NaiveDate::from_ymd_opt(y, m, d).unwrap().and_hms_opt(h, mi, s).unwrap()
+        NaiveDate::from_ymd_opt(y, m, d)
+            .unwrap()
+            .and_hms_opt(h, mi, s)
+            .unwrap()
     }
 
     fn test_state() -> AppState {
@@ -366,6 +528,7 @@ mod tests {
             tokio::sync::broadcast::channel(64).0,
             None,
             false,
+            crate::vlm::VlmConfig::default(),
         );
         AppState {
             context,
@@ -386,7 +549,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("<div id=\"app\"></div>"));
         assert!(html.contains("/app/main."));
@@ -396,7 +561,12 @@ mod tests {
     async fn health_endpoint() {
         let app = router(test_state());
         let resp = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -406,11 +576,18 @@ mod tests {
     async fn photos_list_empty_returns_events_shape() {
         let app = router(test_state());
         let resp = app
-            .oneshot(Request::builder().uri("/api/photos").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/photos")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["total"], 0);
         assert!(json["events"].is_array());
@@ -421,25 +598,38 @@ mod tests {
     async fn photos_list_returns_frontend_event_contract() {
         let state = test_state();
         let commands = state.context.observation_commands();
-        commands.ingest_source_photo(crate::application::ObservationInput {
-            source_filename: "a.jpg".into(),
-            captured_at: dt(2026, 3, 21, 10, 0, 0),
-            pet_id: Some("chatora".into()),
-        }).await.unwrap();
-        commands.apply_observation(crate::application::ObservationResult {
-            source_filename: "a.jpg".into(),
-            is_valid: true,
-            summary: "tabby cat resting".into(),
-            behavior: "resting".into(),
-        }).await.unwrap();
+        commands
+            .ingest_source_photo(crate::application::ObservationInput {
+                source_filename: "a.jpg".into(),
+                captured_at: dt(2026, 3, 21, 10, 0, 0),
+                pet_id: Some("chatora".into()),
+            })
+            .await
+            .unwrap();
+        commands
+            .apply_observation(crate::application::ObservationResult {
+                source_filename: "a.jpg".into(),
+                is_valid: true,
+                summary: "tabby cat resting".into(),
+                behavior: "resting".into(),
+            })
+            .await
+            .unwrap();
 
         let app = router(state);
         let resp = app
-            .oneshot(Request::builder().uri("/api/photos?is_valid=true").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/photos?is_valid=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["total"], 1);
         let event = &json["events"][0];
@@ -448,14 +638,24 @@ mod tests {
         assert_eq!(event["pet_id"], "chatora");
         assert_eq!(event["behavior"], "resting");
         assert_eq!(event["summary"], "tabby cat resting");
-        assert!(event["observed_at"].as_str().unwrap().starts_with("2026-03-21T10:00:00"));
+        assert!(
+            event["observed_at"]
+                .as_str()
+                .unwrap()
+                .starts_with("2026-03-21T10:00:00")
+        );
     }
 
     #[tokio::test]
     async fn photo_serve_not_found() {
         let app = router(test_state());
         let resp = app
-            .oneshot(Request::builder().uri("/api/photos/nonexistent.jpg").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/photos/nonexistent.jpg")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -465,7 +665,12 @@ mod tests {
     async fn photo_serve_path_traversal() {
         let app = router(test_state());
         let resp = app
-            .oneshot(Request::builder().uri("/api/photos/../../../etc/passwd").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/photos/../../../etc/passwd")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -475,19 +680,29 @@ mod tests {
     async fn stats_endpoint_returns_frontend_contract() {
         let state = test_state();
         let commands = state.context.observation_commands();
-        commands.ingest_source_photo(crate::application::ObservationInput {
-            source_filename: "a.jpg".into(),
-            captured_at: dt(2026, 3, 21, 10, 0, 0),
-            pet_id: None,
-        }).await.unwrap();
+        commands
+            .ingest_source_photo(crate::application::ObservationInput {
+                source_filename: "a.jpg".into(),
+                captured_at: dt(2026, 3, 21, 10, 0, 0),
+                pet_id: None,
+            })
+            .await
+            .unwrap();
 
         let app = router(state);
         let resp = app
-            .oneshot(Request::builder().uri("/api/stats").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["total_events"], 1);
         assert_eq!(json["pending_events"], 1);
@@ -501,7 +716,12 @@ mod tests {
         let tx = state.event_tx.clone();
         let app = router(state);
         let resp = app
-            .oneshot(Request::builder().uri("/api/events").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -513,7 +733,8 @@ mod tests {
             caption: "tabby cat resting".into(),
             behavior: "resting".into(),
             pet_id: Some("chatora".into()),
-        }).unwrap();
+        })
+        .unwrap();
 
         let chunk = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
             .await
@@ -564,8 +785,11 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
-        ).unwrap();
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(json["ok"], true);
         assert_eq!(json["detections_count"], 2);
         assert!(json["photo_id"].as_i64().unwrap() > 0);
@@ -575,29 +799,43 @@ mod tests {
     async fn get_detections_returns_ingested_data() {
         let state = test_state();
         let commands = state.context.observation_commands();
-        commands.ingest_with_detections(
-            "test.jpg",
-            dt(2026, 3, 21, 10, 0, 0),
-            Some("mike"),
-            &[crate::db::DetectionInput {
-                panel_index: Some(0),
-                bbox_x: 10, bbox_y: 20, bbox_w: 100, bbox_h: 150,
-                yolo_class: Some("cat".into()),
-                pet_class: Some("mike".into()),
-                confidence: Some(0.9),
-                detected_at: "2026-03-21T10:00:00".into(),
-            }],
-        ).await.unwrap();
+        commands
+            .ingest_with_detections(
+                "test.jpg",
+                dt(2026, 3, 21, 10, 0, 0),
+                Some("mike"),
+                &[crate::db::DetectionInput {
+                    panel_index: Some(0),
+                    bbox_x: 10,
+                    bbox_y: 20,
+                    bbox_w: 100,
+                    bbox_h: 150,
+                    yolo_class: Some("cat".into()),
+                    pet_class: Some("mike".into()),
+                    confidence: Some(0.9),
+                    detected_at: "2026-03-21T10:00:00".into(),
+                }],
+            )
+            .await
+            .unwrap();
 
         let app = router(state);
         let resp = app
-            .oneshot(Request::builder().uri("/api/detections/1").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/detections/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
-        ).unwrap();
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         let dets = json.as_array().unwrap();
         assert_eq!(dets.len(), 1);
         assert_eq!(dets[0]["yolo_class"], "cat");
@@ -609,19 +847,25 @@ mod tests {
     async fn patch_detection_override() {
         let state = test_state();
         let commands = state.context.observation_commands();
-        commands.ingest_with_detections(
-            "test.jpg",
-            dt(2026, 3, 21, 10, 0, 0),
-            Some("chatora"),
-            &[crate::db::DetectionInput {
-                panel_index: Some(0),
-                bbox_x: 10, bbox_y: 20, bbox_w: 100, bbox_h: 150,
-                yolo_class: Some("cat".into()),
-                pet_class: Some("chatora".into()),
-                confidence: Some(0.8),
-                detected_at: "2026-03-21T10:00:00".into(),
-            }],
-        ).await.unwrap();
+        commands
+            .ingest_with_detections(
+                "test.jpg",
+                dt(2026, 3, 21, 10, 0, 0),
+                Some("chatora"),
+                &[crate::db::DetectionInput {
+                    panel_index: Some(0),
+                    bbox_x: 10,
+                    bbox_y: 20,
+                    bbox_w: 100,
+                    bbox_h: 150,
+                    yolo_class: Some("cat".into()),
+                    pet_class: Some("chatora".into()),
+                    confidence: Some(0.8),
+                    detected_at: "2026-03-21T10:00:00".into(),
+                }],
+            )
+            .await
+            .unwrap();
 
         let app = router(state);
         let resp = app
@@ -637,8 +881,11 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
-        ).unwrap();
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(json["ok"], true);
         assert_eq!(json["pet_id_override"], "mike");
     }
@@ -664,13 +911,21 @@ mod tests {
     async fn pet_names_endpoint() {
         let app = router(test_state());
         let resp = app
-            .oneshot(Request::builder().uri("/api/pet-names").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/pet-names")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
-        ).unwrap();
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(json["mike"], "Mike");
         assert_eq!(json["chatora"], "Chatora");
     }
