@@ -17,10 +17,16 @@ const STATUS_OPTIONS: Array<{ value: StatusFilter; label: string }> = [
 ];
 
 export function FilterBar({ query, petNames, behaviors, onStatusChange, onPetChange, onBehaviorChange }: FilterBarProps) {
-  const petOptions = [
-    { value: "", label: "All pets" },
-    ...Object.entries(petNames).map(([id, name]) => ({ value: id, label: name })),
-  ];
+  const petEntries = Object.entries(petNames)
+    .map(([id, name]) => ({ value: id, label: name }))
+    .sort((a, b) => {
+      // "other" (no display name override, id === label) goes last
+      const aIsOther = a.value === "other";
+      const bIsOther = b.value === "other";
+      if (aIsOther !== bIsOther) return aIsOther ? 1 : -1;
+      return a.label.localeCompare(b.label);
+    });
+  const petOptions = [{ value: "", label: "All pets" }, ...petEntries];
 
   return (
     <section class="filter-bar">
