@@ -8,9 +8,11 @@ LIBS_N2D = -lNano2Dutil -lNano2D -lm
 LIBS_CODEC = -lmultimedia -lhbmem -lalog -lpthread -ldl -lm
 LIBS_VPS = -lspcdev -lcam -lvpf -lhbmem -lalog -lpthread -ldl
 LIBS_VFLOW = -lcam -lvpf -lhbmem -lalog -lpthread -ldl
+LIBS_OPENCL = -lOpenCL -lm
 
 TARGETS = format_convert_test h265_fixqp_test letterbox_hw_test vps_test \
-          vse_6ch_test zerocopy_bench letterbox_verify n2d_multiprocess_test
+          vse_6ch_test zerocopy_bench letterbox_verify n2d_multiprocess_test \
+          opencl_median5_bench
 
 .PHONY: all clean help
 
@@ -47,6 +49,10 @@ n2d_multiprocess_test: n2d_multiprocess_test.c
 # VSE → nano2D letterbox visual verification (outputs YUV files)
 letterbox_verify: letterbox_verify.c
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(LDFLAGS) $(LIBS_N2D) $(LIBS_VFLOW)
+
+# OpenCL 5x5 median filter GPU vs CPU benchmark
+opencl_median5_bench: opencl_median5_bench.c
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(LDFLAGS) $(LIBS_OPENCL)
 
 clean:
 	rm -f $(TARGETS)

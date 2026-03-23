@@ -1,5 +1,5 @@
 use crate::application::{ActivityStats, EventSummary};
-use crate::db::{PhotoFilter, PhotoStore};
+use crate::db::{DetectionInput, PhotoFilter, PhotoStore};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
@@ -52,6 +52,8 @@ pub fn router(state: AppState) -> Router {
         .route("/app/{*path}", get(handle_embedded_asset))
         .route("/api/photos", get(handle_photos_list))
         .route("/api/photos/{filename}", get(handle_photo_serve).patch(handle_photo_update))
+        .route("/api/photos/ingest", post(handle_ingest))
+        .route("/api/detections/{id}", get(handle_detections_get).patch(handle_detection_update))
         .route("/api/stats", get(handle_stats))
         .route("/api/events", get(handle_sse))
         .route("/health", get(handle_health))
@@ -153,6 +155,7 @@ async fn handle_photo_serve(
 #[derive(Deserialize)]
 struct PhotoUpdate {
     is_valid: Option<bool>,
+    pet_id: Option<String>,
 }
 
 async fn handle_photo_update(
@@ -163,21 +166,103 @@ async fn handle_photo_update(
     let safe_name = sanitize_filename(&filename);
     let store = state.store.lock().unwrap();
 
+    // Verify photo exists
+    match store.get_by_filename(&safe_name) {
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not found"}))).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Ok(Some(_)) => {}
+    }
+
+    let mut updated = serde_json::json!({"ok": true});
+
     if let Some(is_valid) = body.is_valid {
-        // Toggle is_valid (user override)
-        let result = store.get_by_filename(&safe_name);
-        match result {
-            Ok(Some(_photo)) => {
-                if let Err(e) = store.set_validation_override(&safe_name, is_valid) {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response();
-                }
-                Json(serde_json::json!({"ok": true, "is_valid": is_valid})).into_response()
-            }
-            Ok(None) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not found"}))).into_response(),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        if let Err(e) = store.set_validation_override(&safe_name, is_valid) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response();
         }
-    } else {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "is_valid required"}))).into_response()
+        updated["is_valid"] = serde_json::json!(is_valid);
+    }
+
+    if let Some(ref pet_id) = body.pet_id {
+        if let Err(e) = store.update_pet_id(&safe_name, pet_id) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response();
+        }
+        updated["pet_id"] = serde_json::json!(pet_id);
+    }
+
+    if body.is_valid.is_none() && body.pet_id.is_none() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "is_valid or pet_id required"}))).into_response();
+    }
+
+    Json(updated).into_response()
+}
+
+// POST /api/photos/ingest — rdk-x5 sends comic metadata + detections
+#[derive(Deserialize)]
+struct IngestRequest {
+    filename: String,
+    captured_at: String,
+    pet_id: Option<String>,
+    detections: Vec<DetectionInput>,
+}
+
+async fn handle_ingest(
+    State(state): State<AppState>,
+    Json(body): Json<IngestRequest>,
+) -> impl IntoResponse {
+    let captured_at = match chrono::NaiveDateTime::parse_from_str(&body.captured_at, "%Y-%m-%dT%H:%M:%S") {
+        Ok(dt) => dt,
+        Err(_) => match chrono::NaiveDateTime::parse_from_str(&body.captured_at, "%Y-%m-%dT%H:%M:%S%.f") {
+            Ok(dt) => dt,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("invalid captured_at: {e}")}))).into_response(),
+        },
+    };
+
+    let safe_name = sanitize_filename(&body.filename);
+    let store = state.store.lock().unwrap();
+
+    match store.ingest_with_detections(
+        &safe_name,
+        captured_at,
+        body.pet_id.as_deref(),
+        &body.detections,
+    ) {
+        Ok(photo_id) => Json(serde_json::json!({
+            "ok": true,
+            "photo_id": photo_id,
+            "detections_count": body.detections.len(),
+        })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+// GET /api/detections/:id — get detections for a photo
+async fn handle_detections_get(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let store = state.store.lock().unwrap();
+    match store.get_detections(id) {
+        Ok(dets) => Json(dets).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+// PATCH /api/detections/:id — update pet_id_override on a detection
+#[derive(Deserialize)]
+struct DetectionUpdate {
+    pet_id_override: String,
+}
+
+async fn handle_detection_update(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<DetectionUpdate>,
+) -> impl IntoResponse {
+    let store = state.store.lock().unwrap();
+    match store.update_detection_override(id, &body.pet_id_override) {
+        Ok(0) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "detection not found"}))).into_response(),
+        Ok(_) => Json(serde_json::json!({"ok": true, "pet_id_override": body.pet_id_override})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
     }
 }
 

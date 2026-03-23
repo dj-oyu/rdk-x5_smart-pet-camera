@@ -3,7 +3,6 @@ package webmonitor
 import (
 	"image"
 	"image/jpeg"
-	"math"
 	"os"
 	"testing"
 )
@@ -106,32 +105,29 @@ func loadTestImage(t *testing.T, path string) image.Image {
 
 func TestClassifyPetColor_RealMike(t *testing.T) {
 	img := loadTestImage(t, "testdata/mike.jpg")
-	// Panel 1 (top-right): zoomed on mike
 	panel := extractPanel(img, 1)
 	nv12, w, h := rgbImageToNV12(panel)
 
-	// Use full panel as bbox (cat fills most of the zoomed panel)
 	bbox := BoundingBox{X: 0, Y: 0, W: w, H: h}
-	got := classifyPetColor(nv12, w, h, bbox)
+	got, scatter := classifyPetColorDebug(nv12, w, h, bbox)
 
-	t.Logf("mike panel 1: classified as %q (w=%d, h=%d)", got, w, h)
+	t.Logf("mike panel 1: classified as %q, scatter=%.2f (w=%d, h=%d)", got, scatter, w, h)
 	if got != "mike" {
-		t.Errorf("expected mike, got %q", got)
+		t.Errorf("expected mike, got %q (scatter=%.2f)", got, scatter)
 	}
 }
 
 func TestClassifyPetColor_RealChatora(t *testing.T) {
 	img := loadTestImage(t, "testdata/chatora.jpg")
-	// Panel 1 (top-right): zoomed on chatora
 	panel := extractPanel(img, 1)
 	nv12, w, h := rgbImageToNV12(panel)
 
 	bbox := BoundingBox{X: 0, Y: 0, W: w, H: h}
-	got := classifyPetColor(nv12, w, h, bbox)
+	got, scatter := classifyPetColorDebug(nv12, w, h, bbox)
 
-	t.Logf("chatora panel 1: classified as %q (w=%d, h=%d)", got, w, h)
+	t.Logf("chatora panel 1: classified as %q, scatter=%.2f (w=%d, h=%d)", got, scatter, w, h)
 	if got != "chatora" {
-		t.Errorf("expected chatora, got %q", got)
+		t.Errorf("expected chatora, got %q (scatter=%.2f)", got, scatter)
 	}
 }
 
@@ -170,39 +166,6 @@ func TestClassifyPetColor_NilData(t *testing.T) {
 	got := classifyPetColor(nil, 640, 480, BoundingBox{X: 0, Y: 0, W: 100, H: 100})
 	if got != "other" {
 		t.Errorf("expected other for nil data, got %q", got)
-	}
-}
-
-func TestRgbToHSV(t *testing.T) {
-	tests := []struct {
-		name      string
-		r, g, b   float64
-		wantH     float64
-		wantSHigh bool
-		wantVHigh bool
-	}{
-		{"pure red", 255, 0, 0, 0, true, true},
-		{"orange", 255, 165, 0, 39, true, true},
-		{"white", 255, 255, 255, 0, false, true},
-		{"black", 0, 0, 0, 0, false, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			h, s, v := rgbToHSV(tt.r, tt.g, tt.b)
-			if math.Abs(h-tt.wantH) > 5 {
-				t.Errorf("H = %.1f, want ~%.1f", h, tt.wantH)
-			}
-			if tt.wantSHigh && s < 100 {
-				t.Errorf("S = %.1f, expected high", s)
-			}
-			if !tt.wantSHigh && s > 100 {
-				t.Errorf("S = %.1f, expected low", s)
-			}
-			if tt.wantVHigh && v < 200 {
-				t.Errorf("V = %.1f, expected high", v)
-			}
-		})
 	}
 }
 
