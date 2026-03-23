@@ -61,6 +61,42 @@ def _det_to_dict(d: 'DetDict') -> dict:
     }
 
 
+def _containment_ratio(a: DetBbox, b: DetBbox) -> float:
+    """Fraction of the smaller bbox's area that overlaps with the larger one.
+
+    Returns intersection / min(area_a, area_b).  This catches cases where
+    a small cat bbox is fully contained inside a large dog bbox (IoU is low
+    but containment is 100%).
+    """
+    x1 = max(a.x, b.x)
+    y1 = max(a.y, b.y)
+    x2 = min(a.x + a.w, b.x + b.w)
+    y2 = min(a.y + a.h, b.y + b.h)
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    min_area = min(a.w * a.h, b.w * b.h)
+    return inter / min_area if min_area > 0 else 0.0
+
+
+def _suppress_dog_with_cat(
+    detections: list[DetDict], threshold: float = 0.5
+) -> list[DetDict]:
+    """Suppress dog detections that overlap with cat detections.
+
+    YOLO often misclassifies cats as dogs, producing a small cat bbox
+    inside a larger dog bbox.  Uses containment ratio (intersection /
+    min_area) instead of IoU to catch size-mismatched overlaps.
+    """
+    cats = [d for d in detections if d.class_name == "cat"]
+    if not cats:
+        return detections
+    return [
+        d for d in detections
+        if d.class_name != "dog" or not any(
+            _containment_ratio(d.bbox, c.bbox) > threshold for c in cats
+        )
+    ]
+
+
 def apply_cross_roi_nms(
     detections: list[DetDict], iou_threshold: float = 0.5
 ) -> list[DetDict]:
@@ -648,6 +684,7 @@ class YoloDetectorDaemon:
                             d for d in merged_yolo
                             if d.class_name not in self.night_fp_classes
                         ]
+                        merged_yolo = _suppress_dog_with_cat(merged_yolo)
 
                         # Combine: motion + YOLO results
                         all_dicts = motion_dicts + merged_yolo
@@ -797,6 +834,7 @@ class YoloDetectorDaemon:
 
                         # Cross-ROI NMS: 重複検出を除去
                         merged_dicts = apply_cross_roi_nms(all_detections, iou_threshold=0.5)
+                        merged_dicts = _suppress_dog_with_cat(merged_dicts)
 
                         if is_debug and len(merged_dicts) != len(all_detections):
                             logger.debug(
@@ -856,7 +894,7 @@ class YoloDetectorDaemon:
                             )
 
                         # No merge needed - overlapping ROIs rarely produce duplicates
-                        merged_dicts = all_detections
+                        merged_dicts = _suppress_dog_with_cat(all_detections)
 
                         # Apply scaling after merge (single rounding at final output)
                         scaled_dicts = [
