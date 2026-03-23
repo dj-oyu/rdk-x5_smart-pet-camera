@@ -61,6 +61,42 @@ def _det_to_dict(d: 'DetDict') -> dict:
     }
 
 
+def _containment_ratio(a: DetBbox, b: DetBbox) -> float:
+    """Fraction of the smaller bbox's area that overlaps with the larger one.
+
+    Returns intersection / min(area_a, area_b).  This catches cases where
+    a small cat bbox is fully contained inside a large dog bbox (IoU is low
+    but containment is 100%).
+    """
+    x1 = max(a.x, b.x)
+    y1 = max(a.y, b.y)
+    x2 = min(a.x + a.w, b.x + b.w)
+    y2 = min(a.y + a.h, b.y + b.h)
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    min_area = min(a.w * a.h, b.w * b.h)
+    return inter / min_area if min_area > 0 else 0.0
+
+
+def _suppress_dog_with_cat(
+    detections: list[DetDict], threshold: float = 0.5
+) -> list[DetDict]:
+    """Suppress dog detections that overlap with cat detections.
+
+    YOLO often misclassifies cats as dogs, producing a small cat bbox
+    inside a larger dog bbox.  Uses containment ratio (intersection /
+    min_area) instead of IoU to catch size-mismatched overlaps.
+    """
+    cats = [d for d in detections if d.class_name == "cat"]
+    if not cats:
+        return detections
+    return [
+        d for d in detections
+        if d.class_name != "dog" or not any(
+            _containment_ratio(d.bbox, c.bbox) > threshold for c in cats
+        )
+    ]
+
+
 def apply_cross_roi_nms(
     detections: list[DetDict], iou_threshold: float = 0.5
 ) -> list[DetDict]:
@@ -152,7 +188,7 @@ class YoloDetectorDaemon:
 
         # Night camera ROI mode (1280x720 with 3 overlapping ROIs)
         self.night_roi_mode: bool = False  # Enabled only for camera_id=1
-        self.night_roi_regions: list[tuple[int, int, int, int]] = []  # 3 ROIs for 720p
+        self.night_roi_regions: list[tuple[int, int, int, int]] = []  # 3 ROIs for 720p fallback (VSE uses 2)
 
         # VSE ROI SHM readers (opened when night camera is first detected)
         # Each reader corresponds to one pre-cropped 640x640 NV12 ROI from VSE Ch3-4.
@@ -264,8 +300,8 @@ class YoloDetectorDaemon:
     def _open_roi_readers(self) -> None:
         """Open VSE ROI SHM readers for night camera.
 
-        Called lazily on first camera_id=1 frame.  The three SHM regions are
-        written by the C camera daemon via VSE Ch3-5 (640x640 pre-cropped NV12).
+        Called lazily on first camera_id=1 frame.  The 2 SHM regions are
+        written by the C camera daemon via VSE Ch3-4 (640x640 pre-cropped NV12).
         Falls back gracefully if the SHM is not yet available.
         """
         if self.roi_readers:
@@ -401,16 +437,21 @@ class YoloDetectorDaemon:
                         self.night_roi_regions = self.detector.get_roi_regions_720p()
                         self.roi_enabled = False
                         self.roi_index = 0
-                        self.detection_cache = [[] for _ in self.night_roi_regions]
                         # Lower score_threshold for night camera (darker images = lower confidence)
                         self.detector.score_threshold = max(0.25, self.score_threshold - 0.15)
                         # Open VSE ROI SHM readers (lazy — no-op if already open)
                         self._open_roi_readers()
-                        logger.debug(f"Camera switched to {camera_id} [night ROI mode: {len(self.night_roi_regions)} regions, score_th={self.detector.score_threshold:.2f}, vse_roi={'yes' if self.roi_readers else 'fallback'}]")
+                        # detection_cache size matches active ROI count (VSE=2, fallback=3)
+                        active_roi_count = len(self.roi_readers) if self.roi_readers else len(self.night_roi_regions)
+                        self.detection_cache = [[] for _ in range(active_roi_count)]
+                        logger.debug(f"Camera switched to {camera_id} [night ROI mode: {active_roi_count} regions, score_th={self.detector.score_threshold:.2f}, vse_roi={'yes' if self.roi_readers else 'fallback'}]")
 
                     # Update active camera after processing switch
                     self.active_camera = camera_id
                     self.detector.clahe_enabled = (self.active_camera == 1)
+                    self.detector.clahe_frequency = 6 if self.active_camera == 1 else 1
+                    if self.active_camera == 0:
+                        self.detector._clahe_y_cache.clear()
 
                 # Initialize scale factors on first frame (before any switch)
                 if self.scale_x is None or self.scale_y is None:
@@ -433,12 +474,12 @@ class YoloDetectorDaemon:
                     if zc_frame.camera_id == 1 and zc_frame.width == 1280 and zc_frame.height == 720:
                         self.night_roi_mode = True
                         self.night_roi_regions = self.detector.get_roi_regions_720p()
-                        logger.debug(f"Night camera ROI mode: {len(self.night_roi_regions)} regions")
-                        # Initialize detection cache for 3 ROIs
-                        self.detection_cache = [[] for _ in self.night_roi_regions]
                         self.roi_index = 0
                         # Open VSE ROI SHM readers (lazy — no-op if already open)
                         self._open_roi_readers()
+                        active_roi_count = len(self.roi_readers) if self.roi_readers else len(self.night_roi_regions)
+                        self.detection_cache = [[] for _ in range(active_roi_count)]
+                        logger.debug(f"Night camera ROI mode: {active_roi_count} regions")
                     else:
                         # Day camera or other resolutions: use original logic
                         self.night_roi_mode = False
@@ -516,7 +557,8 @@ class YoloDetectorDaemon:
 
                     # YOLO ROI detection (every 3rd frame — motion runs every frame)
                     # Skip YOLO when scene is static (no motion detected or in cooldown)
-                    num_rois = len(self.roi_readers) if self.roi_readers else len(self.night_roi_regions)
+                    vse_active = bool(self.roi_readers)
+                    num_rois = len(self.roi_readers) if vse_active else len(self.night_roi_regions)
                     run_yolo = (self.stats["frames_processed"] % max(num_rois, 1) == 0) and (self.motion_cooldown > 0 or len(motion_dicts) > 0)
                     if not run_yolo:
                         self.stats["yolo_skipped_frames"] = self.stats.get("yolo_skipped_frames", 0) + 1
@@ -524,11 +566,11 @@ class YoloDetectorDaemon:
                         current_roi = self.roi_index
 
                         # ── VSE ROI SHM path (preferred) ──────────────────────────
-                        # ROI SHM contains pre-cropped 640x640 NV12 from VSE Ch3-5.
+                        # ROI SHM contains pre-cropped 640x640 NV12 from VSE Ch3-4.
                         # No CPU crop needed; read directly and call detect_nv12().
                         vse_detections = None
                         roi_hb_buf = None
-                        if self.roi_readers and len(self.roi_readers) == 3:
+                        if vse_active:
                             roi_reader = self.roi_readers[current_roi]
                             if roi_reader.wait_for_frame(timeout_sec=0.05):
                                 roi_frame = roi_reader.get_frame()
@@ -571,7 +613,7 @@ class YoloDetectorDaemon:
                         if current_roi == 0:
                             self.cache_frame_number = zc_frame.frame_number
                             self.cache_timestamp = zc_frame.timestamp_sec
-                        self.roi_index = (self.roi_index + 1) % len(self.night_roi_regions)
+                        self.roi_index = (self.roi_index + 1) % num_rois
                         cycle_complete = (self.roi_index == 0)
                     else:
                         cycle_complete = False
@@ -642,6 +684,7 @@ class YoloDetectorDaemon:
                             d for d in merged_yolo
                             if d.class_name not in self.night_fp_classes
                         ]
+                        merged_yolo = _suppress_dog_with_cat(merged_yolo)
 
                         # Combine: motion + YOLO results
                         all_dicts = motion_dicts + merged_yolo
@@ -668,7 +711,7 @@ class YoloDetectorDaemon:
                                 detections=[_det_to_dict(d) for d in scaled_dicts],
                             )
 
-                        self.detection_cache = [[] for _ in self.night_roi_regions]
+                        self.detection_cache = [[] for _ in self.detection_cache]
                         detection_dicts = scaled_dicts
                     else:
                         # YOLO skipped — still write motion-only detections
@@ -791,6 +834,7 @@ class YoloDetectorDaemon:
 
                         # Cross-ROI NMS: 重複検出を除去
                         merged_dicts = apply_cross_roi_nms(all_detections, iou_threshold=0.5)
+                        merged_dicts = _suppress_dog_with_cat(merged_dicts)
 
                         if is_debug and len(merged_dicts) != len(all_detections):
                             logger.debug(
@@ -824,7 +868,7 @@ class YoloDetectorDaemon:
                         merged_dicts = scaled_dicts
 
                         # Clear cache for next cycle
-                        self.detection_cache = [[] for _ in self.night_roi_regions]
+                        self.detection_cache = [[] for _ in self.detection_cache]
 
                         # Use merged results for stats/logging
                         detection_dicts = merged_dicts
@@ -850,7 +894,7 @@ class YoloDetectorDaemon:
                             )
 
                         # No merge needed - overlapping ROIs rarely produce duplicates
-                        merged_dicts = all_detections
+                        merged_dicts = _suppress_dog_with_cat(all_detections)
 
                         # Apply scaling after merge (single rounding at final output)
                         scaled_dicts = [

@@ -12,6 +12,40 @@ pub struct Photo {
     pub behavior: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Detection {
+    pub id: i64,
+    pub photo_id: i64,
+    pub panel_index: Option<i32>,
+    /// Bbox in comic image coordinates (848x496 space)
+    pub bbox_x: i32,
+    pub bbox_y: i32,
+    pub bbox_w: i32,
+    pub bbox_h: i32,
+    /// YOLO detection class (e.g. "cat", "dog", "person", "cup")
+    pub yolo_class: Option<String>,
+    /// UV scatter-based pet identity (e.g. "mike", "chatora", "other")
+    pub pet_class: Option<String>,
+    /// User manual correction of pet identity
+    pub pet_id_override: Option<String>,
+    pub confidence: Option<f64>,
+    pub detected_at: String,
+}
+
+/// Input for ingest API. bbox must be in comic image coordinates.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DetectionInput {
+    pub panel_index: Option<i32>,
+    pub bbox_x: i32,
+    pub bbox_y: i32,
+    pub bbox_w: i32,
+    pub bbox_h: i32,
+    pub yolo_class: Option<String>,
+    pub pet_class: Option<String>,
+    pub confidence: Option<f64>,
+    pub detected_at: String,
+}
+
 #[derive(Debug, Default)]
 pub struct PhotoFilter {
     pub is_valid: Option<bool>,
@@ -61,6 +95,27 @@ impl PhotoStore {
             "ALTER TABLE photos ADD COLUMN vlm_attempts INTEGER NOT NULL DEFAULT 0;
              ALTER TABLE photos ADD COLUMN vlm_last_error TEXT;",
         );
+
+        // Detections table: per-bbox records for pet_id calibration
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS detections (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                photo_id        INTEGER NOT NULL REFERENCES photos(id),
+                panel_index     INTEGER,
+                bbox_x          INTEGER NOT NULL,
+                bbox_y          INTEGER NOT NULL,
+                bbox_w          INTEGER NOT NULL,
+                bbox_h          INTEGER NOT NULL,
+                yolo_class      TEXT,
+                pet_class       TEXT,
+                pet_id_override TEXT,
+                confidence      REAL,
+                detected_at     TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_detections_photo
+                ON detections(photo_id);",
+        )?;
+
         Ok(())
     }
 
@@ -102,6 +157,99 @@ impl PhotoStore {
         self.conn.execute(
             "UPDATE photos SET is_valid = ?1 WHERE filename = ?2",
             params![is_valid, filename],
+        )
+    }
+
+    pub fn update_pet_id(&self, filename: &str, pet_id: &str) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE photos SET pet_id = ?1 WHERE filename = ?2",
+            params![pet_id, filename],
+        )
+    }
+
+    /// Insert photo + detections atomically. Returns photo id.
+    /// If photo already exists (by filename), adds detections to existing record.
+    pub fn ingest_with_detections(
+        &self,
+        filename: &str,
+        captured_at: NaiveDateTime,
+        pet_id: Option<&str>,
+        detections: &[DetectionInput],
+    ) -> rusqlite::Result<i64> {
+        let ts = captured_at.format("%Y-%m-%dT%H:%M:%S").to_string();
+
+        // Upsert photo
+        self.conn.execute(
+            "INSERT OR IGNORE INTO photos (filename, captured_at, pet_id) VALUES (?1, ?2, ?3)",
+            params![filename, ts, pet_id],
+        )?;
+        let photo_id: i64 = self.conn.query_row(
+            "SELECT id FROM photos WHERE filename = ?1",
+            params![filename],
+            |row| row.get(0),
+        )?;
+
+        // Update pet_id if photo existed without one
+        if pet_id.is_some() {
+            self.conn.execute(
+                "UPDATE photos SET pet_id = COALESCE(pet_id, ?1) WHERE id = ?2",
+                params![pet_id, photo_id],
+            )?;
+        }
+
+        // Insert detections
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO detections (photo_id, panel_index, bbox_x, bbox_y, bbox_w, bbox_h, yolo_class, pet_class, confidence, detected_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )?;
+        for d in detections {
+            stmt.execute(params![
+                photo_id,
+                d.panel_index,
+                d.bbox_x,
+                d.bbox_y,
+                d.bbox_w,
+                d.bbox_h,
+                d.yolo_class,
+                d.pet_class,
+                d.confidence,
+                d.detected_at,
+            ])?;
+        }
+
+        Ok(photo_id)
+    }
+
+    pub fn get_detections(&self, photo_id: i64) -> rusqlite::Result<Vec<Detection>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, photo_id, panel_index, bbox_x, bbox_y, bbox_w, bbox_h, yolo_class, pet_class, pet_id_override, confidence, detected_at
+             FROM detections WHERE photo_id = ?1 ORDER BY panel_index",
+        )?;
+        let dets = stmt
+            .query_map(params![photo_id], |row| {
+                Ok(Detection {
+                    id: row.get(0)?,
+                    photo_id: row.get(1)?,
+                    panel_index: row.get(2)?,
+                    bbox_x: row.get(3)?,
+                    bbox_y: row.get(4)?,
+                    bbox_w: row.get(5)?,
+                    bbox_h: row.get(6)?,
+                    yolo_class: row.get(7)?,
+                    pet_class: row.get(8)?,
+                    pet_id_override: row.get(9)?,
+                    confidence: row.get(10)?,
+                    detected_at: row.get(11)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(dets)
+    }
+
+    pub fn update_detection_override(&self, detection_id: i64, pet_id: &str) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE detections SET pet_id_override = ?1 WHERE id = ?2",
+            params![pet_id, detection_id],
         )
     }
 
