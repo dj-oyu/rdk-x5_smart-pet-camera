@@ -9,34 +9,40 @@
 ## Project Structure
 | Directory | Lang | Role |
 |-----------|------|------|
-| `src/capture/` | C | Camera daemons, 9 SHM regions |
-| `src/streaming_server/` | Go | WebRTC/MJPEG server (pion/webrtc) |
+| `src/capture/` | C | Camera daemons, 6 SHM regions |
+| `src/streaming_server/` | Go | WebRTC/MJPEG server (pion/webrtc v4) |
 | `src/detector/` | Python | YOLO on BPU (hobot_dnn) |
 | `src/common/` | Python | Shared types |
 | `src/mock/` | Python | Mock camera, detector, SHM |
-| `src/ai-pyramid/` | TBD | AI Pyramid album/VLM (planned) |
+| `src/web/` | Preact | Frontend SPA |
+| `src/ai-pyramid/` | Rust | AI Pyramid album/VLM (axum + rusqlite) |
 | `docs/` | — | Consolidated reference docs |
 
 ## Docs Map
 | Doc | Scope |
 |-----|-------|
 | `01-04_*.md` | Core specs (goals, requirements, design, architecture) |
-| `camera-and-isp.md` | Camera switching, ISP, AWB, H.264 |
+| `camera-and-isp.md` | Camera switching, ISP, AWB, H.265 |
 | `detection-and-yolo.md` | YOLO pipeline, benchmarks, night ROI |
 | `streaming-server.md` | Go server, WebRTC, API |
-| `shared-memory.md` | 9 SHM regions, zero-copy, IPC |
+| `shared-memory.md` | 6 SHM regions, zero-copy, IPC |
 | `performance.md` | CPU optimization, idle throttling |
+| `recording-design.md` | H.265 recording pipeline (.hevc → .mp4) |
 | `pet-album-spec.md` | Album feature (iframe, AI Pyramid, rsync) |
+| `pet-album-mcp.md` | MCP integration spec |
 | `vlm_integration_spec.md` | VLM behavior analysis spec |
 | `hardware-specs.md` | GPU/VPU/BPU specs, nano2D/VSE/hbn_vflow benchmarks |
 | `hw-offload-roadmap.md` | H.265移行 + HWオフロード実装計画 |
 | `axmodel-conversion-guide.md` | Pulsar2 axmodel変換手順書 (Qwen3-VL/Qwen3.5) |
+| `logging_system.md` | Logging architecture |
+| `text-rendering-design.md` | Text overlay/rendering on video |
+| `development_roadmap.md` | Project timeline and roadmap |
 
 ## Future Tasks
 - [ ] JSON event recording (schema defined, not coded)
 - [ ] Unified YAML config (params hardcoded across C/Python/Go)
 - [ ] Process auto-recovery / storage cleanup
 - [ ] Multi-camera fusion mode
-- [ ] AI Pyramid: HTTPS, album web app, VLM pipeline
+- [x] AI Pyramid: HTTPS, album web app, VLM pipeline (Rust実装完了)
 - [x] H.265移行 (Phase 1) → エンコーダー、WebRTC (pion v4)、録画パイプライン完了
 - [ ] HW offload Phase 2 → `hw-offload-roadmap.md` に計画化済み

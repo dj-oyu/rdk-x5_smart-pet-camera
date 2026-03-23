@@ -10,21 +10,23 @@ cd src/capture && make
 ```
 
 ## Key Constraints
-- **H.265**: libspcdev VPU encoder, 700kbps hard limit, GOP=14, SHM format=4
+- **H.265**: hb_mm_mc VPU encoder, 700kbps hard limit, GOP=fps, CBR
 - **ISP**: runtime APIはAWB/3DNR/2DNRのみ動作。Gamma/WDR/CPROCは実行時変更不可
 - **AWB夜間**: MANUAL必須（IR用）。ISP起動30フレーム後に適用
 - **SHM**: O_RDWR必須（sem_wait使用時）。O_RDONLYだとSIGBUS
-- **フレーム取得**: `sp_vio_get_frame()` を使う（`sp_vio_get_yuv()` は色空間不一致）
+- **VIO**: hbn_vflow API (VIN→ISP→VSE)
 
-## SHM Regions (9)
-| Name | Size | Purpose |
-|------|------|---------|
-| `/pet_camera_control` | 8B | Active camera index |
-| `/pet_camera_zc_0`, `zc_1` | ~150B | DAY/NIGHT zero-copy frames |
-| `/pet_camera_h264_zc_0`, `h264_zc_1` | ~150B | H.264 zero-copy frames |
-| `/pet_camera_stream` | ~93MB | H.265 ring buffer (format=4) |
-| `/pet_camera_mjpeg_frame` | ~1.4MB | MJPEG frame |
-| `/pet_camera_detections` | ~584B | Detection results |
+## SHM Regions (6)
+| Name | Purpose |
+|------|---------|
+| `/pet_camera_h265_zc` | H.265 stream zero-copy (encoder → Go streaming) |
+| `/pet_camera_yolo_zc` | YOLO input zero-copy (unified, replaces zc_0/zc_1) |
+| `/pet_camera_detections` | Detection results |
+| `/pet_camera_mjpeg_zc` | MJPEG NV12 zero-copy |
+| `/pet_camera_roi_zc_0` | Night ROI region 0 (640x640) |
+| `/pet_camera_roi_zc_1` | Night ROI region 1 (640x640) |
+
+定義元: `shm_constants.h`
 
 ## Docs
 → `docs/camera-and-isp.md`, `docs/shared-memory.md`

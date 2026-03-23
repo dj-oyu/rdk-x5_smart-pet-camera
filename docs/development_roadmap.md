@@ -17,14 +17,14 @@
 
 ### フェーズ構成
 
-```
-Phase 0: モック環境構築 ✅ 完了
-    ↓
-Phase 1: 実機Capture実装 （次のステップ）
-    ↓
-Phase 2: 実機統合
-    ↓
-Phase 3: 本物の検出モデル統合
+```mermaid
+graph TD
+    p0["Phase 0: モック環境構築 ✅ 完了"]
+    p1["Phase 1: 実機Capture実装 ✅ 完了"]
+    p2["Phase 2: 実機統合 ✅ 完了"]
+    p3["Phase 3: 本物の検出モデル統合 ✅ 完了"]
+
+    p0 --> p1 --> p2 --> p3
 ```
 
 ---
@@ -67,12 +67,12 @@ Phase 3: 本物の検出モデル統合
 **ファイル**: `src/mock/detector.py` (195行)
 
 #### ✅ Phase 0-5: WebMonitor実装
-- Flask + MJPEGストリーミング
+- Flask + MJPEGストリーミング（Phase 0のみ）
 - BBox合成表示
 - リアルタイムFPS表示
 - HTML UI内蔵
 
-**ファイル**: `src/monitor/web_monitor.py` (389行)
+**ファイル**: `src/monitor/web_monitor.py` (389行) → 現在は Go web_monitor (`src/streaming_server/cmd/web_monitor/`) に移行済み
 
 #### ✅ Phase 0-6: 統合メインプログラム実装
 - 全モジュールの統合
