@@ -33,6 +33,8 @@ pub fn parse_vlm_response(raw: &str) -> Result<VlmResponse, String> {
     serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {e}, raw: {raw}"))
 }
 
+const DAY_SUMMARY_PROMPT: &str = "Summarize this cat's day based on these timestamped observations. Describe activity patterns and notable moments in 2-3 sentences. Respond in plain text, no JSON.";
+
 #[derive(Debug, Clone)]
 pub struct VlmConfig {
     pub base_url: String,
@@ -110,8 +112,8 @@ impl VlmClient {
     }
 
     pub async fn analyze(&self, jpeg_path: &Path) -> Result<VlmResponse, String> {
-        let jpeg_data = std::fs::read(jpeg_path)
-            .map_err(|e| format!("read {}: {e}", jpeg_path.display()))?;
+        let jpeg_data =
+            std::fs::read(jpeg_path).map_err(|e| format!("read {}: {e}", jpeg_path.display()))?;
 
         let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_data);
         let data_url = format!("data:image/jpeg;base64,{b64}");
@@ -172,6 +174,48 @@ impl VlmClient {
         }
         Err(last_err)
     }
+
+    /// Summarize a day's observations using text-only chat (no image, low NPU cost).
+    pub async fn summarize_day(&self, captions: &[String]) -> Result<String, String> {
+        let observations = captions.join("\n- ");
+        let user_text = format!("Observations:\n- {observations}\n\n{DAY_SUMMARY_PROMPT}");
+
+        let request = ChatRequest {
+            model: self.config.model.clone(),
+            messages: vec![Message {
+                role: "user".into(),
+                content: vec![ContentPart::Text { text: user_text }],
+            }],
+            max_tokens: 256,
+            temperature: 0.3,
+        };
+
+        let url = format!("{}/v1/chat/completions", self.config.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| format!("VLM request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("VLM API {status}: {body}"));
+        }
+
+        let chat_resp: ChatResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("VLM response decode: {e}"))?;
+
+        Ok(chat_resp
+            .choices
+            .first()
+            .map(|c| c.message.content.trim().to_string())
+            .unwrap_or_default())
+    }
 }
 
 #[cfg(test)]
@@ -211,14 +255,15 @@ mod tests {
 
     #[test]
     fn parse_with_whitespace() {
-        let raw = "  \n  {\"is_valid\": true, \"caption\": \"cat\", \"behavior\": \"eating\"}  \n  ";
+        let raw =
+            "  \n  {\"is_valid\": true, \"caption\": \"cat\", \"behavior\": \"eating\"}  \n  ";
         let resp = parse_vlm_response(raw).unwrap();
         assert!(resp.is_valid);
     }
 
     #[tokio::test]
     async fn client_with_mock_server() {
-        use axum::{routing::post, Json, Router};
+        use axum::{Json, Router, routing::post};
         use std::io::Write;
 
         // Create a tiny test JPEG

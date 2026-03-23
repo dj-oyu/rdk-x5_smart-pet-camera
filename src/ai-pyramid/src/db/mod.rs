@@ -1,5 +1,5 @@
 use chrono::NaiveDateTime;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 #[derive(Debug, Clone)]
 pub struct Photo {
@@ -53,6 +53,8 @@ pub struct PhotoFilter {
     pub pet_id: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    pub search: Option<String>,
+    pub behavior: Option<String>,
 }
 
 pub struct PhotoStore {
@@ -153,7 +155,11 @@ impl PhotoStore {
         )
     }
 
-    pub fn set_validation_override(&self, filename: &str, is_valid: bool) -> rusqlite::Result<usize> {
+    pub fn set_validation_override(
+        &self,
+        filename: &str,
+        is_valid: bool,
+    ) -> rusqlite::Result<usize> {
         self.conn.execute(
             "UPDATE photos SET is_valid = ?1 WHERE filename = ?2",
             params![is_valid, filename],
@@ -246,18 +252,25 @@ impl PhotoStore {
         Ok(dets)
     }
 
-    pub fn update_detection_override(&self, detection_id: i64, pet_id: &str) -> rusqlite::Result<usize> {
+    pub fn update_detection_override(
+        &self,
+        detection_id: i64,
+        pet_id: &str,
+    ) -> rusqlite::Result<usize> {
         let updated = self.conn.execute(
             "UPDATE detections SET pet_id_override = ?1 WHERE id = ?2",
             params![pet_id, detection_id],
         )?;
         if updated > 0 {
             // Update photo's pet_id by majority vote of cat detections
-            let photo_id: Option<i64> = self.conn.query_row(
-                "SELECT photo_id FROM detections WHERE id = ?1",
-                params![detection_id],
-                |row| row.get(0),
-            ).optional()?;
+            let photo_id: Option<i64> = self
+                .conn
+                .query_row(
+                    "SELECT photo_id FROM detections WHERE id = ?1",
+                    params![detection_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
             if let Some(pid) = photo_id {
                 self.update_pet_id_by_majority(pid)?;
             }
@@ -344,6 +357,14 @@ impl PhotoStore {
             where_clauses.push("pet_id = ?");
             param_values.push(Box::new(pid.clone()));
         }
+        if let Some(ref search) = filter.search {
+            where_clauses.push("caption LIKE '%' || ? || '%'");
+            param_values.push(Box::new(search.clone()));
+        }
+        if let Some(ref beh) = filter.behavior {
+            where_clauses.push("behavior = ?");
+            param_values.push(Box::new(beh.clone()));
+        }
 
         let where_sql = if where_clauses.is_empty() {
             String::new()
@@ -353,8 +374,11 @@ impl PhotoStore {
 
         // Count
         let count_sql = format!("SELECT COUNT(*) FROM photos {where_sql}");
-        let params_ref: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
-        let total: i64 = self.conn.query_row(&count_sql, params_ref.as_slice(), |r| r.get(0))?;
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let total: i64 = self
+            .conn
+            .query_row(&count_sql, params_ref.as_slice(), |r| r.get(0))?;
 
         // Query
         let limit = filter.limit.unwrap_or(50);
@@ -366,7 +390,8 @@ impl PhotoStore {
         let mut all_params: Vec<Box<dyn rusqlite::types::ToSql>> = param_values;
         all_params.push(Box::new(limit));
         all_params.push(Box::new(offset));
-        let all_ref: Vec<&dyn rusqlite::types::ToSql> = all_params.iter().map(|p| p.as_ref()).collect();
+        let all_ref: Vec<&dyn rusqlite::types::ToSql> =
+            all_params.iter().map(|p| p.as_ref()).collect();
 
         let mut stmt = self.conn.prepare(&query_sql)?;
         let photos = stmt
@@ -384,12 +409,52 @@ impl PhotoStore {
         )
     }
 
+    pub fn distinct_behaviors(&self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT behavior FROM photos WHERE behavior IS NOT NULL AND behavior != '' ORDER BY behavior",
+        )?;
+        let behaviors = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(behaviors)
+    }
+
+    /// Return captions for valid photos on a given date (YYYY-MM-DD).
+    pub fn captions_for_date(&self, date: &str) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT caption FROM photos WHERE is_valid = 1 AND caption IS NOT NULL AND captured_at LIKE ? || '%' ORDER BY captured_at ASC",
+        )?;
+        let captions = stmt
+            .query_map(params![date], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(captions)
+    }
+
     pub fn stats(&self) -> rusqlite::Result<Stats> {
-        let total: i64 = self.conn.query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))?;
-        let valid: i64 = self.conn.query_row("SELECT COUNT(*) FROM photos WHERE is_valid = 1", [], |r| r.get(0))?;
-        let invalid: i64 = self.conn.query_row("SELECT COUNT(*) FROM photos WHERE is_valid = 0", [], |r| r.get(0))?;
-        let pending: i64 = self.conn.query_row("SELECT COUNT(*) FROM photos WHERE is_valid IS NULL", [], |r| r.get(0))?;
-        Ok(Stats { total, valid, invalid, pending })
+        let total: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))?;
+        let valid: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM photos WHERE is_valid = 1", [], |r| {
+                    r.get(0)
+                })?;
+        let invalid: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM photos WHERE is_valid = 0", [], |r| {
+                    r.get(0)
+                })?;
+        let pending: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM photos WHERE is_valid IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(Stats {
+            total,
+            valid,
+            invalid,
+            pending,
+        })
     }
 }
 
@@ -403,8 +468,8 @@ pub struct Stats {
 
 fn row_to_photo(row: &rusqlite::Row) -> rusqlite::Result<Photo> {
     let captured_str: String = row.get(2)?;
-    let captured_at = NaiveDateTime::parse_from_str(&captured_str, "%Y-%m-%dT%H:%M:%S")
-        .unwrap_or_default();
+    let captured_at =
+        NaiveDateTime::parse_from_str(&captured_str, "%Y-%m-%dT%H:%M:%S").unwrap_or_default();
     let is_valid_int: Option<i32> = row.get(4)?;
     Ok(Photo {
         id: row.get(0)?,
@@ -423,7 +488,10 @@ mod tests {
     use chrono::NaiveDate;
 
     fn dt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(y, m, d).unwrap().and_hms_opt(h, mi, s).unwrap()
+        NaiveDate::from_ymd_opt(y, m, d)
+            .unwrap()
+            .and_hms_opt(h, mi, s)
+            .unwrap()
     }
 
     fn setup() -> PhotoStore {
@@ -442,9 +510,14 @@ mod tests {
     fn insert_and_get() {
         let store = setup();
         let ts = dt(2026, 3, 21, 10, 45, 32);
-        store.insert("comic_20260321_104532_chatora.jpg", ts, Some("chatora")).unwrap();
+        store
+            .insert("comic_20260321_104532_chatora.jpg", ts, Some("chatora"))
+            .unwrap();
 
-        let photo = store.get_by_filename("comic_20260321_104532_chatora.jpg").unwrap().unwrap();
+        let photo = store
+            .get_by_filename("comic_20260321_104532_chatora.jpg")
+            .unwrap()
+            .unwrap();
         assert_eq!(photo.filename, "comic_20260321_104532_chatora.jpg");
         assert_eq!(photo.captured_at, ts);
         assert_eq!(photo.pet_id.as_deref(), Some("chatora"));
@@ -465,7 +538,9 @@ mod tests {
         let store = setup();
         let ts = dt(2026, 3, 21, 10, 45, 32);
         store.insert("comic_test.jpg", ts, None).unwrap();
-        store.update_vlm_result("comic_test.jpg", true, "A tabby cat resting", "resting").unwrap();
+        store
+            .update_vlm_result("comic_test.jpg", true, "A tabby cat resting", "resting")
+            .unwrap();
 
         let photo = store.get_by_filename("comic_test.jpg").unwrap().unwrap();
         assert_eq!(photo.is_valid, Some(true));
@@ -476,13 +551,25 @@ mod tests {
     #[test]
     fn list_with_filters() {
         let store = setup();
-        store.insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), Some("chatora")).unwrap();
-        store.insert("b.jpg", dt(2026, 3, 21, 11, 0, 0), Some("mike")).unwrap();
-        store.insert("c.jpg", dt(2026, 3, 21, 12, 0, 0), Some("chatora")).unwrap();
+        store
+            .insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), Some("chatora"))
+            .unwrap();
+        store
+            .insert("b.jpg", dt(2026, 3, 21, 11, 0, 0), Some("mike"))
+            .unwrap();
+        store
+            .insert("c.jpg", dt(2026, 3, 21, 12, 0, 0), Some("chatora"))
+            .unwrap();
 
-        store.update_vlm_result("a.jpg", true, "cap a", "resting").unwrap();
-        store.update_vlm_result("b.jpg", false, "cap b", "other").unwrap();
-        store.update_vlm_result("c.jpg", true, "cap c", "eating").unwrap();
+        store
+            .update_vlm_result("a.jpg", true, "cap a", "resting")
+            .unwrap();
+        store
+            .update_vlm_result("b.jpg", false, "cap b", "other")
+            .unwrap();
+        store
+            .update_vlm_result("c.jpg", true, "cap c", "eating")
+            .unwrap();
 
         // All
         let (photos, total) = store.list(&PhotoFilter::default()).unwrap();
@@ -491,17 +578,33 @@ mod tests {
         assert_eq!(photos[0].filename, "c.jpg"); // newest first
 
         // Valid only
-        let (photos, total) = store.list(&PhotoFilter { is_valid: Some(true), ..Default::default() }).unwrap();
+        let (photos, total) = store
+            .list(&PhotoFilter {
+                is_valid: Some(true),
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(total, 2);
         assert_eq!(photos.len(), 2);
 
         // By pet_id
-        let (photos, total) = store.list(&PhotoFilter { pet_id: Some("chatora".into()), ..Default::default() }).unwrap();
+        let (photos, total) = store
+            .list(&PhotoFilter {
+                pet_id: Some("chatora".into()),
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(total, 2);
         assert_eq!(photos[0].pet_id.as_deref(), Some("chatora"));
 
         // Pagination
-        let (photos, total) = store.list(&PhotoFilter { limit: Some(1), offset: Some(1), ..Default::default() }).unwrap();
+        let (photos, total) = store
+            .list(&PhotoFilter {
+                limit: Some(1),
+                offset: Some(1),
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(total, 3);
         assert_eq!(photos.len(), 1);
         assert_eq!(photos[0].filename, "b.jpg");
@@ -510,22 +613,38 @@ mod tests {
     #[test]
     fn count_pending() {
         let store = setup();
-        store.insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), None).unwrap();
-        store.insert("b.jpg", dt(2026, 3, 21, 11, 0, 0), None).unwrap();
+        store
+            .insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), None)
+            .unwrap();
+        store
+            .insert("b.jpg", dt(2026, 3, 21, 11, 0, 0), None)
+            .unwrap();
         assert_eq!(store.count_pending().unwrap(), 2);
 
-        store.update_vlm_result("a.jpg", true, "cap", "resting").unwrap();
+        store
+            .update_vlm_result("a.jpg", true, "cap", "resting")
+            .unwrap();
         assert_eq!(store.count_pending().unwrap(), 1);
     }
 
     #[test]
     fn stats_counts() {
         let store = setup();
-        store.insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), None).unwrap();
-        store.insert("b.jpg", dt(2026, 3, 21, 11, 0, 0), None).unwrap();
-        store.insert("c.jpg", dt(2026, 3, 21, 12, 0, 0), None).unwrap();
-        store.update_vlm_result("a.jpg", true, "cap", "resting").unwrap();
-        store.update_vlm_result("b.jpg", false, "cap", "other").unwrap();
+        store
+            .insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), None)
+            .unwrap();
+        store
+            .insert("b.jpg", dt(2026, 3, 21, 11, 0, 0), None)
+            .unwrap();
+        store
+            .insert("c.jpg", dt(2026, 3, 21, 12, 0, 0), None)
+            .unwrap();
+        store
+            .update_vlm_result("a.jpg", true, "cap", "resting")
+            .unwrap();
+        store
+            .update_vlm_result("b.jpg", false, "cap", "other")
+            .unwrap();
 
         let s = store.stats().unwrap();
         assert_eq!(s.total, 3);
@@ -537,8 +656,12 @@ mod tests {
     #[test]
     fn record_vlm_failure_and_list_pending() {
         let store = setup();
-        store.insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), None).unwrap();
-        store.insert("b.jpg", dt(2026, 3, 21, 11, 0, 0), None).unwrap();
+        store
+            .insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), None)
+            .unwrap();
+        store
+            .insert("b.jpg", dt(2026, 3, 21, 11, 0, 0), None)
+            .unwrap();
 
         // Both pending, 0 attempts
         let pending = store.list_pending_filenames(5).unwrap();
@@ -561,9 +684,13 @@ mod tests {
     #[test]
     fn vlm_success_resets_error() {
         let store = setup();
-        store.insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), None).unwrap();
+        store
+            .insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), None)
+            .unwrap();
         store.record_vlm_failure("a.jpg", "timeout").unwrap();
-        store.update_vlm_result("a.jpg", true, "cat", "resting").unwrap();
+        store
+            .update_vlm_result("a.jpg", true, "cat", "resting")
+            .unwrap();
 
         let photo = store.get_by_filename("a.jpg").unwrap().unwrap();
         assert_eq!(photo.is_valid, Some(true));
@@ -575,11 +702,22 @@ mod tests {
     #[test]
     fn list_pending_filter() {
         let store = setup();
-        store.insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), None).unwrap();
-        store.insert("b.jpg", dt(2026, 3, 21, 11, 0, 0), None).unwrap();
-        store.update_vlm_result("b.jpg", true, "cap", "resting").unwrap();
+        store
+            .insert("a.jpg", dt(2026, 3, 21, 10, 0, 0), None)
+            .unwrap();
+        store
+            .insert("b.jpg", dt(2026, 3, 21, 11, 0, 0), None)
+            .unwrap();
+        store
+            .update_vlm_result("b.jpg", true, "cap", "resting")
+            .unwrap();
 
-        let (photos, total) = store.list(&PhotoFilter { is_pending: true, ..Default::default() }).unwrap();
+        let (photos, total) = store
+            .list(&PhotoFilter {
+                is_pending: true,
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(total, 1);
         assert_eq!(photos[0].filename, "a.jpg");
     }
@@ -591,7 +729,10 @@ mod tests {
         let detections = vec![
             DetectionInput {
                 panel_index: Some(0),
-                bbox_x: 10, bbox_y: 20, bbox_w: 100, bbox_h: 150,
+                bbox_x: 10,
+                bbox_y: 20,
+                bbox_w: 100,
+                bbox_h: 150,
                 yolo_class: Some("cat".into()),
                 pet_class: Some("chatora".into()),
                 confidence: Some(0.9),
@@ -599,7 +740,10 @@ mod tests {
             },
             DetectionInput {
                 panel_index: Some(1),
-                bbox_x: 430, bbox_y: 20, bbox_w: 100, bbox_h: 150,
+                bbox_x: 430,
+                bbox_y: 20,
+                bbox_w: 100,
+                bbox_h: 150,
                 yolo_class: Some("cat".into()),
                 pet_class: Some("chatora".into()),
                 confidence: Some(0.8),
@@ -607,14 +751,19 @@ mod tests {
             },
             DetectionInput {
                 panel_index: Some(0),
-                bbox_x: 300, bbox_y: 100, bbox_w: 80, bbox_h: 60,
+                bbox_x: 300,
+                bbox_y: 100,
+                bbox_w: 80,
+                bbox_h: 60,
                 yolo_class: Some("cup".into()),
                 pet_class: None,
                 confidence: Some(0.6),
                 detected_at: "2026-03-21T10:00:00".into(),
             },
         ];
-        store.ingest_with_detections("test.jpg", ts, Some("chatora"), &detections).unwrap();
+        store
+            .ingest_with_detections("test.jpg", ts, Some("chatora"), &detections)
+            .unwrap();
 
         // Initially pet_id is chatora
         let photo = store.get_by_filename("test.jpg").unwrap().unwrap();

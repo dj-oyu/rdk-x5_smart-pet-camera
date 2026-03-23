@@ -26,6 +26,19 @@ export type ActivityStats = {
 export type EventQuery = {
   status: StatusFilter;
   petId: string;
+  search: string;
+  behavior: string;
+  limit: number;
+  offset: number;
+};
+
+export const DEFAULT_QUERY: EventQuery = {
+  status: "all",
+  petId: "",
+  search: "",
+  behavior: "",
+  limit: 0,
+  offset: 0,
 };
 
 function buildParams(query: EventQuery): URLSearchParams {
@@ -35,6 +48,18 @@ function buildParams(query: EventQuery): URLSearchParams {
   }
   if (query.petId) {
     params.set("pet_id", query.petId);
+  }
+  if (query.search) {
+    params.set("search", query.search);
+  }
+  if (query.behavior) {
+    params.set("behavior", query.behavior);
+  }
+  if (query.limit > 0) {
+    params.set("limit", String(query.limit));
+  }
+  if (query.offset > 0) {
+    params.set("offset", String(query.offset));
   }
   return params;
 }
@@ -104,6 +129,32 @@ export async function fetchPetNames(): Promise<PetNames> {
   return response.json();
 }
 
+export async function fetchBehaviors(): Promise<string[]> {
+  const response = await fetch("/api/behaviors");
+  if (!response.ok) {
+    return [];
+  }
+  return response.json();
+}
+
+export type DailySummaryResponse = {
+  date: string;
+  summary: string;
+  photo_count: number;
+};
+
+export async function fetchDailySummary(date?: string): Promise<DailySummaryResponse> {
+  const response = await fetch("/api/daily-summary", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ date: date ?? null }),
+  });
+  if (!response.ok) {
+    throw new Error(`failed to load daily summary: ${response.status}`);
+  }
+  return response.json();
+}
+
 export function readQueryFromLocation(): EventQuery {
   const params = new URLSearchParams(window.location.search);
   const rawStatus = params.get("is_valid");
@@ -117,7 +168,11 @@ export function readQueryFromLocation(): EventQuery {
 
   return {
     status,
-    petId: params.get("pet_id") ?? ""
+    petId: params.get("pet_id") ?? "",
+    search: params.get("search") ?? "",
+    behavior: params.get("behavior") ?? "",
+    limit: Number(params.get("limit")) || 0,
+    offset: Number(params.get("offset")) || 0,
   };
 }
 

@@ -1,4 +1,5 @@
 use crate::application::{EventQueries, ObservationCommands, PetEvent, SharedEventRepository};
+use crate::vlm::VlmConfig;
 use std::path::{Path, PathBuf};
 use tokio::sync::broadcast;
 
@@ -9,6 +10,7 @@ pub struct AppContext {
     event_tx: broadcast::Sender<PetEvent>,
     base_url: Option<String>,
     is_tls: bool,
+    vlm_config: VlmConfig,
 }
 
 impl AppContext {
@@ -18,6 +20,7 @@ impl AppContext {
         event_tx: broadcast::Sender<PetEvent>,
         base_url: Option<String>,
         is_tls: bool,
+        vlm_config: VlmConfig,
     ) -> Self {
         Self {
             repository,
@@ -25,6 +28,7 @@ impl AppContext {
             event_tx,
             base_url,
             is_tls,
+            vlm_config,
         }
     }
 
@@ -54,5 +58,9 @@ impl AppContext {
 
     pub fn repository(&self) -> &SharedEventRepository {
         &self.repository
+    }
+
+    pub fn vlm_config(&self) -> VlmConfig {
+        self.vlm_config.clone()
     }
 }
