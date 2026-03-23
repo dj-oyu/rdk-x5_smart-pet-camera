@@ -1443,8 +1443,8 @@ body.lightbox-active .mobile-tab-bar {
     display: flex;
     justify-content: center;
     align-items: center;
-    background: rgba(0, 0, 0, 0.92);
-    backdrop-filter: blur(8px);
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(20px) saturate(120%);
     cursor: pointer;
     animation: lightbox-in 0.15s ease-out both;
 }
