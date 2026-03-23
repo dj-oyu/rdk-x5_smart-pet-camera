@@ -13,6 +13,22 @@ function formatObservedAt(value: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+const inIframe = window.parent !== window;
+
+function notifyParentLightbox(event: EventSummary): void {
+  const src = new URL(photoUrl(event.source_filename), window.location.origin).href;
+  window.parent.postMessage({
+    type: "album-lightbox",
+    src,
+    meta: {
+      date: event.observed_at,
+      pet: event.pet_id ?? undefined,
+      behavior: event.behavior ?? undefined,
+      caption: event.summary ?? undefined,
+    },
+  }, "*");
+}
+
 export function EventGrid({ events, loading, error, onOpenEvent }: EventGridProps) {
   if (loading) {
     return <div class="empty-state">Loading events...</div>;
@@ -38,7 +54,11 @@ export function EventGrid({ events, loading, error, onOpenEvent }: EventGridProp
               rel="noreferrer"
               onClick={(clickEvent) => {
                 clickEvent.preventDefault();
-                onOpenEvent(event);
+                if (inIframe) {
+                  notifyParentLightbox(event);
+                } else {
+                  onOpenEvent(event);
+                }
               }}
             >
               <div class="event-image-shell">
