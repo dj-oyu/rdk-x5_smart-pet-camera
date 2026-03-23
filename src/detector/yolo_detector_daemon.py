@@ -417,12 +417,9 @@ class YoloDetectorDaemon:
             def log_message(self, format, *args):
                 pass  # suppress per-request logging
 
-        class ReusableHTTPServer(HTTPServer):
-            allow_reuse_address = True
-
         def serve():
             try:
-                server = ReusableHTTPServer(("0.0.0.0", port), DetectHandler)
+                server = HTTPServer(("0.0.0.0", port), DetectHandler)
             except OSError as e:
                 logger.error(f"Detect API failed to bind port {port}: {e}")
                 return
