@@ -158,6 +158,7 @@ export function App() {
             events={events}
             loading={loading}
             error={error}
+            petNames={petNames}
             onOpenEvent={(event) => setSelectedEvent(event)}
           />
           <Pagination
