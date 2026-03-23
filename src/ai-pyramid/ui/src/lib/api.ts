@@ -60,6 +60,40 @@ export function photoUrl(sourceFilename: string): string {
   return `/api/photos/${encodeURIComponent(sourceFilename)}`;
 }
 
+export type Detection = {
+  id: number;
+  photo_id: number;
+  panel_index: number | null;
+  bbox_x: number;
+  bbox_y: number;
+  bbox_w: number;
+  bbox_h: number;
+  yolo_class: string | null;
+  pet_class: string | null;
+  pet_id_override: string | null;
+  confidence: number | null;
+  detected_at: string;
+};
+
+export async function fetchDetections(photoId: number): Promise<Detection[]> {
+  const response = await fetch(`/api/detections/${photoId}`);
+  if (!response.ok) {
+    throw new Error(`failed to load detections: ${response.status}`);
+  }
+  return response.json();
+}
+
+export async function updateDetectionOverride(detectionId: number, petIdOverride: string): Promise<void> {
+  const response = await fetch(`/api/detections/${detectionId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pet_id_override: petIdOverride }),
+  });
+  if (!response.ok) {
+    throw new Error(`failed to update detection: ${response.status}`);
+  }
+}
+
 export function readQueryFromLocation(): EventQuery {
   const params = new URLSearchParams(window.location.search);
   const rawStatus = params.get("is_valid");

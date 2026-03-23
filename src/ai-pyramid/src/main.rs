@@ -6,7 +6,6 @@ use pet_album::server;
 use pet_album::vlm::VlmConfig;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::info;
 
@@ -65,13 +64,9 @@ async fn main() {
 
     std::fs::create_dir_all(&args.photos_dir).expect("failed to create photos directory");
 
-    let app_store = PhotoStore::open(&args.db_path).expect("failed to open database");
-    app_store.migrate().expect("failed to migrate database");
-    let repository = PhotoStoreRepository::shared(app_store);
-
-    let server_store = PhotoStore::open(&args.db_path).expect("failed to open database for server");
-    server_store.migrate().expect("failed to migrate database for server");
-    let store = Arc::new(Mutex::new(server_store));
+    let store = PhotoStore::open(&args.db_path).expect("failed to open database");
+    store.migrate().expect("failed to migrate database");
+    let repository = PhotoStoreRepository::shared(store);
 
     info!("Database: {}", args.db_path);
     info!("Photos dir: {}", args.photos_dir.display());
@@ -83,8 +78,9 @@ async fn main() {
         timeout: Duration::from_secs(30),
     };
 
-    // Broadcast channel used by the existing HTTP/SSE layer.
-    let (event_tx, _) = tokio::sync::broadcast::channel::<server::PhotoEvent>(64);
+    // Broadcast channels: PetEvent for application layer, PhotoEvent for SSE
+    let (pet_event_tx, _) = tokio::sync::broadcast::channel::<pet_album::application::PetEvent>(64);
+    let (sse_event_tx, _) = tokio::sync::broadcast::channel::<server::PhotoEvent>(64);
 
     let bind_addr: SocketAddr = args
         .addr
@@ -107,16 +103,17 @@ async fn main() {
     let app_context = AppContext::new(
         repository,
         args.photos_dir.clone(),
-        tokio::sync::broadcast::channel(64).0,
-        base_url.clone(),
+        pet_event_tx,
+        base_url,
         tls.is_some(),
     );
 
+    // Bridge PetEvent → PhotoEvent for SSE
     let mut app_events = app_context.subscribe();
-    let server_events = event_tx.clone();
+    let sse_bridge = sse_event_tx.clone();
     tokio::spawn(async move {
         while let Ok(event) = app_events.recv().await {
-            let _ = server_events.send(server::PhotoEvent {
+            let _ = sse_bridge.send(server::PhotoEvent {
                 filename: event.source_filename,
                 is_valid: event.is_valid,
                 caption: event.summary,
@@ -126,17 +123,15 @@ async fn main() {
         }
     });
 
-    let watcher = PhotoWatcher::new(app_context, vlm_config);
+    let watcher = PhotoWatcher::new(app_context.clone(), vlm_config);
     tokio::spawn(async move {
         watcher.run().await;
     });
 
     let app_state = server::AppState {
-        store,
+        context: app_context,
         photos_dir: args.photos_dir,
-        event_tx,
-        base_url,
-        is_tls: tls.is_some(),
+        event_tx: sse_event_tx,
     };
     let app = server::router(app_state);
 

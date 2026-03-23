@@ -1,4 +1,5 @@
 use crate::application::{ActivityStats, AppResult, EventQuery, EventSummary, SharedEventRepository};
+use crate::db::Detection;
 
 #[derive(Clone)]
 pub struct EventQueries {
@@ -32,5 +33,9 @@ impl EventQueries {
 
     pub async fn get_observation_attempts(&self, source_filename: &str) -> AppResult<Option<i32>> {
         self.repository.get_observation_attempts(source_filename).await
+    }
+
+    pub async fn get_detections(&self, photo_id: i64) -> AppResult<Vec<Detection>> {
+        self.repository.get_detections(photo_id).await
     }
 }
