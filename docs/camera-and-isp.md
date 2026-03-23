@@ -1,6 +1,6 @@
 # カメラ・ISP・エンコーディング リファレンス
 
-本ドキュメントは、カメラ切り替え、ISP低照度補正、AWBチューニング、H.264ハードウェアエンコーディング、ストリーム切り替えに関する設計・実装の知見を統合したものである。
+本ドキュメントは、カメラ切り替え、ISP低照度補正、AWBチューニング、H.265ハードウェアエンコーディング、ストリーム切り替えに関する設計・実装の知見を統合したものである。
 
 ---
 
@@ -10,110 +10,131 @@
 2. [カメラ切り替え (Camera Switcher)](#2-カメラ切り替え-camera-switcher)
 3. [ISP低照度補正](#3-isp低照度補正)
 4. [AWBチューニング (夜間カメラ)](#4-awbチューニング-夜間カメラ)
-5. [H.264ハードウェアエンコーディング](#5-h264ハードウェアエンコーディング)
+5. [H.265ハードウェアエンコーディング](#5-h265ハードウェアエンコーディング)
 6. [ストリーム切り替え (Fluent Stream Switching)](#6-ストリーム切り替え-fluent-stream-switching)
-7. [カメラデーモン リファクタリング](#7-カメラデーモン-リファクタリング)
+7. [カメラデーモン 3層アーキテクチャ](#7-カメラデーモン-3層アーキテクチャ)
 
 ---
 
 ## 1. システム全体アーキテクチャ
 
-```
-Camera Sensor (IMX219)
-    |
-    v
-ISP Pipeline (HW): VIN -> ISP -> VSE
-    |                              |
-    |-- Ch0 (1920x1080) -> H.264 HW Encoder -> /pet_camera_stream (録画・WebRTC)
-    |-- Ch1 (640x640)   -> YOLO検出
-    └-- Ch2 (640x480)   -> MJPEG
+```mermaid
+graph TD
+    sensor["Camera Sensor (IMX219)"]
+    isp["ISP Pipeline HW: VIN - ISP - VSE<br/>(hbn_vflow API)"]
+    enc["H.265 HW Encoder<br/>(hb_mm_mc)"]
+    h265_shm["/pet_camera_h265_zc<br/>(WebRTC / 録画)"]
+    yolo_shm["/pet_camera_yolo_zc<br/>(YOLO検出)"]
+    mjpeg_shm["/pet_camera_mjpeg_zc<br/>(MJPEG)"]
+    roi_shm["/pet_camera_roi_zc_0, 1<br/>(ROI検出, NIGHTのみ)"]
+
+    sensor --> isp
+    isp -->|"Ch0 (1280x720)"| enc --> h265_shm
+    isp -->|"Ch1 (640x360 DAY / 1280x720 NIGHT)"| yolo_shm
+    isp -->|"Ch2 (768x432)"| mjpeg_shm
+    isp -->|"Ch3-4 (640x640 x2, NIGHTのみ)"| roi_shm
 ```
 
-### 共有メモリ構成（リファクタリング後）
+### 共有メモリ構成
 
-| SHM名 | 構造体 | Producer | Consumer | 用途 |
-|--------|--------|----------|----------|------|
-| `/pet_camera_control` | `CameraControl` (8B) | switcher | camera_daemon x2 | 切り替え指示 |
-| `/pet_camera_zc_0` | `ZeroCopyFrameBuffer` (~150B) | camera_daemon(0) | YOLO, switcher | DAY frame + brightness |
-| `/pet_camera_zc_1` | `ZeroCopyFrameBuffer` (~150B) | camera_daemon(1) | YOLO, switcher | NIGHT frame + brightness |
-| `/pet_camera_stream` | `SharedFrameBuffer` (~93MB) | active camera | streaming_server | H.264 |
-| `/pet_camera_mjpeg_frame` | `SharedFrameBuffer` (~1.4MB) | camera_daemon | web_monitor | MJPEG用NV12 |
-| `/pet_camera_detections` | `LatestDetectionResult` (~584B) | YOLO daemon | monitor | 検出結果 |
+| SHM名 | 用途 | Producer | Consumer |
+|--------|------|----------|----------|
+| `/pet_camera_h265_zc` | H.265ゼロコピーストリーム | camera_daemon (encoder_thread) | Go streaming server |
+| `/pet_camera_yolo_zc` | YOLO入力ゼロコピー（統合、旧zc_0/zc_1を置換） | camera_daemon (active pipeline) | Python YOLO detector |
+| `/pet_camera_detections` | 検出結果 | Python YOLO daemon | Go web_monitor |
+| `/pet_camera_mjpeg_zc` | MJPEGゼロコピーNV12 | camera_daemon (active pipeline) | Go web_monitor |
+| `/pet_camera_roi_zc_0` | 夜間ROI領域0 (640x640) | camera_daemon (NIGHT pipeline) | Python YOLO detector |
+| `/pet_camera_roi_zc_1` | 夜間ROI領域1 (640x640) | camera_daemon (NIGHT pipeline) | Python YOLO detector |
+
+定義元: `src/capture/shm_constants.h`
 
 ---
 
 ## 2. カメラ切り替え (Camera Switcher)
 
-### 現在の設計（リファクタリング後）
+### 現在の設計
 
-単一スレッドのポーリングループ方式。旧方式のコールバック・シグナル・マルチスレッド構成を廃止。
+シングルプロセス・マルチスレッド構成。DAY/NIGHTの2パイプラインスレッドと1つのswitcherスレッドが同一プロセス内で動作する。カメラ切り替えはプロセス内共有変数（`volatile int g_active_camera`）で制御し、SHMは使用しない。
 
+```mermaid
+graph TD
+    subgraph process["camera_daemon_main (単一プロセス)"]
+        main["main()"]
+        day["Pipeline Thread<br/>DAY=0 (30fps)"]
+        night["Pipeline Thread<br/>NIGHT=1 (30fps)"]
+        switcher["switcher_thread()<br/>ISP brightness 直接読み取り"]
+        shared["g_active_camera<br/>(volatile int)"]
+
+        main --> day
+        main --> night
+        main --> switcher
+        switcher -->|WRITE| shared
+        day -->|READ| shared
+        night -->|READ| shared
+    end
 ```
-camera_switcher_daemon (単一スレッド)
-├── main()
-│   ├── spawn_daemon(DAY)   -> camera_daemon(0)  -- 常時30fps稼働
-│   ├── spawn_daemon(NIGHT) -> camera_daemon(1)  -- 常時30fps稼働
-│   └── switcher_loop()     <- シンプルなポーリング
-└── 共有メモリ読み書き
-    ├── READ:  /pet_camera_zc_0    (DAY brightness)
-    ├── READ:  /pet_camera_zc_1    (NIGHT brightness)
-    └── WRITE: /pet_camera_control (active_camera_index)
-```
 
-### メインループ
+### switcherスレッド
 
 ```c
-int switcher_loop(SwitcherContext *ctx) {
-    while (ctx->running) {
-        float brightness = ctx->shm_day->frame.brightness_avg;
-        CameraSwitchDecision decision = camera_switcher_check_brightness(
-            &ctx->switcher, brightness, ctx->active_camera);
-        if (decision.should_switch) {
-            shm_control_set_active(ctx->control, decision.target_camera);
-            ctx->active_camera = decision.target_camera;
+// camera_daemon_main.c
+static void *switcher_thread(void *arg) {
+    while (g_running) {
+        // DAYカメラのISPハンドルからbrightness直接読み取り（SHM不要）
+        isp_brightness_result_t brightness = {.valid = false};
+        if (g_pipelines[0].vio.isp_handle > 0) {
+            isp_get_brightness(g_pipelines[0].vio.isp_handle, &brightness);
         }
-        int interval_ms = (ctx->active_camera == DAY) ? 250 : 5000;
+
+        if (brightness.valid) {
+            CameraSwitchDecision decision = camera_switcher_record_brightness(
+                &ctx->switcher, CAMERA_MODE_DAY, (double)brightness.brightness_avg);
+
+            if (decision == CAMERA_SWITCH_DECISION_TO_NIGHT) {
+                g_active_camera = 1;
+                pthread_cond_broadcast(&g_pipelines[0].switch_cond);
+                pthread_cond_broadcast(&g_pipelines[1].switch_cond);
+            }
+            // ... (逆方向も同様)
+        }
+
+        int interval_ms = (g_active_camera == 0) ? 250 : 5000;
         usleep(interval_ms * 1000);
     }
-    return 0;
 }
 ```
 
-### camera_daemon側の活性判定
+### 非activeパイプラインのブロック
+
+非activeパイプラインは `pthread_cond_timedwait` でブロックし、CPU消費をゼロにする。switcherスレッドが `pthread_cond_broadcast` で起床させる。
 
 ```c
 // camera_pipeline.c
-bool write_active = pipeline->control_shm &&
-    shm_control_get_active(pipeline->control_shm) == pipeline->camera_index;
-```
-
-### CameraControl構造体
-
-```c
-typedef struct {
-    volatile int active_camera_index;  // 0=DAY, 1=NIGHT
-    volatile uint32_t version;         // 変更検知用
-} CameraControl;
+bool write_active = pipeline->active_camera &&
+                    *pipeline->active_camera == pipeline->camera_index;
+if (!write_active) {
+    pthread_mutex_lock(&pipeline->switch_mutex);
+    pthread_cond_timedwait(&pipeline->switch_cond, &pipeline->switch_mutex, &ts);
+    pthread_mutex_unlock(&pipeline->switch_mutex);
+    continue;
+}
 ```
 
 ### 切り替え判定パラメータ
 
-- **DAY→NIGHT**: brightness_avg < 閾値 かつ持続時間超過
-- **NIGHT→DAY**: brightness_avg > 閾値 かつ持続時間超過
+```c
+CameraSwitchConfig cfg = {
+    .day_to_night_threshold = 50.0,
+    .night_to_day_threshold = 60.0,
+    .day_to_night_hold_seconds = 0.5,
+    .night_to_day_hold_seconds = 3.0,
+    .warmup_frames = 15,
+};
+```
+
+- **DAY→NIGHT**: brightness_avg < 50.0 が0.5秒持続
+- **NIGHT→DAY**: brightness_avg > 60.0 が3.0秒持続
 - ヒステリシス付き（`camera_switcher.c` の既存ロジックを維持）
-
-### 旧プローブ問題（解決済み）
-
-旧方式では1-shotプローブ時に共有メモリのリングバッファが上書きされる問題があった。現在は軽量な `brightness_avg` を各カメラのZeroCopy SHMに常時更新する方式で解消。
-
-### リファクタリング効果
-
-| 項目 | Before | After |
-|------|--------|-------|
-| スレッド数 | 3 (main + active + probe) | 1 |
-| コールバック | 4種類 | 0 |
-| シグナル | SIGUSR1/SIGUSR2 | 不要 |
-| コード行数 | ~700行 | ~200行 |
 
 ---
 
@@ -133,19 +154,18 @@ typedef struct {
 
 ### 採用アーキテクチャ
 
+> **注意**: ISP低照度補正（NR調整・ガンマ補正）はフレームドロップの原因となったため**現在は無効化**されている。画像補正はYOLO detector側のCLAHE前処理で代替。以下は設計時の知見として残す。
+
 ISPのHW機能（NR）＋ソフトウェアガンマ補正の組み合わせ:
 
-```
-ISP Pipeline (HW)
-    |-- 3DNR: 低照度時に強化
-    |-- 2DNR: 低照度時に強化
-    v
-VSE Ch1 (640x640 NV12)
-    |
-Software Gamma Correction (CPU, LUTベース)
-    |-- brightness_avgに基づく適応的ガンマ選択
-    v
-YOLO Input
+```mermaid
+graph TD
+    isp["ISP Pipeline (HW)<br/>3DNR: 低照度時に強化<br/>2DNR: 低照度時に強化"]
+    vse["VSE Ch1 (640x640 NV12)"]
+    gamma["Software Gamma Correction<br/>(CPU, LUTベース)<br/>brightness_avg に基づく適応的ガンマ選択"]
+    yolo["YOLO Input"]
+
+    isp --> vse --> gamma --> yolo
 ```
 
 ### ノイズリダクション設定
@@ -241,19 +261,17 @@ AWB Manual設定は **ISPがフレーム処理を開始してから約1秒後（
 
 ```c
 // camera_pipeline.c の pipeline_run 内
-if (frame_count == 30) {
-    // ここでAWB Manual設定を適用
+if (!night_awb_applied && frame_number == 30) {
+    hbn_isp_awb_attr_t awb_attr = {0};
+    hbn_isp_get_awb_attr(pipeline->vio.isp_handle, &awb_attr);
+    awb_attr.mode = HBN_ISP_MODE_MANUAL;
+    awb_attr.manual_attr.gain.rgain  = 1.8f;
+    awb_attr.manual_attr.gain.grgain = 1.8f;
+    awb_attr.manual_attr.gain.gbgain = 1.8f;
+    awb_attr.manual_attr.gain.bgain  = 2.34f;
+    hbn_isp_set_awb_attr(pipeline->vio.isp_handle, &awb_attr);
+    night_awb_applied = true;
 }
-```
-
-### チューニング方法
-
-```bash
-# インタラクティブモード
-./build/test_awb_tuning --camera 1
-# awb> m 1.8 1.8 2.34   <- 設定
-# awb> s my_test         <- フレーム保存
-# awb> d                 <- 現在値ダンプ
 ```
 
 ### 調整ポイント
@@ -265,113 +283,89 @@ if (frame_count == 30) {
 
 ---
 
-## 5. H.264ハードウェアエンコーディング
+## 5. H.265ハードウェアエンコーディング
 
-### libspcdev概要
+### Media Codec API (hb_mm_mc)
 
-D-Roboticsの統一コーデックライブラリ。VIO・Encoder・Decoderを単一ライブラリに統合。
+D-Robotics X5のVPUハードウェアエンコーダーを `hb_mm_mc` APIで制御する。旧 `libspcdev` APIは使用しない。
 
 ### 基本パイプライン
 
 ```c
-// 1. 初期化
-void *vio_object = sp_init_vio_module();
-void *encoder_object = sp_init_encoder_module();
+// encoder_lowlevel.c
 
-// 2. カメラオープン
-sp_open_camera_v2(vio_object, camera_index, -1, 1, &parms, &width, &height);
+// 1. コーデック設定
+media_codec_context_t *encoder = &ctx->codec_ctx;
+encoder->encoder = 1;
+encoder->codec_id = MEDIA_CODEC_ID_H265;
 
-// 3. エンコーダー起動
-sp_start_encode(encoder_object, 0, SP_ENCODER_H264, width, height, bitrate);
+// 2. エンコードパラメータ
+encoder->video_enc_params.width = width;
+encoder->video_enc_params.height = height;
+encoder->video_enc_params.pix_fmt = MC_PIXEL_FORMAT_NV12;
 
-// 4. ゼロコピーバインディング
-sp_module_bind(vio_object, SP_MTYPE_VIO, encoder_object, SP_MTYPE_ENCODER);
+// 3. H.265 CBRレート制御
+encoder->video_enc_params.rc_params.mode = MC_AV_RC_MODE_H265CBR;
+encoder->video_enc_params.rc_params.h265_cbr_params.bit_rate = bitrate;
+encoder->video_enc_params.rc_params.h265_cbr_params.frame_rate = fps;
+encoder->video_enc_params.rc_params.h265_cbr_params.intra_period = fps;  // GOP = fps
 
-// 5. キャプチャループ
-while (running) {
-    int size = sp_encoder_get_stream(encoder_object, buffer);
-    if (size > 0) {
-        // 共有メモリに書き込み (format=3)
-        shm_frame_buffer_write(shm, &frame);
-    }
-}
+// 4. 初期化・設定・開始
+hb_mm_mc_initialize(encoder);
+hb_mm_mc_configure(encoder);
+hb_mm_mc_start(encoder, &startup_params);
+
+// 5. エンコードループ (encoder_thread.c)
+hb_mm_mc_dequeue_input_buffer(&ctx->codec_ctx, &input_buffer, timeout);
+// NV12データをinput_bufferにmemcpy
+hb_mm_mc_queue_input_buffer(&ctx->codec_ctx, &input_buffer, timeout);
+hb_mm_mc_dequeue_output_buffer(&ctx->codec_ctx, &output_buffer, &info, timeout);
+// H.265ビットストリームをSHMに書き込み
 
 // 6. クリーンアップ
-sp_module_unbind(vio, SP_MTYPE_VIO, encoder, SP_MTYPE_ENCODER);
-sp_stop_encode(encoder_object);
-sp_vio_close(vio_object);
-sp_release_encoder_module(encoder_object);
-sp_release_vio_module(vio_object);
+hb_mm_mc_stop(encoder);
+hb_mm_mc_release(encoder);
+```
+
+### VIOパイプライン (hbn_vflow)
+
+カメラ入力は `hbn_vflow` APIで VIN→ISP→VSE パイプラインを構築する。
+
+```c
+// vio_lowlevel.c
+hbn_vflow_create(&ctx->vflow_fd);
+hbn_vflow_add_vnode(ctx->vflow_fd, vin_node_handle);
+hbn_vflow_add_vnode(ctx->vflow_fd, isp_node_handle);
+hbn_vflow_add_vnode(ctx->vflow_fd, vse_node_handle);
+hbn_vflow_bind_vnode(ctx->vflow_fd, ...);
+hbn_vflow_start(ctx->vflow_fd);
 ```
 
 ### ビットレート制限
 
-**D-Robotics X5のH.264 HWエンコーダーには700 kbps (700000 bps) のハード制限がある。**
+**D-Robotics X5のH.265 HWエンコーダーには700 kbps (700000 bps) のハード制限がある。**
 
 ```c
 #define DEFAULT_BITRATE  600000  // 600 kbps (安全マージン含む)
 ```
 
 - 100~700 kbps: 動作確認済み
-- 750 kbps以上: エラー (`Invalid h264 bit rate parameters. Should be [0, 700000]`)
-- 回避方法なし（ソフトウェアエンコーダー以外）
+- 750 kbps以上: エラー
 
-### フレームフォーマット
+### H.265キーフレーム判定
 
 ```c
-// shared_memory.h
-int format;  // 0=JPEG, 1=NV12, 2=RGB, 3=H264
+static bool is_h265_keyframe(const uint8_t *data, size_t size) {
+    if (size < 5) return false;
+    // Annex-B start code: 00 00 00 01
+    if (data[0] == 0x00 && data[1] == 0x00 &&
+        data[2] == 0x00 && data[3] == 0x01) {
+        uint8_t nal_type = (data[4] >> 1) & 0x3F;
+        return (nal_type >= 16 && nal_type <= 21);  // IDR/BLA/CRA
+    }
+    return false;
+}
 ```
-
-H.264フレームサイズ:
-- キーフレーム (I): 30-35 KB
-- 予測フレーム (P): 5-10 KB
-- `MAX_FRAME_SIZE` (3MB) で十分
-
-### NV12取得API
-
-**重要**: `sp_vio_get_yuv()` ではなく `sp_vio_get_frame()` を使用すること。前者はD-Robotics APIの出力フォーマットが標準NV12と不一致で、OpenCVの色変換が失敗する。
-
-### VIOフレーム取得API一覧
-
-| 関数 | 用途 |
-|------|------|
-| `sp_vio_get_frame()` | NV12フレーム取得（推奨） |
-| `sp_vio_get_yuv()` | YUV取得（色変換問題あり） |
-| `sp_vio_get_raw()` | RAWフレーム取得 |
-
-### libspcdev API制約
-
-- GOP設定パラメータなし（`sp_start_encode()` は width, height, bitrate のみ）
-- 動的キーフレーム要求API なし（`sp_encoder_request_idr()` 等は存在しない）
-- エンコーダー詳細設定構造体なし
-- ストリームメタデータ取得API なし
-- デフォルトGOP: **14フレーム（約470ms @ 30fps）**
-
-### パフォーマンス比較
-
-| 項目 | JPEG (旧) | H.264 (新) |
-|------|-----------|------------|
-| CPU使用率 | ~35% | ~15% (57%削減) |
-| メモリ使用量 | ~80 MB | ~60 MB (25%削減) |
-| ビットレート | ~15 Mbps | ~8 Mbps (47%削減) |
-
-### ビルド設定
-
-```makefile
-LDLIBS_COMMON := -lrt
-LDLIBS_DROBOTICS := $(LDLIBS_COMMON) -lpthread -lspcdev
-# 削除: -ljpeg -lcam -lvpf -lhbmem
-```
-
-### トラブルシューティング
-
-| 問題 | 原因 | 解決策 |
-|------|------|--------|
-| `sp_open_camera_v2` 失敗 | 旧プロセスが残っている | `pkill -f camera_daemon; make cleanup` |
-| VLC再生不可 | SPS/PPS欠落 | キーフレームから録画開始する |
-| 0バイト録画 | `frame.size` 属性不在 | `bytes(frame.data)` を使用 |
-| 画像が緑/マゼンタ | `sp_vio_get_yuv()` 使用 | `sp_vio_get_frame()` に変更 |
 
 ### 録画コマンド
 
@@ -379,7 +373,7 @@ LDLIBS_DROBOTICS := $(LDLIBS_COMMON) -lpthread -lspcdev
 curl -X POST http://localhost:8080/api/recording/start
 sleep 10
 curl -X POST http://localhost:8080/api/recording/stop
-ffplay recordings/recording_*.h264
+# 録画は .hevc → .mp4 変換で保存
 ```
 
 ---
@@ -388,85 +382,58 @@ ffplay recordings/recording_*.h264
 
 ### 課題
 
-H.264デコーダーはキーフレーム（I-frame）から再生を開始する必要がある。カメラ切り替え時にP-frameから配信すると画面が乱れる。
+H.265デコーダーはキーフレーム（IDR/CRA）から再生を開始する必要がある。カメラ切り替え時にP-frameから配信すると画面が乱れる。
 
 ### 採用方式: ウォームアップ延長型
 
-libspcdevにGOP制御・動的キーフレーム要求APIが存在しないため、ウォームアップ期間を延長してキーフレーム遭遇を保証する方式を採用。
+ウォームアップ期間を延長してキーフレーム遭遇を保証する方式を採用。
 
 ```c
-// camera_switcher_daemon.c
+// camera_daemon_main.c
 cfg.warmup_frames = 15;  // 約500ms @ 30fps
 ```
 
 **根拠**:
-- デフォルトGOP: 14フレーム (470ms)
+- GOP: `intra_period = fps` (30フレーム = 1秒)
 - warmup: 15フレーム (500ms)
-- キーフレーム遭遇確率: ~100%
 - 実装: 1行変更のみ
-
-### 検討・却下された代替案
-
-| 案 | 理由 |
-|----|------|
-| A. SIGUSR2でIDR要求 | libspcdevに動的キーフレーム要求APIなし |
-| B. NV12/H.264タイムスタンプ同期 | キーフレーム問題は未解決 |
-| C. バッファオーバーラップ | クライアント実装が複雑 |
-
-### H.264キーフレーム判定（参考）
-
-```c
-static bool is_h264_keyframe(const uint8_t *data, size_t size) {
-    if (size < 5) return false;
-    // Annex-B start code: 00 00 00 01
-    if (data[0] == 0x00 && data[1] == 0x00 &&
-        data[2] == 0x00 && data[3] == 0x01) {
-        uint8_t nal_type = data[4] & 0x1F;
-        return (nal_type == 5);  // IDR frame
-    }
-    return false;
-}
-```
 
 ---
 
-## 7. カメラデーモン リファクタリング
+## 7. カメラデーモン 3層アーキテクチャ
 
-### 目標: 3層アーキテクチャ
+### 実装済みアーキテクチャ
 
-```
-Layer 3: Application (camera_daemon_main.c)
-    - main(), signal handling, lifecycle
-        |
-Layer 2: Pipeline (camera_pipeline.c/h, decoder_thread.c/h)
-    - Pipeline orchestration, capture loop, frame routing
-        |
-Layer 1: HAL (vio_lowlevel.c/h, encoder_lowlevel.c/h, decoder_lowlevel.c/h)
-    - VIN/ISP/VSE pipeline (hbn_*), H.264 encode/decode (hb_mm_mc_*)
+```mermaid
+graph TD
+    L3["Layer 3: Application<br/>camera_daemon_main.c<br/>main(), signal handling, lifecycle, switcher thread"]
+    L2["Layer 2: Pipeline<br/>camera_pipeline.c/h, encoder_thread.c/h<br/>Pipeline orchestration, capture loop, frame routing, zero-copy SHM"]
+    L1["Layer 1: HAL<br/>vio_lowlevel.c/h, encoder_lowlevel.c/h<br/>VIN/ISP/VSE pipeline (hbn_vflow_*), H.265 encode (hb_mm_mc_*)"]
+
+    L3 --> L2 --> L1
 ```
 
-### 主要API設計
+### 主要API
 
 ```c
-// Layer 1: VIO
-int vio_create(vio_context_t *ctx, int camera_index, int width, int height, int fps);
+// Layer 1: VIO (hbn_vflow API)
+int vio_create(vio_context_t *ctx, int camera_index,
+               int sensor_w, int sensor_h, int output_w, int output_h, int fps);
 int vio_get_frame(vio_context_t *ctx, hbn_vnode_image_t *frame, int timeout_ms);
+int vio_get_frame_ch1(vio_context_t *ctx, hbn_vnode_image_t *frame, int timeout_ms);
+int vio_get_frame_ch2(vio_context_t *ctx, hbn_vnode_image_t *frame, int timeout_ms);
+int vio_get_frame_roi(vio_context_t *ctx, int roi_index, hbn_vnode_image_t *frame, int timeout_ms);
 
-// Layer 1: Encoder
+// Layer 1: Encoder (hb_mm_mc API)
 int encoder_create(encoder_context_t *ctx, int camera_index, int w, int h, int fps, int bitrate);
-int encoder_encode_frame(encoder_context_t *ctx, const uint8_t *nv12_y, const uint8_t *nv12_uv,
-                          uint8_t **h264_data, size_t *h264_size);
+int encoder_encode_frame_zerocopy(encoder_context_t *ctx, const uint8_t *nv12_y, const uint8_t *nv12_uv,
+                                   size_t y_size, size_t uv_size, int timeout_ms, encoder_output_t *out);
 
 // Layer 2: Pipeline
-int pipeline_create(camera_pipeline_t *p, int cam_idx, int w, int h, int fps, int bitrate,
-                     const char *shm_h264_name);
-int pipeline_run(camera_pipeline_t *p);  // Main capture loop
+int pipeline_create(camera_pipeline_t *p, int cam_idx, int sensor_w, int sensor_h,
+                     int output_w, int output_h, int fps, int bitrate, volatile int *active_camera);
+int pipeline_run(camera_pipeline_t *p, volatile bool *running_flag);
 ```
-
-### 進捗
-
-- Phase 1 (HAL層): PoC完了（vio, encoder実装検証済み）
-- Phase 2-4: 未着手
 
 ---
 
@@ -476,35 +443,16 @@ int pipeline_run(camera_pipeline_t *p);  // Main capture loop
 
 | パス | 内容 |
 |------|------|
-| `/usr/include/sp_codec.h`, `sp_vio.h` | libspcdev API |
-| `/usr/lib/libspcdev.so` | libspcdev本体 |
-| `/usr/include/hbn_isp_api.h` | ISP API |
-| `/app/cdev_demo/vio2encoder/vio2encoder.c` | libspcdevサンプル |
-
-### 環境変数
-
-| 変数 | デフォルト | 用途 |
-|------|-----------|------|
-| `SHM_NAME_NV12` | - | NV12共有メモリ名 |
-| `SHM_NAME_H264` | - | H.264共有メモリ名 |
-| `H264_BITRATE` | 600000 | H.264ビットレート (bps) |
-| `FRAME_INTERVAL_MS` | 0 | フレーム間隔制限 |
+| `hb_mm_mc.h` | Media Codec API (H.265エンコード) |
+| `hbn_vflow.h`, `hbn_vnode_*.h` | VIO Pipeline API |
+| `hbn_isp_api.h` | ISP API (AWB, NR) |
+| `hb_mem_mgr.h` | メモリ管理 (zero-copy import/export) |
 
 ### デバッグコマンド
 
 ```bash
 # 共有メモリ確認
 ls -lh /dev/shm/pet_camera_*
-
-# GOP構造の解析
-ffprobe -v error -select_streams v:0 -show_entries frame=pict_type \
-  -of csv=p=0 recording.h264 | head -50 | nl
-
-# ISP統計確認
-./build/test_isp_lowlight --camera 0 --dump-stats
-
-# AWBテスト
-./build/test_awb_tuning --camera 1
 
 # プロファイリング
 uv run scripts/profile_shm.py
