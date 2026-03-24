@@ -54,6 +54,8 @@ type capturedPanel struct {
 	placeholder bool        // filled panel (wider crop to show context)
 	motionHint  bool        // panel guided by motion detection (tighter crop)
 	petClass    string      // "mike", "chatora", "other", or "" if unknown
+	petConfidence float64  // 0.0-1.0, classification confidence
+	petColorResult *PetColorResult // full diagnostic data (nil if not classified)
 	detections  []Detection // all YOLO detections at capture time
 }
 
@@ -311,9 +313,14 @@ func (cc *ComicCapture) capturePanel(now time.Time) {
 
 	// Classify pet color from bbox region (scale detection coords to frame)
 	var petClass string
+	var petConfidence float64
+	var petColorResult *PetColorResult
 	if cc.lastCatBBox != nil {
 		scaledBBox := scaleBBoxToFrame(*cc.lastCatBBox)
-		petClass = classifyPetColor(frame.Data, frame.Width, frame.Height, scaledBBox)
+		result := classifyPetColor(frame.Data, frame.Width, frame.Height, scaledBBox)
+		petClass = result.PetID
+		petConfidence = result.Confidence
+		petColorResult = &result
 	}
 
 	// Snapshot all current YOLO detections
@@ -333,14 +340,16 @@ func (cc *ComicCapture) capturePanel(now time.Time) {
 	}
 
 	panel := capturedPanel{
-		nv12Data:   append([]byte(nil), frame.Data...),
-		width:      frame.Width,
-		height:     frame.Height,
-		timestamp:  now,
-		bbox:       panelBBox,
-		motionHint: isMotionHint,
-		petClass:   petClass,
-		detections: dets,
+		nv12Data:       append([]byte(nil), frame.Data...),
+		width:          frame.Width,
+		height:         frame.Height,
+		timestamp:      now,
+		bbox:           panelBBox,
+		motionHint:     isMotionHint,
+		petClass:       petClass,
+		petConfidence:  petConfidence,
+		petColorResult: petColorResult,
+		detections:     dets,
 	}
 	cc.panels = append(cc.panels, panel)
 	cc.lastCaptureTime = now
@@ -571,6 +580,14 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 	}
 
 	petID := dominantPetID(panels)
+	// Log confidence scores for calibration
+	scores := map[string]float64{}
+	for _, p := range panels {
+		if p.petClass != "" && p.petClass != "other" {
+			scores[p.petClass] += p.petConfidence
+		}
+	}
+	log.Printf("[Comic] Stitched %d panels (dominant=%s, scores=%v)", numPanels, petID, scores)
 	filename := fmt.Sprintf("comic_%s_%s.jpg", sessionID, petID)
 	outPath := filepath.Join(cc.outputDir, filename)
 	if err := os.WriteFile(outPath, jpegData, 0644); err != nil {
@@ -588,15 +605,20 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 	}
 
 	type ingestDetection struct {
-		PanelIndex *int    `json:"panel_index"`
-		BBoxX      int     `json:"bbox_x"`
-		BBoxY      int     `json:"bbox_y"`
-		BBoxW      int     `json:"bbox_w"`
-		BBoxH      int     `json:"bbox_h"`
-		YoloClass  string  `json:"yolo_class"`
-		PetClass   *string `json:"pet_class,omitempty"`
-		Confidence float64 `json:"confidence"`
-		DetectedAt string  `json:"detected_at"`
+		PanelIndex    *int     `json:"panel_index"`
+		BBoxX         int      `json:"bbox_x"`
+		BBoxY         int      `json:"bbox_y"`
+		BBoxW         int      `json:"bbox_w"`
+		BBoxH         int      `json:"bbox_h"`
+		YoloClass     string   `json:"yolo_class"`
+		PetClass      *string  `json:"pet_class,omitempty"`
+		PetConfidence *float64 `json:"pet_confidence,omitempty"`
+		UVScatter     *float64 `json:"uv_scatter,omitempty"`
+		MeanU         *float64 `json:"mean_u,omitempty"`
+		MeanV         *float64 `json:"mean_v,omitempty"`
+		MeanY         *float64 `json:"mean_y,omitempty"`
+		Confidence    float64  `json:"confidence"`
+		DetectedAt    string   `json:"detected_at"`
 	}
 	type ingestPayload struct {
 		Filename   string             `json:"filename"`
@@ -652,10 +674,22 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 				Confidence: det.Confidence,
 				DetectedAt: p.timestamp.Format("2006-01-02T15:04:05"),
 			}
-			// pet_class only for cat/dog detections
+			// pet_class + color metrics only for cat/dog detections
 			if det.ClassName == "cat" || det.ClassName == "dog" {
 				pc := p.petClass
 				d.PetClass = &pc
+				if p.petColorResult != nil {
+					conf := p.petColorResult.Confidence
+					scatter := p.petColorResult.Scatter
+					mu := p.petColorResult.MeanU
+					mv := p.petColorResult.MeanV
+					my := p.petColorResult.MeanY
+					d.PetConfidence = &conf
+					d.UVScatter = &scatter
+					d.MeanU = &mu
+					d.MeanV = &mv
+					d.MeanY = &my
+				}
 			}
 			payload.Detections = append(payload.Detections, d)
 		}
