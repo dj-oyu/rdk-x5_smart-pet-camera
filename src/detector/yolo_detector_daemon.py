@@ -794,10 +794,16 @@ class YoloDetectorDaemon:
                                         # Write grid to file for Go server
                                         try:
                                             import json as _json
+                                            # ROI position in 1280x720 output space
+                                            roi_sx, roi_sy, roi_sw, _ = self.VSE_ROI_REGIONS[motion_roi_idx]
                                             _json_str = _json.dumps({
                                                 "grid": grid,
                                                 "rows": grid_size,
                                                 "cols": grid_size,
+                                                "roi_x": int(roi_sx * (1280.0 / 1920.0)),
+                                                "roi_y": int(roi_sy * (720.0 / 1080.0)),
+                                                "roi_w": int(roi_sw * (1280.0 / 1920.0)),
+                                                "roi_h": int(roi_sw * (720.0 / 1080.0)),
                                                 "base_valid": True,
                                                 "quiet_frames": self._quiet_frames,
                                             })
@@ -1007,13 +1013,13 @@ class YoloDetectorDaemon:
                                         ),
                                     ))
                                 fc_classes = ",".join(d.class_name.value for d in fc_detections) or "none"
-                                logger.info(
+                                logger.debug(
                                     f"focus_crop: roi={self._motion_roi_idx} "
                                     f"center=({mcx},{mcy}) size={fc_sz} "
                                     f"det={fc_classes}"
                                 )
                             except Exception as e:
-                                logger.info(f"Focus crop failed: {e}")
+                                logger.debug(f"Focus crop failed: {e}")
 
                         for buf in roi_hb_bufs:
                             buf.release()
