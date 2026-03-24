@@ -10,6 +10,7 @@ import sys
 import time
 import random
 import signal
+import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -105,7 +106,7 @@ def main():
 
     # Setup signal handler
     running = [True]
-    def signal_handler(signum: int, frame: object) -> None:
+    def signal_handler(signum: int, frame: types.FrameType | None) -> None:
         print("\n[Info] Shutting down...")
         running[0] = False
 
