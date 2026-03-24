@@ -416,6 +416,10 @@ class YoloDetector:
         self._lb_y_dst: np.ndarray | None = None     # Yデータコピー先のview
         self._lb_uv_dst: np.ndarray | None = None    # UVデータコピー先のview
 
+    def clear_clahe_cache(self) -> None:
+        """Clear the CLAHE Y-plane cache (called on camera switch)."""
+        self._clahe_y_cache.clear()
+
     def _download_default_model(self) -> None:
         """デフォルトモデル（YOLOv13n）をダウンロード"""
         import urllib.request
