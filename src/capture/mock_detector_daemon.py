@@ -27,7 +27,7 @@ CLASS_PROBS = {
 }
 
 
-def generate_dummy_detections(frame_width: int, frame_height: int, num_detections: int = None):
+def generate_dummy_detections(frame_width: int, frame_height: int, num_detections: int | None = None) -> list[dict[str, object]]:
     """Generate dummy detection results with random variations"""
     if num_detections is None:
         # Randomly decide number of detections (0-3)
@@ -103,7 +103,7 @@ def main():
 
     # Setup signal handler
     running = [True]
-    def signal_handler(signum, frame):
+    def signal_handler(signum: int, frame: object) -> None:
         print("\n[Info] Shutting down...")
         running[0] = False
 
