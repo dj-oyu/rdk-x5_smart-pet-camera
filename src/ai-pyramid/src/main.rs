@@ -35,7 +35,10 @@ struct Args {
     #[arg(long, default_value = "http://localhost:8000")]
     vlm_url: String,
 
-    #[arg(long, default_value = "AXERA-TECH/Qwen3-VL-2B-Instruct-GPTQ-Int4-C256-P3584-CTX4095")]
+    #[arg(
+        long,
+        default_value = "AXERA-TECH/Qwen3-VL-2B-Instruct-GPTQ-Int4-C256-P3584-CTX4095"
+    )]
     vlm_model: String,
 
     #[arg(long, default_value_t = 128)]
@@ -56,8 +59,21 @@ fn find_tls_certs() -> Option<(PathBuf, PathBuf)> {
 
 #[tokio::main]
 async fn main() {
-    // Load .env file if present (before parsing args and reading env vars)
-    let _ = dotenvy::dotenv();
+    // Load .env — walk up to repo root if not found in cwd
+    let _ = dotenvy::dotenv().or_else(|_| {
+        let mut dir = std::env::current_dir().ok();
+        while let Some(d) = dir {
+            let candidate = d.join(".env");
+            if candidate.is_file() {
+                return dotenvy::from_path(&candidate).map(|_| candidate);
+            }
+            dir = d.parent().map(|p| p.to_path_buf());
+        }
+        Err(dotenvy::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            ".env not found",
+        )))
+    });
 
     tracing_subscriber::fmt::init();
 
@@ -125,30 +141,27 @@ async fn main() {
         }
     });
 
-    let detect_client: Option<Arc<DetectClient>> = match (
-        std::env::var("PET_CAMERA_HOST").ok(),
-        std::env::var("PET_ALBUM_HOST").ok(),
-    ) {
-        (Some(camera_host), Some(album_host)) => {
-            let camera_port = std::env::var("PET_CAMERA_DETECT_PORT")
-                .unwrap_or_else(|_| "8083".into());
-            let album_port = std::env::var("PET_ALBUM_PORT")
-                .unwrap_or_else(|_| "8082".into());
-            let config = DetectConfig {
-                camera_base_url: format!("http://{camera_host}:{camera_port}"),
-                self_base_url: format!("http://{album_host}:{album_port}"),
-                timeout: Duration::from_secs(30),
-            };
-            info!(
-                "Detection enabled: camera={}, self={}",
-                config.camera_base_url, config.self_base_url
-            );
-            Some(Arc::new(DetectClient::new(config)))
-        }
-        _ => {
-            info!("Detection disabled: PET_CAMERA_HOST or PET_ALBUM_HOST not set");
-            None
-        }
+    let camera_host = std::env::var("PET_CAMERA_HOST").ok();
+    let album_host = std::env::var("PET_ALBUM_HOST").ok();
+    let detect_client: Option<Arc<DetectClient>> = if camera_host.is_some() || album_host.is_some()
+    {
+        let camera_host = camera_host.unwrap_or_else(|| "localhost".into());
+        let album_host = album_host.unwrap_or_else(|| "localhost".into());
+        let camera_port = std::env::var("PET_CAMERA_DETECT_PORT").unwrap_or_else(|_| "8083".into());
+        let album_port = std::env::var("PET_ALBUM_PORT").unwrap_or_else(|_| "8082".into());
+        let config = DetectConfig {
+            camera_base_url: format!("http://{camera_host}:{camera_port}"),
+            self_base_url: format!("http://{album_host}:{album_port}"),
+            timeout: Duration::from_secs(30),
+        };
+        info!(
+            "Detection enabled: camera={}, self={}",
+            config.camera_base_url, config.self_base_url
+        );
+        Some(Arc::new(DetectClient::new(config)))
+    } else {
+        info!("Detection disabled: neither PET_CAMERA_HOST nor PET_ALBUM_HOST set");
+        None
     };
 
     let watcher = PhotoWatcher::new(app_context.clone(), vlm_config, detect_client.clone());

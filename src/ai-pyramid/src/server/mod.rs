@@ -408,7 +408,7 @@ async fn handle_backfill(State(state): State<AppState>) -> impl IntoResponse {
         None => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": "detection not configured (PET_CAMERA_HOST not set)"})),
+                Json(serde_json::json!({"error": "detection not configured (set PET_CAMERA_HOST or PET_ALBUM_HOST)"})),
             )
                 .into_response();
         }
@@ -467,7 +467,10 @@ async fn handle_backfill(State(state): State<AppState>) -> impl IntoResponse {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
 
-        tracing::info!("Backfill complete: {ok} ok, {fail} failed, {} total", photos.len());
+        tracing::info!(
+            "Backfill complete: {ok} ok, {fail} failed, {} total",
+            photos.len()
+        );
     });
 
     Json(serde_json::json!({"ok": true, "message": "backfill started"})).into_response()
