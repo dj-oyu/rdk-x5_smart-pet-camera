@@ -113,6 +113,10 @@ pub(crate) enum DbCommand {
         date: String,
         reply: oneshot::Sender<AppResult<Vec<String>>>,
     },
+    ListPhotosWithoutDetections {
+        limit: i64,
+        reply: oneshot::Sender<AppResult<Vec<Photo>>>,
+    },
 }
 
 fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
@@ -195,6 +199,9 @@ fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
             DbCommand::DistinctBehaviors { reply } => send_reply(reply, store.distinct_behaviors()),
             DbCommand::CaptionsForDate { date, reply } => {
                 send_reply(reply, store.captions_for_date(&date))
+            }
+            DbCommand::ListPhotosWithoutDetections { limit, reply } => {
+                send_reply(reply, store.list_photos_without_detections(limit))
             }
         }
     }

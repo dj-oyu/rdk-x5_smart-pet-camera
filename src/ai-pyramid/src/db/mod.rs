@@ -440,6 +440,22 @@ impl PhotoStore {
         Ok(captions)
     }
 
+    /// Return photos that have no detections in the DB.
+    pub fn list_photos_without_detections(&self, limit: i64) -> rusqlite::Result<Vec<Photo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.id, p.filename, p.captured_at, p.caption, p.is_valid, p.pet_id, p.behavior
+             FROM photos p
+             LEFT JOIN detections d ON d.photo_id = p.id
+             WHERE d.id IS NULL
+             ORDER BY p.captured_at DESC
+             LIMIT ?1",
+        )?;
+        let photos = stmt
+            .query_map(params![limit], row_to_photo)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(photos)
+    }
+
     pub fn stats(&self) -> rusqlite::Result<Stats> {
         let total: i64 = self
             .conn
@@ -792,5 +808,40 @@ mod tests {
 
         // cup detection override should not affect majority (yolo_class != cat)
         // (cup detection id=3 is not a cat, so it's excluded from majority)
+    }
+
+    #[test]
+    fn list_photos_without_detections_filters_correctly() {
+        let store = setup();
+        let ts = dt(2026, 3, 21, 10, 45, 0);
+
+        // Insert two photos
+        store.insert("a.jpg", ts, Some("chatora")).unwrap();
+        store.insert("b.jpg", ts, Some("mike")).unwrap();
+
+        // Both should appear (no detections)
+        let result = store.list_photos_without_detections(100).unwrap();
+        assert_eq!(result.len(), 2);
+
+        // Add detections to a.jpg
+        let detections = vec![DetectionInput {
+            panel_index: None,
+            bbox_x: 10,
+            bbox_y: 10,
+            bbox_w: 50,
+            bbox_h: 50,
+            yolo_class: Some("cat".into()),
+            pet_class: None,
+            confidence: Some(0.9),
+            detected_at: "2026-03-21T10:45:00".into(),
+        }];
+        store
+            .ingest_with_detections("a.jpg", ts, Some("chatora"), &detections)
+            .unwrap();
+
+        // Only b.jpg should remain
+        let result = store.list_photos_without_detections(100).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].filename, "b.jpg");
     }
 }

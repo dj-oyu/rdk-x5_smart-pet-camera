@@ -1,5 +1,7 @@
 use crate::application::{AppContext, EventQueries, EventSummary, ObservationCommands};
 use crate::db::DetectionInput;
+use crate::detect::DetectClient;
+use crate::ingest::filename::parse_comic_filename;
 use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
@@ -31,6 +33,7 @@ pub struct AppState {
     pub photos_dir: PathBuf,
     pub event_tx: tokio::sync::broadcast::Sender<PhotoEvent>,
     pub pet_names: HashMap<String, String>,
+    pub detect_client: Option<std::sync::Arc<DetectClient>>,
 }
 
 /// Load pet display names from environment variables.
@@ -84,6 +87,7 @@ pub fn router(state: AppState) -> Router {
             "/api/detections/{id}",
             get(handle_detections_get).patch(handle_detection_update),
         )
+        .route("/api/backfill", post(handle_backfill))
         .route("/api/stats", get(handle_stats))
         .route("/api/behaviors", get(handle_behaviors))
         .route("/api/daily-summary", post(handle_daily_summary))
@@ -359,6 +363,78 @@ async fn handle_detection_update(
     }
 }
 
+// POST /api/backfill — trigger detection backfill for photos without detections
+async fn handle_backfill(State(state): State<AppState>) -> impl IntoResponse {
+    let detect_client = match &state.detect_client {
+        Some(c) => c.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "detection not configured (PET_CAMERA_HOST not set)"})),
+            )
+                .into_response();
+        }
+    };
+
+    let context = state.context.clone();
+    tokio::spawn(async move {
+        let queries = context.event_queries();
+        let commands = context.observation_commands();
+        let photos = match queries.list_photos_without_detections(500).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("Backfill query failed: {e}");
+                return;
+            }
+        };
+
+        tracing::info!("Backfill: {} photos to process", photos.len());
+        let mut ok = 0u32;
+        let mut fail = 0u32;
+
+        for photo in &photos {
+            match detect_client.detect(&photo.source_filename).await {
+                Ok(dets) if !dets.is_empty() => {
+                    let captured_at = parse_comic_filename(&photo.source_filename)
+                        .map(|m| m.captured_at)
+                        .unwrap_or_default();
+                    if let Err(e) = commands
+                        .ingest_with_detections(
+                            &photo.source_filename,
+                            captured_at,
+                            photo.pet_id.as_deref(),
+                            &dets,
+                        )
+                        .await
+                    {
+                        tracing::warn!("Backfill DB error {}: {e}", photo.source_filename);
+                        fail += 1;
+                    } else {
+                        tracing::info!(
+                            "Backfill OK: {} ({} dets)",
+                            photo.source_filename,
+                            dets.len()
+                        );
+                        ok += 1;
+                    }
+                }
+                Ok(_) => {
+                    tracing::info!("Backfill: no detections for {}", photo.source_filename);
+                }
+                Err(e) => {
+                    tracing::warn!("Backfill detect error {}: {e}", photo.source_filename);
+                    fail += 1;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
+        tracing::info!("Backfill complete: {ok} ok, {fail} failed, {} total", photos.len());
+    });
+
+    Json(serde_json::json!({"ok": true, "message": "backfill started"})).into_response()
+}
+
 async fn handle_stats(State(state): State<AppState>) -> impl IntoResponse {
     match state.queries().activity_stats().await {
         Ok(stats) => Json(stats).into_response(),
@@ -558,6 +634,7 @@ mod tests {
                 ("mike".into(), "Mike".into()),
                 ("chatora".into(), "Chatora".into()),
             ]),
+            detect_client: None,
         }
     }
 
