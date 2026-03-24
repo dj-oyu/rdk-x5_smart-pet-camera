@@ -156,13 +156,20 @@ export async function fetchDailySummary(date?: string): Promise<DailySummaryResp
 }
 
 export async function updatePhotoPetId(sourceFilename: string, petId: string): Promise<void> {
+  await updatePhotoFields(sourceFilename, { pet_id: petId });
+}
+
+export async function updatePhotoFields(
+  sourceFilename: string,
+  fields: Record<string, unknown>,
+): Promise<void> {
   const response = await fetch(`/api/photos/${encodeURIComponent(sourceFilename)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pet_id: petId }),
+    body: JSON.stringify(fields),
   });
   if (!response.ok) {
-    throw new Error(`failed to update pet_id: ${response.status}`);
+    throw new Error(`failed to update photo: ${response.status}`);
   }
 }
 

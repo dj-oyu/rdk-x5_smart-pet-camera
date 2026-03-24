@@ -103,6 +103,11 @@ pub(crate) enum DbCommand {
         pet_id: String,
         reply: oneshot::Sender<AppResult<usize>>,
     },
+    UpdateBehavior {
+        filename: String,
+        behavior: String,
+        reply: oneshot::Sender<AppResult<usize>>,
+    },
     DistinctPetIds {
         reply: oneshot::Sender<AppResult<Vec<String>>>,
     },
@@ -195,6 +200,11 @@ fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
                 pet_id,
                 reply,
             } => send_reply(reply, store.update_pet_id(&filename, &pet_id)),
+            DbCommand::UpdateBehavior {
+                filename,
+                behavior,
+                reply,
+            } => send_reply(reply, store.update_behavior(&filename, &behavior)),
             DbCommand::DistinctPetIds { reply } => send_reply(reply, store.distinct_pet_ids()),
             DbCommand::DistinctBehaviors { reply } => send_reply(reply, store.distinct_behaviors()),
             DbCommand::CaptionsForDate { date, reply } => {

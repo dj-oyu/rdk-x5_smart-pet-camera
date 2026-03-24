@@ -46,6 +46,7 @@ pub trait EventRepositoryPort: Send + Sync {
     async fn get_detections(&self, photo_id: i64) -> AppResult<Vec<Detection>>;
     async fn update_detection_override(&self, detection_id: i64, pet_id: &str) -> AppResult<usize>;
     async fn update_pet_id(&self, source_filename: &str, pet_id: &str) -> AppResult<usize>;
+    async fn update_behavior(&self, source_filename: &str, behavior: &str) -> AppResult<usize>;
     async fn distinct_pet_ids(&self) -> AppResult<Vec<String>>;
     async fn distinct_behaviors(&self) -> AppResult<Vec<String>>;
     async fn captions_for_date(&self, date: &str) -> AppResult<Vec<String>>;
@@ -225,6 +226,16 @@ impl EventRepositoryPort for PhotoStoreRepository {
             .request(|reply| DbCommand::UpdatePetId {
                 filename: source_filename.to_string(),
                 pet_id: pet_id.to_string(),
+                reply,
+            })
+            .await
+    }
+
+    async fn update_behavior(&self, source_filename: &str, behavior: &str) -> AppResult<usize> {
+        self.db
+            .request(|reply| DbCommand::UpdateBehavior {
+                filename: source_filename.to_string(),
+                behavior: behavior.to_string(),
                 reply,
             })
             .await
