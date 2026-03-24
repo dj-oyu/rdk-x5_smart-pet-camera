@@ -999,15 +999,20 @@ class YoloDetectorDaemon:
                     timing = self.detector.get_last_timing()
                     self.stats["avg_inference_time_ms"] = timing["total"] * 1000
                     if run_yolo:
+                        for d in detection_dicts:
+                            if d.class_name == "motion":
+                                self.stats["total_mot"] = self.stats.get("total_mot", 0) + 1
+                            else:
+                                self.stats["total_yolo"] = self.stats.get("total_yolo", 0) + 1
                         self.stats["total_detections"] += len(detection_dicts)
 
                     # Periodic stats log
                     if self.stats["frames_processed"] % 300 == 0:
-                        mot = sum(1 for d in detection_dicts if d.class_name == "motion")
-                        yolo = len(detection_dicts) - mot
+                        t_mot = self.stats.get("total_mot", 0)
+                        t_yolo = self.stats.get("total_yolo", 0)
                         logger.info(
                             f"[{self.stats['frames_processed']}f] "
-                            f"det={self.stats['total_detections']}(mot={mot},yolo={yolo}) "
+                            f"det={self.stats['total_detections']}(mot={t_mot},yolo={t_yolo}) "
                             f"inf={self.stats['avg_inference_time_ms']:.0f}ms "
                             f"cam={self.active_camera} "
                             f"bright={zc_frame.brightness_avg:.1f} "
