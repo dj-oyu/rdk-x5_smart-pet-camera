@@ -1,6 +1,6 @@
 use crate::application::db_thread::{Database, DbCommand};
 use crate::application::{ActivityStats, AppResult, EventQuery, EventSummary};
-use crate::db::{Detection, DetectionInput, PhotoStore};
+use crate::db::{Detection, DetectionInput, EditHistoryEntry, PhotoStore};
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
 use std::sync::Arc;
@@ -51,6 +51,7 @@ pub trait EventRepositoryPort: Send + Sync {
     async fn distinct_behaviors(&self) -> AppResult<Vec<String>>;
     async fn captions_for_date(&self, date: &str) -> AppResult<Vec<String>>;
     async fn list_photos_without_detections(&self, limit: i64) -> AppResult<Vec<EventSummary>>;
+    async fn get_edit_history(&self, since: Option<&str>) -> AppResult<Vec<EditHistoryEntry>>;
 }
 
 pub type SharedEventRepository = Arc<dyn EventRepositoryPort>;
@@ -267,5 +268,15 @@ impl EventRepositoryPort for PhotoStoreRepository {
             .request(|reply| DbCommand::ListPhotosWithoutDetections { limit, reply })
             .await
             .map(|photos| photos.into_iter().map(EventSummary::from).collect())
+    }
+
+    async fn get_edit_history(
+        &self,
+        since: Option<&str>,
+    ) -> AppResult<Vec<EditHistoryEntry>> {
+        let since = since.map(|s| s.to_string());
+        self.db
+            .request(move |reply| DbCommand::GetEditHistory { since, reply })
+            .await
     }
 }

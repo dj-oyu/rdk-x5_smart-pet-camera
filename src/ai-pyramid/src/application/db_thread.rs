@@ -1,5 +1,5 @@
 use crate::application::AppResult;
-use crate::db::{Detection, DetectionInput, Photo, PhotoFilter, PhotoStore, Stats};
+use crate::db::{Detection, DetectionInput, EditHistoryEntry, Photo, PhotoFilter, PhotoStore, Stats};
 use chrono::NaiveDateTime;
 use std::sync::mpsc;
 use std::thread;
@@ -122,6 +122,10 @@ pub(crate) enum DbCommand {
         limit: i64,
         reply: oneshot::Sender<AppResult<Vec<Photo>>>,
     },
+    GetEditHistory {
+        since: Option<String>,
+        reply: oneshot::Sender<AppResult<Vec<EditHistoryEntry>>>,
+    },
 }
 
 fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
@@ -212,6 +216,9 @@ fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
             }
             DbCommand::ListPhotosWithoutDetections { limit, reply } => {
                 send_reply(reply, store.list_photos_without_detections(limit))
+            }
+            DbCommand::GetEditHistory { since, reply } => {
+                send_reply(reply, store.get_edit_history(since.as_deref()))
             }
         }
     }

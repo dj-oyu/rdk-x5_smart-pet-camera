@@ -88,6 +88,7 @@ pub fn router(state: AppState) -> Router {
             get(handle_detections_get).patch(handle_detection_update),
         )
         .route("/api/backfill", post(handle_backfill))
+        .route("/api/edit-history", get(handle_edit_history))
         .route("/api/stats", get(handle_stats))
         .route("/api/behaviors", get(handle_behaviors))
         .route("/api/daily-summary", post(handle_daily_summary))
@@ -367,6 +368,31 @@ async fn handle_detection_update(
             .into_response(),
         Ok(_) => Json(serde_json::json!({"ok": true, "pet_id_override": body.pet_id_override}))
             .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+// GET /api/edit-history — list edit history entries, optionally filtered by since
+#[derive(Deserialize)]
+struct EditHistoryQuery {
+    since: Option<String>,
+}
+
+async fn handle_edit_history(
+    State(state): State<AppState>,
+    Query(query): Query<EditHistoryQuery>,
+) -> impl IntoResponse {
+    match state
+        .context
+        .event_queries()
+        .get_edit_history(query.since.as_deref())
+        .await
+    {
+        Ok(entries) => Json(entries).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
@@ -923,6 +949,7 @@ mod tests {
                     pet_class: Some("mike".into()),
                     confidence: Some(0.9),
                     detected_at: "2026-03-21T10:00:00".into(),
+                    color_metrics: None,
                 }],
             )
             .await
@@ -971,6 +998,7 @@ mod tests {
                     pet_class: Some("chatora".into()),
                     confidence: Some(0.8),
                     detected_at: "2026-03-21T10:00:00".into(),
+                    color_metrics: None,
                 }],
             )
             .await

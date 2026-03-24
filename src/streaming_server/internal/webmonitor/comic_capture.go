@@ -604,21 +604,26 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 		{comicMargin + comicBorder + comicPanelW + 2*comicBorder + comicGap, comicMargin + comicBorder + comicPanelH + 2*comicBorder + comicGap}, // bottom-right
 	}
 
+	type colorMetrics struct {
+		Version int     `json:"v"`
+		Scatter float64 `json:"scatter"`
+		MeanU   float64 `json:"mean_u"`
+		MeanV   float64 `json:"mean_v"`
+		MeanY   float64 `json:"mean_y"`
+		UVDist  float64 `json:"uv_dist"`
+		Conf    float64 `json:"conf"`
+	}
 	type ingestDetection struct {
-		PanelIndex    *int     `json:"panel_index"`
-		BBoxX         int      `json:"bbox_x"`
-		BBoxY         int      `json:"bbox_y"`
-		BBoxW         int      `json:"bbox_w"`
-		BBoxH         int      `json:"bbox_h"`
-		YoloClass     string   `json:"yolo_class"`
-		PetClass      *string  `json:"pet_class,omitempty"`
-		PetConfidence *float64 `json:"pet_confidence,omitempty"`
-		UVScatter     *float64 `json:"uv_scatter,omitempty"`
-		MeanU         *float64 `json:"mean_u,omitempty"`
-		MeanV         *float64 `json:"mean_v,omitempty"`
-		MeanY         *float64 `json:"mean_y,omitempty"`
-		Confidence    float64  `json:"confidence"`
-		DetectedAt    string   `json:"detected_at"`
+		PanelIndex   *int            `json:"panel_index"`
+		BBoxX        int             `json:"bbox_x"`
+		BBoxY        int             `json:"bbox_y"`
+		BBoxW        int             `json:"bbox_w"`
+		BBoxH        int             `json:"bbox_h"`
+		YoloClass    string          `json:"yolo_class"`
+		PetClass     *string         `json:"pet_class,omitempty"`
+		ColorMetrics *colorMetrics   `json:"color_metrics,omitempty"`
+		Confidence   float64         `json:"confidence"`
+		DetectedAt   string          `json:"detected_at"`
 	}
 	type ingestPayload struct {
 		Filename   string             `json:"filename"`
@@ -678,17 +683,16 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 			if det.ClassName == "cat" || det.ClassName == "dog" {
 				pc := p.petClass
 				d.PetClass = &pc
-				if p.petColorResult != nil {
-					conf := p.petColorResult.Confidence
-					scatter := p.petColorResult.Scatter
-					mu := p.petColorResult.MeanU
-					mv := p.petColorResult.MeanV
-					my := p.petColorResult.MeanY
-					d.PetConfidence = &conf
-					d.UVScatter = &scatter
-					d.MeanU = &mu
-					d.MeanV = &mv
-					d.MeanY = &my
+				if r := p.petColorResult; r != nil {
+					d.ColorMetrics = &colorMetrics{
+						Version: 1,
+						Scatter: r.Scatter,
+						MeanU:   r.MeanU,
+						MeanV:   r.MeanV,
+						MeanY:   r.MeanY,
+						UVDist:  r.UVDist,
+						Conf:    r.Confidence,
+					}
 				}
 			}
 			payload.Detections = append(payload.Detections, d)
