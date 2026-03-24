@@ -46,10 +46,7 @@ impl EventQueries {
         self.repository.get_detections(photo_id).await
     }
 
-    pub async fn get_edit_history(
-        &self,
-        since: Option<&str>,
-    ) -> AppResult<Vec<EditHistoryEntry>> {
+    pub async fn get_edit_history(&self, since: Option<&str>) -> AppResult<Vec<EditHistoryEntry>> {
         self.repository.get_edit_history(since).await
     }
 
@@ -65,10 +62,7 @@ impl EventQueries {
         self.repository.captions_for_date(date).await
     }
 
-    pub async fn list_photos_without_detections(
-        &self,
-        limit: i64,
-    ) -> AppResult<Vec<EventSummary>> {
+    pub async fn list_photos_without_detections(&self, limit: i64) -> AppResult<Vec<EventSummary>> {
         self.repository.list_photos_without_detections(limit).await
     }
 }

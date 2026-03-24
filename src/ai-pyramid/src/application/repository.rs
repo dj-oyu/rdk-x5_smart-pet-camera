@@ -270,10 +270,7 @@ impl EventRepositoryPort for PhotoStoreRepository {
             .map(|photos| photos.into_iter().map(EventSummary::from).collect())
     }
 
-    async fn get_edit_history(
-        &self,
-        since: Option<&str>,
-    ) -> AppResult<Vec<EditHistoryEntry>> {
+    async fn get_edit_history(&self, since: Option<&str>) -> AppResult<Vec<EditHistoryEntry>> {
         let since = since.map(|s| s.to_string());
         self.db
             .request(move |reply| DbCommand::GetEditHistory { since, reply })

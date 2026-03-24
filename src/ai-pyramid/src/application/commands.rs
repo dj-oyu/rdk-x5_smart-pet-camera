@@ -117,11 +117,7 @@ impl ObservationCommands {
         self.repository.update_pet_id(source_filename, pet_id).await
     }
 
-    pub async fn update_behavior(
-        &self,
-        source_filename: &str,
-        behavior: &str,
-    ) -> AppResult<usize> {
+    pub async fn update_behavior(&self, source_filename: &str, behavior: &str) -> AppResult<usize> {
         self.repository
             .update_behavior(source_filename, behavior)
             .await

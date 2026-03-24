@@ -1,5 +1,7 @@
 use crate::application::AppResult;
-use crate::db::{Detection, DetectionInput, EditHistoryEntry, Photo, PhotoFilter, PhotoStore, Stats};
+use crate::db::{
+    Detection, DetectionInput, EditHistoryEntry, Photo, PhotoFilter, PhotoStore, Stats,
+};
 use chrono::NaiveDateTime;
 use std::sync::mpsc;
 use std::thread;

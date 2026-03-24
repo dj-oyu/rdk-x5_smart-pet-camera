@@ -134,9 +134,9 @@ impl PhotoStore {
         )?;
 
         // Migration for existing DBs without color_metrics column
-        let _ = self.conn.execute_batch(
-            "ALTER TABLE detections ADD COLUMN color_metrics TEXT;",
-        );
+        let _ = self
+            .conn
+            .execute_batch("ALTER TABLE detections ADD COLUMN color_metrics TEXT;");
 
         // Edit history: records every user correction as a JSON diff
         self.conn.execute_batch(
@@ -201,11 +201,15 @@ impl PhotoStore {
     }
 
     pub fn update_pet_id(&self, filename: &str, pet_id: &str) -> rusqlite::Result<usize> {
-        if let Some((photo_id, old_value)) = self.conn.query_row(
-            "SELECT id, pet_id FROM photos WHERE filename = ?1",
-            params![filename],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
-        ).optional()? {
+        if let Some((photo_id, old_value)) = self
+            .conn
+            .query_row(
+                "SELECT id, pet_id FROM photos WHERE filename = ?1",
+                params![filename],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?
+        {
             let changes = serde_json::json!({"pet_id": {"old": old_value, "new": pet_id}});
             self.conn.execute(
                 "INSERT INTO edit_history (photo_id, changes) VALUES (?1, ?2)",
@@ -219,11 +223,15 @@ impl PhotoStore {
     }
 
     pub fn update_behavior(&self, filename: &str, behavior: &str) -> rusqlite::Result<usize> {
-        if let Some((photo_id, old_value)) = self.conn.query_row(
-            "SELECT id, behavior FROM photos WHERE filename = ?1",
-            params![filename],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
-        ).optional()? {
+        if let Some((photo_id, old_value)) = self
+            .conn
+            .query_row(
+                "SELECT id, behavior FROM photos WHERE filename = ?1",
+                params![filename],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?
+        {
             let changes = serde_json::json!({"behavior": {"old": old_value, "new": behavior}});
             self.conn.execute(
                 "INSERT INTO edit_history (photo_id, changes) VALUES (?1, ?2)",
@@ -338,20 +346,21 @@ impl PhotoStore {
             params![pet_id, detection_id],
         )?;
         if updated > 0
-            && let Some((photo_id, old_value)) = old {
-                // Record edit history
-                let changes = serde_json::json!({
-                    "pet_id": { "old": old_value, "new": pet_id },
-                    "detection_id": detection_id,
-                });
-                self.conn.execute(
-                    "INSERT INTO edit_history (photo_id, changes) VALUES (?1, ?2)",
-                    params![photo_id, changes.to_string()],
-                )?;
+            && let Some((photo_id, old_value)) = old
+        {
+            // Record edit history
+            let changes = serde_json::json!({
+                "pet_id": { "old": old_value, "new": pet_id },
+                "detection_id": detection_id,
+            });
+            self.conn.execute(
+                "INSERT INTO edit_history (photo_id, changes) VALUES (?1, ?2)",
+                params![photo_id, changes.to_string()],
+            )?;
 
-                // Update photo's pet_id by majority vote of cat detections
-                self.update_pet_id_by_majority(photo_id)?;
-            }
+            // Update photo's pet_id by majority vote of cat detections
+            self.update_pet_id_by_majority(photo_id)?;
+        }
         Ok(updated)
     }
 
