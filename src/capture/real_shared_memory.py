@@ -265,7 +265,7 @@ class DetectionWriter:
             self.detection_fd = None
 
     def write_detection_result(
-        self, frame_number: int, timestamp_sec: float, detections: list[dict],
+        self, frame_number: int, timestamp_sec: float, detections: list[dict[str, object]],
     ) -> None:
         if not self.detection_mmap:
             return

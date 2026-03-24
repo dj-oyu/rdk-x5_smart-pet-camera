@@ -29,7 +29,8 @@ from ctypes import (
     Structure,
     byref,
 )
-from typing import Optional
+from types import TracebackType
+from typing import Any, Optional
 import numpy as np
 import logging
 import struct
@@ -312,7 +313,7 @@ class HbMemBuffer:
 
         lib.hb_mem_invalidate_buf_with_vaddr(self._buf.virt_addr, self._buf.size)
 
-    def as_numpy(self, dtype: np.dtype = np.uint8) -> np.ndarray:
+    def as_numpy(self, dtype: "np.dtype[Any]" = np.uint8) -> np.ndarray:  # type: ignore[assignment]
         """
         Get buffer as numpy array (zero-copy view).
 
@@ -392,7 +393,12 @@ class HbMemBuffer:
         """Context manager entry."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool:
         """Context manager exit - release buffer."""
         self.release()
         return False
@@ -686,7 +692,12 @@ class HbMemGraphicBuffer:
     def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool:
         self.release()
         return False
 

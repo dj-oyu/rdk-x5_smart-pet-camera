@@ -10,7 +10,7 @@ import os
 import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 import logging
 
 import cv2
@@ -66,7 +66,7 @@ class HWPreprocessor(Preprocessor):
         except OSError as e:
             logging.getLogger(__name__).warning("HWPreprocessor: failed to load %s: %s", lib_path, e)
 
-    def set_hb_mem_buffer(self, buf) -> None:
+    def set_hb_mem_buffer(self, buf: Any) -> None:
         """Set the current frame's HbMemGraphicBuffer for GPU letterbox."""
         self._hb_buf = buf
 
