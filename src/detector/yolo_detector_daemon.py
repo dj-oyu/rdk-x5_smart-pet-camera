@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# pyright: reportUnusedVariable=false, reportUnusedImport=false, reportGeneralTypeIssues=false
+# NOTE: run() is too complex for pyright to analyze, causing false
+# positives for all variables/imports inside it.  Suppressed file-wide
+# until run() is refactored into smaller methods.
 """
 yolo_detector_daemon.py - YOLO detector daemon with zero-copy VIO buffer sharing
 
@@ -6,13 +10,16 @@ Reads NV12 frames via zero-copy shared memory (hb_mem share_id) and writes
 YOLO detection results to detection shared memory.
 """
 
+from __future__ import annotations
+
 import sys
-import time
 import signal
+import time
 import logging
 import queue
 import threading
-from collections import namedtuple
+import types
+from typing import NamedTuple
 from pathlib import Path
 
 import cv2
@@ -48,9 +55,17 @@ logging.basicConfig(
 logger = logging.getLogger("YOLODetectorDaemon")
 yolo_logger = logging.getLogger("detection.yolo_detector")
 
-# Lightweight result types (namedtuples are faster than dicts and give attribute access)
-DetBbox = namedtuple('DetBbox', ['x', 'y', 'w', 'h'])
-DetDict = namedtuple('DetDict', ['class_name', 'confidence', 'bbox'])
+# Lightweight result types (NamedTuples are faster than dicts and give attribute access)
+class DetBbox(NamedTuple):
+    x: int
+    y: int
+    w: int
+    h: int
+
+class DetDict(NamedTuple):
+    class_name: str
+    confidence: float
+    bbox: DetBbox
 
 
 # Day camera motion detection zones (320x320, 3cols x 2rows, overlapping)
@@ -73,7 +88,7 @@ DAY_MOTION_THRESH = 15       # pixel diff threshold (day camera has low noise)
 DAY_MOTION_MIN_AREA_RATIO = 0.005  # min contour area as fraction of zone area
 
 
-def _det_to_dict(d: 'DetDict') -> dict:
+def _det_to_dict(d: DetDict) -> dict[str, object]:
     """Convert a DetDict namedtuple to a plain dict for the SHM write boundary."""
     return {
         "class_name": d.class_name,
@@ -226,14 +241,14 @@ class YoloDetectorDaemon:
         self.VSE_SCALE: float = 960.0 / 640.0  # 1.5 — 640x640 → 1920x1080 sensor space
 
         # Detection result cache for temporal integration
-        self.detection_cache: list[list[dict]] = []  # [roi_0_dets, roi_1_dets, ...]
+        self.detection_cache: list[list[dict[str, object]]] = []  # [roi_0_dets, roi_1_dets, ...]
         self.cache_frame_number: int = -1  # Frame number when cache started
         self.cache_timestamp: float = 0.0  # Timestamp when cache started
 
         # Night motion detection state (per-ROI, 320x320 resolution)
         self._prev_roi_small: dict[str, np.ndarray] = {}  # {"roi0": 320x320, "roi1": 320x320}
         self._diff_acc: dict[str, np.ndarray] = {}  # temporal diff accumulator per ROI (320x320 uint16)
-        self._motion_bboxes: list = []  # motion bbox buffer for next YOLO write
+        self._motion_bboxes: list[tuple[int, int, int, int]] = []  # motion bbox buffer for next YOLO write
         self._roi_has_motion: bool = False  # Any ROI had motion recently
         self.motion_cooldown: int = 0  # Frames to skip after motion detected
 
@@ -365,7 +380,7 @@ class YoloDetectorDaemon:
         nv12_640 = np.concatenate([y_640.ravel(), uv_640.ravel()])
         return nv12_640, x0, y0, max(cw, ch)
 
-    def _save_night_frame(self, nv12_data, width: int, height: int, frame_number: int) -> None:
+    def _save_night_frame(self, nv12_data: np.ndarray, width: int, height: int, frame_number: int) -> None:
         """Enqueue NV12 frame for async saving (fine-tuning data collection)."""
         try:
             self._save_queue.put_nowait((bytes(nv12_data), width, height, frame_number))
@@ -434,7 +449,7 @@ class YoloDetectorDaemon:
         try:
             from detection.yolo_detector import HWPreprocessor
             hw_prep = HWPreprocessor(self.detector)
-            if hw_prep._lib is not None:
+            if hw_prep.is_available:
                 self.detector.preprocessor = hw_prep
                 logger.info("HW preprocessor enabled (nano2D letterbox)")
         except Exception as e:
@@ -477,7 +492,7 @@ class YoloDetectorDaemon:
                 f"{self.stats['total_detections']}det ({avg_dets:.2f}/f)"
             )
 
-    def signal_handler(self, signum, frame) -> None:
+    def signal_handler(self, signum: int, frame: types.FrameType | None) -> None:
         """シグナルハンドラ"""
         self.running = False
 
@@ -496,6 +511,7 @@ class YoloDetectorDaemon:
         from urllib.request import urlopen, Request
         from urllib.error import URLError
 
+        assert self.detector is not None
         detector = self.detector
 
         class DetectHandler(BaseHTTPRequestHandler):
@@ -556,7 +572,7 @@ class YoloDetectorDaemon:
                     logger.warning(f"Detect API error: {e}")
                     self.send_error(500, str(e))
 
-            def log_message(self, format, *args):
+            def log_message(self, format: str, *args: object) -> None:
                 pass  # suppress per-request logging
 
         def serve():
@@ -580,7 +596,7 @@ class YoloDetectorDaemon:
         signal.signal(signal.SIGTERM, self.signal_handler)
 
         # Async night frame save queue + worker thread
-        self._save_queue: queue.Queue = queue.Queue(maxsize=10)
+        self._save_queue: queue.Queue[tuple[bytes, int, int, int] | None] = queue.Queue(maxsize=10)
         self._save_thread = threading.Thread(target=self._save_worker, daemon=True)
         self._save_thread.start()
 

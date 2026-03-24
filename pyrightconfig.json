@@ -6,8 +6,7 @@
     "**/node_modules",
     "**/__pycache__",
     ".venv",
-    "venv",
-    "src/detector/yolo_detector_daemon.py"
+    "venv"
   ],
   "ignore": [],
   "defineConstant": {},
