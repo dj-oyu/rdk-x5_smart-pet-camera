@@ -235,8 +235,6 @@ class YoloDetectorDaemon:
         self._focus_crop_enabled: bool = True
         self._motion_roi_idx: int = -1  # which ROI had motion (-1=none/both)
 
-        # Base diff heatmap grid (16x16, exposed via API for web UI)
-        self._base_diff_grid: list[list[float]] = []  # 16x16 normalized 0.0-1.0
 
         # Night YOLO false positive filter (IR images cause frequent misdetections)
         self.night_fp_classes = {"toilet", "sink", "suitcase", "chair"}
@@ -424,28 +422,7 @@ class YoloDetectorDaemon:
 
         detector = self.detector
 
-        daemon_self = self  # capture for inner class
-
         class DetectHandler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                if self.path != "/base_diff":
-                    self.send_error(404)
-                    return
-                grid = daemon_self._base_diff_grid
-                body = json.dumps({
-                    "grid": grid,
-                    "rows": len(grid),
-                    "cols": len(grid[0]) if grid else 0,
-                    "base_valid": any(daemon_self._base_valid.values()),
-                    "quiet_frames": daemon_self._quiet_frames,
-                }).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
             def do_POST(self):
                 if self.path != "/detect":
                     self.send_error(404)
@@ -814,7 +791,6 @@ class YoloDetectorDaemon:
                                                 ].mean()) / 255.0
                                                 row.append(round(cell_mean, 3))
                                             grid.append(row)
-                                        self._base_diff_grid = grid
                                         # Write grid to file for Go server
                                         try:
                                             import json as _json
