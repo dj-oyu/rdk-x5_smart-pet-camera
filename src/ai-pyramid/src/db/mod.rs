@@ -30,6 +30,18 @@ pub struct Detection {
     pub pet_id_override: Option<String>,
     pub confidence: Option<f64>,
     pub detected_at: String,
+    /// Opaque JSON from pet camera: UV scatter metrics, thresholds, version.
+    /// ai-pyramid stores/returns this without parsing.
+    pub color_metrics: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EditHistoryEntry {
+    pub id: i64,
+    pub photo_id: i64,
+    /// JSON diff of changes (opaque to ai-pyramid)
+    pub changes: String,
+    pub created_at: String,
 }
 
 /// Input for ingest API. bbox must be in comic image coordinates.
@@ -44,6 +56,8 @@ pub struct DetectionInput {
     pub pet_class: Option<String>,
     pub confidence: Option<f64>,
     pub detected_at: String,
+    /// Opaque JSON blob from pet camera (color classification metrics).
+    pub color_metrics: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Default)]
@@ -112,10 +126,30 @@ impl PhotoStore {
                 pet_class       TEXT,
                 pet_id_override TEXT,
                 confidence      REAL,
-                detected_at     TEXT NOT NULL
+                detected_at     TEXT NOT NULL,
+                color_metrics   TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_detections_photo
                 ON detections(photo_id);",
+        )?;
+
+        // Migration for existing DBs without color_metrics column
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE detections ADD COLUMN color_metrics TEXT;",
+        );
+
+        // Edit history: records every user correction as a JSON diff
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS edit_history (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                photo_id   INTEGER NOT NULL REFERENCES photos(id),
+                changes    TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_edit_history_photo
+                ON edit_history(photo_id);
+            CREATE INDEX IF NOT EXISTS idx_edit_history_created
+                ON edit_history(created_at);",
         )?;
 
         Ok(())
@@ -167,6 +201,17 @@ impl PhotoStore {
     }
 
     pub fn update_pet_id(&self, filename: &str, pet_id: &str) -> rusqlite::Result<usize> {
+        if let Some((photo_id, old_value)) = self.conn.query_row(
+            "SELECT id, pet_id FROM photos WHERE filename = ?1",
+            params![filename],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+        ).optional()? {
+            let changes = serde_json::json!({"pet_id": {"old": old_value, "new": pet_id}});
+            self.conn.execute(
+                "INSERT INTO edit_history (photo_id, changes) VALUES (?1, ?2)",
+                params![photo_id, changes.to_string()],
+            )?;
+        }
         self.conn.execute(
             "UPDATE photos SET pet_id = ?1 WHERE filename = ?2",
             params![pet_id, filename],
@@ -174,6 +219,17 @@ impl PhotoStore {
     }
 
     pub fn update_behavior(&self, filename: &str, behavior: &str) -> rusqlite::Result<usize> {
+        if let Some((photo_id, old_value)) = self.conn.query_row(
+            "SELECT id, behavior FROM photos WHERE filename = ?1",
+            params![filename],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+        ).optional()? {
+            let changes = serde_json::json!({"behavior": {"old": old_value, "new": behavior}});
+            self.conn.execute(
+                "INSERT INTO edit_history (photo_id, changes) VALUES (?1, ?2)",
+                params![photo_id, changes.to_string()],
+            )?;
+        }
         self.conn.execute(
             "UPDATE photos SET behavior = ?1 WHERE filename = ?2",
             params![behavior, filename],
@@ -212,10 +268,11 @@ impl PhotoStore {
 
         // Insert detections
         let mut stmt = self.conn.prepare(
-            "INSERT INTO detections (photo_id, panel_index, bbox_x, bbox_y, bbox_w, bbox_h, yolo_class, pet_class, confidence, detected_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO detections (photo_id, panel_index, bbox_x, bbox_y, bbox_w, bbox_h, yolo_class, pet_class, confidence, detected_at, color_metrics)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )?;
         for d in detections {
+            let metrics_str = d.color_metrics.as_ref().map(|v| v.to_string());
             stmt.execute(params![
                 photo_id,
                 d.panel_index,
@@ -227,6 +284,7 @@ impl PhotoStore {
                 d.pet_class,
                 d.confidence,
                 d.detected_at,
+                metrics_str,
             ])?;
         }
 
@@ -235,7 +293,7 @@ impl PhotoStore {
 
     pub fn get_detections(&self, photo_id: i64) -> rusqlite::Result<Vec<Detection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, photo_id, panel_index, bbox_x, bbox_y, bbox_w, bbox_h, yolo_class, pet_class, pet_id_override, confidence, detected_at
+            "SELECT id, photo_id, panel_index, bbox_x, bbox_y, bbox_w, bbox_h, yolo_class, pet_class, pet_id_override, confidence, detected_at, color_metrics
              FROM detections WHERE photo_id = ?1 ORDER BY panel_index",
         )?;
         let dets = stmt
@@ -253,6 +311,7 @@ impl PhotoStore {
                     pet_id_override: row.get(9)?,
                     confidence: row.get(10)?,
                     detected_at: row.get(11)?,
+                    color_metrics: row.get(12)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -264,25 +323,65 @@ impl PhotoStore {
         detection_id: i64,
         pet_id: &str,
     ) -> rusqlite::Result<usize> {
+        // Read current value before update for edit_history
+        let old: Option<(i64, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT photo_id, pet_id_override FROM detections WHERE id = ?1",
+                params![detection_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
         let updated = self.conn.execute(
             "UPDATE detections SET pet_id_override = ?1 WHERE id = ?2",
             params![pet_id, detection_id],
         )?;
-        if updated > 0 {
-            // Update photo's pet_id by majority vote of cat detections
-            let photo_id: Option<i64> = self
-                .conn
-                .query_row(
-                    "SELECT photo_id FROM detections WHERE id = ?1",
-                    params![detection_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if let Some(pid) = photo_id {
-                self.update_pet_id_by_majority(pid)?;
+        if updated > 0
+            && let Some((photo_id, old_value)) = old {
+                // Record edit history
+                let changes = serde_json::json!({
+                    "pet_id": { "old": old_value, "new": pet_id },
+                    "detection_id": detection_id,
+                });
+                self.conn.execute(
+                    "INSERT INTO edit_history (photo_id, changes) VALUES (?1, ?2)",
+                    params![photo_id, changes.to_string()],
+                )?;
+
+                // Update photo's pet_id by majority vote of cat detections
+                self.update_pet_id_by_majority(photo_id)?;
             }
-        }
         Ok(updated)
+    }
+
+    pub fn get_edit_history(&self, since: Option<&str>) -> rusqlite::Result<Vec<EditHistoryEntry>> {
+        let (sql, param): (&str, Option<&str>) = match since {
+            Some(s) => (
+                "SELECT id, photo_id, changes, created_at FROM edit_history WHERE created_at >= ?1 ORDER BY created_at DESC LIMIT 1000",
+                Some(s),
+            ),
+            None => (
+                "SELECT id, photo_id, changes, created_at FROM edit_history ORDER BY created_at DESC LIMIT 1000",
+                None,
+            ),
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = if let Some(p) = param {
+            stmt.query_map(params![p], Self::map_edit_history_row)?
+        } else {
+            stmt.query_map([], Self::map_edit_history_row)?
+        };
+        rows.collect()
+    }
+
+    fn map_edit_history_row(row: &rusqlite::Row) -> rusqlite::Result<EditHistoryEntry> {
+        Ok(EditHistoryEntry {
+            id: row.get(0)?,
+            photo_id: row.get(1)?,
+            changes: row.get(2)?,
+            created_at: row.get(3)?,
+        })
     }
 
     /// Update photo's pet_id based on majority vote of cat detection overrides/classes.
@@ -770,6 +869,7 @@ mod tests {
                 pet_class: Some("chatora".into()),
                 confidence: Some(0.9),
                 detected_at: "2026-03-21T10:00:00".into(),
+                color_metrics: None,
             },
             DetectionInput {
                 panel_index: Some(1),
@@ -781,6 +881,7 @@ mod tests {
                 pet_class: Some("chatora".into()),
                 confidence: Some(0.8),
                 detected_at: "2026-03-21T10:00:00".into(),
+                color_metrics: None,
             },
             DetectionInput {
                 panel_index: Some(0),
@@ -792,6 +893,7 @@ mod tests {
                 pet_class: None,
                 confidence: Some(0.6),
                 detected_at: "2026-03-21T10:00:00".into(),
+                color_metrics: None,
             },
         ];
         store
@@ -841,6 +943,7 @@ mod tests {
             pet_class: None,
             confidence: Some(0.9),
             detected_at: "2026-03-21T10:45:00".into(),
+            color_metrics: None,
         }];
         store
             .ingest_with_detections("a.jpg", ts, Some("chatora"), &detections)
