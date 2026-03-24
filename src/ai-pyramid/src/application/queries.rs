@@ -57,4 +57,11 @@ impl EventQueries {
     pub async fn captions_for_date(&self, date: &str) -> AppResult<Vec<String>> {
         self.repository.captions_for_date(date).await
     }
+
+    pub async fn list_photos_without_detections(
+        &self,
+        limit: i64,
+    ) -> AppResult<Vec<EventSummary>> {
+        self.repository.list_photos_without_detections(limit).await
+    }
 }
