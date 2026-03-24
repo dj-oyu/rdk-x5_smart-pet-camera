@@ -27,7 +27,7 @@ YOLO検出(5秒連続) → Go comic生成 → SD一時保存
 
 [配信フロー]
 Browser
-  └─ https://rdk-x5:8080
+  └─ https://<camera-host>:8080
        ├─ Preact SPA（映像・YOLO検出・軌跡）
        └─ <iframe src="https://<album-host>:8090/album">
             └─ AI Pyramid Proが完全にレンダリングしたアルバムUI
@@ -431,7 +431,7 @@ comic_YYYYMMDD_HHMMSS.jpg             # 旧形式 (後方互換)
 # Usage: systemctl start comic-sync (systemdで自動起動)
 
 WATCH_DIR="${RECORDING_PATH:-./recordings}/comics"
-REMOTE_HOST="m5stack-ai-pyramid"
+REMOTE_HOST="<album-host>"
 REMOTE_DIR="data/photos"
 LOG_TAG="comic-sync"
 
@@ -525,8 +525,8 @@ graph TD
 **Tailscale SSH セットアップ（初回のみ）:**
 ```bash
 # RDK X5 で実行
-tailscale ssh m5stack-ai-pyramid    # 初回接続で認証
-ssh m5stack-ai-pyramid "mkdir -p data/photos"  # 受信ディレクトリ作成
+tailscale ssh <album-host>    # 初回接続で認証
+ssh <album-host> "mkdir -p data/photos"  # 受信ディレクトリ作成
 ```
 
 **障害時のフォールバック:**
@@ -534,7 +534,7 @@ ssh m5stack-ai-pyramid "mkdir -p data/photos"  # 受信ディレクトリ作成
 - ネットワーク断: 同上。復旧後に inotifywait は新規ファイルを検知して再送
 - 大量蓄積時: RDK X5 復旧時に手動一括同期も可能:
   ```bash
-  rsync -a --remove-source-files recordings/comics/ m5stack-ai-pyramid:data/photos/
+  rsync -a --remove-source-files recordings/comics/ <album-host>:data/photos/
   ```
 
 #### 4.2 AI Pyramid Pro HTTPS化

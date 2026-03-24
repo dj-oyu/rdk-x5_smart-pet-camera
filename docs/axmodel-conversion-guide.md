@@ -195,7 +195,7 @@ pulsar2 llm_build \
 ```bash
 # AI Pyramid Pro にaxmodelを転送
 rsync -avz Qwen/Qwen3-VL-2B-w8a16/ \
-  m5stack-ai-pyramid:/opt/models/qwen3-vl-2b/
+  <album-host>:/opt/models/qwen3-vl-2b/
 ```
 
 ### 4.2 tokenizerサーバー起動

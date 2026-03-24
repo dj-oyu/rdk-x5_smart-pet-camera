@@ -4,7 +4,7 @@
 
 ```mermaid
 graph TD
-    RDK["rdk-x5<br/>(Go streaming_server)"]
+    RDK["camera<br/>(Go streaming_server)"]
     RSYNC["rsync<br/>(Tailscale SSH)"]
     INGEST_API["POST /api/photos/ingest"]
     WATCHER["PhotoWatcher<br/>(fsnotify)"]
