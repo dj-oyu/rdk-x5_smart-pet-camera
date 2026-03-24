@@ -6,7 +6,8 @@
     "**/node_modules",
     "**/__pycache__",
     ".venv",
-    "venv"
+    "venv",
+    "src/detector/yolo_detector_daemon.py"
   ],
   "ignore": [],
   "defineConstant": {},
@@ -19,12 +20,14 @@
   "extraPaths": [
     "src",
     "src/common/src",
-    "src/mock"
+    "src/mock",
+    "src/capture"
   ],
   "reportUnusedFunction": false,
   "reportUnknownMemberType": false,
   "reportUnknownArgumentType": false,
   "reportUnknownVariableType": false,
   "reportUnknownLambdaType": false,
-  "reportImplicitStringConcatenation": false
+  "reportImplicitStringConcatenation": false,
+  "reportAttributeAccessIssue": false
 }

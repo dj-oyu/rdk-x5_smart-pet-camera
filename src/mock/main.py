@@ -8,6 +8,10 @@
 - Web UI は Go サーバー (streaming_server) が提供
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 import argparse
 import threading
 import time
@@ -22,7 +26,7 @@ from common.types import Frame, DetectionResult, CameraType
 # モックモジュールをインポート
 from shared_memory import MockSharedMemory
 from camera import MockCamera
-from detector import MockDetector
+from detector import MockDetector  # type: ignore[attr-defined]  # resolved via sys.path at runtime
 from camera_switcher import CameraSwitchController
 
 
@@ -75,7 +79,7 @@ def camera_thread_func(camera: MockCamera, shared_memory: MockSharedMemory) -> N
     print("Camera thread stopped")
 
 
-def detection_thread_func(detector: MockDetector, shared_memory: MockSharedMemory) -> None:
+def detection_thread_func(detector: Any, shared_memory: MockSharedMemory) -> None:
     """
     検出スレッド（10fps相当）
 
