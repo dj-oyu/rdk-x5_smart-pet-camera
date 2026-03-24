@@ -13,7 +13,9 @@ import signal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "common" / "src"))
 
+from common.types import DetectionDict
 from real_shared_memory import RealSharedMemory
 
 # Detection classes
@@ -27,7 +29,7 @@ CLASS_PROBS = {
 }
 
 
-def generate_dummy_detections(frame_width: int, frame_height: int, num_detections: int | None = None) -> list[dict[str, object]]:
+def generate_dummy_detections(frame_width: int, frame_height: int, num_detections: int | None = None) -> list[DetectionDict]:
     """Generate dummy detection results with random variations"""
     if num_detections is None:
         # Randomly decide number of detections (0-3)
