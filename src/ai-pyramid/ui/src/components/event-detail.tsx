@@ -2,6 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import {
   fetchDetections,
   updateDetectionOverride,
+  updatePhotoPetId,
   photoUrl,
   type Detection,
   type EventSummary,
@@ -41,6 +42,8 @@ export function EventDetail({ event, onClose }: Props) {
   const [detections, setDetections] = useState<Detection[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [editingPetId, setEditingPetId] = useState(false);
+  const [currentPetId, setCurrentPetId] = useState(event.pet_id);
 
   useEffect(() => {
     let cancelled = false;
@@ -64,6 +67,13 @@ export function EventDetail({ event, onClose }: Props) {
         prev.map((d) => (d.id === detId ? { ...d, pet_id_override: petId } : d))
       );
       setEditingId(null);
+    });
+  }
+
+  function handlePhotoPetId(petId: string) {
+    updatePhotoPetId(event.source_filename, petId).then(() => {
+      setCurrentPetId(petId);
+      setEditingPetId(false);
     });
   }
 
@@ -120,7 +130,39 @@ export function EventDetail({ event, onClose }: Props) {
         <div class="detail-info">
           <p class="detail-caption">{event.summary ?? "No summary"}</p>
           <div class="detail-meta">
-            <span>{event.pet_id ?? "unknown"}</span>
+            <span class="detail-pet-id">
+              {editingPetId ? (
+                <span class="pet-select">
+                  {PET_OPTIONS.map((opt) => (
+                    <button
+                      type="button"
+                      class={`pet-opt ${currentPetId === opt ? "selected" : ""}`}
+                      onClick={() => handlePhotoPetId(opt)}
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    class="pet-opt cancel"
+                    onClick={() => setEditingPetId(false)}
+                  >
+                    ✕
+                  </button>
+                </span>
+              ) : (
+                <>
+                  {currentPetId ?? "unknown"}
+                  <button
+                    type="button"
+                    class="detection-edit"
+                    onClick={() => setEditingPetId(true)}
+                  >
+                    edit
+                  </button>
+                </>
+              )}
+            </span>
             <span class={`status-pill ${event.status}`}>{event.status}</span>
             <span>{event.behavior ?? ""}</span>
             <span>{new Date(event.observed_at).toLocaleString()}</span>
