@@ -1,7 +1,7 @@
 use crate::application::{
     ActivityStats, AppResult, EventQuery, EventSummary, SharedEventRepository,
 };
-use crate::db::Detection;
+use crate::db::{Detection, EditHistoryEntry};
 
 #[derive(Clone)]
 pub struct EventQueries {
@@ -44,6 +44,13 @@ impl EventQueries {
 
     pub async fn get_detections(&self, photo_id: i64) -> AppResult<Vec<Detection>> {
         self.repository.get_detections(photo_id).await
+    }
+
+    pub async fn get_edit_history(
+        &self,
+        since: Option<&str>,
+    ) -> AppResult<Vec<EditHistoryEntry>> {
+        self.repository.get_edit_history(since).await
     }
 
     pub async fn distinct_pet_ids(&self) -> AppResult<Vec<String>> {
