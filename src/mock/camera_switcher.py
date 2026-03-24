@@ -17,7 +17,7 @@ import time
 import numpy as np
 import cv2
 
-from common.types import CameraType, Frame
+from common.types import CameraType
 from shared_memory import MockSharedMemory
 from camera import MockCamera
 
@@ -217,7 +217,6 @@ class CameraSwitchController:
 
             active_id = self._active_camera_id
             day_avg = self._average_brightness(0)
-            night_avg = self._average_brightness(1)
 
             if active_id == 0:
                 if day_avg is None:

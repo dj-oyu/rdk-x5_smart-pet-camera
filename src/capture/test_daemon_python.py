@@ -17,7 +17,6 @@ Options:
 import argparse
 import time
 import sys
-import os
 from pathlib import Path
 
 # Add parent directory to path to import real_shared_memory
