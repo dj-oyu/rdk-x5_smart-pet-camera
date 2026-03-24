@@ -76,10 +76,13 @@ export function useSidebar() {
       const rows = grid.length;
       const cols = grid[0].length;
       // Softmax-style normalization: relative contrast within grid
+      // IR noise floor: mean≈0.015, max≈0.025. Only show when real diff exists.
       const maxV = Math.max(...grid.flat());
       const normalized = grid.map(row => row.map(v => {
-        if (maxV < 0.005) return 0;  // all near-zero → no heatmap
-        return Math.min(1, (v / maxV) ** 0.5);  // sqrt for gamma expansion
+        if (maxV < 0.04) return 0;  // below noise — suppress entire grid
+        const shifted = Math.max(0, v - 0.015);  // subtract noise floor
+        const shiftedMax = maxV - 0.015;
+        return shiftedMax > 0 ? Math.min(1, (shifted / shiftedMax) ** 0.5) : 0;
       }));
       // Map ROI grid cells to canvas coordinates (ROI covers part of 1280x720)
       const frameW = 1280;
