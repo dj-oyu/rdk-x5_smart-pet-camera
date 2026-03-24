@@ -70,6 +70,11 @@ class HWPreprocessor(Preprocessor):
         except OSError as e:
             logging.getLogger(__name__).warning("HWPreprocessor: failed to load %s: %s", lib_path, e)
 
+    @property
+    def is_available(self) -> bool:
+        """Whether the nano2D library was loaded successfully."""
+        return self._lib is not None
+
     def set_hb_mem_buffer(self, buf: HbMemGraphicBuffer) -> None:
         """Set the current frame's HbMemGraphicBuffer for GPU letterbox."""
         self._hb_buf = buf
