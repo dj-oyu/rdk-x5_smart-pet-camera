@@ -10,8 +10,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import argparse
 import threading
 import time
@@ -79,7 +77,7 @@ def camera_thread_func(camera: MockCamera, shared_memory: MockSharedMemory) -> N
     print("Camera thread stopped")
 
 
-def detection_thread_func(detector: Any, shared_memory: MockSharedMemory) -> None:
+def detection_thread_func(detector: MockDetector, shared_memory: MockSharedMemory) -> None:  # type: ignore[name-defined]
     """
     検出スレッド（10fps相当）
 

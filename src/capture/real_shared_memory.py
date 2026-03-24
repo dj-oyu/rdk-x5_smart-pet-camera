@@ -25,7 +25,9 @@ from ctypes import (
     addressof,
 )
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
+
+from common.types import DetectionDict
 
 # Load librt for semaphore operations
 librt = None
@@ -265,7 +267,7 @@ class DetectionWriter:
             self.detection_fd = None
 
     def write_detection_result(
-        self, frame_number: int, timestamp_sec: float, detections: list[dict[str, Any]],
+        self, frame_number: int, timestamp_sec: float, detections: list[DetectionDict],
     ) -> None:
         if not self.detection_mmap:
             return

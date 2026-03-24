@@ -5,13 +5,17 @@ RDK X5用YOLO物体検出実装
 Ultralytics YOLOモデル（YOLOv13nなど）を使用した物体検出
 MockDetectorと同じインターフェースを提供
 """
+from __future__ import annotations
 
 import os
 import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional, TYPE_CHECKING
 import logging
+
+if TYPE_CHECKING:
+    from hb_mem_bindings import HbMemGraphicBuffer
 
 import cv2
 import numpy as np
@@ -66,7 +70,7 @@ class HWPreprocessor(Preprocessor):
         except OSError as e:
             logging.getLogger(__name__).warning("HWPreprocessor: failed to load %s: %s", lib_path, e)
 
-    def set_hb_mem_buffer(self, buf: Any) -> None:
+    def set_hb_mem_buffer(self, buf: HbMemGraphicBuffer) -> None:
         """Set the current frame's HbMemGraphicBuffer for GPU letterbox."""
         self._hb_buf = buf
 

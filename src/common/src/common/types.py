@@ -6,9 +6,24 @@ C実装との互換性を考慮した構造体定義
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, TypedDict
 from enum import Enum
 import time
+
+
+class BBoxDict(TypedDict):
+    """SHM書き込み用バウンディングボックス辞書"""
+    x: int
+    y: int
+    w: int
+    h: int
+
+
+class DetectionDict(TypedDict):
+    """SHM書き込み用検出結果辞書"""
+    class_name: str
+    confidence: float
+    bbox: BBoxDict
 
 
 class CameraType(Enum):
