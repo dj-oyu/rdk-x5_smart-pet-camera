@@ -171,8 +171,7 @@ func (s *Server) Handler() http.Handler {
 
 func handleConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	albumURL := os.Getenv("PET_ALBUM_URL")
-	fmt.Fprintf(w, `{"album_url":%q}`, albumURL)
+	fmt.Fprintf(w, `{"album_url":%q}`, albumBaseURL)
 }
 
 func (s *Server) handleDetectionHistory(w http.ResponseWriter, r *http.Request) {

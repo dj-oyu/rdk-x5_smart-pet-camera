@@ -7,7 +7,7 @@
 set -euo pipefail
 
 WATCH_DIR="${RECORDING_PATH:-./recordings}/comics"
-REMOTE_HOST="${PET_ALBUM_SSH_HOST:?PET_ALBUM_SSH_HOST is required}"
+REMOTE_HOST="${PET_ALBUM_HOST:?PET_ALBUM_HOST is required}"
 REMOTE_DIR="${PET_ALBUM_PHOTOS_DIR:-/app/smart-pet-camera/src/ai-pyramid/data/photos}"
 LOG_TAG="comic-sync"
 
