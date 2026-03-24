@@ -173,6 +173,13 @@ impl PhotoStore {
         )
     }
 
+    pub fn update_behavior(&self, filename: &str, behavior: &str) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE photos SET behavior = ?1 WHERE filename = ?2",
+            params![behavior, filename],
+        )
+    }
+
     /// Insert photo + detections atomically. Returns photo id.
     /// If photo already exists (by filename), adds detections to existing record.
     pub fn ingest_with_detections(

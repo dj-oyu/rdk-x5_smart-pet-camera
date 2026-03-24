@@ -196,6 +196,7 @@ async fn handle_photo_serve(
 struct PhotoUpdate {
     is_valid: Option<bool>,
     pet_id: Option<String>,
+    behavior: Option<String>,
 }
 
 async fn handle_photo_update(
@@ -249,10 +250,21 @@ async fn handle_photo_update(
         updated["pet_id"] = serde_json::json!(pet_id);
     }
 
-    if body.is_valid.is_none() && body.pet_id.is_none() {
+    if let Some(ref behavior) = body.behavior {
+        if let Err(e) = commands.update_behavior(&safe_name, behavior).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+        updated["behavior"] = serde_json::json!(behavior);
+    }
+
+    if body.is_valid.is_none() && body.pet_id.is_none() && body.behavior.is_none() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "is_valid or pet_id required"})),
+            Json(serde_json::json!({"error": "is_valid, pet_id, or behavior required"})),
         )
             .into_response();
     }

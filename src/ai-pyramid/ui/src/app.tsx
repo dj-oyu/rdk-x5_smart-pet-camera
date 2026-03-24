@@ -115,7 +115,9 @@ export function App() {
         {selectedEvent && (
           <EventDetail
             event={selectedEvent}
+            petNames={petNames}
             onClose={() => setSelectedEvent(null)}
+            onUpdated={() => setRefreshTick((c) => c + 1)}
           />
         )}
         <section class="secondary-stack">
@@ -172,7 +174,9 @@ export function App() {
       {selectedEvent && (
         <EventDetail
           event={selectedEvent}
+          petNames={petNames}
           onClose={() => setSelectedEvent(null)}
+          onUpdated={() => setRefreshTick((c) => c + 1)}
         />
       )}
     </main>
