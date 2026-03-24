@@ -138,16 +138,7 @@ func (cc *ComicCapture) run() {
 			return
 		case <-ticker.C:
 			if needsStitch := cc.tick(time.Now()); needsStitch {
-				// stitchAndSave runs outside cc.mu to avoid deadlock with stitcher goroutine
-				if len(cc.panels) > 0 && !cc.SkipStitch {
-					cc.stitchAndSave()
-				}
-				cc.mu.Lock()
-				cc.state = comicIdle
-				cc.panels = nil
-				cc.catFirstSeen = time.Time{}
-				log.Printf("[Comic] Session finished: %s", cc.sessionID)
-				cc.mu.Unlock()
+				cc.finalizeSession()
 			}
 		}
 	}
@@ -245,6 +236,11 @@ func (cc *ComicCapture) startCapturing(now time.Time) {
 
 func (cc *ComicCapture) finishCapturing() {
 	cc.prepareFinish()
+	cc.finalizeSession()
+}
+
+// finalizeSession runs stitch (if panels exist) and resets state. Must be called without cc.mu held.
+func (cc *ComicCapture) finalizeSession() {
 	if len(cc.panels) > 0 && !cc.SkipStitch {
 		cc.stitchAndSave()
 	}
@@ -313,10 +309,11 @@ func (cc *ComicCapture) capturePanel(now time.Time) {
 		return
 	}
 
-	// Classify pet color from bbox region
+	// Classify pet color from bbox region (scale detection coords to frame)
 	var petClass string
 	if cc.lastCatBBox != nil {
-		petClass = classifyPetColor(frame.Data, frame.Width, frame.Height, *cc.lastCatBBox)
+		scaledBBox := scaleBBoxToFrame(*cc.lastCatBBox)
+		petClass = classifyPetColor(frame.Data, frame.Width, frame.Height, scaledBBox)
 	}
 
 	// Snapshot all current YOLO detections
@@ -421,6 +418,15 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 	var pinner runtime.Pinner
 	defer pinner.Unpin()
 
+	// Find last YOLO bbox (non-motion, non-placeholder) for motion vector extrapolation
+	var lastYoloBBox *BoundingBox
+	for i := len(panels) - 1; i >= 0; i-- {
+		if panels[i].bbox != nil && !panels[i].motionHint && !panels[i].placeholder {
+			lastYoloBBox = panels[i].bbox
+			break
+		}
+	}
+
 	for i := 0; i < numPanels; i++ {
 		p := panels[i]
 		pinner.Pin(&p.nv12Data[0])
@@ -433,19 +439,52 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 
 		// Compute crop region
 		if p.bbox != nil && i > 0 {
+			// Detection bbox is in 1280x720 coordinate space (YOLO output).
+			// Scale to actual frame dimensions (e.g. 768x432 from VSE Ch2).
+			sb := scaleBBoxToFrame(*p.bbox)
+			bx, by, bw, bh := sb.X, sb.Y, sb.W, sb.H
+
 			var factor float64
 			if p.motionHint {
-				// Motion union bbox tracks object contour — tighter but with min margin
 				factor = 1.5 + rand.Float64()*0.5
 			} else if p.placeholder {
 				factor = 3.0 + rand.Float64()*1.0
 			} else {
 				factor = 1.3 + rand.Float64()*1.2
 			}
-			cx := p.bbox.X + p.bbox.W/2
-			cy := p.bbox.Y + p.bbox.H/2
-			expandW := int(float64(p.bbox.W) * factor)
-			expandH := int(float64(p.bbox.H) * factor)
+
+			cx := bx + bw/2
+			cy := by + bh/2
+
+			// Motion vector extrapolation: shift crop toward arrival side
+			if p.motionHint && lastYoloBBox != nil {
+				sYolo := scaleBBoxToFrame(*lastYoloBBox)
+				yoloCX := sYolo.X + sYolo.W/2
+				yoloCY := sYolo.Y + sYolo.H/2
+				cx += cx - yoloCX
+				cy += cy - yoloCY
+				// Clamp extrapolated center to frame bounds
+				if cx < 0 {
+					cx = 0
+				} else if cx >= p.width {
+					cx = p.width - 1
+				}
+				if cy < 0 {
+					cy = 0
+				} else if cy >= p.height {
+					cy = p.height - 1
+				}
+			}
+
+			expandW := int(float64(bw) * factor)
+			expandH := int(float64(bh) * factor)
+			// Ensure minimum crop size
+			if expandW < 64 {
+				expandW = 64
+			}
+			if expandH < 64 {
+				expandH = 64
+			}
 			x0, y0 := cx-expandW/2, cy-expandH/2
 			if x0 < 0 {
 				x0 = 0
@@ -458,6 +497,12 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 			}
 			if y0+expandH > p.height {
 				expandH = p.height - y0
+			}
+			if expandW < 2 {
+				expandW = 2
+			}
+			if expandH < 2 {
+				expandH = 2
 			}
 			cropRegions[i] = cropRegion{x0, y0, expandW, expandH}
 			cCrops[i] = C.comic_crop_t{
@@ -576,11 +621,13 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 		scaleY := float64(comicPanelH) / float64(cr.h)
 
 		for _, det := range p.detections {
+			// Scale detection bbox (1280x720) to frame coordinates
+			sd := scaleBBoxToFrame(det.BBox)
 			// Map frame bbox → comic coordinates
-			comicX := ox + int(float64(det.BBox.X-cr.x)*scaleX)
-			comicY := oy + int(float64(det.BBox.Y-cr.y)*scaleY)
-			comicW := int(float64(det.BBox.W) * scaleX)
-			comicH := int(float64(det.BBox.H) * scaleY)
+			comicX := ox + int(float64(sd.X-cr.x)*scaleX)
+			comicY := oy + int(float64(sd.Y-cr.y)*scaleY)
+			comicW := int(float64(sd.W) * scaleX)
+			comicH := int(float64(sd.H) * scaleY)
 
 			// Skip detections outside the crop region
 			if comicX+comicW < ox || comicX > ox+comicPanelW ||
@@ -693,20 +740,19 @@ func (cc *ComicCapture) CaptureComic(message string) (string, error) {
 	// Without a real detection, lastCatBBox would be nil → all panels use full frame.
 	// By setting a randomized bbox per panel, we get the same zoom/angle variety
 	// as auto-captured comics.
-	frame, ok := cc.src.LatestNV12()
-	if !ok {
+	if _, ok := cc.src.LatestNV12(); !ok {
 		return "", fmt.Errorf("no frame available from SHM")
 	}
-	fw, fh := frame.Width, frame.Height
 
+	// Generate bbox in detection coordinate space (1280x720) for consistency
+	// with auto-capture. doStitch applies scaleBBoxToFrame uniformly.
+	const detW, detH = 1280, 720
 	randomBBox := func() *BoundingBox {
 		// Bias toward center-left (cat food bowl area) with some variation.
-		// Base center: ~35-50% from left, ~40-60% from top
-		cx := fw*35/100 + rand.Intn(fw*15/100) // 35-50% X
-		cy := fh*40/100 + rand.Intn(fh*20/100) // 40-60% Y
-		// Random size (15-40% of frame)
-		bw := fw/7 + rand.Intn(fw/4)
-		bh := fh/7 + rand.Intn(fh/4)
+		cx := detW*35/100 + rand.Intn(detW*15/100) // 35-50% X
+		cy := detH*40/100 + rand.Intn(detH*20/100) // 40-60% Y
+		bw := detW/7 + rand.Intn(detW/4)
+		bh := detH/7 + rand.Intn(detH/4)
 		return &BoundingBox{
 			X: cx - bw/2,
 			Y: cy - bh/2,
@@ -822,4 +868,16 @@ func petDetection(det *DetectionResult) (*BoundingBox, string) {
 		}
 	}
 	return best, bestClass
+}
+
+// scaleBBoxToFrame converts detection bbox (1280x720) to MJPEG frame coordinates (768x432).
+// Both detection output and MJPEG VSE channel have fixed resolutions.
+// 768/1280 = 432/720 = 3/5, so we use integer multiply+divide.
+func scaleBBoxToFrame(bbox BoundingBox) BoundingBox {
+	return BoundingBox{
+		X: bbox.X * 3 / 5,
+		Y: bbox.Y * 3 / 5,
+		W: bbox.W * 3 / 5,
+		H: bbox.H * 3 / 5,
+	}
 }
