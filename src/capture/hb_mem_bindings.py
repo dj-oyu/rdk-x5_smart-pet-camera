@@ -639,6 +639,16 @@ class HbMemGraphicBuffer:
                     c_uint64(self._size[plane]),
                 )
 
+    @property
+    def virt_addr(self) -> list[int]:
+        """Virtual addresses per plane (read-only)."""
+        return self._virt_addr
+
+    @property
+    def plane_size(self) -> list[int]:
+        """Sizes per plane in bytes (read-only)."""
+        return self._size
+
     def get_plane_array(self, plane: int) -> np.ndarray:
         """
         Get a plane as a numpy array (zero-copy view).
@@ -777,6 +787,9 @@ def import_nv12_planes(
         raise
 
 
+_import_state: dict[str, bool] = {}
+
+
 def import_nv12_graph_buf(
     raw_buf_data: bytes,
     expected_plane_sizes: list[int],
@@ -805,35 +818,35 @@ def import_nv12_graph_buf(
         # Invalidate cache before reading
         buf.invalidate_cache()
 
-        y_vaddr = buf._virt_addr[0]
-        uv_vaddr = buf._virt_addr[1]
-        y_size = buf._size[0]
-        uv_size = buf._size[1]
+        y_vaddr = buf.virt_addr[0]
+        uv_vaddr = buf.virt_addr[1]
+        y_size = buf.plane_size[0]
+        uv_size = buf.plane_size[1]
 
         # One-time frame data diagnostic (first import only)
-        if not hasattr(import_nv12_graph_buf, '_diag_done'):
-            import_nv12_graph_buf._diag_done = True
+        if not _import_state.get("diag_done"):
+            _import_state["diag_done"] = True
             y_arr_diag = buf.get_plane_array(0)
-            y_mean = float(np.mean(y_arr_diag))
-            y_std = float(np.std(y_arr_diag))
+            y_mean = float(np.mean(y_arr_diag))  # type: ignore[attr-defined]
+            y_std = float(np.std(y_arr_diag))  # type: ignore[attr-defined]
             logger.debug(f"Frame data diagnostic: Y plane mean={y_mean:.1f}, std={y_std:.1f}")
 
         # Check if Y and UV planes are contiguous in virtual memory
         if uv_vaddr == y_vaddr + y_size:
             # Contiguous: create single NV12 view (zero-copy, no concatenate needed)
             nv12_size = y_size + uv_size
-            nv12_arr = np.ctypeslib.as_array(_get_array_type(nv12_size).from_address(y_vaddr))
+            nv12_arr = np.ctypeslib.as_array(_get_array_type(nv12_size).from_address(y_vaddr))  # type: ignore[attr-defined]
             uv_arr = nv12_arr[y_size:]  # slice view, no copy
-            if not hasattr(import_nv12_graph_buf, '_contiguous_logged'):
-                import_nv12_graph_buf._contiguous_logged = True
+            if not _import_state.get("contiguous_logged"):
+                _import_state["contiguous_logged"] = True
                 logger.debug(f"NV12 contiguous buffer: Y+UV={nv12_size} bytes, zero-copy view")
             y_arr = nv12_arr
         else:
             # Non-contiguous: separate views (fallback)
             y_arr = buf.get_plane_array(0)
             uv_arr = buf.get_plane_array(1)
-            if not hasattr(import_nv12_graph_buf, '_contiguous_logged'):
-                import_nv12_graph_buf._contiguous_logged = True
+            if not _import_state.get("contiguous_logged"):
+                _import_state["contiguous_logged"] = True
                 logger.debug(
                     f"NV12 non-contiguous buffer: Y@0x{y_vaddr:x}+{y_size}, "
                     f"UV@0x{uv_vaddr:x}+{uv_size} (will require concatenate)"

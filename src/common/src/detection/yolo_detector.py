@@ -96,6 +96,7 @@ class HWPreprocessor(Preprocessor):
             if phys_y and self._ensure_ctx(width, height, width, dst_h):
                 out_ptr = ctypes.c_void_p()
                 out_size = ctypes.c_size_t()
+                assert self._lib is not None
                 ret = self._lib.n2d_letterbox_process(
                     self._ctx, phys_y, phys_uv, stride,
                     ctypes.byref(out_ptr), ctypes.byref(out_size))
@@ -107,7 +108,7 @@ class HWPreprocessor(Preprocessor):
 
     def crop_roi(self, nv12_array: np.ndarray, width: int, height: int,
                  roi_x: int, roi_y: int, roi_w: int, roi_h: int) -> np.ndarray:
-        return self._detector._crop_nv12_roi(nv12_array, width, height, roi_x, roi_y, roi_w, roi_h)
+        return self._detector.crop_nv12_roi(nv12_array, width, height, roi_x, roi_y, roi_w, roi_h)
 
     def __del__(self) -> None:
         if self._ctx and self._lib:
@@ -128,7 +129,7 @@ def _fast_softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
 
 # hobot_dnn (RDK X5 BPU API)
 try:
-    from hobot_dnn import pyeasy_dnn as dnn
+    from hobot_dnn import pyeasy_dnn as dnn  # type: ignore[import-not-found]
 except ImportError:
     try:
         from hobot_dnn_rdkx5 import pyeasy_dnn as dnn
@@ -560,7 +561,7 @@ class YoloDetector:
             brightness_avg=brightness_avg,
         )
 
-    def _crop_nv12_roi(
+    def crop_nv12_roi(
         self,
         nv12_array: np.ndarray,
         width: int,
@@ -682,6 +683,7 @@ class YoloDetector:
                 cropped[roi_w * roi_h:] = 128  # UV=128
             else:
                 # CLAHEなし — 通常のROIクロップ
+                assert self.preprocessor is not None
                 cropped = self.preprocessor.crop_roi(
                     nv12_array, width, height, roi_x, roi_y, roi_w, roi_h
                 )
@@ -844,6 +846,7 @@ class YoloDetector:
             pad_top = pad_total // 2
             pad_bottom = pad_total - pad_top
 
+            assert self.preprocessor is not None
             input_tensor = self.preprocessor.letterbox(
                 nv12_array, width, height, pad_top, pad_bottom
             )
@@ -988,15 +991,16 @@ class YoloDetector:
         pad_top_uv = pad_top // 2
 
         # バッファ確保
-        self._lb_buf = np.empty(y_size_out + uv_size_out, dtype=np.uint8)
+        buf = np.empty(y_size_out + uv_size_out, dtype=np.uint8)  # type: ignore[attr-defined]
+        self._lb_buf = buf
 
         # Y平面のview
-        y_out = self._lb_buf[:y_size_out].reshape(new_height, width)
+        y_out = buf[:y_size_out].reshape(new_height, width)
         y_out[:pad_top, :] = 16               # 上部黒帯 (Y=16)
         y_out[pad_top + height :, :] = 16     # 下部黒帯
 
         # UV平面のview
-        uv_out = self._lb_buf[y_size_out:].reshape(uv_height_out, width)
+        uv_out = buf[y_size_out:].reshape(uv_height_out, width)
         uv_out[:pad_top_uv, :] = 128                              # 上部中間値
         uv_out[pad_top_uv + height // 2 :, :] = 128               # 下部中間値
 
@@ -1036,6 +1040,10 @@ class YoloDetector:
 
         y_size_in = width * height
         uv_size_in = width * (height // 2)
+
+        assert self._lb_buf is not None
+        assert self._lb_y_dst is not None
+        assert self._lb_uv_dst is not None
 
         # Y平面をコピー先viewに直接書き込み
         y_in = nv12_array[:y_size_in].reshape(height, width)
