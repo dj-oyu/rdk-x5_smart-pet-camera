@@ -758,15 +758,18 @@ class YoloDetectorDaemon:
                                         )
                                         bdiff = cv2.absdiff(small_denoised, small_base)
                                         bdiff = cv2.GaussianBlur(bdiff, (5, 5), 0)
-                                        base_noise_floor = max(15, int(self._noise_sigma * 3))
+                                        base_noise_floor = max(20, int(self._noise_sigma * 4))
                                         bdiff[bdiff < base_noise_floor] = 0
                                         # Mask border (outer 5%) — IR LED illumination unevenness
                                         b = 16
                                         bdiff[:b, :] = 0; bdiff[-b:, :] = 0
                                         bdiff[:, :b] = 0; bdiff[:, -b:] = 0
                                         nz_ratio = cv2.countNonZero(bdiff) / (320 * 320)
-                                        if nz_ratio > 0.003:
+                                        if nz_ratio > 0.01:  # 1% — stricter than frame_diff
                                             motion_detected_this_frame = True
+                                        # Diagnostic log (every 300 frames)
+                                        if fp % 300 == 0:
+                                            logger.info(f"base_diff {rkey}: nz={nz_ratio:.4f} floor={base_noise_floor}")
 
                                     self._prev_roi_small[rkey] = small_denoised
                                     m_hb_buf.release()
