@@ -34,6 +34,7 @@ type Server struct {
 	detectionBroadcaster  *DetectionBroadcaster
 	statusBroadcaster     *StatusBroadcaster
 	connectionBroadcaster *ConnectionBroadcaster
+	heatmapBroadcaster    *HeatmapBroadcaster
 	comicCapture          *ComicCapture
 	detectionHistory      *DetectionHistory
 
@@ -111,6 +112,10 @@ func NewServer(cfg Config) *Server {
 		detectionHistory.Record(det)
 	})
 
+	// Start heatmap broadcaster (watches base_diff grid file from Python detector)
+	heatmapBroadcaster := NewHeatmapBroadcaster("/tmp/base_diff_grid.json")
+	heatmapBroadcaster.Start()
+
 	// Initialize comic capture with its own SHM reader (independent version tracking)
 	var comicCapture *ComicCapture
 	if comicShm, err := newSHMReader(cfg.FrameShmName, cfg.DetectionShmName); err == nil {
@@ -131,6 +136,7 @@ func NewServer(cfg Config) *Server {
 		detectionBroadcaster:  detectionBroadcaster,
 		statusBroadcaster:     statusBroadcaster,
 		connectionBroadcaster: connectionBroadcaster,
+		heatmapBroadcaster:    heatmapBroadcaster,
 		comicCapture:          comicCapture,
 		detectionHistory:      detectionHistory,
 		mjpegStreams:          make(map[string]mjpegStreamEntry),
@@ -164,6 +170,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/comic-capture", s.handleComicCaptureNow)
 	mux.HandleFunc("/api/detections/history", s.handleDetectionHistory)
 	mux.HandleFunc("/api/base_diff", s.handleBaseDiff)
+	mux.HandleFunc("/api/base_diff/stream", s.handleBaseDiffStream)
 	mux.HandleFunc("/api/config", handleConfig)
 
 	return mux
@@ -188,6 +195,12 @@ func (s *Server) handleBaseDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Write(data)
+}
+
+func (s *Server) handleBaseDiffStream(w http.ResponseWriter, r *http.Request) {
+	id, eventCh := s.heatmapBroadcaster.Subscribe()
+	defer s.heatmapBroadcaster.Unsubscribe(id)
+	streamHeatmapEventsFromChannel(w, r, eventCh)
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -587,6 +600,9 @@ func (s *Server) handleConnectionsStream(w http.ResponseWriter, r *http.Request)
 
 // Shutdown stops background goroutines and persists state.
 func (s *Server) Shutdown() {
+	if s.heatmapBroadcaster != nil {
+		s.heatmapBroadcaster.Stop()
+	}
 	if s.comicCapture != nil {
 		s.comicCapture.Stop()
 	}
