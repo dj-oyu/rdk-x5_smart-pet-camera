@@ -798,6 +798,11 @@ class YoloDetectorDaemon:
         # Stats
         self.stats["frames_processed"] += 1
         self.stats["avg_inference_time_ms"] = timing["total"] * 1000
+        for k in ("preprocessing", "inference", "postprocessing"):
+            self.stats.setdefault(f"_sum_{k}", 0.0)
+            self.stats.setdefault(f"_cnt_{k}", 0)
+            self.stats[f"_sum_{k}"] += timing.get(k, 0.0) * 1000
+            self.stats[f"_cnt_{k}"] += 1
         if self.night_roi_mode and len(self.night_roi_regions) > 0:
             if cycle_complete:
                 self.stats["total_detections"] += len(detection_dicts)
@@ -1192,6 +1197,12 @@ class YoloDetectorDaemon:
         self.stats["frames_processed"] += 1
         timing = self.detector.get_last_timing()
         self.stats["avg_inference_time_ms"] = timing["total"] * 1000
+        if run_yolo:
+            for k in ("preprocessing", "inference", "postprocessing"):
+                self.stats.setdefault(f"_sum_{k}", 0.0)
+                self.stats.setdefault(f"_cnt_{k}", 0)
+                self.stats[f"_sum_{k}"] += timing.get(k, 0.0) * 1000
+                self.stats[f"_cnt_{k}"] += 1
         if run_yolo:
             for d in detection_dicts:
                 if d.class_name == "motion":
