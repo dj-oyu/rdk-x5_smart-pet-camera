@@ -47,7 +47,7 @@ impl Default for VlmConfig {
     fn default() -> Self {
         Self {
             base_url: "http://localhost:8000".into(),
-            model: "qwen3-vl-2B-Int4-ax650".into(),
+            model: "AXERA-TECH/Qwen3-VL-2B-Instruct-GPTQ-Int4-C256-P3584-CTX4095".into(),
             max_tokens: 128,
             timeout: Duration::from_secs(30),
         }

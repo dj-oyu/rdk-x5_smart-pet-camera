@@ -11,6 +11,7 @@ MODE="artifact"
 PHOTOS_DIR="data/photos"
 DB_PATH="data/pet-album.db"
 VLM_URL="http://localhost:8000"
+VLM_MODEL="AXERA-TECH/Qwen3-VL-2B-Instruct-GPTQ-Int4-C256-P3584-CTX4095"
 UI_DIR="ui"
 UI_BUILD_SCRIPT="build"
 EXTRA=()
@@ -78,4 +79,5 @@ exec "$BIN" \
   --photos-dir "$PHOTOS_DIR" \
   --db-path "$DB_PATH" \
   --vlm-url "$VLM_URL" \
+  --vlm-model "$VLM_MODEL" \
   "${EXTRA[@]}"

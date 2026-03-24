@@ -48,6 +48,14 @@ ai-pyramid配下の変更をマージしたら、必ず以下を実行:
 - Memory: 8GB LPDDR4x → **System 2GB + CMM 6GB** (HWアクセラレーション用)
 - Storage: eMMC 32GB + microSD
 
+## VLM推論 (axllm)
+- バックエンド: **axllm serve** (AXERA-TECH公式, StackFlowから移行済み)
+- モデル: `Qwen3-VL-2B-Instruct-GPTQ-Int4-C256-P3584-CTX4095` (3.1GB, CMM 2,887MB)
+- 速度: **9.2 tok/s** (画像+テキスト), TTFT 352ms (画像)
+- コンテキスト長: 3,584 tokens
+- API: OpenAI互換 `POST /v1/chat/completions` on port 8000
+- systemd: `axllm-serve.service` (enabled)
+
 ## Architecture
 ```
 src/ai-pyramid/
@@ -98,3 +106,4 @@ src/ai-pyramid/
 | `docs/pet-album-spec.md` | Album feature spec |
 | `docs/vlm_integration_spec.md` | VLM behavior analysis spec |
 | `docs/detections-integration.md` | YOLO detection → ai-pyramid 連携仕様 |
+| `docs/vlm-optimization.md` | VLM呼び出し最適化レポート (axllmベンチマーク) |

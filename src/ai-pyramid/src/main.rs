@@ -33,7 +33,7 @@ struct Args {
     #[arg(long, default_value = "http://localhost:8000")]
     vlm_url: String,
 
-    #[arg(long, default_value = "qwen3-vl-2B-Int4-ax650")]
+    #[arg(long, default_value = "AXERA-TECH/Qwen3-VL-2B-Instruct-GPTQ-Int4-C256-P3584-CTX4095")]
     vlm_model: String,
 
     #[arg(long, default_value_t = 128)]
