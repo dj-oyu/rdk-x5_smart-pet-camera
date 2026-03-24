@@ -308,17 +308,19 @@ camera の YOLO detector daemon が HTTP エンドポイントを提供する。
 #### リクエスト
 
 ```
-POST http://<camera-host>:8083/detect
+POST https://${PET_CAMERA_HOST}:8083/detect
 Content-Type: application/json
 
 {
-  "image_url": "http://ai-pyramid:3000/api/photos/comic_20260321_104532_chatora.jpg"
+  "image_url": "https://${PET_ALBUM_HOST}:${PET_ALBUM_PORT}/api/photos/comic_20260321_104532_chatora.jpg"
 }
 ```
 
+- ホスト名は `.env` の `PET_CAMERA_HOST` / `PET_ALBUM_HOST` / `PET_ALBUM_PORT` を使用
 - ポート 8083 は Tailscale ACL `tcp:8080-8999` の範囲内
 - camera が `image_url` から JPEG をダウンロードして検出 (base64不要)
-- ai-pyramid の `GET /api/photos/{filename}` をそのまま指定可能
+- ai-pyramid の `GET /api/photos/{filename}` (HTTPS) をそのまま指定可能
+- `urlopen` は SSL 証明書を検証する — Tailscale cert は Let's Encrypt なので OK
 - 画像サイズ制限なし (内部で 640x640 にletterbox)
 - タイムアウト: 画像ダウンロード 10秒
 
@@ -396,10 +398,18 @@ HTTP GET image_url → JPEG bytes
 
 #### 手順 (ai-pyramid 実機上で実行)
 
+`.env` から環境変数を読み込んで実行する。
+
 ```bash
+# .env を読み込み
+set -a; source /app/smart-pet-camera/src/ai-pyramid/.env; set +a
+
 # 1. detections が空の photo を検索
 # 2. 各 photo を rdk-x5 で検出
 # 3. 結果を ingest API で DB に INSERT
+
+CAMERA_DETECT="https://${PET_CAMERA_HOST}:8083/detect"
+ALBUM_API="https://${PET_ALBUM_HOST}:${PET_ALBUM_PORT:-8082}"
 
 sqlite3 data/pet-album.db \
   "SELECT p.filename FROM photos p LEFT JOIN detections d ON d.photo_id=p.id WHERE d.id IS NULL" | \
@@ -407,9 +417,9 @@ while read f; do
   echo "Processing: $f"
 
   # rdk-x5 で検出 (camera が ai-pyramid から画像を直接ダウンロード)
-  DETECT=$(curl -sf -X POST http://<camera-host>:8083/detect \
+  DETECT=$(curl -sf -X POST "$CAMERA_DETECT" \
     -H 'Content-Type: application/json' \
-    -d "{\"image_url\":\"http://ai-pyramid:3000/api/photos/$f\"}")
+    -d "{\"image_url\":\"${ALBUM_API}/api/photos/$f\"}")
 
   [ -z "$DETECT" ] && echo "  SKIP (detect failed)" && continue
 
@@ -426,7 +436,7 @@ while read f; do
       detected_at: ($f | capture("comic_(?<d>[0-9]{8})_(?<t>[0-9]{6})") |
         "\(.d[0:4])-\(.d[4:6])-\(.d[6:8])T\(.t[0:2]):\(.t[2:4]):\(.t[4:6])")
     }]
-  }' | curl -sf -X POST http://localhost:3000/api/photos/ingest \
+  }' | curl -sf -X POST "${ALBUM_API}/api/photos/ingest" \
     -H 'Content-Type: application/json' -d @- > /dev/null
 
   echo "  OK ($(echo "$DETECT" | jq '.detections | length') detections)"
@@ -441,3 +451,4 @@ done
 - `jq` が必要 (`apt install jq`)
 - camera の detector daemon が起動中である必要あり
 - `sleep 0.2` で BPU 負荷を分散 (リアルタイム検出への影響軽減)
+- detect API の `urlopen` は HTTPS 証明書を検証する — Tailscale cert (Let's Encrypt) なので問題なし
