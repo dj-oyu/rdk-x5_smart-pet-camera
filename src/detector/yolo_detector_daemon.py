@@ -780,9 +780,11 @@ class YoloDetectorDaemon:
                                         small_base = cv2.resize(
                                             base_u8, (320, 320), interpolation=cv2.INTER_AREA
                                         )
-                                        bdiff = cv2.absdiff(small_denoised, small_base)
-                                        bdiff = cv2.GaussianBlur(bdiff, (5, 5), 0)
+                                        bdiff_raw = cv2.absdiff(small_denoised, small_base)
+                                        bdiff_raw = cv2.GaussianBlur(bdiff_raw, (5, 5), 0)
+                                        # Thresholded version for motion trigger
                                         base_noise_floor = max(20, int(self._noise_sigma * 4))
+                                        bdiff = bdiff_raw.copy()
                                         bdiff[bdiff < base_noise_floor] = 0
                                         # Mask border (outer 5%) — IR LED illumination unevenness
                                         b = 16
@@ -794,14 +796,14 @@ class YoloDetectorDaemon:
                                         # Diagnostic log (every 300 frames)
                                         if fp % 300 == 0:
                                             logger.info(f"base_diff {rkey}: nz={nz_ratio:.4f} floor={base_noise_floor}")
-                                        # Update 16x16 heatmap grid for web UI
+                                        # Update 16x16 heatmap grid for web UI (raw diff, no threshold)
                                         grid_size = 16
                                         cell = 320 // grid_size  # 20px per cell
                                         grid = []
                                         for gy in range(grid_size):
                                             row = []
                                             for gx in range(grid_size):
-                                                cell_mean = float(bdiff[
+                                                cell_mean = float(bdiff_raw[
                                                     gy * cell:(gy + 1) * cell,
                                                     gx * cell:(gx + 1) * cell,
                                                 ].mean()) / 255.0
