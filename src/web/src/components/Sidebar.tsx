@@ -26,7 +26,7 @@ export function useSidebar() {
   const pointsRef = useRef<TrajectoryPoint[]>([]);
   const ganttRef = useRef<GanttRecord[]>([]);
   const lastKeyRef = useRef<string>('');
-  const heatmapRef = useRef<{ grid: number[][]; baseValid: boolean; roiX: number; roiY: number; roiW: number; roiH: number }>({ grid: [], baseValid: false, roiX: 0, roiY: 0, roiW: 1280, roiH: 720 });
+  const heatmapRef = useRef<{ grid: number[][]; baseValid: boolean }>({ grid: [], baseValid: false });
   const [legendEntries, setLegendEntries] = useState<[string, number][]>([]);
   const [ganttClasses, setGanttClasses] = useState<string[]>([]);
 
@@ -39,14 +39,7 @@ export function useSidebar() {
         .then((r) => r.json())
         .then((data) => {
           if (data.grid && data.grid.length > 0) {
-            heatmapRef.current = {
-              grid: data.grid,
-              baseValid: data.base_valid,
-              roiX: data.roi_x ?? 0,
-              roiY: data.roi_y ?? 0,
-              roiW: data.roi_w ?? 1280,
-              roiH: data.roi_h ?? 720,
-            };
+            heatmapRef.current = { grid: data.grid, baseValid: data.base_valid };
           }
         })
         .catch(() => {});
@@ -71,7 +64,7 @@ export function useSidebar() {
     ctx.clearRect(0, 0, width, height);
 
     // ── Draw base_diff heatmap as background ──
-    const { grid, baseValid, roiX, roiY, roiW, roiH } = heatmapRef.current;
+    const { grid, baseValid } = heatmapRef.current;
     if (baseValid && grid.length > 0) {
       const rows = grid.length;
       const cols = grid[0].length;
@@ -84,13 +77,8 @@ export function useSidebar() {
         const shiftedMax = maxV - 0.015;
         return shiftedMax > 0 ? Math.min(1, (shifted / shiftedMax) ** 0.5) : 0;
       }));
-      // Map ROI grid cells to canvas coordinates (ROI covers part of 1280x720)
-      const frameW = 1280;
-      const frameH = 720;
-      const cellW = (roiW / frameW * width) / cols;
-      const cellH = (roiH / frameH * height) / rows;
-      const offsetX = roiX / frameW * width;
-      const offsetY = roiY / frameH * height;
+      const cellW = width / cols;
+      const cellH = height / rows;
       for (let gy = 0; gy < rows; gy++) {
         for (let gx = 0; gx < cols; gx++) {
           const v = normalized[gy][gx];
@@ -99,7 +87,7 @@ export function useSidebar() {
           const g = Math.round(80 * (1 - v));
           const b = Math.round(255 * (1 - v));
           ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${0.2 + v * 0.6})`;
-          ctx.fillRect(offsetX + gx * cellW, offsetY + gy * cellH, cellW, cellH);
+          ctx.fillRect(gx * cellW, gy * cellH, cellW, cellH);
         }
       }
     }
