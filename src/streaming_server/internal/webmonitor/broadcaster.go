@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/color"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -1186,4 +1187,118 @@ func (cb *ConnectionBroadcaster) broadcastCounts() {
 		}
 	}
 	cb.mu.Unlock()
+}
+
+// ── HeatmapBroadcaster ──────────────────────────────────────────────
+
+// HeatmapBroadcaster watches a JSON file for changes and pushes updates to SSE clients.
+type HeatmapBroadcaster struct {
+	mu       sync.Mutex
+	clients  map[int]chan []byte
+	nextID   int
+	stop     chan struct{}
+	stopped  bool
+	filePath string
+	lastMod  time.Time
+}
+
+// NewHeatmapBroadcaster creates a broadcaster that watches filePath for mtime changes.
+func NewHeatmapBroadcaster(filePath string) *HeatmapBroadcaster {
+	return &HeatmapBroadcaster{
+		clients:  make(map[int]chan []byte),
+		stop:     make(chan struct{}),
+		filePath: filePath,
+	}
+}
+
+// Subscribe adds a new client and returns a channel for receiving heatmap events.
+func (hb *HeatmapBroadcaster) Subscribe() (int, <-chan []byte) {
+	hb.mu.Lock()
+	id := hb.nextID
+	hb.nextID++
+	ch := make(chan []byte, 2)
+	hb.clients[id] = ch
+	logger.Debug("HeatmapBroadcaster", "Client #%d subscribed (total clients: %d)", id, len(hb.clients))
+	hb.mu.Unlock()
+	return id, ch
+}
+
+// Unsubscribe removes a client.
+func (hb *HeatmapBroadcaster) Unsubscribe(id int) {
+	hb.mu.Lock()
+	if ch, ok := hb.clients[id]; ok {
+		close(ch)
+		delete(hb.clients, id)
+		logger.Debug("HeatmapBroadcaster", "Client #%d unsubscribed (remaining clients: %d)", id, len(hb.clients))
+	}
+	hb.mu.Unlock()
+}
+
+// Start begins the file-watching event loop.
+func (hb *HeatmapBroadcaster) Start() {
+	go hb.run()
+}
+
+// Stop halts the broadcaster.
+func (hb *HeatmapBroadcaster) Stop() {
+	hb.mu.Lock()
+	if !hb.stopped {
+		close(hb.stop)
+		hb.stopped = true
+	}
+	hb.mu.Unlock()
+}
+
+// GetClientCount returns the number of connected heatmap SSE clients.
+func (hb *HeatmapBroadcaster) GetClientCount() int {
+	hb.mu.Lock()
+	defer hb.mu.Unlock()
+	return len(hb.clients)
+}
+
+func (hb *HeatmapBroadcaster) run() {
+	logger.Info("HeatmapBroadcaster", "Starting heatmap broadcaster (file=%s, interval=67ms)", hb.filePath)
+	ticker := time.NewTicker(67 * time.Millisecond) // ~15fps
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-hb.stop:
+			return
+		case <-ticker.C:
+		}
+
+		hb.mu.Lock()
+		clientCount := len(hb.clients)
+		hb.mu.Unlock()
+
+		if clientCount == 0 {
+			continue
+		}
+
+		info, err := os.Stat(hb.filePath)
+		if err != nil || !info.ModTime().After(hb.lastMod) {
+			continue
+		}
+		hb.lastMod = info.ModTime()
+
+		data, err := os.ReadFile(hb.filePath)
+		if err != nil {
+			continue
+		}
+
+		hb.broadcast(data)
+	}
+}
+
+func (hb *HeatmapBroadcaster) broadcast(data []byte) {
+	hb.mu.Lock()
+	for _, ch := range hb.clients {
+		select {
+		case ch <- data:
+		default:
+			// Drop if client is slow
+		}
+	}
+	hb.mu.Unlock()
 }
