@@ -18,7 +18,8 @@ interface GanttRecord {
 const GANTT_WINDOW = 24 * 60 * 60; // 24 hours in seconds
 const GANTT_GAP_THRESHOLD = 30; // merge gaps shorter than 30s
 
-const ALBUM_URL = 'https://<album-host>:8082/app?embed=petcamera';
+const ALBUM_BASE = 'https://<album-host>:8082/app';
+const ALBUM_URL = `${ALBUM_BASE}?embed=petcamera`;
 
 export function useSidebar() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -338,7 +339,7 @@ export function AlbumView() {
       <div class="panel album-panel">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <h2>アルバム</h2>
-          <a href={ALBUM_URL} target="_blank" class="album-link" title="別タブで開く">↗</a>
+          <a href={ALBUM_BASE} target="_blank" class="album-link" title="別タブで開く">↗</a>
         </div>
         {albumOffline ? (
           <div class="album-offline">アルバムサービスに接続できません</div>
