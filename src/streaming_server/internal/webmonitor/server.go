@@ -164,8 +164,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/comic-capture", s.handleComicCaptureNow)
 	mux.HandleFunc("/api/detections/history", s.handleDetectionHistory)
 	mux.HandleFunc("/api/base_diff", s.handleBaseDiff)
+	mux.HandleFunc("/api/config", handleConfig)
 
 	return mux
+}
+
+func handleConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	albumURL := os.Getenv("PET_ALBUM_URL")
+	fmt.Fprintf(w, `{"album_url":%q}`, albumURL)
 }
 
 func (s *Server) handleDetectionHistory(w http.ResponseWriter, r *http.Request) {
