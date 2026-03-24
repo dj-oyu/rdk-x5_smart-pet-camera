@@ -640,3 +640,209 @@ func TestNoCatResetsContinuousTracking(t *testing.T) {
 		t.Fatal("should be capturing after 5s of continuous cat")
 	}
 }
+
+func motionDetection(version int, bboxes ...BoundingBox) *DetectionResult {
+	dets := make([]Detection, len(bboxes))
+	for i, bb := range bboxes {
+		dets[i] = Detection{ClassName: "motion", Confidence: 0.5, BBox: bb}
+	}
+	return &DetectionResult{
+		FrameNumber:   1,
+		Timestamp:     float64(time.Now().Unix()),
+		NumDetections: len(dets),
+		Version:       version,
+		Detections:    dets,
+	}
+}
+
+func TestMotionUnionBBox(t *testing.T) {
+	tests := []struct {
+		name   string
+		det    *DetectionResult
+		wantBB *BoundingBox
+	}{
+		{
+			name:   "nil detection",
+			det:    nil,
+			wantBB: nil,
+		},
+		{
+			name: "no motion entries",
+			det: &DetectionResult{
+				NumDetections: 1,
+				Detections:    []Detection{{ClassName: "cat", BBox: BoundingBox{10, 10, 50, 50}}},
+			},
+			wantBB: nil,
+		},
+		{
+			name:   "single motion bbox",
+			det:    motionDetection(1, BoundingBox{100, 200, 50, 60}),
+			wantBB: &BoundingBox{100, 200, 50, 60},
+		},
+		{
+			name: "union of two motion bboxes",
+			det: motionDetection(1,
+				BoundingBox{100, 200, 50, 60},
+				BoundingBox{130, 180, 40, 30},
+			),
+			wantBB: &BoundingBox{100, 180, 70, 80}, // min(100,130)=100, min(200,180)=180, max(150,170)=170, max(260,210)=260
+		},
+		{
+			name: "motion mixed with non-motion",
+			det: &DetectionResult{
+				NumDetections: 3,
+				Detections: []Detection{
+					{ClassName: "cat", BBox: BoundingBox{0, 0, 500, 500}},
+					{ClassName: "motion", BBox: BoundingBox{100, 100, 20, 20}},
+					{ClassName: "motion", BBox: BoundingBox{200, 200, 30, 30}},
+				},
+			},
+			wantBB: &BoundingBox{100, 100, 130, 130},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := motionUnionBBox(tt.det)
+			if tt.wantBB == nil {
+				if got != nil {
+					t.Fatalf("expected nil, got %v", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("expected non-nil bbox")
+			}
+			if *got != *tt.wantBB {
+				t.Fatalf("got %v, want %v", *got, *tt.wantBB)
+			}
+		})
+	}
+}
+
+func TestTickTracksMotionBBox(t *testing.T) {
+	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
+	cc := newTestComicCapture(src, t.TempDir())
+
+	now := time.Now()
+
+	// Cat detection → clears motion
+	src.setDetection(catDetection(1))
+	cc.tick(now)
+	if cc.lastMotionBBox != nil {
+		t.Fatal("motion should be nil when cat detected")
+	}
+
+	// Motion-only detection → tracks motion bbox
+	src.setDetection(motionDetection(2, BoundingBox{300, 200, 80, 60}))
+	cc.tick(now.Add(1 * time.Second))
+	if cc.lastMotionBBox == nil {
+		t.Fatal("motion bbox should be tracked")
+	}
+	if cc.lastMotionBBox.X != 300 || cc.lastMotionBBox.W != 80 {
+		t.Fatalf("unexpected motion bbox: %v", *cc.lastMotionBBox)
+	}
+
+	// Cat returns → clears motion
+	src.setDetection(catDetection(3))
+	cc.tick(now.Add(2 * time.Second))
+	if cc.lastMotionBBox != nil {
+		t.Fatal("motion should be cleared when cat detected")
+	}
+}
+
+func TestFillMissingPanelsUsesMotion(t *testing.T) {
+	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
+	cc := newTestComicCapture(src, t.TempDir())
+
+	now := time.Now()
+
+	// Simulate: capturing with 2 panels, then motion detected
+	cc.state = comicCapturing
+	cc.MaxPanels = 4
+	cc.panels = []capturedPanel{
+		{nv12Data: makeTestNV12(768, 432), width: 768, height: 432, bbox: &BoundingBox{100, 100, 200, 150}},
+		{nv12Data: makeTestNV12(768, 432), width: 768, height: 432, bbox: &BoundingBox{100, 100, 200, 150}},
+	}
+
+	// Set motion bbox
+	cc.lastMotionBBox = &BoundingBox{400, 300, 100, 80}
+	cc.lastMotionSeen = now.Add(-1 * time.Second) // 1 second ago
+
+	cc.fillMissingPanels(now)
+
+	if len(cc.panels) != 4 {
+		t.Fatalf("expected 4 panels, got %d", len(cc.panels))
+	}
+	for i := 2; i < 4; i++ {
+		p := cc.panels[i]
+		if !p.placeholder {
+			t.Fatalf("panel %d should be placeholder", i)
+		}
+		if !p.motionHint {
+			t.Fatalf("panel %d should have motionHint", i)
+		}
+		if p.bbox == nil || p.bbox.X != 400 {
+			t.Fatalf("panel %d should use motion bbox, got %v", i, p.bbox)
+		}
+	}
+}
+
+func TestFillMissingPanelsFallsBackToLastBBox(t *testing.T) {
+	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
+	cc := newTestComicCapture(src, t.TempDir())
+
+	now := time.Now()
+
+	cc.state = comicCapturing
+	cc.MaxPanels = 4
+	cc.panels = []capturedPanel{
+		{nv12Data: makeTestNV12(768, 432), width: 768, height: 432, bbox: &BoundingBox{100, 100, 200, 150}},
+		{nv12Data: makeTestNV12(768, 432), width: 768, height: 432, bbox: &BoundingBox{100, 100, 200, 150}},
+	}
+
+	// Motion too old (10 seconds ago)
+	cc.lastMotionBBox = &BoundingBox{400, 300, 100, 80}
+	cc.lastMotionSeen = now.Add(-10 * time.Second)
+
+	cc.fillMissingPanels(now)
+
+	for i := 2; i < 4; i++ {
+		p := cc.panels[i]
+		if p.motionHint {
+			t.Fatalf("panel %d should NOT have motionHint (stale motion)", i)
+		}
+		if p.bbox == nil || p.bbox.X != 100 {
+			t.Fatalf("panel %d should use last panel bbox, got %v", i, p.bbox)
+		}
+	}
+}
+
+func TestCapturePanelMotionFallback(t *testing.T) {
+	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
+	cc := newTestComicCapture(src, t.TempDir())
+
+	now := time.Now()
+
+	// YOLO cat seen 5 seconds ago (stale), motion 1 second ago (fresh)
+	cc.lastCatBBox = &BoundingBox{100, 100, 200, 150}
+	cc.lastCatSeen = now.Add(-5 * time.Second)
+	cc.lastMotionBBox = &BoundingBox{500, 400, 120, 90}
+	cc.lastMotionSeen = now.Add(-1 * time.Second)
+
+	src.setDetection(motionDetection(1, BoundingBox{500, 400, 120, 90}))
+	cc.tick(now) // consume detection
+
+	cc.capturePanel(now)
+
+	if len(cc.panels) != 1 {
+		t.Fatalf("expected 1 panel, got %d", len(cc.panels))
+	}
+	p := cc.panels[0]
+	if !p.motionHint {
+		t.Fatal("panel should have motionHint (YOLO stale, motion fresh)")
+	}
+	if p.bbox.X != 500 {
+		t.Fatalf("panel should use motion bbox, got X=%d", p.bbox.X)
+	}
+}

@@ -53,6 +53,26 @@ DetBbox = namedtuple('DetBbox', ['x', 'y', 'w', 'h'])
 DetDict = namedtuple('DetDict', ['class_name', 'confidence', 'bbox'])
 
 
+# Day camera motion detection zones (320x320, 3cols x 2rows, overlapping)
+# Zones cover the 640x360 frame with heavy overlap so any pet bbox position
+# maps to a zone that covers the surrounding area well.
+DAY_MOTION_ZONES: list[tuple[int, int, int, int]] = [
+    (0,   0,  320, 320),   # Z0: top-left      center=(160,160)
+    (160, 0,  320, 320),   # Z1: top-center     center=(320,160)
+    (320, 0,  320, 320),   # Z2: top-right      center=(480,160)
+    (0,   40, 320, 320),   # Z3: bottom-left    center=(160,200)
+    (160, 40, 320, 320),   # Z4: bottom-center  center=(320,200)
+    (320, 40, 320, 320),   # Z5: bottom-right   center=(480,200)
+]
+# Voronoi boundaries for O(1) zone selection (midpoints of zone centers)
+_DAY_ZONE_COL_BOUNDS = (240, 400)  # x boundaries between cols 0/1 and 1/2
+_DAY_ZONE_ROW_BOUND = 180          # y boundary between rows 0 and 1
+
+DAY_MOTION_TIMEOUT = 10.0    # seconds to keep tracking motion after pet lost
+DAY_MOTION_THRESH = 15       # pixel diff threshold (day camera has low noise)
+DAY_MOTION_MIN_AREA_RATIO = 0.005  # min contour area as fraction of zone area
+
+
 def _det_to_dict(d: 'DetDict') -> dict:
     """Convert a DetDict namedtuple to a plain dict for the SHM write boundary."""
     return {
@@ -236,6 +256,13 @@ class YoloDetectorDaemon:
         self._motion_roi_idx: int = -1  # which ROI had motion (-1=none/both)
         self._roi_grids: dict[str, list[list[float]]] = {}  # per-ROI heatmap grids
 
+        # Day camera motion detection state (320x320 zones, no resize)
+        self._day_prev_zone: np.ndarray | None = None   # previous zone crop (320x320 Y)
+        self._day_zone_current: np.ndarray | None = None  # current zone crop (set before hb_mem release)
+        self._day_active_zone: int = -1                  # active zone index (0-5)
+        self._day_last_pet_bbox: DetBbox | None = None   # last YOLO pet bbox (640x360 space)
+        self._day_pet_seen_at: float = 0.0               # timestamp of last pet detection
+
 
         # Night YOLO false positive filter (IR images cause frequent misdetections)
         self.night_fp_classes = {"toilet", "sink", "suitcase", "chair"}
@@ -245,6 +272,54 @@ class YoloDetectorDaemon:
         self.night_collect_count: int = 0
         self.night_collect_max: int = 500  # Max frames to collect per session
         self.night_collect_interval: int = 150  # Collect every N frames during motion
+
+    def _select_zone(self, bbox: 'DetBbox') -> int:
+        """Select the motion zone whose center is nearest to bbox center (Voronoi, O(1))."""
+        bcx = bbox.x + bbox.w // 2
+        bcy = bbox.y + bbox.h // 2
+        col = 0 if bcx < _DAY_ZONE_COL_BOUNDS[0] else (1 if bcx < _DAY_ZONE_COL_BOUNDS[1] else 2)
+        row = 0 if bcy < _DAY_ZONE_ROW_BOUND else 1
+        return row * 3 + col
+
+    def _detect_day_motion(self, current_zone: np.ndarray) -> list['DetDict']:
+        """Frame-diff motion detection on a 320x320 zone. No resize."""
+        if self._day_prev_zone is None:
+            self._day_prev_zone = current_zone
+            return []
+
+        zx, zy, _, _ = DAY_MOTION_ZONES[self._day_active_zone]
+
+        diff = cv2.absdiff(current_zone, self._day_prev_zone)
+        self._day_prev_zone = current_zone
+
+        diff = cv2.GaussianBlur(diff, (5, 5), 0)
+        _, thresh = cv2.threshold(diff, DAY_MOTION_THRESH, 255, cv2.THRESH_BINARY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        min_area = 320 * 320 * DAY_MOTION_MIN_AREA_RATIO
+        results: list[DetDict] = []
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < min_area:
+                continue
+            x, y, w, h = cv2.boundingRect(c)
+            results.append(DetDict(
+                class_name="motion",
+                confidence=min(1.0, area / (320 * 320 * 0.05)),
+                bbox=DetBbox(x=x + zx, y=y + zy, w=w, h=h),
+            ))
+        return results
+
+    def _reset_day_motion(self) -> None:
+        """Reset day motion detection state."""
+        self._day_prev_zone = None
+        self._day_zone_current = None
+        self._day_active_zone = -1
+        self._day_last_pet_bbox = None
+        self._day_pet_seen_at = 0.0
 
     @staticmethod
     def _crop_nv12_to_640(
@@ -623,6 +698,7 @@ class YoloDetectorDaemon:
                     self._prev_roi_small.clear()
                     self._diff_acc.clear()
                     self._last_brightness = -1.0
+                    self._reset_day_motion()
 
                 # Initialize scale factors on first frame (before any switch)
                 if self.scale_x is None or self.scale_y is None:
@@ -1139,6 +1215,16 @@ class YoloDetectorDaemon:
                     current_roi = -1
                     cycle_complete = True
 
+                # Day motion: crop active zone from Y plane before releasing buffer
+                if self.active_camera == 0 and self._day_active_zone >= 0:
+                    zx, zy, zw, zh = DAY_MOTION_ZONES[self._day_active_zone]
+                    y_plane = nv12_data[:zc_frame.width * zc_frame.height].reshape(
+                        zc_frame.height, zc_frame.width
+                    )
+                    self._day_zone_current = y_plane[zy:zy + zh, zx:zx + zw].copy()
+                else:
+                    self._day_zone_current = None
+
                 # Release zero-copy buffer
                 hb_mem_buffer.release()
 
@@ -1287,6 +1373,59 @@ class YoloDetectorDaemon:
                             detections=[_det_to_dict(d) for d in scaled_dicts],
                         )
                     detection_dicts = scaled_dicts
+
+                # Day motion detection: track pet bbox, detect motion when YOLO lost
+                if self.active_camera == 0 and cycle_complete:
+                    has_pet = any(
+                        d.class_name in ("cat", "dog") for d in detection_dicts
+                    )
+                    if has_pet:
+                        for d in detection_dicts:
+                            if d.class_name in ("cat", "dog"):
+                                # Track in pre-scale (640x360) space for zone selection
+                                self._day_last_pet_bbox = DetBbox(
+                                    x=int(d.bbox.x / self.scale_x),
+                                    y=int(d.bbox.y / self.scale_y),
+                                    w=int(d.bbox.w / self.scale_x),
+                                    h=int(d.bbox.h / self.scale_y),
+                                )
+                                self._day_pet_seen_at = time.time()
+                                self._day_active_zone = self._select_zone(
+                                    self._day_last_pet_bbox
+                                )
+                                break
+                        self._day_prev_zone = None  # reset diff on pet re-detection
+                    elif (
+                        self._day_last_pet_bbox is not None
+                        and (time.time() - self._day_pet_seen_at) < DAY_MOTION_TIMEOUT
+                        and self._day_zone_current is not None
+                    ):
+                        motion_dets = self._detect_day_motion(self._day_zone_current)
+                        if motion_dets:
+                            motion_scaled = [
+                                DetDict(
+                                    "motion",
+                                    d.confidence,
+                                    DetBbox(
+                                        int(d.bbox.x * self.scale_x),
+                                        int(d.bbox.y * self.scale_y),
+                                        int(d.bbox.w * self.scale_x),
+                                        int(d.bbox.h * self.scale_y),
+                                    ),
+                                )
+                                for d in motion_dets
+                            ]
+                            all_dets = list(detection_dicts) + motion_scaled
+                            self.detection_writer.write_detection_result(
+                                frame_number=zc_frame.frame_number,
+                                timestamp_sec=zc_frame.timestamp_sec,
+                                detections=[_det_to_dict(d) for d in all_dets],
+                            )
+                            if is_debug:
+                                logger.debug(
+                                    f"  day_motion: zone={self._day_active_zone} "
+                                    f"contours={len(motion_dets)}"
+                                )
 
                 # Update stats
                 self.stats["frames_processed"] += 1
