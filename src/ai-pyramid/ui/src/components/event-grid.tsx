@@ -77,30 +77,27 @@ export function EventGrid({ events, loading, error, petNames, onOpenEvent }: Eve
         // In standalone mode: no featured card, uniform grid
         const featured = embedded && index === 0;
         return (
-          <article class={`event-card ${event.status} ${featured ? "featured" : "history"}`} key={event.id}>
-            <a
-              href={photoUrl(event.source_filename)}
-              target="_blank"
-              rel="noreferrer"
-              onClick={(clickEvent) => {
-                clickEvent.preventDefault();
-                if (inIframe) {
-                  notifyParentLightbox(event);
-                } else {
-                  onOpenEvent(event);
-                }
-              }}
-            >
-              <div class="event-image-shell">
-                <img
-                  src={photoUrl(event.source_filename)}
-                  alt={event.summary ?? event.source_filename}
-                  loading={featured ? "eager" : "lazy"}
-                  fetchPriority={featured ? "high" : "auto"}
-                />
-                {featured && <FeaturedOverlay event={event} petNames={petNames} />}
-              </div>
-            </a>
+          <article
+            class={`event-card ${event.status} ${featured ? "featured" : "history"}`}
+            key={event.id}
+            onClick={() => {
+              if (inIframe) {
+                notifyParentLightbox(event);
+              } else {
+                onOpenEvent(event);
+              }
+            }}
+            style={{ cursor: "pointer" }}
+          >
+            <div class="event-image-shell">
+              <img
+                src={photoUrl(event.source_filename)}
+                alt={event.summary ?? event.source_filename}
+                loading={featured ? "eager" : "lazy"}
+                fetchPriority={featured ? "high" : "auto"}
+              />
+              {featured && <FeaturedOverlay event={event} petNames={petNames} />}
+            </div>
             <div class="event-card-body">
               <p class={`event-summary ${featured ? "featured-summary" : "history-summary"}`}>
                 {event.summary ?? "No summary yet."}
