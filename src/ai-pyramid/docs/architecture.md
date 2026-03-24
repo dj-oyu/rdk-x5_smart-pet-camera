@@ -4,7 +4,7 @@
 
 ```mermaid
 graph TD
-    RDK["rdk-x5<br/>(Go streaming_server)"]
+    RDK["camera<br/>(Go streaming_server)"]
     RSYNC["rsync<br/>(Tailscale SSH)"]
     INGEST_API["POST /api/photos/ingest"]
     WATCHER["PhotoWatcher<br/>(fsnotify)"]
@@ -262,8 +262,8 @@ SSE: `EventSource("/api/events")` でリアルタイム更新。
 ### TLS Auto-Detection
 
 以下のパスを順に検索:
-1. `/data/tailscale/certs/m5stack-ai-pyramid.tail848eb5.ts.net.{crt,key}`
-2. `../../m5stack-ai-pyramid.tail848eb5.ts.net.{crt,key}`
+1. `/data/tailscale/certs/<album-host>.{crt,key}`
+2. `../../<album-host>.{crt,key}`
 
 ---
 

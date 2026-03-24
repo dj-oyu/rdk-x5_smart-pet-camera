@@ -57,7 +57,7 @@ GET /mcp/photos/842
         "pet_album": {
           "enabled": true,
           "type": "http",
-          "url": "https://m5stack-ai-pyramid.tail848eb5.ts.net:8090/mcp",
+          "url": "https://<album-host>:8090/mcp",
           "deferred": false,
           "timeout": 30
         }

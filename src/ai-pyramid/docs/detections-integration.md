@@ -254,7 +254,7 @@ PET_NAME_CHATORA=チャトラ
 ### 使用箇所
 
 - ai-pyramid: アルバムUIでの表示名
-- rdk-x5 streaming_server: comic captureのタイムスタンプ表示 (将来)
+- camera streaming_server: comic captureのタイムスタンプ表示 (将来)
 
 ### 実装 (Future)
 
@@ -301,14 +301,14 @@ UV散布度閾値のキャリブレーションに使用できるテストデー
 
 detections API 導入前に保存された comic 画像には bbox 情報がない。これらの画像に対して後追いで YOLO 検出を実行し、detections テーブルに登録する。
 
-### rdk-x5 側仕様: `POST /detect` (port 8083)
+### camera 側仕様: `POST /detect` (port 8083)
 
-rdk-x5 の YOLO detector daemon が HTTP エンドポイントを提供する。デーモンのメインループ (SHM フレーム処理) と並行して動作。
+camera の YOLO detector daemon が HTTP エンドポイントを提供する。デーモンのメインループ (SHM フレーム処理) と並行して動作。
 
 #### リクエスト
 
 ```
-POST http://rdk-x5:8083/detect
+POST http://<camera-host>:8083/detect
 Content-Type: application/json
 
 {
@@ -317,7 +317,7 @@ Content-Type: application/json
 ```
 
 - ポート 8083 は Tailscale ACL `tcp:8080-8999` の範囲内
-- rdk-x5 が `image_url` から JPEG をダウンロードして検出 (base64不要)
+- camera が `image_url` から JPEG をダウンロードして検出 (base64不要)
 - ai-pyramid の `GET /api/photos/{filename}` をそのまま指定可能
 - 画像サイズ制限なし (内部で 640x640 にletterbox)
 - タイムアウト: 画像ダウンロード 10秒
@@ -406,8 +406,8 @@ sqlite3 data/pet-album.db \
 while read f; do
   echo "Processing: $f"
 
-  # rdk-x5 で検出 (rdk-x5 が ai-pyramid から画像を直接ダウンロード)
-  DETECT=$(curl -sf -X POST http://rdk-x5:8083/detect \
+  # rdk-x5 で検出 (camera が ai-pyramid から画像を直接ダウンロード)
+  DETECT=$(curl -sf -X POST http://<camera-host>:8083/detect \
     -H 'Content-Type: application/json' \
     -d "{\"image_url\":\"http://ai-pyramid:3000/api/photos/$f\"}")
 
@@ -439,5 +439,5 @@ done
 - `pet_class` = NULL (元フレームの NV12 がないため UV scatter 不可)
 - `panel_index` = NULL (backfill ではパネル情報なし)
 - `jq` が必要 (`apt install jq`)
-- rdk-x5 の detector daemon が起動中である必要あり
+- camera の detector daemon が起動中である必要あり
 - `sleep 0.2` で BPU 負荷を分散 (リアルタイム検出への影響軽減)

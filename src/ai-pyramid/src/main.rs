@@ -40,20 +40,16 @@ struct Args {
     vlm_max_tokens: u32,
 }
 
-const CERT_SEARCH_PATHS: &[&str] = &[
-    "/data/tailscale/certs/m5stack-ai-pyramid.tail848eb5.ts.net",
-    "../../m5stack-ai-pyramid.tail848eb5.ts.net", // repo root from src/ai-pyramid
-];
-
 fn find_tls_certs() -> Option<(PathBuf, PathBuf)> {
-    for base in CERT_SEARCH_PATHS {
-        let cert = PathBuf::from(format!("{base}.crt"));
-        let key = PathBuf::from(format!("{base}.key"));
-        if cert.exists() && key.exists() {
-            return Some((cert, key));
-        }
+    let cert = std::env::var("PET_ALBUM_TLS_CERT").ok()?;
+    let key = std::env::var("PET_ALBUM_TLS_KEY").ok()?;
+    let cert = PathBuf::from(cert);
+    let key = PathBuf::from(key);
+    if cert.exists() && key.exists() {
+        Some((cert, key))
+    } else {
+        None
     }
-    None
 }
 
 #[tokio::main]
