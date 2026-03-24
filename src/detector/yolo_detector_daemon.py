@@ -815,6 +815,21 @@ class YoloDetectorDaemon:
                                                 row.append(round(cell_mean, 3))
                                             grid.append(row)
                                         self._base_diff_grid = grid
+                                        # Write grid to file for Go server
+                                        try:
+                                            import json as _json
+                                            _json_str = _json.dumps({
+                                                "grid": grid,
+                                                "rows": grid_size,
+                                                "cols": grid_size,
+                                                "base_valid": True,
+                                                "quiet_frames": self._quiet_frames,
+                                            })
+                                            with open("/tmp/base_diff_grid.json.tmp", "w") as _f:
+                                                _f.write(_json_str)
+                                            Path("/tmp/base_diff_grid.json.tmp").replace("/tmp/base_diff_grid.json")
+                                        except Exception:
+                                            pass
 
                                     self._prev_roi_small[rkey] = small_denoised
                                     m_hb_buf.release()

@@ -35,7 +35,7 @@ export function useSidebar() {
     let active = true;
     const poll = () => {
       if (!active) return;
-      fetch(`http://${location.hostname}:8083/base_diff`)
+      fetch('/api/base_diff')
         .then((r) => r.json())
         .then((data) => {
           if (data.grid && data.grid.length > 0) {
@@ -68,18 +68,22 @@ export function useSidebar() {
     if (baseValid && grid.length > 0) {
       const rows = grid.length;
       const cols = grid[0].length;
+      // Softmax-style normalization: relative contrast within grid
+      const maxV = Math.max(...grid.flat());
+      const normalized = grid.map(row => row.map(v => {
+        if (maxV < 0.005) return 0;  // all near-zero → no heatmap
+        return Math.min(1, (v / maxV) ** 0.5);  // sqrt for gamma expansion
+      }));
       const cellW = width / cols;
       const cellH = height / rows;
       for (let gy = 0; gy < rows; gy++) {
         for (let gx = 0; gx < cols; gx++) {
-          const v = grid[gy][gx];
-          if (v < 0.001) continue;
-          // Cyan-to-red heatmap: low=cyan, high=red
-          const intensity = Math.min(v * 5, 1); // amplify for visibility
-          const r = Math.round(255 * intensity);
-          const g = Math.round(255 * (1 - intensity) * 0.5);
-          const b = Math.round(255 * (1 - intensity));
-          ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${0.15 + intensity * 0.45})`;
+          const v = normalized[gy][gx];
+          if (v < 0.05) continue;
+          const r = Math.round(255 * v);
+          const g = Math.round(80 * (1 - v));
+          const b = Math.round(255 * (1 - v));
+          ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${0.2 + v * 0.6})`;
           ctx.fillRect(gx * cellW, gy * cellH, cellW, cellH);
         }
       }

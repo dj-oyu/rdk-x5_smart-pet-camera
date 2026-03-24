@@ -163,6 +163,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/comics/", s.handleComicServe)
 	mux.HandleFunc("/api/comic-capture", s.handleComicCaptureNow)
 	mux.HandleFunc("/api/detections/history", s.handleDetectionHistory)
+	mux.HandleFunc("/api/base_diff", s.handleBaseDiff)
 
 	return mux
 }
@@ -171,6 +172,16 @@ func (s *Server) handleDetectionHistory(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 	records := s.detectionHistory.Records()
 	json.NewEncoder(w).Encode(records)
+}
+
+func (s *Server) handleBaseDiff(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	data, err := os.ReadFile("/tmp/base_diff_grid.json")
+	if err != nil {
+		w.Write([]byte(`{"grid":[],"rows":0,"cols":0,"base_valid":false,"quiet_frames":0}`))
+		return
+	}
+	w.Write(data)
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
