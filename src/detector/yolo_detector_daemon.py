@@ -945,8 +945,14 @@ class YoloDetectorDaemon:
                                             h=int(det.bbox.h * fc_scale),
                                         ),
                                     ))
+                                fc_classes = ",".join(d.class_name.value for d in fc_detections) or "none"
+                                logger.info(
+                                    f"focus_crop: roi={self._motion_roi_idx} "
+                                    f"center=({mcx},{mcy}) size={fc_sz} "
+                                    f"det={fc_classes}"
+                                )
                             except Exception as e:
-                                logger.debug(f"Focus crop failed: {e}")
+                                logger.info(f"Focus crop failed: {e}")
 
                         for buf in roi_hb_bufs:
                             buf.release()
