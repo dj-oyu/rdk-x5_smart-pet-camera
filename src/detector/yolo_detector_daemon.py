@@ -234,6 +234,7 @@ class YoloDetectorDaemon:
         # Focus crop state
         self._focus_crop_enabled: bool = True
         self._motion_roi_idx: int = -1  # which ROI had motion (-1=none/both)
+        self._roi_grids: dict[str, list[list[float]]] = {}  # per-ROI heatmap grids
 
 
         # Night YOLO false positive filter (IR images cause frequent misdetections)
@@ -791,19 +792,19 @@ class YoloDetectorDaemon:
                                                 ].mean()) / 255.0
                                                 row.append(round(cell_mean, 3))
                                             grid.append(row)
-                                        # Write grid to file for Go server
+                                        # Store per-ROI grid, write combined to file
+                                        self._roi_grids[rkey] = grid
                                         try:
                                             import json as _json
-                                            # ROI position in 1280x720 output space
-                                            roi_sx, roi_sy, roi_sw, _ = self.VSE_ROI_REGIONS[motion_roi_idx]
+                                            # Combine ROI grids side-by-side into full-frame grid
+                                            # ROI0=left 16cols, ROI1=right 16cols → 32 cols total
+                                            g0 = self._roi_grids.get("roi0", [[0.0]*grid_size]*grid_size)
+                                            g1 = self._roi_grids.get("roi1", [[0.0]*grid_size]*grid_size)
+                                            combined = [g0[r] + g1[r] for r in range(grid_size)]
                                             _json_str = _json.dumps({
-                                                "grid": grid,
+                                                "grid": combined,
                                                 "rows": grid_size,
-                                                "cols": grid_size,
-                                                "roi_x": int(roi_sx * (1280.0 / 1920.0)),
-                                                "roi_y": int(roi_sy * (720.0 / 1080.0)),
-                                                "roi_w": int(roi_sw * (1280.0 / 1920.0)),
-                                                "roi_h": int(roi_sw * (720.0 / 1080.0)),
+                                                "cols": grid_size * 2,
                                                 "base_valid": True,
                                                 "quiet_frames": self._quiet_frames,
                                             })
