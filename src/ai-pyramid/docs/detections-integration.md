@@ -308,17 +308,19 @@ camera の YOLO detector daemon が HTTP エンドポイントを提供する。
 #### リクエスト
 
 ```
-POST http://<camera-host>:8083/detect
+POST https://${PET_CAMERA_HOST}:8083/detect
 Content-Type: application/json
 
 {
-  "image_url": "http://ai-pyramid:3000/api/photos/comic_20260321_104532_chatora.jpg"
+  "image_url": "https://${PET_ALBUM_HOST}:${PET_ALBUM_PORT}/api/photos/comic_20260321_104532_chatora.jpg"
 }
 ```
 
+- ホスト名は `.env` の `PET_CAMERA_HOST` / `PET_ALBUM_HOST` / `PET_ALBUM_PORT` を使用
 - ポート 8083 は Tailscale ACL `tcp:8080-8999` の範囲内
 - camera が `image_url` から JPEG をダウンロードして検出 (base64不要)
-- ai-pyramid の `GET /api/photos/{filename}` をそのまま指定可能
+- ai-pyramid の `GET /api/photos/{filename}` (HTTPS) をそのまま指定可能
+- `urlopen` は SSL 証明書を検証する — Tailscale cert は Let's Encrypt なので OK
 - 画像サイズ制限なし (内部で 640x640 にletterbox)
 - タイムアウト: 画像ダウンロード 10秒
 
@@ -403,6 +405,8 @@ Standalone モードのサイドバーに「Run Backfill」ボタンがある。
 
 #### API からの実行
 
+`.env` から環境変数を読み込んで実行する。
+
 ```bash
 # backfill 開始
 curl -X POST http://localhost:3000/api/backfill
@@ -418,3 +422,4 @@ curl http://localhost:3000/api/backfill/status
 - `panel_index` = NULL (backfill ではパネル情報なし)
 - camera の detector daemon が起動中である必要あり
 - `sleep 0.2` で BPU 負荷を分散 (リアルタイム検出への影響軽減)
+- detect API の `urlopen` は HTTPS 証明書を検証する — Tailscale cert (Let's Encrypt) なので問題なし
