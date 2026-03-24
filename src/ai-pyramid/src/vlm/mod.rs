@@ -47,7 +47,7 @@ impl Default for VlmConfig {
     fn default() -> Self {
         Self {
             base_url: "http://localhost:8000".into(),
-            model: "qwen3-vl-2B-Int4-ax650".into(),
+            model: "AXERA-TECH/Qwen3-VL-2B-Instruct-GPTQ-Int4-C256-P3584-CTX4095".into(),
             max_tokens: 128,
             timeout: Duration::from_secs(30),
         }
@@ -177,7 +177,13 @@ impl VlmClient {
 
     /// Summarize a day's observations using text-only chat (no image, low NPU cost).
     pub async fn summarize_day(&self, captions: &[String]) -> Result<String, String> {
-        let observations = captions.join("\n- ");
+        // Limit to most recent 50 captions to stay within 3,584 token context
+        let recent: &[String] = if captions.len() > 50 {
+            &captions[captions.len() - 50..]
+        } else {
+            captions
+        };
+        let observations = recent.join("\n- ");
         let user_text = format!("Observations:\n- {observations}\n\n{DAY_SUMMARY_PROMPT}");
 
         let request = ChatRequest {
