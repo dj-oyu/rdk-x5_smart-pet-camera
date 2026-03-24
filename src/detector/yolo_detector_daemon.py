@@ -217,16 +217,19 @@ class YoloDetectorDaemon:
         self._roi_has_motion: bool = False  # Any ROI had motion recently
         self.motion_cooldown: int = 0  # Frames to skip after motion detected
 
-        # Base reference image state (per-ROI, 640x640 float32 EMA)
-        self._base_roi_y: dict[str, np.ndarray] = {}  # {"roi0": f32 EMA, "roi1": f32 EMA}
+        # Base reference image state (per-ROI, snapshot-based update)
+        self._base_roi_y: dict[str, np.ndarray] = {}  # {"roi0": f32 base, "roi1": f32 base}
+        self._snapshot_roi_y: dict[str, np.ndarray] = {}  # recent snapshot (640x640 float32)
         self._base_valid: dict[str, bool] = {}  # whether base image is usable per ROI
-        self._base_ema_count: dict[str, int] = {}  # EMA frames accumulated per ROI
+        self._base_init_count: dict[str, int] = {}  # initial EMA frames for first base build
         self._quiet_frames: int = 0  # consecutive frames with no motion AND no YOLO detection
         self._noise_sigma: float = 4.8  # pre-computed from recordings (NIR + H.265 noise)
         self._last_brightness: float = -1.0  # for brightness change detection
-        self.BASE_QUIET_THRESHOLD: int = 1800  # ~60s @ 30fps before base building starts
-        self.BASE_EMA_ALPHA: float = 0.02
-        self.BASE_EMA_MIN_FRAMES: int = 50  # min EMA frames before base_valid
+        self.BASE_QUIET_THRESHOLD: int = 1800  # ~60s @ 30fps for initial base build only
+        self.BASE_INIT_FRAMES: int = 50  # EMA frames for initial base
+        self.SNAPSHOT_INTERVAL: int = 300  # ~10s @ 30fps between snapshot updates
+        self.SNAPSHOT_BLEND_ALPHA: float = 0.05  # how fast base absorbs stable changes
+        self._snapshot_timer: int = 0  # frames since last snapshot
 
         # Focus crop state
         self._focus_crop_enabled: bool = True
@@ -635,8 +638,10 @@ class YoloDetectorDaemon:
                     # Reset base reference images on camera switch
                     self._base_roi_y.clear()
                     self._base_valid.clear()
-                    self._base_ema_count.clear()
+                    self._base_init_count.clear()
+                    self._snapshot_roi_y.clear()
                     self._quiet_frames = 0
+                    self._snapshot_timer = 0
                     self._prev_roi_small.clear()
                     self._diff_acc.clear()
                     self._last_brightness = -1.0
@@ -834,34 +839,59 @@ class YoloDetectorDaemon:
                     else:
                         self._quiet_frames += 1
 
-                    # ── EMA base image building during quiet ─────────
-                    if (
-                        self._quiet_frames >= self.BASE_QUIET_THRESHOLD
-                        and _y_denoised_for_base is not None
-                        and _rkey_for_base
-                    ):
+                    # ── Base image management (snapshot-based) ─────────
+                    if _y_denoised_for_base is not None and _rkey_for_base:
                         rk = _rkey_for_base
-                        if rk not in self._base_roi_y:
-                            self._base_roi_y[rk] = _y_denoised_for_base.astype(np.float32)
-                            self._base_ema_count[rk] = 1
+                        y_f32 = _y_denoised_for_base.astype(np.float32)
+
+                        if not self._base_valid.get(rk, False):
+                            # Phase 1: Initial base build (requires quiet)
+                            if self._quiet_frames >= self.BASE_QUIET_THRESHOLD:
+                                if rk not in self._base_roi_y:
+                                    self._base_roi_y[rk] = y_f32.copy()
+                                    self._base_init_count[rk] = 1
+                                else:
+                                    cv2.accumulateWeighted(
+                                        _y_denoised_for_base, self._base_roi_y[rk], 0.02
+                                    )
+                                    self._base_init_count[rk] = self._base_init_count.get(rk, 0) + 1
+                                if self._base_init_count.get(rk, 0) >= self.BASE_INIT_FRAMES:
+                                    self._base_valid[rk] = True
+                                    self._snapshot_roi_y[rk] = y_f32.copy()
+                                    self._snapshot_timer = 0
+                                    logger.info(f"Base image ready for {rk}")
                         else:
-                            cv2.accumulateWeighted(
-                                _y_denoised_for_base, self._base_roi_y[rk], self.BASE_EMA_ALPHA
-                            )
-                            self._base_ema_count[rk] = self._base_ema_count.get(rk, 0) + 1
-                        if (
-                            self._base_ema_count.get(rk, 0) >= self.BASE_EMA_MIN_FRAMES
-                            and not self._base_valid.get(rk, False)
-                        ):
-                            self._base_valid[rk] = True
-                            logger.info(f"Base image ready for {rk} (ema_count={self._base_ema_count[rk]})")
+                            # Phase 2: Snapshot-based update (no quiet required)
+                            self._snapshot_timer += 1
+
+                            # Take new snapshot periodically
+                            if self._snapshot_timer >= self.SNAPSHOT_INTERVAL:
+                                self._snapshot_roi_y[rk] = y_f32.copy()
+                                self._snapshot_timer = 0
+
+                            # Compare snapshot vs now: if stable, blend snapshot into base
+                            if rk in self._snapshot_roi_y:
+                                snap = self._snapshot_roi_y[rk]
+                                snap_u8 = np.clip(snap, 0, 255).astype(np.uint8)
+                                snap_diff = cv2.absdiff(_y_denoised_for_base, snap_u8)
+                                snap_diff = cv2.GaussianBlur(snap_diff, (5, 5), 0)
+                                snap_noise_floor = max(20, int(self._noise_sigma * 4))
+                                snap_diff[snap_diff < snap_noise_floor] = 0
+                                snap_stable = cv2.countNonZero(snap_diff) / snap_diff.size
+
+                                if snap_stable < 0.005:  # < 0.5%: scene stable since snapshot
+                                    cv2.accumulateWeighted(
+                                        snap_u8, self._base_roi_y[rk], self.SNAPSHOT_BLEND_ALPHA
+                                    )
 
                     # Brightness change detection — invalidate base on large ISP shifts
                     if self._last_brightness >= 0 and abs(zc_frame.brightness_avg - self._last_brightness) > 20:
                         self._base_roi_y.clear()
                         self._base_valid.clear()
-                        self._base_ema_count.clear()
+                        self._base_init_count.clear()
+                        self._snapshot_roi_y.clear()
                         self._quiet_frames = 0
+                        self._snapshot_timer = 0
                         logger.info("Base images cleared (brightness change)")
                     self._last_brightness = zc_frame.brightness_avg
 
