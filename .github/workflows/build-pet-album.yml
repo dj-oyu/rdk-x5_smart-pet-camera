@@ -38,8 +38,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src/ai-pyramid/target
-          key: aarch64-22.04-cargo-${{ hashFiles('src/ai-pyramid/Cargo.lock') }}
-          restore-keys: aarch64-22.04-cargo-
+          key: aarch64-22.04-cargo-${{ hashFiles('src/ai-pyramid/Cargo.lock') }}-ui-${{ hashFiles('src/ai-pyramid/ui/src/**', 'src/web/src/styles/album.css') }}
+          restore-keys: aarch64-22.04-cargo-${{ hashFiles('src/ai-pyramid/Cargo.lock') }}-ui-
+            aarch64-22.04-cargo-
 
       - name: Cache Bun
         uses: actions/cache@v4
@@ -57,6 +58,9 @@ jobs:
       - name: Build frontend
         working-directory: src/ai-pyramid/ui
         run: bun run build
+
+      - name: Invalidate embedded UI cache
+        run: cargo clean -p pet-album 2>/dev/null || true
 
       - name: Test
         run: cargo test
