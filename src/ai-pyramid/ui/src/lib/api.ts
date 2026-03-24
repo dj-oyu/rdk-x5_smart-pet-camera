@@ -155,6 +155,17 @@ export async function fetchDailySummary(date?: string): Promise<DailySummaryResp
   return response.json();
 }
 
+export async function updatePhotoPetId(sourceFilename: string, petId: string): Promise<void> {
+  const response = await fetch(`/api/photos/${encodeURIComponent(sourceFilename)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pet_id: petId }),
+  });
+  if (!response.ok) {
+    throw new Error(`failed to update pet_id: ${response.status}`);
+  }
+}
+
 export function readQueryFromLocation(): EventQuery {
   const params = new URLSearchParams(window.location.search);
   const rawStatus = params.get("is_valid");
