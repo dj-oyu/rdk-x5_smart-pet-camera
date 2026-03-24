@@ -26,8 +26,28 @@ export function useSidebar() {
   const pointsRef = useRef<TrajectoryPoint[]>([]);
   const ganttRef = useRef<GanttRecord[]>([]);
   const lastKeyRef = useRef<string>('');
+  const heatmapRef = useRef<{ grid: number[][]; baseValid: boolean }>({ grid: [], baseValid: false });
   const [legendEntries, setLegendEntries] = useState<[string, number][]>([]);
   const [ganttClasses, setGanttClasses] = useState<string[]>([]);
+
+  // Poll base_diff heatmap from detector API
+  useEffect(() => {
+    let active = true;
+    const poll = () => {
+      if (!active) return;
+      fetch(`http://${location.hostname}:8083/base_diff`)
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.grid && data.grid.length > 0) {
+            heatmapRef.current = { grid: data.grid, baseValid: data.base_valid };
+          }
+        })
+        .catch(() => {});
+    };
+    poll();
+    const id = setInterval(poll, 500);
+    return () => { active = false; clearInterval(id); };
+  }, []);
 
   const drawTrajectory = useCallback(() => {
     const canvas = canvasRef.current;
@@ -36,14 +56,37 @@ export function useSidebar() {
     if (!ctx) return;
 
     const width = canvas.clientWidth || 320;
-    const height = canvas.clientHeight || 150;
+    // Force 16:9 aspect ratio matching 1280x720 video
+    const height = Math.round(width * 9 / 16);
     canvas.width = width * window.devicePixelRatio;
     canvas.height = height * window.devicePixelRatio;
     ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
     ctx.clearRect(0, 0, width, height);
 
+    // ── Draw base_diff heatmap as background ──
+    const { grid, baseValid } = heatmapRef.current;
+    if (baseValid && grid.length > 0) {
+      const rows = grid.length;
+      const cols = grid[0].length;
+      const cellW = width / cols;
+      const cellH = height / rows;
+      for (let gy = 0; gy < rows; gy++) {
+        for (let gx = 0; gx < cols; gx++) {
+          const v = grid[gy][gx];
+          if (v < 0.001) continue;
+          // Cyan-to-red heatmap: low=cyan, high=red
+          const intensity = Math.min(v * 5, 1); // amplify for visibility
+          const r = Math.round(255 * intensity);
+          const g = Math.round(255 * (1 - intensity) * 0.5);
+          const b = Math.round(255 * (1 - intensity));
+          ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${0.15 + intensity * 0.45})`;
+          ctx.fillRect(gx * cellW, gy * cellH, cellW, cellH);
+        }
+      }
+    }
+
     const points = pointsRef.current;
-    if (points.length === 0) {
+    if (points.length === 0 && !baseValid) {
       ctx.fillStyle = 'rgba(154, 174, 211, 0.6)';
       ctx.font = '12px "Space Grotesk", sans-serif';
       ctx.fillText('no trajectory data', 10, height / 2);
