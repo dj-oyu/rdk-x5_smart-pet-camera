@@ -49,6 +49,7 @@ pub trait EventRepositoryPort: Send + Sync {
     async fn distinct_pet_ids(&self) -> AppResult<Vec<String>>;
     async fn distinct_behaviors(&self) -> AppResult<Vec<String>>;
     async fn captions_for_date(&self, date: &str) -> AppResult<Vec<String>>;
+    async fn list_photos_without_detections(&self, limit: i64) -> AppResult<Vec<EventSummary>>;
 }
 
 pub type SharedEventRepository = Arc<dyn EventRepositoryPort>;
@@ -248,5 +249,12 @@ impl EventRepositoryPort for PhotoStoreRepository {
                 reply,
             })
             .await
+    }
+
+    async fn list_photos_without_detections(&self, limit: i64) -> AppResult<Vec<EventSummary>> {
+        self.db
+            .request(|reply| DbCommand::ListPhotosWithoutDetections { limit, reply })
+            .await
+            .map(|photos| photos.into_iter().map(EventSummary::from).collect())
     }
 }

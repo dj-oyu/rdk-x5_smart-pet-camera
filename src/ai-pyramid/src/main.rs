@@ -1,11 +1,13 @@
 use clap::Parser;
 use pet_album::application::{AppContext, PhotoStoreRepository};
 use pet_album::db::PhotoStore;
+use pet_album::detect::{DetectClient, DetectConfig};
 use pet_album::ingest::watcher::PhotoWatcher;
 use pet_album::server;
 use pet_album::vlm::VlmConfig;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
@@ -123,7 +125,33 @@ async fn main() {
         }
     });
 
-    let watcher = PhotoWatcher::new(app_context.clone(), vlm_config);
+    let detect_client: Option<Arc<DetectClient>> = match (
+        std::env::var("PET_CAMERA_HOST").ok(),
+        std::env::var("PET_ALBUM_HOST").ok(),
+    ) {
+        (Some(camera_host), Some(album_host)) => {
+            let camera_port = std::env::var("PET_CAMERA_DETECT_PORT")
+                .unwrap_or_else(|_| "8083".into());
+            let album_port = std::env::var("PET_ALBUM_PORT")
+                .unwrap_or_else(|_| "8082".into());
+            let config = DetectConfig {
+                camera_base_url: format!("http://{camera_host}:{camera_port}"),
+                self_base_url: format!("http://{album_host}:{album_port}"),
+                timeout: Duration::from_secs(30),
+            };
+            info!(
+                "Detection enabled: camera={}, self={}",
+                config.camera_base_url, config.self_base_url
+            );
+            Some(Arc::new(DetectClient::new(config)))
+        }
+        _ => {
+            info!("Detection disabled: PET_CAMERA_HOST or PET_ALBUM_HOST not set");
+            None
+        }
+    };
+
+    let watcher = PhotoWatcher::new(app_context.clone(), vlm_config, detect_client.clone());
     tokio::spawn(async move {
         watcher.run().await;
     });
@@ -138,6 +166,7 @@ async fn main() {
         photos_dir: args.photos_dir,
         event_tx: sse_event_tx,
         pet_names,
+        detect_client,
     };
     let app = server::router(app_state);
 

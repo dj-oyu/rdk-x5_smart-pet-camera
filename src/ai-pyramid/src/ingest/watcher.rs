@@ -1,8 +1,10 @@
 use crate::application::{AppContext, ObservationInput, ObservationResult};
+use crate::detect::DetectClient;
 use crate::ingest::filename::parse_comic_filename;
 use crate::vlm::{VlmClient, VlmConfig};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -15,11 +17,12 @@ const FILE_STABLE_MAX_RETRIES: u32 = 3;
 pub struct PhotoWatcher {
     app: AppContext,
     vlm_config: VlmConfig,
+    detect_client: Option<Arc<DetectClient>>,
 }
 
 impl PhotoWatcher {
-    pub fn new(app: AppContext, vlm_config: VlmConfig) -> Self {
-        Self { app, vlm_config }
+    pub fn new(app: AppContext, vlm_config: VlmConfig, detect_client: Option<Arc<DetectClient>>) -> Self {
+        Self { app, vlm_config, detect_client }
     }
 
     async fn initial_scan(&self) {
@@ -218,6 +221,27 @@ impl PhotoWatcher {
                 Err(error) => {
                     error!("Observation error for {filename}: {error}");
                     let _ = commands.record_observation_failure(&filename, &error).await;
+                }
+            }
+
+            // Run YOLO detection via rdk-x5 (non-fatal)
+            if let Some(ref detect_client) = self.detect_client {
+                match detect_client.detect(&filename).await {
+                    Ok(dets) if !dets.is_empty() => {
+                        if let Ok(meta) = parse_comic_filename(&filename) {
+                            let _ = commands
+                                .ingest_with_detections(
+                                    &filename,
+                                    meta.captured_at,
+                                    meta.pet_id.as_deref(),
+                                    &dets,
+                                )
+                                .await;
+                            info!("Detection: {filename} ({} dets)", dets.len());
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!("Detection failed for {filename}: {e}"),
                 }
             }
         }

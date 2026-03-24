@@ -97,6 +97,15 @@ export function EventGrid({ events, loading, error, petNames, onOpenEvent }: Eve
                 fetchPriority={featured ? "high" : "auto"}
               />
               {featured && <FeaturedOverlay event={event} petNames={petNames} />}
+              <button
+                type="button"
+                class="card-edit-btn"
+                title="Edit detections"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenEvent(event);
+                }}
+              >✎</button>
             </div>
             <div class="event-card-body">
               <p class={`event-summary ${featured ? "featured-summary" : "history-summary"}`}>
