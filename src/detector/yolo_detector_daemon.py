@@ -210,12 +210,32 @@ class YoloDetectorDaemon:
         self.cache_frame_number: int = -1  # Frame number when cache started
         self.cache_timestamp: float = 0.0  # Timestamp when cache started
 
-        # Night motion detection state (per-ROI Y plane cache)
-        self._prev_roi_y: dict[str, np.ndarray] = {}  # {"roi0": y_plane, "roi1": y_plane}
-        self._diff_acc: dict[str, np.ndarray] = {}  # temporal diff accumulator per ROI
+        # Night motion detection state (per-ROI, 320x320 resolution)
+        self._prev_roi_small: dict[str, np.ndarray] = {}  # {"roi0": 320x320, "roi1": 320x320}
+        self._diff_acc: dict[str, np.ndarray] = {}  # temporal diff accumulator per ROI (320x320 uint16)
         self._motion_bboxes: list = []  # motion bbox buffer for next YOLO write
         self._roi_has_motion: bool = False  # Any ROI had motion recently
         self.motion_cooldown: int = 0  # Frames to skip after motion detected
+
+        # Base reference image state (per-ROI, snapshot-based update)
+        self._base_roi_y: dict[str, np.ndarray] = {}  # {"roi0": f32 base, "roi1": f32 base}
+        self._snapshot_roi_y: dict[str, np.ndarray] = {}  # recent snapshot (640x640 float32)
+        self._base_valid: dict[str, bool] = {}  # whether base image is usable per ROI
+        self._base_init_count: dict[str, int] = {}  # initial EMA frames for first base build
+        self._quiet_frames: int = 0  # consecutive frames with no motion AND no YOLO detection
+        self._noise_sigma: float = 4.8  # pre-computed from recordings (NIR + H.265 noise)
+        self._last_brightness: float = -1.0  # for brightness change detection
+        self.BASE_QUIET_THRESHOLD: int = 1800  # ~60s @ 30fps for initial base build only
+        self.BASE_INIT_FRAMES: int = 50  # EMA frames for initial base
+        self.SNAPSHOT_INTERVAL: int = 300  # ~10s @ 30fps between snapshot updates
+        self.SNAPSHOT_BLEND_ALPHA: float = 0.05  # how fast base absorbs stable changes
+        self._snapshot_timer: int = 0  # frames since last snapshot
+
+        # Focus crop state
+        self._focus_crop_enabled: bool = True
+        self._motion_roi_idx: int = -1  # which ROI had motion (-1=none/both)
+        self._roi_grids: dict[str, list[list[float]]] = {}  # per-ROI heatmap grids
+
 
         # Night YOLO false positive filter (IR images cause frequent misdetections)
         self.night_fp_classes = {"toilet", "sink", "suitcase", "chair"}
@@ -225,6 +245,50 @@ class YoloDetectorDaemon:
         self.night_collect_count: int = 0
         self.night_collect_max: int = 500  # Max frames to collect per session
         self.night_collect_interval: int = 150  # Collect every N frames during motion
+
+    @staticmethod
+    def _crop_nv12_to_640(
+        nv12_data: np.ndarray, width: int, height: int,
+        cx: int, cy: int, crop_size: int,
+    ) -> tuple[np.ndarray, int, int, int]:
+        """Crop a square region from NV12 frame and resize to 640x640.
+
+        Args:
+            nv12_data: NV12 buffer (Y + UV planes contiguous)
+            width, height: frame dimensions
+            cx, cy: crop center in frame coordinates
+            crop_size: side length of square crop (before resize)
+
+        Returns:
+            (nv12_640, crop_x, crop_y, crop_size) where crop_x/y are clamped origin
+        """
+        # Clamp crop region to frame bounds, ensure even coordinates for NV12
+        half = crop_size // 2
+        x0 = max(0, cx - half) & ~1  # even alignment for NV12 chroma
+        y0 = max(0, cy - half) & ~1
+        x1 = min(width, x0 + crop_size) & ~1
+        y1 = min(height, y0 + crop_size) & ~1
+        # Re-adjust origin if clamped
+        if x1 - x0 < crop_size and x0 > 0:
+            x0 = max(0, x1 - crop_size) & ~1
+        if y1 - y0 < crop_size and y0 > 0:
+            y0 = max(0, y1 - crop_size) & ~1
+        cw = x1 - x0
+        ch = y1 - y0
+
+        y_plane = nv12_data[:width * height].reshape(height, width)
+        uv_plane = nv12_data[width * height:].reshape(height // 2, width)
+
+        # Crop Y and UV
+        y_crop = y_plane[y0:y0 + ch, x0:x0 + cw]
+        uv_crop = uv_plane[y0 // 2:(y0 + ch) // 2, x0:x0 + cw]
+
+        # Resize to 640x640
+        y_640 = cv2.resize(y_crop, (640, 640), interpolation=cv2.INTER_LINEAR)
+        uv_640 = cv2.resize(uv_crop, (640, 320), interpolation=cv2.INTER_LINEAR)
+
+        nv12_640 = np.concatenate([y_640.ravel(), uv_640.ravel()])
+        return nv12_640, x0, y0, max(cw, ch)
 
     def _save_night_frame(self, nv12_data, width: int, height: int, frame_number: int) -> None:
         """Enqueue NV12 frame for async saving (fine-tuning data collection)."""
@@ -549,6 +613,16 @@ class YoloDetectorDaemon:
                     self.detector.clahe_frequency = 6 if self.active_camera == 1 else 1
                     if self.active_camera == 0:
                         self.detector._clahe_y_cache.clear()
+                    # Reset base reference images on camera switch
+                    self._base_roi_y.clear()
+                    self._base_valid.clear()
+                    self._base_init_count.clear()
+                    self._snapshot_roi_y.clear()
+                    self._quiet_frames = 0
+                    self._snapshot_timer = 0
+                    self._prev_roi_small.clear()
+                    self._diff_acc.clear()
+                    self._last_brightness = -1.0
 
                 # Initialize scale factors on first frame (before any switch)
                 if self.scale_x is None or self.scale_y is None:
@@ -600,14 +674,17 @@ class YoloDetectorDaemon:
                     #               temporal diff accumulation for dark-cat sensitivity
                     # Every 2 frames (when motion active): YOLO on both ROIs
 
-                    # Release main yolo_zc buffer early (not needed for ROI path)
-                    hb_mem_buffer.release()
+                    # Hold Ch1 buffer (1280x720) for potential focus crop
+                    # Released after YOLO inference or at end of night ROI block
+                    _ch1_held = True
 
                     vse_active = bool(self.roi_readers)
                     fp = self.stats["frames_processed"]
 
                     # ── Per-frame motion detection on alternating ROI ──────────
                     motion_detected_this_frame = False
+                    _y_denoised_for_base = None  # set if Y plane successfully extracted
+                    _rkey_for_base = ""
                     if vse_active:
                         motion_roi_idx = fp & 1
                         motion_reader = self.roi_readers[motion_roi_idx]
@@ -622,28 +699,33 @@ class YoloDetectorDaemon:
                                     m_y_size = mf.width * mf.height
                                     y_plane = m_y_arr[:m_y_size].reshape(mf.height, mf.width)
                                     y_denoised = cv2.medianBlur(y_plane, 3)
+                                    small_denoised = cv2.resize(
+                                        y_denoised, (320, 320), interpolation=cv2.INTER_AREA
+                                    )
 
                                     rkey = f"roi{motion_roi_idx}"
-                                    if rkey in self._prev_roi_y:
-                                        diff = cv2.absdiff(y_denoised, self._prev_roi_y[rkey])
-                                        diff = cv2.GaussianBlur(diff, (7, 7), 0)
+                                    _y_denoised_for_base = y_denoised
+                                    _rkey_for_base = rkey
+
+                                    # ── frame_diff (320x320) ──
+                                    if rkey in self._prev_roi_small:
+                                        diff = cv2.absdiff(small_denoised, self._prev_roi_small[rkey])
+                                        diff = cv2.GaussianBlur(diff, (5, 5), 0)
                                         diff[diff < 8] = 0  # cut IR noise floor
 
-                                        # Temporal sum accumulation (uint16 + right shift)
+                                        # Temporal sum accumulation (320x320 uint16)
                                         if rkey not in self._diff_acc:
-                                            self._diff_acc[rkey] = np.zeros_like(diff, dtype=np.uint16)
+                                            self._diff_acc[rkey] = np.zeros((320, 320), dtype=np.uint16)
                                         acc = self._diff_acc[rkey]
                                         acc >>= 1
                                         acc += diff.astype(np.uint16)
 
-                                        # Threshold + downscale for fast contour detection
                                         acc_u8 = np.minimum(acc, 255).astype(np.uint8)
                                         _, thresh = cv2.threshold(acc_u8, 30, 255, cv2.THRESH_BINARY)
-                                        thresh_small = cv2.resize(thresh, (320, 320), interpolation=cv2.INTER_NEAREST)
                                         close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-                                        thresh_small = cv2.morphologyEx(thresh_small, cv2.MORPH_CLOSE, close_kernel)
+                                        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, close_kernel)
                                         contours, _ = cv2.findContours(
-                                            thresh_small, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                                            thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
                                         )
 
                                         # Contours in 320x320 → scale 2x to 640 (=1280x720 output)
@@ -673,19 +755,143 @@ class YoloDetectorDaemon:
                                         if len(self._motion_bboxes) > 10:
                                             self._motion_bboxes = self._motion_bboxes[-5:]
 
-                                    self._prev_roi_y[rkey] = y_denoised
+                                    # ── base_diff (320x320, shared small_denoised) ──
+                                    if self._base_valid.get(rkey, False):
+                                        base_u8 = np.clip(
+                                            self._base_roi_y[rkey], 0, 255
+                                        ).astype(np.uint8)
+                                        small_base = cv2.resize(
+                                            base_u8, (320, 320), interpolation=cv2.INTER_AREA
+                                        )
+                                        bdiff_raw = cv2.absdiff(small_denoised, small_base)
+                                        bdiff_raw = cv2.GaussianBlur(bdiff_raw, (5, 5), 0)
+                                        # Thresholded version for motion trigger
+                                        base_noise_floor = max(20, int(self._noise_sigma * 4))
+                                        bdiff = bdiff_raw.copy()
+                                        bdiff[bdiff < base_noise_floor] = 0
+                                        # Mask border (outer 5%) — IR LED illumination unevenness
+                                        b = 16
+                                        bdiff[:b, :] = 0; bdiff[-b:, :] = 0
+                                        bdiff[:, :b] = 0; bdiff[:, -b:] = 0
+                                        nz_ratio = cv2.countNonZero(bdiff) / (320 * 320)
+                                        if nz_ratio > 0.01:  # 1% — stricter than frame_diff
+                                            motion_detected_this_frame = True
+                                        # Diagnostic log (every 300 frames)
+                                        if fp % 300 == 0:
+                                            logger.info(f"base_diff {rkey}: nz={nz_ratio:.4f} floor={base_noise_floor}")
+                                        # Update 16x16 heatmap grid for web UI (raw diff, no threshold)
+                                        grid_size = 16
+                                        cell = 320 // grid_size  # 20px per cell
+                                        grid = []
+                                        for gy in range(grid_size):
+                                            row = []
+                                            for gx in range(grid_size):
+                                                cell_mean = float(bdiff_raw[
+                                                    gy * cell:(gy + 1) * cell,
+                                                    gx * cell:(gx + 1) * cell,
+                                                ].mean()) / 255.0
+                                                row.append(round(cell_mean, 3))
+                                            grid.append(row)
+                                        # Store per-ROI grid, write combined to file
+                                        self._roi_grids[rkey] = grid
+                                        try:
+                                            import json as _json
+                                            # Combine ROI grids side-by-side into full-frame grid
+                                            # ROI0=left 16cols, ROI1=right 16cols → 32 cols total
+                                            g0 = self._roi_grids.get("roi0", [[0.0]*grid_size]*grid_size)
+                                            g1 = self._roi_grids.get("roi1", [[0.0]*grid_size]*grid_size)
+                                            combined = [g0[r] + g1[r] for r in range(grid_size)]
+                                            _json_str = _json.dumps({
+                                                "grid": combined,
+                                                "rows": grid_size,
+                                                "cols": grid_size * 2,
+                                                "base_valid": True,
+                                                "quiet_frames": self._quiet_frames,
+                                            })
+                                            with open("/tmp/base_diff_grid.json.tmp", "w") as _f:
+                                                _f.write(_json_str)
+                                            Path("/tmp/base_diff_grid.json.tmp").replace("/tmp/base_diff_grid.json")
+                                        except Exception:
+                                            pass
+
+                                    self._prev_roi_small[rkey] = small_denoised
                                     m_hb_buf.release()
                                 except Exception as e:
                                     logger.warning(f"Motion ROI read failed (roi={motion_roi_idx}): {e}")
+
+                    # Track which ROI had motion (for focus crop)
+                    if motion_detected_this_frame and vse_active:
+                        self._motion_roi_idx = motion_roi_idx
+                    elif not motion_detected_this_frame and self.motion_cooldown <= 1:
+                        self._motion_roi_idx = -1
 
                     # Update motion cooldown
                     if motion_detected_this_frame:
                         self.motion_cooldown = 8
                         self._roi_has_motion = True
+                        self._quiet_frames = 0
                     elif self.motion_cooldown > 0:
                         self.motion_cooldown -= 1
                         if self.motion_cooldown == 0:
                             self._roi_has_motion = False
+                    else:
+                        self._quiet_frames += 1
+
+                    # ── Base image management (snapshot-based) ─────────
+                    if _y_denoised_for_base is not None and _rkey_for_base:
+                        rk = _rkey_for_base
+                        y_f32 = _y_denoised_for_base.astype(np.float32)
+
+                        if not self._base_valid.get(rk, False):
+                            # Phase 1: Initial base build (requires quiet)
+                            if self._quiet_frames >= self.BASE_QUIET_THRESHOLD:
+                                if rk not in self._base_roi_y:
+                                    self._base_roi_y[rk] = y_f32.copy()
+                                    self._base_init_count[rk] = 1
+                                else:
+                                    cv2.accumulateWeighted(
+                                        _y_denoised_for_base, self._base_roi_y[rk], 0.02
+                                    )
+                                    self._base_init_count[rk] = self._base_init_count.get(rk, 0) + 1
+                                if self._base_init_count.get(rk, 0) >= self.BASE_INIT_FRAMES:
+                                    self._base_valid[rk] = True
+                                    self._snapshot_roi_y[rk] = y_f32.copy()
+                                    self._snapshot_timer = 0
+                                    logger.info(f"Base image ready for {rk}")
+                        else:
+                            # Phase 2: Snapshot-based update (no quiet required)
+                            self._snapshot_timer += 1
+
+                            # Take new snapshot periodically
+                            if self._snapshot_timer >= self.SNAPSHOT_INTERVAL:
+                                self._snapshot_roi_y[rk] = y_f32.copy()
+                                self._snapshot_timer = 0
+
+                            # Compare snapshot vs now: if stable, blend snapshot into base
+                            if rk in self._snapshot_roi_y:
+                                snap = self._snapshot_roi_y[rk]
+                                snap_u8 = np.clip(snap, 0, 255).astype(np.uint8)
+                                snap_diff = cv2.absdiff(_y_denoised_for_base, snap_u8)
+                                snap_diff = cv2.GaussianBlur(snap_diff, (5, 5), 0)
+                                snap_noise_floor = max(20, int(self._noise_sigma * 4))
+                                snap_diff[snap_diff < snap_noise_floor] = 0
+                                snap_stable = cv2.countNonZero(snap_diff) / snap_diff.size
+
+                                if snap_stable < 0.005:  # < 0.5%: scene stable since snapshot
+                                    cv2.accumulateWeighted(
+                                        snap_u8, self._base_roi_y[rk], self.SNAPSHOT_BLEND_ALPHA
+                                    )
+
+                    # Brightness change detection — invalidate base on large ISP shifts
+                    if self._last_brightness >= 0 and abs(zc_frame.brightness_avg - self._last_brightness) > 20:
+                        self._base_roi_y.clear()
+                        self._base_valid.clear()
+                        self._base_init_count.clear()
+                        self._snapshot_roi_y.clear()
+                        self._quiet_frames = 0
+                        self._snapshot_timer = 0
+                        logger.info("Base images cleared (brightness change)")
+                    self._last_brightness = zc_frame.brightness_avg
 
                     # ── YOLO: both ROIs in one frame (every 2nd frame) ─────────
                     run_yolo = vse_active and ((fp & 1) == 0) and (
@@ -697,11 +903,28 @@ class YoloDetectorDaemon:
                     all_yolo_dicts = []
                     roi_hb_bufs = []
 
+                    # Determine focus crop mode: motion in one ROI only
+                    use_focus_crop = (
+                        run_yolo
+                        and self._focus_crop_enabled
+                        and _ch1_held
+                        and self._motion_roi_idx >= 0
+                        and len(self._motion_bboxes) > 0
+                    )
+
                     if run_yolo:
                         self.cache_frame_number = zc_frame.frame_number
                         self.cache_timestamp = zc_frame.timestamp_sec
 
-                        for roi_idx, roi_reader in enumerate(self.roi_readers):
+                        # Select which VSE ROIs to run YOLO on
+                        if use_focus_crop:
+                            # Run YOLO on motion-side VSE ROI only (save 1 BPU slot for focus crop)
+                            roi_indices = [self._motion_roi_idx]
+                        else:
+                            roi_indices = list(range(len(self.roi_readers)))
+
+                        for roi_idx in roi_indices:
+                            roi_reader = self.roi_readers[roi_idx]
                             roi_hb_buf = None
                             if not roi_reader.wait_for_frame(timeout_sec=0.05):
                                 logger.debug(f"VSE ROI SHM timeout (roi={roi_idx})")
@@ -721,7 +944,7 @@ class YoloDetectorDaemon:
                                     roi_hb_buf.release()
                                 continue
 
-                            # YOLO inference
+                            # YOLO inference on VSE ROI
                             roi_y_size = roi_frame.width * roi_frame.height
                             if len(roi_y_arr) == roi_y_size + len(roi_uv_arr):
                                 roi_nv12 = roi_y_arr
@@ -751,6 +974,54 @@ class YoloDetectorDaemon:
                                     ),
                                 ))
 
+                        # ── Focus crop: YOLO on Ch1 crop centered on motion ──
+                        if use_focus_crop:
+                            try:
+                                # Find centroid of largest motion bbox
+                                best_bbox = max(
+                                    self._motion_bboxes,
+                                    key=lambda d: d.bbox.w * d.bbox.h,
+                                )
+                                mcx = best_bbox.bbox.x + best_bbox.bbox.w // 2
+                                mcy = best_bbox.bbox.y + best_bbox.bbox.h // 2
+                                # Crop size: 1.5x motion bbox, clamped to [360, 720]
+                                motion_size = max(best_bbox.bbox.w, best_bbox.bbox.h)
+                                crop_size = min(720, max(360, int(motion_size * 1.5)))
+                                # Make even for NV12
+                                crop_size = crop_size & ~1
+
+                                fc_nv12, fc_x, fc_y, fc_sz = self._crop_nv12_to_640(
+                                    nv12_data, zc_frame.width, zc_frame.height,
+                                    mcx, mcy, crop_size,
+                                )
+                                fc_detections = self.detector.detect_nv12(
+                                    nv12_data=fc_nv12,
+                                    width=640, height=640,
+                                    brightness_avg=zc_frame.brightness_avg,
+                                    clahe_cache_key="focus_crop",
+                                )
+                                # Transform focus crop coords → 1280x720
+                                fc_scale = fc_sz / 640.0
+                                for det in fc_detections:
+                                    all_yolo_dicts.append(DetDict(
+                                        class_name=det.class_name.value,
+                                        confidence=det.confidence,
+                                        bbox=DetBbox(
+                                            x=int(det.bbox.x * fc_scale) + fc_x,
+                                            y=int(det.bbox.y * fc_scale) + fc_y,
+                                            w=int(det.bbox.w * fc_scale),
+                                            h=int(det.bbox.h * fc_scale),
+                                        ),
+                                    ))
+                                fc_classes = ",".join(d.class_name.value for d in fc_detections) or "none"
+                                logger.debug(
+                                    f"focus_crop: roi={self._motion_roi_idx} "
+                                    f"center=({mcx},{mcy}) size={fc_sz} "
+                                    f"det={fc_classes}"
+                                )
+                            except Exception as e:
+                                logger.debug(f"Focus crop failed: {e}")
+
                         for buf in roi_hb_bufs:
                             buf.release()
 
@@ -767,6 +1038,7 @@ class YoloDetectorDaemon:
                         if merged_yolo:
                             self.motion_cooldown = 10
                             self._roi_has_motion = True
+                            self._quiet_frames = 0
 
                         all_dicts = self._motion_bboxes + merged_yolo
                         self._motion_bboxes = []
@@ -801,24 +1073,35 @@ class YoloDetectorDaemon:
                     timing = self.detector.get_last_timing()
                     self.stats["avg_inference_time_ms"] = timing["total"] * 1000
                     if run_yolo:
+                        for d in detection_dicts:
+                            if d.class_name == "motion":
+                                self.stats["total_mot"] = self.stats.get("total_mot", 0) + 1
+                            else:
+                                self.stats["total_yolo"] = self.stats.get("total_yolo", 0) + 1
                         self.stats["total_detections"] += len(detection_dicts)
 
                     # Periodic stats log
                     if self.stats["frames_processed"] % 300 == 0:
-                        mot = sum(1 for d in detection_dicts if d.class_name == "motion")
-                        yolo = len(detection_dicts) - mot
+                        t_mot = self.stats.get("total_mot", 0)
+                        t_yolo = self.stats.get("total_yolo", 0)
                         logger.info(
                             f"[{self.stats['frames_processed']}f] "
-                            f"det={self.stats['total_detections']}(mot={mot},yolo={yolo}) "
+                            f"det={self.stats['total_detections']}(mot={t_mot},yolo={t_yolo}) "
                             f"inf={self.stats['avg_inference_time_ms']:.0f}ms "
                             f"cam={self.active_camera} "
                             f"bright={zc_frame.brightness_avg:.1f} "
-                            f"yolo_skipped={self.stats['yolo_skipped_frames']}"
+                            f"yolo_skipped={self.stats['yolo_skipped_frames']} "
+                            f"quiet={self._quiet_frames} "
+                            f"base={'|'.join(k for k, v in self._base_valid.items() if v) or 'none'}"
                         )
 
                     if is_debug and run_yolo and detection_dicts:
                         classes = ",".join(d.class_name for d in detection_dicts)
                         logger.debug(f"#{self.stats['frames_processed']}: {classes}")
+
+                    # Release Ch1 buffer (held for focus crop)
+                    if _ch1_held:
+                        hb_mem_buffer.release()
 
                     continue
 

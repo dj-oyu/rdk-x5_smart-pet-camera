@@ -26,8 +26,28 @@ export function useSidebar() {
   const pointsRef = useRef<TrajectoryPoint[]>([]);
   const ganttRef = useRef<GanttRecord[]>([]);
   const lastKeyRef = useRef<string>('');
+  const heatmapRef = useRef<{ grid: number[][]; baseValid: boolean }>({ grid: [], baseValid: false });
   const [legendEntries, setLegendEntries] = useState<[string, number][]>([]);
   const [ganttClasses, setGanttClasses] = useState<string[]>([]);
+
+  // Poll base_diff heatmap from detector API
+  useEffect(() => {
+    let active = true;
+    const poll = () => {
+      if (!active) return;
+      fetch('/api/base_diff')
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.grid && data.grid.length > 0) {
+            heatmapRef.current = { grid: data.grid, baseValid: data.base_valid };
+          }
+        })
+        .catch(() => {});
+    };
+    poll();
+    const id = setInterval(poll, 500);
+    return () => { active = false; clearInterval(id); };
+  }, []);
 
   const drawTrajectory = useCallback(() => {
     const canvas = canvasRef.current;
@@ -36,14 +56,44 @@ export function useSidebar() {
     if (!ctx) return;
 
     const width = canvas.clientWidth || 320;
-    const height = canvas.clientHeight || 150;
+    // Force 16:9 aspect ratio matching 1280x720 video
+    const height = Math.round(width * 9 / 16);
     canvas.width = width * window.devicePixelRatio;
     canvas.height = height * window.devicePixelRatio;
     ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
     ctx.clearRect(0, 0, width, height);
 
+    // ── Draw base_diff heatmap as background ──
+    const { grid, baseValid } = heatmapRef.current;
+    if (baseValid && grid.length > 0) {
+      const rows = grid.length;
+      const cols = grid[0].length;
+      // Softmax-style normalization: relative contrast within grid
+      // IR noise floor: mean≈0.015, max≈0.025. Only show when real diff exists.
+      const maxV = Math.max(...grid.flat());
+      const normalized = grid.map(row => row.map(v => {
+        if (maxV < 0.04) return 0;  // below noise — suppress entire grid
+        const shifted = Math.max(0, v - 0.015);  // subtract noise floor
+        const shiftedMax = maxV - 0.015;
+        return shiftedMax > 0 ? Math.min(1, (shifted / shiftedMax) ** 0.5) : 0;
+      }));
+      const cellW = width / cols;
+      const cellH = height / rows;
+      for (let gy = 0; gy < rows; gy++) {
+        for (let gx = 0; gx < cols; gx++) {
+          const v = normalized[gy][gx];
+          if (v < 0.05) continue;
+          const r = Math.round(255 * v);
+          const g = Math.round(80 * (1 - v));
+          const b = Math.round(255 * (1 - v));
+          ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${0.2 + v * 0.6})`;
+          ctx.fillRect(gx * cellW, gy * cellH, cellW, cellH);
+        }
+      }
+    }
+
     const points = pointsRef.current;
-    if (points.length === 0) {
+    if (points.length === 0 && !baseValid) {
       ctx.fillStyle = 'rgba(154, 174, 211, 0.6)';
       ctx.font = '12px "Space Grotesk", sans-serif';
       ctx.fillText('no trajectory data', 10, height / 2);
