@@ -18,8 +18,6 @@ interface GanttRecord {
 const GANTT_WINDOW = 24 * 60 * 60; // 24 hours in seconds
 const GANTT_GAP_THRESHOLD = 30; // merge gaps shorter than 30s
 
-const ALBUM_BASE = 'https://<album-host>:8082/app';
-const ALBUM_URL = `${ALBUM_BASE}?embed=petcamera`;
 
 export function useSidebar() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -352,9 +350,23 @@ export function TrackingView(props: Pick<ReturnType<typeof useSidebar>, 'canvasR
 }
 
 export function AlbumView() {
+  const [albumSrc, setAlbumSrc] = useState('');
   const [albumOffline, setAlbumOffline] = useState(false);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const [lightboxMeta, setLightboxMeta] = useState<{ date?: string; pet?: string; behavior?: string; caption?: string }>({});
+
+  useEffect(() => {
+    fetch('/api/config')
+      .then(r => r.json())
+      .then(c => {
+        if (c.album_url) {
+          setAlbumSrc(`${c.album_url.replace(/\/$/, '')}/app?embed=petcamera`);
+        } else {
+          setAlbumOffline(true);
+        }
+      })
+      .catch(() => setAlbumOffline(true));
+  }, []);
 
   useEffect(() => {
     const handler = (e: MessageEvent) => {
@@ -389,13 +401,13 @@ export function AlbumView() {
       <div class="panel album-panel">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <h2>アルバム</h2>
-          <a href={ALBUM_BASE} target="_blank" class="album-link" title="別タブで開く">↗</a>
+          {albumSrc && <a href={albumSrc.split('?')[0]} target="_blank" class="album-link" title="別タブで開く">↗</a>}
         </div>
         {albumOffline ? (
           <div class="album-offline">アルバムサービスに接続できません</div>
         ) : (
           <iframe
-            src={ALBUM_URL}
+            src={albumSrc}
             class="album-iframe"
             scrolling="auto"
             onError={() => setAlbumOffline(true)}
