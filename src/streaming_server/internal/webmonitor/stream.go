@@ -267,6 +267,40 @@ func streamStatusEventsFromChannel(w http.ResponseWriter, r *http.Request, event
 	}
 }
 
+// streamHeatmapEventsFromChannel streams heatmap grid updates to SSE client.
+func streamHeatmapEventsFromChannel(w http.ResponseWriter, r *http.Request, eventCh <-chan []byte) {
+	ctx := r.Context()
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case data, ok := <-eventCh:
+			if !ok {
+				return
+			}
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-time.After(30 * time.Second):
+			if _, err := fmt.Fprintf(w, ": keepalive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
 // streamConnectionEventsFromChannel streams connection count events to SSE client.
 func streamConnectionEventsFromChannel(w http.ResponseWriter, r *http.Request, eventCh <-chan []byte) {
 	ctx := r.Context()

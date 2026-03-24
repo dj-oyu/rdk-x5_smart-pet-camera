@@ -29,24 +29,43 @@ export function useSidebar() {
   const [legendEntries, setLegendEntries] = useState<[string, number][]>([]);
   const [ganttClasses, setGanttClasses] = useState<string[]>([]);
 
-  // Poll base_diff heatmap from detector API
+  // SSE-based heatmap updates (replaces polling)
   useEffect(() => {
-    let active = true;
-    const poll = () => {
-      if (!active) return;
-      fetch('/api/base_diff')
-        .then((r) => r.json())
-        .then((data) => {
-          if (data.grid && data.grid.length > 0) {
+    let es: EventSource | null = null;
+    let closed = false;
+
+    // Initial fetch for immediate display
+    fetch('/api/base_diff')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.grid?.length > 0) {
+          heatmapRef.current = { grid: data.grid, baseValid: data.base_valid };
+          drawTrajectory();
+        }
+      })
+      .catch(() => {});
+
+    const connect = () => {
+      if (closed) return;
+      es = new EventSource('/api/base_diff/stream');
+      es.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.grid?.length > 0) {
             heatmapRef.current = { grid: data.grid, baseValid: data.base_valid };
+            drawTrajectory();
           }
-        })
-        .catch(() => {});
+        } catch { /* ignore */ }
+      };
+      es.onerror = () => {
+        es?.close();
+        if (!closed) setTimeout(connect, 3000);
+      };
     };
-    poll();
-    const id = setInterval(poll, 500);
-    return () => { active = false; clearInterval(id); };
-  }, []);
+    connect();
+
+    return () => { closed = true; es?.close(); };
+  }, [drawTrajectory]);
 
   const drawTrajectory = useCallback(() => {
     const canvas = canvasRef.current;
