@@ -293,6 +293,71 @@ uv run src/detector/yolo_detector_daemon.py --yolo-model v11n
 
 ---
 
+## 10. pet_id 判定 (mike / chatora 分類)
+
+### 概要
+
+YOLO bbox 内の NV12 UV chrominance を分析し、三毛猫 (mike) と茶トラ (chatora) を判定する。
+VLM は chatora バイアスがあるため、プログラムによるカラー分析を採用。
+
+**実装**: `src/streaming_server/internal/webmonitor/pet_color.go`
+
+### 特徴量
+
+| 特徴量 | 説明 | mike | chatora |
+|--------|------|------|---------|
+| scatter (stdU + stdV) | UV散らばり | 高 (多色パッチ) | 低 (均一) |
+| uvDist | オレンジ参照点 (U=110, V=155) からのユークリッド距離 | 大 (中性的UV) | 小 (オレンジ寄り) |
+| meanY | Y plane 平均輝度 | - | - |
+
+### 判定ロジック
+
+```
+scatter > 5.5 && uvDist > 15  → mike (high confidence)
+scatter < 4.5 && uvDist < 25  → chatora (high confidence)
+それ以外                       → 傾向で判定、confidence=0.3 (曖昧)
+```
+
+夜間 (meanY < 60): IR照明下ではUVが (128,128) 付近に縮退するため confidence を `meanY / 60` で減衰。
+小bbox (面積 < 2000px): サンプル不足のため "other" 即返し。
+
+### confidence 加重投票
+
+comic の4パネルそれぞれで判定し、`dominantPetID()` で confidence の合計値が最大のクラスを選択。合計 < 0.5 の場合は "other"。
+
+### キャリブレーション用ログ
+
+パネル単位:
+```
+[PetColor] pet_id=mike conf=0.85 scatter=6.20 meanU=125.3 meanV=132.1 meanY=98.5 uvDist=28.4 samples=512 bbox=120x95
+```
+
+comic 単位:
+```
+[Comic] Stitched 4 panels (dominant=mike, scores=map[mike:2.55 chatora:0.30])
+```
+
+収集: `journalctl -u web_monitor | grep '\[PetColor\]'`
+
+### ai-pyramid フィードバックループ (未実装)
+
+ingest API で `pet_confidence`, `uv_scatter`, `mean_u`, `mean_v`, `mean_y` を送信済み。
+ai-pyramid 側で以下を実装することで閾値の自動校正が可能:
+
+1. `detections` テーブルに上記カラムを追加
+2. `pet_id_override` (手動修正) データを蓄積
+3. 修正済みデータから最適閾値を計算するクエリ
+4. `/api/calibration/pet-color` エンドポイントで推奨閾値を返却
+
+### 初期キャリブレーションデータ (33サンプル)
+
+| 猫 | n | scatter mean | scatter range | 備考 |
+|----|---|-------------|--------------|------|
+| mike | 16 | 6.65 | 5.81-7.83 | Go NV12変換で +0.9 offset |
+| chatora | 17 | 4.18 | 3.93-4.90 | 夜間画像が多い |
+
+---
+
 ## 夜間カメラ前処理パターン（実験結果）
 
 IR夜間カメラのYOLO検出精度向上のため、以下の前処理パターンを検証済み:
