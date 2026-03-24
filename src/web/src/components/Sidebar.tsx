@@ -65,7 +65,7 @@ export function useSidebar() {
     connect();
 
     return () => { closed = true; es?.close(); };
-  }, [drawTrajectory]);
+  }, []); // drawTrajectory is stable (useCallback with []), no need to list
 
   const drawTrajectory = useCallback(() => {
     const canvas = canvasRef.current;
