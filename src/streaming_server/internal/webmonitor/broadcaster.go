@@ -1257,8 +1257,8 @@ func (hb *HeatmapBroadcaster) GetClientCount() int {
 }
 
 func (hb *HeatmapBroadcaster) run() {
-	logger.Info("HeatmapBroadcaster", "Starting heatmap broadcaster (file=%s, interval=67ms)", hb.filePath)
-	ticker := time.NewTicker(67 * time.Millisecond) // ~15fps
+	logger.Info("HeatmapBroadcaster", "Starting heatmap broadcaster (file=%s, interval=100ms)", hb.filePath)
+	ticker := time.NewTicker(100 * time.Millisecond) // ~10fps
 	defer ticker.Stop()
 
 	for {
