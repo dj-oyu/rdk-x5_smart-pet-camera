@@ -8,7 +8,7 @@
 - 静止画像
 """
 
-from typing import Optional, Literal, TYPE_CHECKING, cast, Any
+from typing import Optional, Literal, TYPE_CHECKING, cast
 from pathlib import Path
 import sys
 import time
@@ -85,7 +85,7 @@ class MockCamera:
                 "Install with: uv pip install opencv-python"
             )
 
-        self._cap: Optional[Any] = None
+        self._cap: Optional[cv2.VideoCapture] = None  # type: ignore[attr-defined]
         self._static_image: Optional[np.ndarray] = None
         self._frame_count = 0
         self._last_capture_time = 0.0

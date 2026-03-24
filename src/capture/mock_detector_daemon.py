@@ -10,10 +10,13 @@ import sys
 import time
 import random
 import signal
+import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "common" / "src"))
 
+from common.types import DetectionDict
 from real_shared_memory import RealSharedMemory
 
 # Detection classes
@@ -27,7 +30,7 @@ CLASS_PROBS = {
 }
 
 
-def generate_dummy_detections(frame_width: int, frame_height: int, num_detections: int = None):
+def generate_dummy_detections(frame_width: int, frame_height: int, num_detections: int | None = None) -> list[DetectionDict]:
     """Generate dummy detection results with random variations"""
     if num_detections is None:
         # Randomly decide number of detections (0-3)
@@ -92,7 +95,7 @@ def main():
             print("[Info] Connected to shared memory")
             connected = True
             break
-        except Exception as e:
+        except Exception:
             print(f"[Info] Waiting for shared memory... ({i+1}/20)")
             time.sleep(1.0)
     
@@ -103,7 +106,7 @@ def main():
 
     # Setup signal handler
     running = [True]
-    def signal_handler(signum, frame):
+    def signal_handler(signum: int, frame: types.FrameType | None) -> None:
         print("\n[Info] Shutting down...")
         running[0] = False
 
