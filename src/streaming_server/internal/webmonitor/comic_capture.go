@@ -52,6 +52,7 @@ type capturedPanel struct {
 	timestamp   time.Time
 	bbox        *BoundingBox
 	placeholder bool        // filled panel (wider crop to show context)
+	motionHint  bool        // panel guided by motion detection (tighter crop)
 	petClass    string      // "mike", "chatora", "other", or "" if unknown
 	detections  []Detection // all YOLO detections at capture time
 }
@@ -75,6 +76,8 @@ type ComicCapture struct {
 	lastCatBBox       *BoundingBox
 	lastCatClass      string
 	lastVersionChange time.Time
+	lastMotionBBox    *BoundingBox // union of motion bboxes from detection SHM
+	lastMotionSeen    time.Time
 	sessionID         string
 	panels            []capturedPanel
 	lastCaptureTime   time.Time
@@ -162,10 +165,16 @@ func (cc *ComicCapture) tick(now time.Time) bool {
 		if hasPet(det) {
 			cc.lastCatSeen = now
 			cc.lastCatBBox, cc.lastCatClass = petDetection(det)
+			cc.lastMotionBBox = nil // clear motion when YOLO active
 			if cc.catFirstSeen.IsZero() {
 				cc.catFirstSeen = now
 			}
 		} else if det.NumDetections > 0 {
+			// No pet, but check for motion detections
+			if mb := motionUnionBBox(det); mb != nil {
+				cc.lastMotionBBox = mb
+				cc.lastMotionSeen = now
+			}
 			// Detection is active but no pet found — reset immediately.
 			cc.catFirstSeen = time.Time{}
 		}
@@ -262,25 +271,39 @@ func (cc *ComicCapture) fillMissingPanels(now time.Time) {
 	if !ok {
 		return
 	}
-	var lastBBox *BoundingBox
-	for i := len(cc.panels) - 1; i >= 0; i-- {
-		if cc.panels[i].bbox != nil {
-			bb := *cc.panels[i].bbox
-			lastBBox = &bb
-			break
+
+	// Prefer recent motion bbox, fall back to last panel bbox
+	var hintBBox *BoundingBox
+	isMotion := false
+	if !cc.lastMotionSeen.IsZero() && now.Sub(cc.lastMotionSeen) < 5*time.Second && cc.lastMotionBBox != nil {
+		hintBBox = cc.lastMotionBBox
+		isMotion = true
+	} else {
+		for i := len(cc.panels) - 1; i >= 0; i-- {
+			if cc.panels[i].bbox != nil {
+				bb := *cc.panels[i].bbox
+				hintBBox = &bb
+				break
+			}
 		}
 	}
+
 	for len(cc.panels) < cc.MaxPanels {
 		panel := capturedPanel{
 			nv12Data:    append([]byte(nil), frame.Data...),
 			width:       frame.Width,
 			height:      frame.Height,
 			timestamp:   now,
-			bbox:        lastBBox,
+			bbox:        hintBBox,
 			placeholder: true,
+			motionHint:  isMotion,
 		}
 		cc.panels = append(cc.panels, panel)
-		log.Printf("[Comic] Panel %d filled (placeholder, session=%s)", len(cc.panels), cc.sessionID)
+		hint := ""
+		if isMotion {
+			hint = "+motion"
+		}
+		log.Printf("[Comic] Panel %d filled (placeholder%s, session=%s)", len(cc.panels), hint, cc.sessionID)
 	}
 }
 
@@ -302,12 +325,23 @@ func (cc *ComicCapture) capturePanel(now time.Time) {
 		dets = append([]Detection(nil), det.Detections...)
 	}
 
+	// bbox: prefer YOLO (recent 2s), fallback to motion (recent 3s)
+	panelBBox := cc.lastCatBBox
+	isMotionHint := false
+	if cc.lastCatBBox == nil || now.Sub(cc.lastCatSeen) > 2*time.Second {
+		if cc.lastMotionBBox != nil && now.Sub(cc.lastMotionSeen) <= 3*time.Second {
+			panelBBox = cc.lastMotionBBox
+			isMotionHint = true
+		}
+	}
+
 	panel := capturedPanel{
 		nv12Data:   append([]byte(nil), frame.Data...),
 		width:      frame.Width,
 		height:     frame.Height,
 		timestamp:  now,
-		bbox:       cc.lastCatBBox,
+		bbox:       panelBBox,
+		motionHint: isMotionHint,
 		petClass:   petClass,
 		detections: dets,
 	}
@@ -400,7 +434,10 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 		// Compute crop region
 		if p.bbox != nil && i > 0 {
 			var factor float64
-			if p.placeholder {
+			if p.motionHint {
+				// Motion union bbox tracks object contour — tighter but with min margin
+				factor = 1.5 + rand.Float64()*0.5
+			} else if p.placeholder {
 				factor = 3.0 + rand.Float64()*1.0
 			} else {
 				factor = 1.3 + rand.Float64()*1.2
@@ -728,6 +765,44 @@ func hasPet(det *DetectionResult) bool {
 		}
 	}
 	return false
+}
+
+// motionUnionBBox returns the union bounding box of all motion detections.
+// Motion detection produces multiple small bboxes along object contours;
+// the union captures the full extent of movement.
+func motionUnionBBox(det *DetectionResult) *BoundingBox {
+	if det == nil {
+		return nil
+	}
+	var minX, minY, maxX, maxY int
+	found := false
+	for _, d := range det.Detections {
+		if d.ClassName != "motion" {
+			continue
+		}
+		x2, y2 := d.BBox.X+d.BBox.W, d.BBox.Y+d.BBox.H
+		if !found {
+			minX, minY, maxX, maxY = d.BBox.X, d.BBox.Y, x2, y2
+			found = true
+		} else {
+			if d.BBox.X < minX {
+				minX = d.BBox.X
+			}
+			if d.BBox.Y < minY {
+				minY = d.BBox.Y
+			}
+			if x2 > maxX {
+				maxX = x2
+			}
+			if y2 > maxY {
+				maxY = y2
+			}
+		}
+	}
+	if !found {
+		return nil
+	}
+	return &BoundingBox{X: minX, Y: minY, W: maxX - minX, H: maxY - minY}
 }
 
 // petDetection returns the bounding box and class name of the highest-confidence pet detection.
