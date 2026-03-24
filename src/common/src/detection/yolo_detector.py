@@ -1132,7 +1132,7 @@ class YoloDetector:
 
         dbboxes_list, ids_list, scores_list = [], [], []
 
-        for idx, (cls, bbox, stride, grid) in enumerate(
+        for _idx, (cls, bbox, stride, grid) in enumerate(
             zip(clses, bboxes, self.strides, self.grids)
         ):
             # 対象クラスのみでmax (各列はstrided viewでコピーなし)
