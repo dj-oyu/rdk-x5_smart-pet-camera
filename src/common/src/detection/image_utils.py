@@ -90,6 +90,6 @@ def jpeg_to_yolo_nv12(
 
     orig_h, orig_w = bgr.shape[:2]
     letterboxed, scale, pad_x, pad_y = letterbox_bgr(bgr, target)
-    nv12, nv12_w, nv12_h = bgr_to_nv12(letterboxed)
+    nv12, _, _ = bgr_to_nv12(letterboxed)
 
     return nv12, orig_w, orig_h, scale, pad_x, pad_y

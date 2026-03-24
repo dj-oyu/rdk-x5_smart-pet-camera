@@ -25,11 +25,9 @@ from ctypes import (
     c_int64,
     c_uint64,
     c_void_p,
-    c_char_p,
     POINTER,
     Structure,
     byref,
-    addressof,
 )
 from typing import Optional
 import numpy as np

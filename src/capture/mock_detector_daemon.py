@@ -92,7 +92,7 @@ def main():
             print("[Info] Connected to shared memory")
             connected = True
             break
-        except Exception as e:
+        except Exception:
             print(f"[Info] Waiting for shared memory... ({i+1}/20)")
             time.sleep(1.0)
     
