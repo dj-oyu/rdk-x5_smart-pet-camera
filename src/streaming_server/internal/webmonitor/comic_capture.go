@@ -687,12 +687,24 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 	return filename
 }
 
+// ingestURL is the ai-pyramid ingest API endpoint. Requires PET_ALBUM_URL env (e.g. "https://host:8082").
+var ingestURL = func() string {
+	u := os.Getenv("PET_ALBUM_URL")
+	if u == "" {
+		return ""
+	}
+	return strings.TrimRight(u, "/") + "/api/photos/ingest"
+}()
+
 // sendIngestToAIPyramid sends detection metadata to ai-pyramid's ingest API.
 // Called asynchronously after comic save. Retries once on failure.
+// No-op if AI_PYRAMID_URL is not set.
 func sendIngestToAIPyramid(payload []byte) {
-	const url = "http://ai-pyramid:3000/api/photos/ingest"
+	if ingestURL == "" {
+		return
+	}
 	for attempt := 0; attempt < 2; attempt++ {
-		resp, err := httpClient.Post(url, "application/json", strings.NewReader(string(payload)))
+		resp, err := httpClient.Post(ingestURL, "application/json", strings.NewReader(string(payload)))
 		if err != nil {
 			if attempt == 0 {
 				time.Sleep(2 * time.Second)
