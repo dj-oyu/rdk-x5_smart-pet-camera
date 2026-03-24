@@ -21,8 +21,16 @@ pub struct PhotoWatcher {
 }
 
 impl PhotoWatcher {
-    pub fn new(app: AppContext, vlm_config: VlmConfig, detect_client: Option<Arc<DetectClient>>) -> Self {
-        Self { app, vlm_config, detect_client }
+    pub fn new(
+        app: AppContext,
+        vlm_config: VlmConfig,
+        detect_client: Option<Arc<DetectClient>>,
+    ) -> Self {
+        Self {
+            app,
+            vlm_config,
+            detect_client,
+        }
     }
 
     async fn initial_scan(&self) {
