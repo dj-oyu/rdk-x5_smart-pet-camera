@@ -988,6 +988,42 @@ button {
   to { offset-distance: 100%; }
 }
 
+/* --- Bbox interaction states --- */
+
+.glass-overlay {
+  pointer-events: auto;
+}
+
+.glass-bbox {
+  transition: transform 0.2s ease, opacity 0.2s ease, box-shadow 0.2s ease;
+}
+
+.glass-bbox.highlighted {
+  transform: scale(1.06);
+  box-shadow: 0 0 12px rgba(255, 255, 255, 0.4);
+  z-index: 10;
+}
+
+.glass-bbox.dimmed {
+  opacity: 0.15;
+}
+
+.glass-overlay.peek .glass-bbox:not(.highlighted) {
+  backdrop-filter: none;
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.detection-row {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.detection-row.active {
+  background: rgba(47, 123, 240, 0.08);
+  border-radius: 4px;
+}
+
 /* --- Card sparkle particles (detection hint) --- */
 
 .sparkle-overlay {
@@ -1017,23 +1053,49 @@ button {
 /* --- Smoke detection (progressive scan) --- */
 
 .scan-active {
-  background: rgba(0, 0, 0, 0.08);
+  background: rgba(0, 0, 0, 0.06);
   transition: background 0.3s;
 }
 
 .smoke-detection {
   position: absolute;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(255, 255, 255, 0.35) 0%, rgba(255, 255, 255, 0.1) 40%, transparent 70%);
-  filter: blur(8px);
-  transform: translate(-50%, -50%);
-  animation: smoke-breathe 2.5s ease-in-out infinite;
+  background: radial-gradient(
+    circle,
+    rgba(255, 255, 255, 0.5) 0%,
+    rgba(200, 220, 255, 0.25) 30%,
+    rgba(255, 255, 255, 0.08) 60%,
+    transparent 80%
+  );
+  filter: url(#smoke-turbulence) blur(6px);
+  transform: translate(-50%, -50%) scale(0);
+  animation: smoke-appear 0.6s ease-out forwards, smoke-drift 3s ease-in-out 0.6s infinite;
   pointer-events: none;
 }
 
-@keyframes smoke-breathe {
-  0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.4; }
-  50% { transform: translate(-50%, -50%) scale(1.2); opacity: 0.7; }
+@keyframes smoke-appear {
+  0% { transform: translate(-50%, -50%) scale(0); opacity: 0; }
+  60% { transform: translate(-50%, -50%) scale(1.3); opacity: 0.7; }
+  100% { transform: translate(-50%, -50%) scale(1); opacity: 0.6; }
+}
+
+@keyframes smoke-drift {
+  0%, 100% {
+    transform: translate(-50%, -50%) scale(1) rotate(0deg);
+    opacity: 0.5;
+  }
+  25% {
+    transform: translate(calc(-50% + 3px), calc(-50% - 4px)) scale(1.1) rotate(2deg);
+    opacity: 0.65;
+  }
+  50% {
+    transform: translate(calc(-50% - 2px), calc(-50% + 3px)) scale(1.15) rotate(-1deg);
+    opacity: 0.7;
+  }
+  75% {
+    transform: translate(calc(-50% + 4px), calc(-50% + 1px)) scale(1.05) rotate(1deg);
+    opacity: 0.55;
+  }
 }
 
 .detect-now-btn {
