@@ -19,11 +19,13 @@ const BEHAVIOR_OPTIONS = [
 ];
 
 const CLASS_COLORS: Record<string, string> = {
-  cat: "#22c55e",
-  dog: "#eab308",
-  person: "#3b82f6",
-  cup: "#a855f7",
-  food_bowl: "#f97316",
+  cat: "#6EFF9E",
+  dog: "#FFC878",
+  bird: "#A0DCFF",
+  food_bowl: "#78C8FF",
+  water_bowl: "#FF8C8C",
+  person: "#FFF08C",
+  cup: "#FFBED2",
 };
 
 function bboxColor(det: Detection): string {
