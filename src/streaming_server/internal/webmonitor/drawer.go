@@ -275,4 +275,3 @@ func DrawStatsOverlay(img *image.RGBA, frameNum int, timestamp float64, detectio
 		}
 	}
 }
-

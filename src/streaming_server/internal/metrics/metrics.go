@@ -12,33 +12,33 @@ import (
 // Metrics holds all application metrics
 type Metrics struct {
 	// Frame processing counters
-	FramesRead          atomic.Uint64
-	FramesProcessed     atomic.Uint64
-	FramesDropped       atomic.Uint64
-	WebRTCFramesSent    atomic.Uint64
-	WebRTCFramesDropped atomic.Uint64
-	RecorderFramesSent  atomic.Uint64
+	FramesRead            atomic.Uint64
+	FramesProcessed       atomic.Uint64
+	FramesDropped         atomic.Uint64
+	WebRTCFramesSent      atomic.Uint64
+	WebRTCFramesDropped   atomic.Uint64
+	RecorderFramesSent    atomic.Uint64
 	RecorderFramesDropped atomic.Uint64
 
 	// Error counters
-	ReadErrors      atomic.Uint64
-	ProcessErrors   atomic.Uint64
-	WebRTCErrors    atomic.Uint64
-	RecorderErrors  atomic.Uint64
+	ReadErrors     atomic.Uint64
+	ProcessErrors  atomic.Uint64
+	WebRTCErrors   atomic.Uint64
+	RecorderErrors atomic.Uint64
 
 	// Latency tracking
-	FrameLatencyMs       atomic.Uint64 // Average frame latency in ms
-	ProcessLatencyMs     atomic.Uint64 // Average processing latency in ms
+	FrameLatencyMs         atomic.Uint64 // Average frame latency in ms
+	ProcessLatencyMs       atomic.Uint64 // Average processing latency in ms
 	RecorderWriteLatencyMs atomic.Uint64 // Latest recorder write latency in ms
-	WebRTCSendLatencyMs  atomic.Uint64 // Latest WebRTC SendFrame latency in ms
+	WebRTCSendLatencyMs    atomic.Uint64 // Latest WebRTC SendFrame latency in ms
 
 	// Buffer usage
 	WebRTCBufferUsage   atomic.Uint64 // Percentage (0-100)
 	RecorderBufferUsage atomic.Uint64 // Percentage (0-100)
 
 	// SHM / recorder queue depth
-	SHMFrameDropRate    atomic.Uint64 // Cumulative count of SHM frame version jumps (missed frames)
-	RecorderQueueDepth  atomic.Uint64 // Current recorder channel occupancy
+	SHMFrameDropRate   atomic.Uint64 // Cumulative count of SHM frame version jumps (missed frames)
+	RecorderQueueDepth atomic.Uint64 // Current recorder channel occupancy
 
 	// WebRTC client tracking
 	ActiveClients atomic.Uint64

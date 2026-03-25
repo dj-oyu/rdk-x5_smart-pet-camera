@@ -1,0 +1,62 @@
+name: "Go"
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/streaming_server/**'
+      - '.github/workflows/go.yml'
+  workflow_dispatch:
+
+jobs:
+  fmt:
+    name: gofmt
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/streaming_server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: src/streaming_server/go.mod
+          cache-dependency-path: src/streaming_server/go.sum
+      - name: Check format
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::Unformatted files:" && echo "$unformatted"
+            exit 1
+          fi
+
+  vet:
+    name: go vet
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/streaming_server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: src/streaming_server/go.mod
+          cache-dependency-path: src/streaming_server/go.sum
+      - name: go vet (pure-Go packages)
+        run: |
+          go vet ./internal/flaskcompat/... ./internal/logger/... ./internal/metrics/... ./internal/recorder/... ./pkg/...
+
+  test:
+    name: go test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/streaming_server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: src/streaming_server/go.mod
+          cache-dependency-path: src/streaming_server/go.sum
+      - name: go test (pure-Go packages)
+        run: |
+          go test ./internal/flaskcompat/... -v -count=1

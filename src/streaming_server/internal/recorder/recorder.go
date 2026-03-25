@@ -12,17 +12,17 @@ import (
 
 // Recorder records H.264 frames to file
 type Recorder struct {
-	mu            sync.RWMutex
-	file          *os.File
-	filename      string
-	basePath      string
-	recording     bool
-	frameCount    uint64
-	bytesWritten  uint64
-	startTime     time.Time
-	frameChan     chan *types.VideoFrame
-	closeChan     chan struct{}
-	wg            sync.WaitGroup
+	mu           sync.RWMutex
+	file         *os.File
+	filename     string
+	basePath     string
+	recording    bool
+	frameCount   uint64
+	bytesWritten uint64
+	startTime    time.Time
+	frameChan    chan *types.VideoFrame
+	closeChan    chan struct{}
+	wg           sync.WaitGroup
 
 	// Header management
 	vpsCache        []byte

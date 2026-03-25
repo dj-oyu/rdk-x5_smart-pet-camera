@@ -3,7 +3,7 @@
 ## Workflow
 - **Package**: `uv` exclusively (`uv add`, `uv sync`, `uv run`)
 - **Verify**: Implement → `uv run scripts/profile_shm.py` → judge JSON metrics
-- **Mock**: `uv run src/capture/mock_camera_daemon.py` for testing without hardware
+- **Mock**: `uv run src/mock/main.py` for testing without hardware
 - **Search**: `gemini_search` skill for external docs
 
 ## Project Structure
@@ -38,6 +38,7 @@
 | `axmodel-conversion-guide.md` | Pulsar2 axmodel変換手順書 (Qwen3-VL/Qwen3.5) |
 | `logging_system.md` | Logging architecture |
 | `text-rendering-design.md` | Text overlay/rendering on video |
+| `tool_profile_shm_design.md` | profile_shm.py tool design |
 | `development_roadmap.md` | Project timeline and roadmap |
 
 ## Future Tasks
