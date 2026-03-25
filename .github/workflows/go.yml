@@ -16,8 +16,8 @@ jobs:
       run:
         working-directory: src/streaming_server
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: src/streaming_server/go.mod
           cache-dependency-path: src/streaming_server/go.sum
@@ -36,8 +36,8 @@ jobs:
       run:
         working-directory: src/streaming_server
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: src/streaming_server/go.mod
           cache-dependency-path: src/streaming_server/go.sum
@@ -52,8 +52,8 @@ jobs:
       run:
         working-directory: src/streaming_server
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: src/streaming_server/go.mod
           cache-dependency-path: src/streaming_server/go.sum
