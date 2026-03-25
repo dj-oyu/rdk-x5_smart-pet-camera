@@ -1,6 +1,13 @@
 export type EventStatus = "valid" | "invalid" | "pending";
 export type StatusFilter = "all" | "valid" | "invalid" | "pending";
 
+export type BboxSummary = {
+  bbox_x: number;
+  bbox_y: number;
+  bbox_w: number;
+  bbox_h: number;
+};
+
 export type EventSummary = {
   id: number;
   source_filename: string;
@@ -9,6 +16,7 @@ export type EventSummary = {
   status: EventStatus;
   pet_id: string | null;
   behavior: string | null;
+  bboxes?: BboxSummary[];
 };
 
 export type EventListResponse = {

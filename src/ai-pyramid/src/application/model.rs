@@ -1,4 +1,4 @@
-use crate::db::{Photo, PhotoFilter, Stats};
+use crate::db::{BboxSummary, Photo, PhotoFilter, Stats};
 use chrono::NaiveDateTime;
 use serde::Serialize;
 
@@ -71,6 +71,8 @@ pub struct EventSummary {
     pub status: EventStatus,
     pub pet_id: Option<String>,
     pub behavior: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bboxes: Option<Vec<BboxSummary>>,
 }
 
 impl EventSummary {
@@ -110,6 +112,7 @@ impl From<Photo> for EventSummary {
             status,
             pet_id: photo.pet_id,
             behavior: photo.behavior,
+            bboxes: None,
         }
     }
 }

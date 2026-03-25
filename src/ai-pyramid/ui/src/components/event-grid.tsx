@@ -1,6 +1,9 @@
 import { useEffect, useState } from "preact/hooks";
-import { isEmbedded, type EventSummary, type PetNames } from "../lib/api";
+import { isEmbedded, type BboxSummary, type EventSummary, type PetNames } from "../lib/api";
 import { photoUrl } from "../lib/api";
+
+const COMIC_W = 848;
+const COMIC_H = 496;
 
 type EventGridProps = {
   events: EventSummary[];
@@ -57,6 +60,45 @@ function petDisplay(petId: string | null, petNames: PetNames): string {
   return petNames[petId] ?? petId;
 }
 
+function SparkleOverlay({ bboxes }: { bboxes: BboxSummary[] }) {
+  // Generate 2 particles per bbox, deterministic offsets from bbox position
+  const particles: { left: string; top: string; delay: string; size: number }[] = [];
+  for (const b of bboxes) {
+    const cx = b.bbox_x + b.bbox_w / 2;
+    const cy = b.bbox_y + b.bbox_h / 2;
+    // Spread particles within bbox area using deterministic pseudo-random
+    const seed = b.bbox_x * 7 + b.bbox_y * 13;
+    for (let i = 0; i < 2; i++) {
+      const ox = ((seed + i * 37) % 41 - 20) / 100 * b.bbox_w;
+      const oy = ((seed + i * 53) % 31 - 15) / 100 * b.bbox_h;
+      particles.push({
+        left: `${((cx + ox) / COMIC_W) * 100}%`,
+        top: `${((cy + oy) / COMIC_H) * 100}%`,
+        delay: `${(particles.length * 0.7) % 3}s`,
+        size: 3 + (seed + i) % 3,
+      });
+    }
+  }
+
+  return (
+    <div class="sparkle-overlay">
+      {particles.map((p, i) => (
+        <span
+          key={i}
+          class="sparkle-particle"
+          style={{
+            left: p.left,
+            top: p.top,
+            width: `${p.size}px`,
+            height: `${p.size}px`,
+            animationDelay: p.delay,
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
 export function EventGrid({ events, loading, error, petNames, onOpenEvent }: EventGridProps) {
   if (loading) {
     return <div class="empty-state">Loading events...</div>;
@@ -97,6 +139,9 @@ export function EventGrid({ events, loading, error, petNames, onOpenEvent }: Eve
                 fetchPriority={featured ? "high" : "auto"}
               />
               {featured && <FeaturedOverlay event={event} petNames={petNames} />}
+              {event.bboxes && event.bboxes.length > 0 && (
+                <SparkleOverlay bboxes={event.bboxes} />
+              )}
               <button
                 type="button"
                 class="card-edit-btn"
