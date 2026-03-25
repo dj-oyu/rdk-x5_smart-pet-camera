@@ -78,6 +78,8 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [smokeHits, setSmokeHits] = useState<PartialDetection[]>([]);
   const [scanning, setScanning] = useState(false);
+  const [hoveredDetId, setHoveredDetId] = useState<number | null>(null);
+  const [peekMode, setPeekMode] = useState(false);
 
   const [editing, setEditing] = useState(false);
   const [petId, setPetId] = useState(event.pet_id);
@@ -200,6 +202,15 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
 
   return (
     <div class="detail-backdrop" onClick={onClose}>
+      {/* SVG turbulence filter for fluid smoke effect */}
+      <svg width="0" height="0" style={{ position: "absolute" }}>
+        <filter id="smoke-turbulence">
+          <feTurbulence type="fractalNoise" baseFrequency="0.015" numOctaves="3" seed="1">
+            <animate attributeName="baseFrequency" values="0.015;0.025;0.015" dur="4s" repeatCount="indefinite" />
+          </feTurbulence>
+          <feDisplacementMap in="SourceGraphic" scale="12" />
+        </filter>
+      </svg>
       <div class="detail-modal" onClick={(e) => e.stopPropagation()}>
         <button type="button" class="detail-close" onClick={onClose}>✕</button>
 
@@ -211,12 +222,17 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
           />
           {/* Confirmed detections: glass bbox with shine */}
           {!scanning && detections.length > 0 && (
-            <div class="glass-overlay">
+            <div
+              class={`glass-overlay ${peekMode ? "peek" : ""}`}
+              onMouseEnter={() => setPeekMode(true)}
+              onMouseLeave={() => { setPeekMode(false); setHoveredDetId(null); }}
+            >
               {detections.map((det) => (
                 <div
                   key={det.id}
-                  class="glass-bbox"
+                  class={`glass-bbox ${hoveredDetId === det.id ? "highlighted" : ""} ${peekMode && hoveredDetId !== det.id ? "dimmed" : ""}`}
                   style={glassBboxStyle(det)}
+                  data-det-id={det.id}
                 >
                   <span
                     class="glass-shine"
@@ -250,9 +266,9 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
                   style={{
                     left: `${offsetX + (hit.bbox_x + hit.bbox_w / 2) * scale}px`,
                     top: `${offsetY + (hit.bbox_y + hit.bbox_h / 2) * scale}px`,
-                    width: `${Math.max(hit.bbox_w, hit.bbox_h) * scale * 0.8}px`,
-                    height: `${Math.max(hit.bbox_w, hit.bbox_h) * scale * 0.8}px`,
-                    opacity: 0.2 + hit.confidence * 0.6,
+                    width: `${Math.max(hit.bbox_w, hit.bbox_h) * scale * 1.2}px`,
+                    height: `${Math.max(hit.bbox_w, hit.bbox_h) * scale * 1.2}px`,
+                    animationDelay: `0s, ${(i * 0.4) % 2}s`,
                   }}
                 />
               ))}
@@ -337,7 +353,13 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
             <strong>Detections ({detections.length})</strong>
             <ul>
               {detections.map((det) => (
-                <li key={det.id} class="detection-row">
+                <li
+                  key={det.id}
+                  class={`detection-row ${hoveredDetId === det.id ? "active" : ""}`}
+                  onMouseEnter={() => setHoveredDetId(det.id)}
+                  onMouseLeave={() => setHoveredDetId(null)}
+                  onTouchStart={() => setHoveredDetId(det.id === hoveredDetId ? null : det.id)}
+                >
                   <span
                     class="detection-color"
                     style={{ background: bboxColor(det) }}

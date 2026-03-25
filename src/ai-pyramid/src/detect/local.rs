@@ -438,24 +438,37 @@ fn parse_ax_output(stdout: &str) -> Result<Vec<RawLocalDetection>, String> {
 /// Merge detections from dual models: deduplicate overlapping bboxes by IoU.
 /// When both models agree (IoU > 0.5, same class), boost confidence:
 ///   boosted = 1 - (1 - conf_a) * (1 - conf_b)
+/// Two-pass merge:
+/// 1. Same-class IoU > 0.5 → boost confidence (dual-model agreement)
+/// 2. Cross-class IoU > 0.3 → same object, keep higher confidence
 fn merge_detections(mut dets: Vec<RawLocalDetection>) -> Vec<RawLocalDetection> {
-    // Sort by confidence descending
     dets.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
 
-    let mut merged: Vec<RawLocalDetection> = Vec::new();
+    // Pass 1: same-class merge with confidence boost
+    let mut pass1: Vec<RawLocalDetection> = Vec::new();
     for det in dets {
-        if let Some(existing) = merged
+        if let Some(existing) = pass1
             .iter_mut()
             .find(|m| m.class_id == det.class_id && iou(m, &det) > 0.5)
         {
-            // Dual-model agreement: boost confidence
             let boosted = 1.0 - (1.0 - existing.confidence) * (1.0 - det.confidence);
             existing.confidence = boosted;
         } else {
-            merged.push(det);
+            pass1.push(det);
         }
     }
-    merged
+
+    // Pass 2: cross-class proximity merge (same object, different label)
+    // Keep highest confidence detection, discard overlapping lower-conf ones
+    pass1.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+    let mut pass2: Vec<RawLocalDetection> = Vec::new();
+    for det in pass1 {
+        let dominated = pass2.iter().any(|m| iou(m, &det) > 0.3);
+        if !dominated {
+            pass2.push(det);
+        }
+    }
+    pass2
 }
 
 fn iou(a: &RawLocalDetection, b: &RawLocalDetection) -> f64 {
