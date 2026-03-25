@@ -79,7 +79,9 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
   const [smokeHits, setSmokeHits] = useState<PartialDetection[]>([]);
   const [scanning, setScanning] = useState(false);
   const [hoveredDetId, setHoveredDetId] = useState<number | null>(null);
+  const [pinnedDetId, setPinnedDetId] = useState<number | null>(null);
   const [peekMode, setPeekMode] = useState(false);
+  const activeDetId = pinnedDetId ?? hoveredDetId;
 
   const [editing, setEditing] = useState(false);
   const [petId, setPetId] = useState(event.pet_id);
@@ -230,7 +232,7 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
               {detections.map((det) => (
                 <div
                   key={det.id}
-                  class={`glass-bbox ${hoveredDetId === det.id ? "highlighted" : ""} ${peekMode && hoveredDetId !== det.id ? "dimmed" : ""}`}
+                  class={`glass-bbox ${activeDetId === det.id ? "highlighted" : ""} ${peekMode && activeDetId !== det.id ? "dimmed" : ""}`}
                   style={glassBboxStyle(det)}
                   data-det-id={det.id}
                 >
@@ -355,10 +357,11 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
               {detections.map((det) => (
                 <li
                   key={det.id}
-                  class={`detection-row ${hoveredDetId === det.id ? "active" : ""}`}
+                  class={`detection-row ${activeDetId === det.id ? "active" : ""}`}
                   onMouseEnter={() => setHoveredDetId(det.id)}
                   onMouseLeave={() => setHoveredDetId(null)}
-                  onTouchStart={() => setHoveredDetId(det.id === hoveredDetId ? null : det.id)}
+                  onClick={() => setPinnedDetId(pinnedDetId === det.id ? null : det.id)}
+                  onTouchStart={() => setPinnedDetId(pinnedDetId === det.id ? null : det.id)}
                 >
                   <span
                     class="detection-color"
