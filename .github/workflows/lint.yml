@@ -28,7 +28,7 @@ jobs:
             for mmd in /tmp/mermaid_block_*.mmd; do
               [ -f "$mmd" ] || continue
               BLOCK=$((BLOCK+1))
-              if mmdc -i "$mmd" -o /tmp/mermaid_out.svg 2>/dev/null; then
+              if mmdc -i "$mmd" -o /tmp/mermaid_out.svg; then
                 echo "OK: $file block #$BLOCK"
               else
                 echo "FAIL: $file block #$BLOCK"; cat "$mmd"; FAIL=1
