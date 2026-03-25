@@ -551,7 +551,7 @@ class YoloDetectorDaemon:
                     logger.info(f"[detect] {orig_w}x{orig_h} scale={scale:.4f} pad=({pad_x},{pad_y})")
                     y_plane = nv12[:640*640].reshape(640, 640)
                     cv2.imwrite("/tmp/detect_nv12_y.png", y_plane)
-                    detections = detector.detect_nv12_readonly(nv12, 640, 640)
+                    detections = detector.detect_nv12(nv12, 640, 640)
                     logger.info(f"[detect] {len(detections)} detections")
 
                     # Map bbox from 640x640 letterbox back to original image coords
