@@ -18,7 +18,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install -g @mermaid-js/mermaid-cli
+      - name: Install mermaid-cli
+        run: |
+          npm install -g @mermaid-js/mermaid-cli
+          echo '{"args":["--no-sandbox"]}' > /tmp/puppeteer-config.json
       - name: Validate mermaid blocks
         run: |
           FAIL=0
@@ -31,7 +34,7 @@ jobs:
               [ -f "$mmd" ] || continue
               BLOCK=$((BLOCK+1))
               echo "--- Checking $file block #$BLOCK ---"
-              if mmdc -i "$mmd" -o /tmp/mermaid_out.svg 2>&1; then
+              if mmdc -i "$mmd" -o /tmp/mermaid_out.svg -p /tmp/puppeteer-config.json 2>&1; then
                 echo "OK: $file block #$BLOCK"
               else
                 echo "::error file=$file::FAIL: block #$BLOCK"
