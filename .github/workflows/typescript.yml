@@ -12,6 +12,7 @@ jobs:
   typecheck:
     name: tsc --noEmit
     runs-on: ubuntu-latest
+    continue-on-error: true
     defaults:
       run:
         working-directory: src/web

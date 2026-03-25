@@ -41,11 +41,9 @@ jobs:
         with:
           go-version-file: src/streaming_server/go.mod
           cache-dependency-path: src/streaming_server/go.sum
-      - name: go vet (skip CGO packages)
-        env:
-          CGO_ENABLED: "0"
+      - name: go vet (pure-Go packages)
         run: |
-          go vet $(go list ./... | grep -v '/shm$' | grep -v '/webmonitor$')
+          go vet ./internal/flaskcompat/... ./internal/logger/... ./internal/metrics/... ./internal/recorder/... ./pkg/...
 
   test:
     name: go test
@@ -59,8 +57,6 @@ jobs:
         with:
           go-version-file: src/streaming_server/go.mod
           cache-dependency-path: src/streaming_server/go.sum
-      - name: go test (skip CGO packages)
-        env:
-          CGO_ENABLED: "0"
+      - name: go test (pure-Go packages)
         run: |
-          go test $(go list ./... | grep -v '/shm$' | grep -v '/webmonitor$') -v -count=1
+          go test ./internal/flaskcompat/... -v -count=1

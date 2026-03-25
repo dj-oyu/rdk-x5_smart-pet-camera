@@ -4,16 +4,16 @@
 
 ```mermaid
 graph TD
-    RDK["camera<br/>(Go streaming_server)"]
-    RSYNC["rsync<br/>(Tailscale SSH)"]
+    RDK["camera<br/>Go streaming_server"]
+    RSYNC["rsync<br/>Tailscale SSH"]
     INGEST_API["POST /api/photos/ingest"]
-    WATCHER["PhotoWatcher<br/>(fsnotify)"]
-    VLM["VLM Worker<br/>(ax-llm / Qwen3-VL)"]
-    DB_THREAD["db_thread<br/>(single owner)"]
-    SQLITE["SQLite<br/>(WAL mode)"]
+    WATCHER["PhotoWatcher<br/>fsnotify"]
+    VLM["VLM Worker<br/>ax-llm / Qwen3-VL"]
+    DB_THREAD["db_thread<br/>single owner"]
+    SQLITE["SQLite<br/>WAL mode"]
     SERVER["axum HTTP Server"]
-    MCP["MCP Server<br/>(JSON-RPC 2.0)"]
-    UI["Preact SPA<br/>(embedded)"]
+    MCP["MCP Server<br/>JSON-RPC 2.0"]
+    UI["Preact SPA<br/>embedded"]
     SSE["SSE /api/events"]
     BROWSER["Browser / iframe"]
 
@@ -46,9 +46,9 @@ graph LR
     CMD["ObservationCommands"]
     Q["EventQueries"]
     REPO["SharedEventRepository"]
-    DB["Database<br/>(mpsc::Sender)"]
-    THR["db_thread<br/>(std::thread)"]
-    STORE["PhotoStore<br/>(rusqlite::Connection)"]
+    DB["Database<br/>mpsc::Sender"]
+    THR["db_thread<br/>std::thread"]
+    STORE["PhotoStore<br/>rusqlite::Connection"]
 
     S --> CTX
     M --> REPO
