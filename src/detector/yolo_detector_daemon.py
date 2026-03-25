@@ -530,6 +530,7 @@ class YoloDetectorDaemon:
                     length = int(self.headers.get("Content-Length", 0))
                     body = json.loads(self.rfile.read(length))
                     image_url = body["image_url"]
+                    req_threshold: float | None = body.get("score_threshold")
                 except (json.JSONDecodeError, KeyError, Exception) as e:
                     self.send_error(400, str(e))
                     return
@@ -545,7 +546,16 @@ class YoloDetectorDaemon:
 
                 try:
                     nv12, orig_w, orig_h, scale, pad_x, pad_y = jpeg_to_yolo_nv12(jpeg_bytes)
+                    # Temporarily override score threshold if requested
+                    orig_threshold = detector.score_threshold
+                    if req_threshold is not None:
+                        detector.score_threshold = float(req_threshold)
+                        detector.conf_thres_raw = -np.log(1 / detector.score_threshold - 1)
                     detections = detector.detect_nv12_readonly(nv12, 640, 640)
+                    if req_threshold is not None:
+                        detector.score_threshold = orig_threshold
+                        detector.conf_thres_raw = -np.log(1 / detector.score_threshold - 1)
+                    logger.info(f"[detect] {orig_w}x{orig_h} scale={scale:.4f} pad=({pad_x},{pad_y}) th={req_threshold or orig_threshold} dets={len(detections)}")
 
                     # Map bbox from 640x640 letterbox back to original image coords
                     result = []
