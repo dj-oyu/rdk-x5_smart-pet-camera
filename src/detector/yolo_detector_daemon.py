@@ -42,7 +42,7 @@ from detection.image_utils import jpeg_to_yolo_nv12
 
 # hb_mem bindings (required for zero-copy)
 from hb_mem_bindings import init_module as hb_mem_init, import_nv12_graph_buf
-from common.types import DetectionDict as _DetectionDict
+from common.types import DetectionDict as _DetectionDict, DetectionClass, PET_BOUNDARY
 
 # ロガー設定（後でmain()で上書きされる）
 logging.basicConfig(
@@ -61,7 +61,7 @@ class DetBbox(NamedTuple):
     h: int
 
 class DetDict(NamedTuple):
-    class_name: str
+    class_name: DetectionClass
     confidence: float
     bbox: DetBbox
 
@@ -94,7 +94,7 @@ DAY_MOTION_MIN_AREA_RATIO = 0.005  # min contour area as fraction of zone area
 def _det_to_dict(d: DetDict) -> _DetectionDict:
     """Convert a DetDict namedtuple to a plain dict for the SHM write boundary."""
     return {
-        "class_name": d.class_name,
+        "class_name": d.class_name.label,
         "confidence": d.confidence,
         "bbox": {"x": d.bbox.x, "y": d.bbox.y, "w": d.bbox.w, "h": d.bbox.h},
     }
@@ -125,12 +125,12 @@ def _suppress_dog_with_cat(
     inside a larger dog bbox.  Uses containment ratio (intersection /
     min_area) instead of IoU to catch size-mismatched overlaps.
     """
-    cats = [d for d in detections if d.class_name == "cat"]
+    cats = [d for d in detections if d.class_name is DetectionClass.CAT]
     if not cats:
         return detections
     return [
         d for d in detections
-        if d.class_name != "dog" or not any(
+        if d.class_name is not DetectionClass.DOG or not any(
             _containment_ratio(d.bbox, c.bbox) > threshold for c in cats
         )
     ]
@@ -283,7 +283,7 @@ class YoloDetectorDaemon:
 
 
         # Night YOLO false positive filter (IR images cause frequent misdetections)
-        self.night_fp_classes = {"toilet", "sink", "suitcase", "chair"}
+        self.night_fp_classes = {DetectionClass.CHAIR}
 
         # Night frame collection for future fine-tuning
         self.night_collect_dir = Path("/tmp/night_collect")
@@ -325,7 +325,7 @@ class YoloDetectorDaemon:
                 continue
             x, y, w, h = cv2.boundingRect(c)
             results.append(DetDict(
-                class_name="motion",
+                class_name=DetectionClass.MOTION,
                 confidence=min(1.0, area / (320 * 320 * 0.05)),
                 bbox=DetBbox(x=x + zx, y=y + zy, w=w, h=h),
             ))
@@ -569,7 +569,7 @@ class YoloDetectorDaemon:
                         w = min(w, orig_w - x)
                         h = min(h, orig_h - y)
                         result.append({
-                            "class_name": d.class_name.value,
+                            "class_name": d.class_name.label,
                             "confidence": round(d.confidence, 3),
                             "bbox": {"x": x, "y": y, "w": w, "h": h},
                         })
@@ -660,7 +660,7 @@ class YoloDetectorDaemon:
 
         detection_dicts = [
             DetDict(
-                class_name=det.class_name.value,
+                class_name=det.class_name,
                 confidence=det.confidence,
                 bbox=DetBbox(x=det.bbox.x, y=det.bbox.y, w=det.bbox.w, h=det.bbox.h),
             )
@@ -675,7 +675,7 @@ class YoloDetectorDaemon:
                 for roi_idx, roi_dets in enumerate(self.detection_cache):
                     all_detections.extend(roi_dets)
                     if roi_dets and is_debug:
-                        classes = [d.class_name for d in roi_dets]
+                        classes = [d.class_name.label for d in roi_dets]
                         logger.debug(f"  Night ROI {roi_idx}: {classes}")
                 if is_debug and all_detections:
                     logger.debug(f"  Night camera: {len(all_detections)} detections before NMS")
@@ -713,7 +713,7 @@ class YoloDetectorDaemon:
                 for roi_idx, roi_dets in enumerate(self.detection_cache):
                     all_detections.extend(roi_dets)
                     if roi_dets and is_debug:
-                        classes = [d.class_name for d in roi_dets]
+                        classes = [d.class_name.label for d in roi_dets]
                         logger.debug(f"  ROI {roi_idx}: {classes}")
                 if is_debug and all_detections:
                     logger.debug(f"  Day ROI: {len(all_detections)} detections")
@@ -763,10 +763,10 @@ class YoloDetectorDaemon:
 
         # Day motion detection: track pet bbox, detect motion when YOLO lost
         if self.active_camera == 0 and cycle_complete:
-            has_pet = any(d.class_name in ("cat", "dog") for d in detection_dicts)
+            has_pet = any(d.class_name < PET_BOUNDARY for d in detection_dicts)
             if has_pet:
                 for d in detection_dicts:
-                    if d.class_name in ("cat", "dog"):
+                    if d.class_name < PET_BOUNDARY:
                         self._day_last_pet_bbox = DetBbox(
                             x=int(d.bbox.x / self.scale_x),
                             y=int(d.bbox.y / self.scale_y),
@@ -786,7 +786,7 @@ class YoloDetectorDaemon:
                 if motion_dets:
                     motion_scaled = [
                         DetDict(
-                            "motion",
+                            DetectionClass.MOTION,
                             d.confidence,
                             DetBbox(
                                 int(d.bbox.x * self.scale_x),
@@ -838,7 +838,7 @@ class YoloDetectorDaemon:
             )
 
         if is_debug and cycle_complete and detection_dicts:
-            classes = ",".join(d.class_name for d in detection_dicts)
+            classes = ",".join(d.class_name.label for d in detection_dicts)
             logger.debug(f"#{self.stats['frames_processed']}: {classes}")
 
     def _run_night_iteration(
@@ -919,7 +919,7 @@ class YoloDetectorDaemon:
                                     continue
                                 motion_detected_this_frame = True
                                 self._motion_bboxes.append(DetDict(
-                                    class_name="motion",
+                                    class_name=DetectionClass.MOTION,
                                     confidence=min(1.0, area / (small_pixels * 0.05)),
                                     bbox=DetBbox(
                                         x=bx * 2 + roi_ox,
@@ -1110,7 +1110,7 @@ class YoloDetectorDaemon:
                 roi_oy = int(roi_sy * (720.0 / 1080.0))
                 for det in detections:
                     all_yolo_dicts.append(DetDict(
-                        class_name=det.class_name.value,
+                        class_name=det.class_name,
                         confidence=det.confidence,
                         bbox=DetBbox(
                             x=det.bbox.x + roi_ox,
@@ -1145,7 +1145,7 @@ class YoloDetectorDaemon:
                     fc_scale = fc_sz / 640.0
                     for det in fc_detections:
                         all_yolo_dicts.append(DetDict(
-                            class_name=det.class_name.value,
+                            class_name=det.class_name,
                             confidence=det.confidence,
                             bbox=DetBbox(
                                 x=int(det.bbox.x * fc_scale) + fc_x,
@@ -1154,7 +1154,7 @@ class YoloDetectorDaemon:
                                 h=int(det.bbox.h * fc_scale),
                             ),
                         ))
-                    fc_classes = ",".join(d.class_name.value for d in fc_detections) or "none"
+                    fc_classes = ",".join(d.class_name.label for d in fc_detections) or "none"
                     logger.debug(
                         f"focus_crop: roi={self._motion_roi_idx} "
                         f"center=({mcx},{mcy}) size={fc_sz} "
@@ -1219,7 +1219,7 @@ class YoloDetectorDaemon:
                 self.stats[f"_cnt_{k}"] += 1
         if run_yolo:
             for d in detection_dicts:
-                if d.class_name == "motion":
+                if d.class_name is DetectionClass.MOTION:
                     self.stats["total_mot"] = self.stats.get("total_mot", 0) + 1
                 else:
                     self.stats["total_yolo"] = self.stats.get("total_yolo", 0) + 1
@@ -1240,7 +1240,7 @@ class YoloDetectorDaemon:
             )
 
         if is_debug and run_yolo and detection_dicts:
-            classes = ",".join(d.class_name for d in detection_dicts)
+            classes = ",".join(d.class_name.label for d in detection_dicts)
             logger.debug(f"#{self.stats['frames_processed']}: {classes}")
 
         # Release Ch1 buffer
