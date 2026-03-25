@@ -442,7 +442,7 @@ impl PhotoStore {
     /// Return filenames that need VLM processing (is_valid IS NULL, attempts < max).
     pub fn list_pending_filenames(&self, max_attempts: i32) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT filename FROM photos WHERE is_valid IS NULL AND vlm_attempts < ?1 ORDER BY captured_at ASC",
+            "SELECT filename FROM photos WHERE is_valid IS NULL AND vlm_attempts < ?1 ORDER BY captured_at ASC LIMIT 500",
         )?;
         let names = stmt
             .query_map(params![max_attempts], |row| row.get(0))?
@@ -572,7 +572,7 @@ impl PhotoStore {
 
     pub fn distinct_pet_ids(&self) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT pet_id FROM photos WHERE pet_id IS NOT NULL AND pet_id != '' ORDER BY pet_id",
+            "SELECT DISTINCT pet_id FROM photos WHERE pet_id IS NOT NULL AND pet_id != '' ORDER BY pet_id LIMIT 100",
         )?;
         let ids = stmt
             .query_map([], |row| row.get(0))?
@@ -582,7 +582,7 @@ impl PhotoStore {
 
     pub fn distinct_behaviors(&self) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT behavior FROM photos WHERE behavior IS NOT NULL AND behavior != '' ORDER BY behavior",
+            "SELECT DISTINCT behavior FROM photos WHERE behavior IS NOT NULL AND behavior != '' ORDER BY behavior LIMIT 100",
         )?;
         let behaviors = stmt
             .query_map([], |row| row.get(0))?
@@ -593,7 +593,7 @@ impl PhotoStore {
     /// Return captions for valid photos on a given date (YYYY-MM-DD).
     pub fn captions_for_date(&self, date: &str) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT caption FROM photos WHERE is_valid = 1 AND caption IS NOT NULL AND captured_at LIKE ? || '%' ORDER BY captured_at ASC",
+            "SELECT caption FROM photos WHERE is_valid = 1 AND caption IS NOT NULL AND captured_at LIKE ? || '%' ORDER BY captured_at ASC LIMIT 200",
         )?;
         let captions = stmt
             .query_map(params![date], |row| row.get(0))?

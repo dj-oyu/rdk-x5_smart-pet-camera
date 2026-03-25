@@ -177,25 +177,25 @@ async fn handle_photo_serve(
     let safe_name = sanitize_filename(&filename);
     let path = state.photos_dir.join(&safe_name);
 
-    if !path.exists() {
-        return (
+    match tokio::fs::File::open(&path).await {
+        Ok(file) => {
+            let stream = tokio_util::io::ReaderStream::new(file);
+            let body = axum::body::Body::from_stream(stream);
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "image/jpeg"),
+                    (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+                ],
+                body,
+            )
+                .into_response()
+        }
+        Err(_) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "not found"})),
         )
-            .into_response();
-    }
-
-    match tokio::fs::read(&path).await {
-        Ok(data) => (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, "image/jpeg"),
-                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
-            ],
-            data,
-        )
             .into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "read error").into_response(),
     }
 }
 
