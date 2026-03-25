@@ -148,11 +148,19 @@ async fn main() {
         let camera_host = camera_host.unwrap_or_else(|| "localhost".into());
         let album_host = album_host.unwrap_or_else(|| "localhost".into());
         let camera_port = std::env::var("PET_CAMERA_PORT").unwrap_or_else(|_| "8080".into());
+        let detect_port = std::env::var("PET_CAMERA_DETECT_PORT").ok();
         let album_port = std::env::var("PET_ALBUM_PORT").unwrap_or_else(|_| "8082".into());
         let config = DetectConfig {
-            camera_base_url: format!("https://{camera_host}:{camera_port}"),
+            camera_base_url: if let Some(ref dp) = detect_port {
+                // Direct to Python detector (HTTP)
+                format!("http://{camera_host}:{dp}")
+            } else {
+                // Via Go proxy (HTTPS)
+                format!("https://{camera_host}:{camera_port}")
+            },
             self_base_url: format!("https://{album_host}:{album_port}"),
             timeout: Duration::from_secs(30),
+            score_threshold: 0.2,
         };
         info!(
             "Detection enabled: camera={}, self={}",

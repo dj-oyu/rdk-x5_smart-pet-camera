@@ -10,6 +10,8 @@ pub struct DetectConfig {
     /// e.g. "http://album-host:8082" — URL the camera uses to fetch photos from us
     pub self_base_url: String,
     pub timeout: Duration,
+    /// YOLO score threshold for panel detection (lower than live camera default)
+    pub score_threshold: f64,
 }
 
 pub struct DetectClient {
@@ -20,6 +22,7 @@ pub struct DetectClient {
 #[derive(Serialize)]
 struct DetectRequest {
     image_url: String,
+    score_threshold: f64,
 }
 
 #[derive(Deserialize)]
@@ -85,7 +88,10 @@ impl DetectClient {
                 "{}/api/photos/{}/panel/{}",
                 self.config.self_base_url, filename, panel
             );
-            let request = DetectRequest { image_url };
+            let request = DetectRequest {
+                image_url,
+                score_threshold: self.config.score_threshold,
+            };
 
             let result = self.detect_one(&detect_url, &request).await;
             match result {
@@ -212,6 +218,7 @@ mod tests {
             camera_base_url: format!("http://{addr}"),
             self_base_url: "http://localhost:8082".into(),
             timeout: Duration::from_secs(5),
+            score_threshold: 0.2,
         });
 
         let dets = client
@@ -258,6 +265,7 @@ mod tests {
             camera_base_url: format!("http://{addr}"),
             self_base_url: "http://localhost:8082".into(),
             timeout: Duration::from_secs(5),
+            score_threshold: 0.2,
         });
 
         let dets = client
