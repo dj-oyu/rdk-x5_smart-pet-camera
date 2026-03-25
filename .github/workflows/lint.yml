@@ -1,74 +1,16 @@
-name: Lint
+name: "Lint: Docs"
 
 on:
   pull_request:
     branches: [main]
     paths:
-      - 'src/streaming_server/**'
-      - 'src/ai-pyramid/**'
-      - 'src/web/**'
       - 'docs/**/*.md'
       - '**/CLAUDE.md'
       - '.github/workflows/lint.yml'
   workflow_dispatch:
 
 jobs:
-  go:
-    name: "Go: vet"
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src/streaming_server
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: src/streaming_server/go.mod
-          cache-dependency-path: src/streaming_server/go.sum
-      - run: go vet ./...
-
-  rust:
-    name: "Rust: clippy"
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src/ai-pyramid
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src/ai-pyramid/target
-          key: lint-cargo-${{ hashFiles('src/ai-pyramid/Cargo.lock') }}
-          restore-keys: lint-cargo-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.11
-      - name: Build frontend
-        working-directory: src/ai-pyramid/ui
-        run: bun install --frozen-lockfile && bun run build
-      - run: cargo clippy -- -D warnings
-
-  typescript:
-    name: "TypeScript: tsc"
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src/web
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.11
-      - run: bun install --frozen-lockfile
-      - run: bunx tsc --noEmit
-
-  docs:
+  mermaid:
     name: "Docs: mermaid"
     runs-on: ubuntu-latest
     steps:

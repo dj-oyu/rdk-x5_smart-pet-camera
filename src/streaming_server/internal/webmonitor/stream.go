@@ -339,4 +339,3 @@ func streamConnectionEventsFromChannel(w http.ResponseWriter, r *http.Request, e
 		}
 	}
 }
-

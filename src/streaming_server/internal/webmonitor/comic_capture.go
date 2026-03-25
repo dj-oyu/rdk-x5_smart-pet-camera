@@ -46,17 +46,17 @@ const (
 )
 
 type capturedPanel struct {
-	nv12Data    []byte
-	width       int
-	height      int
-	timestamp   time.Time
-	bbox        *BoundingBox
-	placeholder bool        // filled panel (wider crop to show context)
-	motionHint  bool        // panel guided by motion detection (tighter crop)
-	petClass    string      // "mike", "chatora", "other", or "" if unknown
-	petConfidence float64  // 0.0-1.0, classification confidence
+	nv12Data       []byte
+	width          int
+	height         int
+	timestamp      time.Time
+	bbox           *BoundingBox
+	placeholder    bool            // filled panel (wider crop to show context)
+	motionHint     bool            // panel guided by motion detection (tighter crop)
+	petClass       string          // "mike", "chatora", "other", or "" if unknown
+	petConfidence  float64         // 0.0-1.0, classification confidence
 	petColorResult *PetColorResult // full diagnostic data (nil if not classified)
-	detections  []Detection // all YOLO detections at capture time
+	detections     []Detection     // all YOLO detections at capture time
 }
 
 type stitchRequest struct {
@@ -598,9 +598,9 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 	// Build ingest payload: map all YOLO detections to comic coordinates.
 	// Panel layout: 2x2 grid in 848x496 comic image.
 	panelOffsets := [4][2]int{
-		{comicMargin + comicBorder, comicMargin + comicBorder},                                                         // top-left
-		{comicMargin + comicBorder + comicPanelW + 2*comicBorder + comicGap, comicMargin + comicBorder},                // top-right
-		{comicMargin + comicBorder, comicMargin + comicBorder + comicPanelH + 2*comicBorder + comicGap},                // bottom-left
+		{comicMargin + comicBorder, comicMargin + comicBorder},                                                                                   // top-left
+		{comicMargin + comicBorder + comicPanelW + 2*comicBorder + comicGap, comicMargin + comicBorder},                                          // top-right
+		{comicMargin + comicBorder, comicMargin + comicBorder + comicPanelH + 2*comicBorder + comicGap},                                          // bottom-left
 		{comicMargin + comicBorder + comicPanelW + 2*comicBorder + comicGap, comicMargin + comicBorder + comicPanelH + 2*comicBorder + comicGap}, // bottom-right
 	}
 
@@ -614,22 +614,22 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 		Conf    float64 `json:"conf"`
 	}
 	type ingestDetection struct {
-		PanelIndex   *int            `json:"panel_index"`
-		BBoxX        int             `json:"bbox_x"`
-		BBoxY        int             `json:"bbox_y"`
-		BBoxW        int             `json:"bbox_w"`
-		BBoxH        int             `json:"bbox_h"`
-		YoloClass    string          `json:"yolo_class"`
-		PetClass     *string         `json:"pet_class,omitempty"`
-		ColorMetrics *colorMetrics   `json:"color_metrics,omitempty"`
-		Confidence   float64         `json:"confidence"`
-		DetectedAt   string          `json:"detected_at"`
+		PanelIndex   *int          `json:"panel_index"`
+		BBoxX        int           `json:"bbox_x"`
+		BBoxY        int           `json:"bbox_y"`
+		BBoxW        int           `json:"bbox_w"`
+		BBoxH        int           `json:"bbox_h"`
+		YoloClass    string        `json:"yolo_class"`
+		PetClass     *string       `json:"pet_class,omitempty"`
+		ColorMetrics *colorMetrics `json:"color_metrics,omitempty"`
+		Confidence   float64       `json:"confidence"`
+		DetectedAt   string        `json:"detected_at"`
 	}
 	type ingestPayload struct {
-		Filename   string             `json:"filename"`
-		CapturedAt string             `json:"captured_at"`
-		PetID      string             `json:"pet_id"`
-		Detections []ingestDetection  `json:"detections"`
+		Filename   string            `json:"filename"`
+		CapturedAt string            `json:"captured_at"`
+		PetID      string            `json:"pet_id"`
+		Detections []ingestDetection `json:"detections"`
 	}
 
 	payload := ingestPayload{
@@ -663,10 +663,20 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 			}
 
 			// Clamp to panel bounds
-			if comicX < ox { comicW -= ox - comicX; comicX = ox }
-			if comicY < oy { comicH -= oy - comicY; comicY = oy }
-			if comicX+comicW > ox+comicPanelW { comicW = ox + comicPanelW - comicX }
-			if comicY+comicH > oy+comicPanelH { comicH = oy + comicPanelH - comicY }
+			if comicX < ox {
+				comicW -= ox - comicX
+				comicX = ox
+			}
+			if comicY < oy {
+				comicH -= oy - comicY
+				comicY = oy
+			}
+			if comicX+comicW > ox+comicPanelW {
+				comicW = ox + comicPanelW - comicX
+			}
+			if comicY+comicH > oy+comicPanelH {
+				comicH = oy + comicPanelH - comicY
+			}
 
 			panelIdx := i
 			d := ingestDetection{

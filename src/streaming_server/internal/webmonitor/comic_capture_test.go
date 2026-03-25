@@ -298,7 +298,6 @@ func TestSessionIDFormat(t *testing.T) {
 	}
 }
 
-
 func TestRateLimitBlocksCapture(t *testing.T) {
 	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
 	cc := newTestComicCapture(src, t.TempDir())
@@ -402,8 +401,6 @@ func TestPanelsClearedAfterStitch(t *testing.T) {
 		t.Fatal("expected idle after detection lost")
 	}
 }
-
-
 
 func TestStartStop(t *testing.T) {
 	src := &mockFrameSource{nv12Data: makeTestNV12(768, 432), nv12W: 768, nv12H: 432}
