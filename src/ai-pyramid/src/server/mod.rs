@@ -249,10 +249,12 @@ async fn handle_photo_panel(
 }
 
 /// Crop a 2×2 comic panel from a JPEG, stripping borders/margins,
-/// and resize to 640×640 for YOLO input.
+/// and letterbox to 640×640 for YOLO input.
 ///
 /// Comic layout (848×496): margin=12, border=2, gap=8, panel=404×228
 /// Panel content starts at (margin+border, margin+border) = (14, 14)
+///
+/// Optimized: RGB (no alpha), SubImage view (no panel copy), replace (no blend).
 fn crop_panel(jpeg_bytes: &[u8], panel: u32) -> Result<Vec<u8>, String> {
     const MARGIN: u32 = 12;
     const BORDER: u32 = 2;
@@ -261,29 +263,40 @@ fn crop_panel(jpeg_bytes: &[u8], panel: u32) -> Result<Vec<u8>, String> {
     const PANEL_H: u32 = 228;
     const CELL_W: u32 = PANEL_W + 2 * BORDER;
     const CELL_H: u32 = PANEL_H + 2 * BORDER;
+    const TARGET: u32 = 640;
 
-    let img = image::load_from_memory_with_format(jpeg_bytes, image::ImageFormat::Jpeg)
-        .map_err(|e| e.to_string())?;
+    // Decode to RGB (no alpha — JPEG has none)
+    let rgb = image::load_from_memory_with_format(jpeg_bytes, image::ImageFormat::Jpeg)
+        .map_err(|e| e.to_string())?
+        .into_rgb8();
 
     let col = panel % 2;
     let row = panel / 2;
     let x = MARGIN + BORDER + col * (CELL_W + GAP);
     let y = MARGIN + BORDER + row * (CELL_H + GAP);
-    let cropped = img.crop_imm(x, y, PANEL_W, PANEL_H);
 
-    // Resize preserving aspect ratio (fit within 640px longest side)
-    let scale = (640.0 / PANEL_W as f64).min(640.0 / PANEL_H as f64);
+    // SubImage view — no pixel copy, just a window into rgb
+    let panel_view = image::imageops::crop_imm(&rgb, x, y, PANEL_W, PANEL_H);
+
+    // Letterbox: resize preserving aspect ratio, center on black 640×640 canvas
+    let scale = (TARGET as f64 / PANEL_W as f64).min(TARGET as f64 / PANEL_H as f64);
     let new_w = (PANEL_W as f64 * scale) as u32;
     let new_h = (PANEL_H as f64 * scale) as u32;
     let resized = image::imageops::resize(
-        &cropped.to_rgba8(),
+        &*panel_view,
         new_w,
         new_h,
         image::imageops::FilterType::Lanczos3,
     );
 
-    let mut buf = std::io::Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(resized)
+    let pad_x = (TARGET - new_w) / 2;
+    let pad_y = (TARGET - new_h) / 2;
+    let mut canvas = image::RgbImage::new(TARGET, TARGET); // black (zero-initialized)
+    image::imageops::replace(&mut canvas, &resized, pad_x as i64, pad_y as i64);
+
+    // Encode directly as RGB JPEG — pre-allocate ~50KB
+    let mut buf = std::io::Cursor::new(Vec::with_capacity(50_000));
+    image::DynamicImage::ImageRgb8(canvas)
         .write_to(&mut buf, image::ImageFormat::Jpeg)
         .map_err(|e| e.to_string())?;
     Ok(buf.into_inner())

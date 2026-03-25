@@ -72,8 +72,13 @@ impl DetectClient {
         const PANEL_H: i32 = 228;
         const CELL_W: i32 = PANEL_W + 2 * BORDER;
         const CELL_H: i32 = PANEL_H + 2 * BORDER;
-        // Upscale factor used by crop_panel (fit 640px longest side, aspect-ratio preserved)
-        let upscale = (640.0_f64 / PANEL_W as f64).min(640.0 / PANEL_H as f64);
+        // Letterbox parameters (must match server::crop_panel)
+        const TARGET: f64 = 640.0;
+        let scale = (TARGET / PANEL_W as f64).min(TARGET / PANEL_H as f64);
+        let new_w = (PANEL_W as f64 * scale) as i32;
+        let new_h = (PANEL_H as f64 * scale) as i32;
+        let pad_x = (TARGET as i32 - new_w) / 2;
+        let pad_y = (TARGET as i32 - new_h) / 2;
 
         for panel in 0..4u32 {
             let image_url = format!(
@@ -92,13 +97,17 @@ impl DetectClient {
                     let origin_y = MARGIN + BORDER + row * (CELL_H + GAP);
 
                     for d in resp.detections {
-                        // Map upscaled coords back to original panel size, then offset
+                        // 640×640 letterbox → remove padding → scale to panel → offset to comic
+                        let panel_x = ((d.bbox.x - pad_x) as f64 / scale) as i32;
+                        let panel_y = ((d.bbox.y - pad_y) as f64 / scale) as i32;
+                        let panel_w = (d.bbox.w as f64 / scale) as i32;
+                        let panel_h = (d.bbox.h as f64 / scale) as i32;
                         all_inputs.push(DetectionInput {
                             panel_index: Some(panel as i32),
-                            bbox_x: origin_x + (d.bbox.x as f64 / upscale) as i32,
-                            bbox_y: origin_y + (d.bbox.y as f64 / upscale) as i32,
-                            bbox_w: (d.bbox.w as f64 / upscale) as i32,
-                            bbox_h: (d.bbox.h as f64 / upscale) as i32,
+                            bbox_x: origin_x + panel_x.max(0),
+                            bbox_y: origin_y + panel_y.max(0),
+                            bbox_w: panel_w.min(PANEL_W - panel_x.max(0)),
+                            bbox_h: panel_h.min(PANEL_H - panel_y.max(0)),
                             yolo_class: Some(d.class_name),
                             pet_class: None,
                             confidence: Some(d.confidence),
@@ -159,7 +168,10 @@ mod tests {
 
     #[tokio::test]
     async fn detect_panels_with_offset() {
-        // Upscaled image size: 404×228 * (640/404) ≈ 640×361
+        // Letterbox: 404×228 → scale=640/404≈1.5842 → 640×361, pad_x=0, pad_y=139
+        // Python returns bbox in 640×640 letterbox space (since image is already 640×640)
+        // But Python's own letterbox is identity (640×640 → 640×640, scale=1, pad=0)
+        // so bbox coords ARE in the 640×640 space from our letterbox
         let app = Router::new().route(
             "/detect",
             post(|Json(body): Json<serde_json::Value>| async move {
@@ -167,23 +179,23 @@ mod tests {
                 assert!(url.contains("/panel/"));
                 let panel: u32 = url.chars().last().unwrap().to_digit(10).unwrap();
                 let resp = match panel {
-                    // Bbox coords are in upscaled (640×361) space
+                    // Bbox in 640×640 space (content at y=139..500)
                     0 => serde_json::json!({
                         "detections": [{
                             "class_name": "cat", "confidence": 0.85,
-                            "bbox": {"x": 158, "y": 79, "w": 141, "h": 141}
+                            "bbox": {"x": 100, "y": 200, "w": 141, "h": 100}
                         }],
-                        "width": 640, "height": 361
+                        "width": 640, "height": 640
                     }),
                     2 => serde_json::json!({
                         "detections": [{
                             "class_name": "cup", "confidence": 0.62,
-                            "bbox": {"x": 317, "y": 158, "w": 127, "h": 95}
+                            "bbox": {"x": 300, "y": 250, "w": 80, "h": 60}
                         }],
-                        "width": 640, "height": 361
+                        "width": 640, "height": 640
                     }),
                     _ => serde_json::json!({
-                        "detections": [], "width": 640, "height": 361
+                        "detections": [], "width": 640, "height": 640
                     }),
                 };
                 Json(resp)
@@ -208,16 +220,18 @@ mod tests {
             .unwrap();
         assert_eq!(dets.len(), 2);
 
-        // upscale = 640/404 ≈ 1.5842
-        // Panel 0 origin: (14, 14)
-        // bbox_x = 14 + (158 / 1.5842) ≈ 14 + 99 = 113
+        // scale = 640/404 ≈ 1.5842, pad_x=0, pad_y=(640-361)/2=139
+        // Panel 0 origin in comic: (14, 14)
+        // panel_x = (100 - 0) / 1.5842 ≈ 63
+        // panel_y = (200 - 139) / 1.5842 ≈ 38
+        let scale = 640.0 / 404.0_f64;
+        let pad_y = (640 - (228.0 * scale) as i32) / 2; // 139
         assert_eq!(dets[0].yolo_class.as_deref(), Some("cat"));
         assert_eq!(dets[0].panel_index, Some(0));
-        assert_eq!(dets[0].bbox_x, 14 + (158.0 / (640.0 / 404.0)) as i32);
-        assert_eq!(dets[0].bbox_y, 14 + (79.0 / (640.0 / 404.0)) as i32);
+        assert_eq!(dets[0].bbox_x, 14 + (100.0 / scale) as i32);
+        assert_eq!(dets[0].bbox_y, 14 + ((200 - pad_y) as f64 / scale) as i32);
 
-        // Panel 2 origin: (14, 14 + 228 + 4 + 8) = (14, 254)
-        // origin_y = 12 + 2 + 1*(228+4+8) = 254
+        // Panel 2 origin: (14, 12+2+1*(228+4+8)) = (14, 254)
         assert_eq!(dets[1].yolo_class.as_deref(), Some("cup"));
         assert_eq!(dets[1].panel_index, Some(2));
         assert_eq!(dets[0].detected_at, "2026-03-21T10:45:32");
