@@ -357,6 +357,10 @@ class YoloDetector:
         # 信頼度閾値の生値
         self.conf_thres_raw = -np.log(1 / self.score_threshold - 1)
 
+        # BPU inference lock — prevents concurrent _forward calls
+        import threading
+        self._bpu_lock = threading.Lock()
+
         # Grid anchors（前計算して保持）
         self.grids = []
         for stride in self.strides:
@@ -1072,12 +1076,13 @@ class YoloDetector:
         return self._lb_buf
 
     def _forward(self, input_tensor: np.ndarray) -> list[np.ndarray]:
-        """BPU推論を実行"""
-        outputs = self.quantize_model[0].forward(input_tensor)
+        """BPU推論を実行（排他制御付き）"""
+        with self._bpu_lock:
+            outputs = self.quantize_model[0].forward(input_tensor)
 
-        # C API出力をnumpy配列に変換（サンプルコードと同じ方式）
-        # バッファを直接取得、reshapeは後処理で行う
-        return [output.buffer for output in outputs]
+            # C API出力をnumpy配列に変換（サンプルコードと同じ方式）
+            # バッファを直接取得、reshapeは後処理で行う
+            return [output.buffer for output in outputs]
 
     def _postprocess(
         self,
