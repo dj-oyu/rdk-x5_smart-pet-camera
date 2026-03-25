@@ -883,7 +883,6 @@ class YoloDetector:
         if not self._nv12_path_debug_logged:
             self._nv12_path_debug_logged = True
 
-
         # 2. BPU推論
         start_infer = time.perf_counter()
         outputs = self._forward(input_tensor)
