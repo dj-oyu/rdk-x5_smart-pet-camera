@@ -80,6 +80,7 @@ type ComicCapture struct {
 	lastVersionChange time.Time
 	lastMotionBBox    *BoundingBox // union of motion bboxes from detection SHM
 	lastMotionSeen    time.Time
+	lastDetResult     *DetectionResult // cached from tick() for capturePanel()
 	sessionID         string
 	panels            []capturedPanel
 	lastCaptureTime   time.Time
@@ -154,6 +155,7 @@ func (cc *ComicCapture) tick(now time.Time) bool {
 	// Poll detection SHM
 	det, ok := cc.src.LatestDetection()
 	if ok {
+		cc.lastDetResult = det
 		cc.lastVersionChange = now
 		if hasPet(det) {
 			cc.lastCatSeen = now
@@ -181,6 +183,7 @@ func (cc *ComicCapture) tick(now time.Time) bool {
 	// Reset continuous tracking only after the full timeout elapses
 	if catGone || versionStale {
 		cc.catFirstSeen = time.Time{}
+		cc.lastDetResult = nil
 	}
 
 	switch cc.state {
@@ -323,10 +326,10 @@ func (cc *ComicCapture) capturePanel(now time.Time) {
 		petColorResult = &result
 	}
 
-	// Snapshot all current YOLO detections
+	// Snapshot all current YOLO detections (cached from tick() poll)
 	var dets []Detection
-	if det, ok := cc.src.LatestDetection(); ok {
-		dets = append([]Detection(nil), det.Detections...)
+	if cc.lastDetResult != nil {
+		dets = append([]Detection(nil), cc.lastDetResult.Detections...)
 	}
 
 	// bbox: prefer YOLO (recent 2s), fallback to motion (recent 3s)
