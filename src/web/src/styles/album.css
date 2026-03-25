@@ -950,23 +950,16 @@ button {
   backdrop-filter: blur(2px);
   background: rgba(255, 255, 255, 0.04);
   overflow: hidden;
-  /* Vignette: center clear, edges blurred (non-linear falloff) */
-  -webkit-mask-image: radial-gradient(
-    ellipse 55% 55% at center,
-    transparent 0%,
-    transparent 35%,
-    rgba(0, 0, 0, 0.4) 60%,
-    rgba(0, 0, 0, 0.8) 80%,
-    black 100%
-  );
-  mask-image: radial-gradient(
-    ellipse 55% 55% at center,
-    transparent 0%,
-    transparent 35%,
-    rgba(0, 0, 0, 0.4) 60%,
-    rgba(0, 0, 0, 0.8) 80%,
-    black 100%
-  );
+  /* Vignette: 4-edge linear gradients composited for uniform edge blur.
+     Avoids elliptical mask that over-blurs corners. */
+  -webkit-mask-image:
+    linear-gradient(to right,  black, transparent 20%, transparent 80%, black),
+    linear-gradient(to bottom, black, transparent 20%, transparent 80%, black);
+  -webkit-mask-composite: source-in;
+  mask-image:
+    linear-gradient(to right,  black, transparent 20%, transparent 80%, black),
+    linear-gradient(to bottom, black, transparent 20%, transparent 80%, black);
+  mask-composite: intersect;
 }
 
 .glass-shine {
