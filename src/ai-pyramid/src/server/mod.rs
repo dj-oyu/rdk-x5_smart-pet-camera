@@ -36,6 +36,7 @@ pub struct AppState {
     pub event_tx: tokio::sync::broadcast::Sender<PhotoEvent>,
     pub pet_names: HashMap<String, String>,
     pub detect_client: Option<Arc<DetectClient>>,
+    pub local_detector: Option<Arc<crate::detect::local::LocalDetector>>,
     pub backfill_running: Arc<AtomicBool>,
 }
 
@@ -521,16 +522,16 @@ async fn handle_edit_history(
 
 // POST /api/backfill — trigger detection backfill for photos without detections
 async fn handle_backfill(State(state): State<AppState>) -> impl IntoResponse {
-    let detect_client = match &state.detect_client {
-        Some(c) => c.clone(),
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": "detection not configured (set PET_CAMERA_HOST or PET_ALBUM_HOST)"})),
-            )
-                .into_response();
-        }
-    };
+    // Need either local detector or remote detect client
+    let local = state.local_detector.clone();
+    let remote = state.detect_client.clone();
+    if local.is_none() && remote.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "detection not configured"})),
+        )
+            .into_response();
+    }
 
     // Prevent concurrent backfill runs
     if state
@@ -547,6 +548,8 @@ async fn handle_backfill(State(state): State<AppState>) -> impl IntoResponse {
 
     let backfill_flag = state.backfill_running.clone();
     let context = state.context.clone();
+    let photos_dir = state.photos_dir.clone();
+    let sse_tx = state.event_tx.clone();
     tokio::spawn(async move {
         let queries = context.event_queries();
         let commands = context.observation_commands();
@@ -559,22 +562,32 @@ async fn handle_backfill(State(state): State<AppState>) -> impl IntoResponse {
             }
         };
 
-        tracing::info!("Backfill: {} photos to process", photos.len());
+        let total = photos.len();
+        tracing::info!(
+            "Backfill: {total} photos to process (local={}, remote={})",
+            local.is_some(),
+            remote.is_some()
+        );
         let mut ok = 0u32;
         let mut fail = 0u32;
 
-        for photo in &photos {
-            // Skip invalid photos — no point detecting on rejected images
+        for (idx, photo) in photos.iter().enumerate() {
+            // Skip invalid photos
             if photo.status == crate::application::EventStatus::Invalid {
-                if let Err(e) = commands.mark_detected(photo.id).await {
-                    tracing::warn!(
-                        "Backfill mark_detected error {}: {e}",
-                        photo.source_filename
-                    );
-                }
+                let _ = commands.mark_detected(photo.id).await;
                 continue;
             }
-            match detect_client.detect(&photo.source_filename).await {
+
+            // Detect: prefer local (level2), fallback to remote (level1)
+            let dets = if let Some(ref ld) = local {
+                ld.detect_comic(&photos_dir, &photo.source_filename).await
+            } else if let Some(ref rc) = remote {
+                rc.detect(&photo.source_filename).await
+            } else {
+                Err("no detector".into())
+            };
+
+            match dets {
                 Ok(dets) if !dets.is_empty() => {
                     let captured_at = parse_comic_filename(&photo.source_filename)
                         .map(|m| m.captured_at)
@@ -592,7 +605,9 @@ async fn handle_backfill(State(state): State<AppState>) -> impl IntoResponse {
                         fail += 1;
                     } else {
                         tracing::info!(
-                            "Backfill OK: {} ({} dets)",
+                            "Backfill [{}/{}] OK: {} ({} dets)",
+                            idx + 1,
+                            total,
                             photo.source_filename,
                             dets.len()
                         );
@@ -600,27 +615,38 @@ async fn handle_backfill(State(state): State<AppState>) -> impl IntoResponse {
                     }
                 }
                 Ok(_) => {
-                    // Zero detections — still mark as detected so we don't retry
-                    tracing::info!("Backfill: no detections for {}", photo.source_filename);
-                    if let Err(e) = commands.mark_detected(photo.id).await {
-                        tracing::warn!(
-                            "Backfill mark_detected error {}: {e}",
-                            photo.source_filename
-                        );
-                    }
+                    tracing::info!(
+                        "Backfill [{}/{}]: no detections for {}",
+                        idx + 1,
+                        total,
+                        photo.source_filename
+                    );
+                    let _ = commands.mark_detected(photo.id).await;
                 }
                 Err(e) => {
-                    tracing::warn!("Backfill detect error {}: {e}", photo.source_filename);
+                    tracing::warn!(
+                        "Backfill [{}/{}] detect error {}: {e}",
+                        idx + 1,
+                        total,
+                        photo.source_filename
+                    );
                     fail += 1;
                 }
             }
+
+            // SSE progress event
+            let _ = sse_tx.send(PhotoEvent {
+                filename: photo.source_filename.clone(),
+                is_valid: photo.status == crate::application::EventStatus::Valid,
+                caption: String::new(),
+                behavior: String::new(),
+                pet_id: photo.pet_id.clone(),
+            });
+
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
 
-        tracing::info!(
-            "Backfill complete: {ok} ok, {fail} failed, {} total",
-            photos.len()
-        );
+        tracing::info!("Backfill complete: {ok} ok, {fail} failed, {total} total");
         backfill_flag.store(false, Ordering::SeqCst);
     });
 
@@ -866,6 +892,7 @@ mod tests {
                 ("chatora".into(), "Chatora".into()),
             ]),
             detect_client: None,
+            local_detector: None,
             backfill_running: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -1144,6 +1171,8 @@ mod tests {
                     confidence: Some(0.9),
                     detected_at: "2026-03-21T10:00:00".into(),
                     color_metrics: None,
+                    det_level: 1,
+                    model: None,
                 }],
             )
             .await
@@ -1193,6 +1222,8 @@ mod tests {
                     confidence: Some(0.8),
                     detected_at: "2026-03-21T10:00:00".into(),
                     color_metrics: None,
+                    det_level: 1,
+                    model: None,
                 }],
             )
             .await

@@ -1,3 +1,5 @@
+pub mod local;
+
 use crate::db::DetectionInput;
 use crate::ingest::filename::parse_comic_filename;
 use serde::{Deserialize, Serialize};
@@ -119,6 +121,8 @@ impl DetectClient {
                             confidence: Some(d.confidence),
                             detected_at: detected_at.clone(),
                             color_metrics: None,
+                            det_level: 1,
+                            model: None,
                         });
                     }
                 }
