@@ -3,15 +3,16 @@ name: Format
 on:
   pull_request:
     branches: [main]
+    paths:
+      - 'src/streaming_server/**'
+      - 'src/ai-pyramid/**'
+      - '.github/workflows/format.yml'
   workflow_dispatch:
 
 jobs:
   go:
     name: "Go: gofmt"
     runs-on: ubuntu-latest
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      contains(join(github.event.pull_request.*.filename, ' '), 'src/streaming_server/')
     defaults:
       run:
         working-directory: src/streaming_server
@@ -32,9 +33,6 @@ jobs:
   rust:
     name: "Rust: cargo fmt"
     runs-on: ubuntu-latest
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      contains(join(github.event.pull_request.*.filename, ' '), 'src/ai-pyramid/')
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

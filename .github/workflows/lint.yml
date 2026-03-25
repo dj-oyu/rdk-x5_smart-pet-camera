@@ -3,15 +3,19 @@ name: Lint
 on:
   pull_request:
     branches: [main]
+    paths:
+      - 'src/streaming_server/**'
+      - 'src/ai-pyramid/**'
+      - 'src/web/**'
+      - 'docs/**/*.md'
+      - '**/CLAUDE.md'
+      - '.github/workflows/lint.yml'
   workflow_dispatch:
 
 jobs:
   go:
     name: "Go: vet"
     runs-on: ubuntu-latest
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      contains(join(github.event.pull_request.*.filename, ' '), 'src/streaming_server/')
     defaults:
       run:
         working-directory: src/streaming_server
@@ -26,9 +30,6 @@ jobs:
   rust:
     name: "Rust: clippy"
     runs-on: ubuntu-latest
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      contains(join(github.event.pull_request.*.filename, ' '), 'src/ai-pyramid/')
     defaults:
       run:
         working-directory: src/ai-pyramid
@@ -56,9 +57,6 @@ jobs:
   typescript:
     name: "TypeScript: tsc"
     runs-on: ubuntu-latest
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      contains(join(github.event.pull_request.*.filename, ' '), 'src/web/')
     defaults:
       run:
         working-directory: src/web
@@ -73,10 +71,6 @@ jobs:
   docs:
     name: "Docs: mermaid"
     runs-on: ubuntu-latest
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      contains(join(github.event.pull_request.*.filename, ' '), 'docs/') ||
-      contains(join(github.event.pull_request.*.filename, ' '), 'CLAUDE.md')
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
