@@ -1,0 +1,21 @@
+{
+  "timestamp": "2026-03-24T18:42:00",
+  "commit": "9c049b9",
+  "model": "yolo26n_det_bpu_bayese_640x640_nv12",
+  "cam0_day": {
+    "samples": 3,
+    "total_ms": {"avg": 25.7, "median": 25, "range": [24, 28]},
+    "preprocess_ms": {"avg": 0.8},
+    "bpu_ms": {"avg": 21.9},
+    "postprocess_ms": {"avg": 3.3},
+    "note": "HW preprocessor (nano2D letterbox), every frame"
+  },
+  "cam1_night": {
+    "samples": 7,
+    "total_ms": {"avg": 21.1, "range": [20, 23]},
+    "preprocess_ms": {"avg": 5.3, "range": [4.9, 6.0]},
+    "bpu_ms": {"avg": 14.4, "range": [14.1, 14.9]},
+    "postprocess_ms": {"avg": 2.3, "range": [1.9, 3.0]},
+    "note": "CLAHE enabled, motion-gated, 2 ROI round-robin"
+  }
+}

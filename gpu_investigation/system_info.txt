@@ -1,0 +1,115 @@
+=== Date ===
+2025年 12月 29日 月曜日 01:37:11 CST
+
+=== Kernel Info ===
+Linux ubuntu 6.1.83 #4 SMP PREEMPT Fri Dec 19 10:54:38 CST 2025 aarch64 aarch64 aarch64 GNU/Linux
+
+=== CPU Info ===
+Architecture:                         aarch64
+CPU op-mode(s):                       32-bit, 64-bit
+Byte Order:                           Little Endian
+CPU(s):                               8
+On-line CPU(s) list:                  0-7
+Vendor ID:                            ARM
+Model name:                           Cortex-A55
+Model:                                0
+Thread(s) per core:                   1
+Core(s) per cluster:                  8
+Socket(s):                            -
+Cluster(s):                           1
+Stepping:                             r2p0
+Frequency boost:                      disabled
+CPU max MHz:                          1500.0000
+CPU min MHz:                          300.0000
+BogoMIPS:                             48.00
+Flags:                                fp asimd evtstrm crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp
+L1d cache:                            256 KiB (8 instances)
+L1i cache:                            256 KiB (8 instances)
+L2 cache:                             512 KiB (8 instances)
+L3 cache:                             1 MiB (1 instance)
+Vulnerability Gather data sampling:   Not affected
+Vulnerability Itlb multihit:          Not affected
+Vulnerability L1tf:                   Not affected
+Vulnerability Mds:                    Not affected
+Vulnerability Meltdown:               Not affected
+Vulnerability Mmio stale data:        Not affected
+Vulnerability Reg file data sampling: Not affected
+Vulnerability Retbleed:               Not affected
+Vulnerability Spec rstack overflow:   Not affected
+Vulnerability Spec store bypass:      Not affected
+Vulnerability Spectre v1:             Mitigation; __user pointer sanitization
+Vulnerability Spectre v2:             Not affected
+Vulnerability Srbds:                  Not affected
+Vulnerability Tsx async abort:        Not affected
+
+=== Memory Info ===
+               total        used        free      shared  buff/cache   available
+Mem:           6.9Gi       1.7Gi       334Mi       809Mi       4.9Gi       4.3Gi
+Swap:             0B          0B          0B
+
+=== PCI Devices ===
+lspci not available
+
+=== V4L2 Devices ===
+Cannot open device /dev/video0, exiting.
+
+=== V4L2 Formats (Device 0) ===
+Could not query /dev/video0
+
+=== V4L2 Formats (Device 8) ===
+Could not query /dev/video8
+
+=== Device Nodes (Video/NPU/BPU/VPU) ===
+crw-rw-r-- 1 root vpu 239, 0  8月 26 23:23 /dev/vpu
+crw-rw-r-- 1 root misc 10, 85  8月 26 23:23 /dev/bpu
+crw-rw-r-- 1 root misc 10, 84  8月 26 23:23 /dev/bpu_core0
+
+=== Sysfs BPU/VPU info ===
+/sys/class/devlink/platform:31030000.power-controller--platform:3a010030.bpu_iommu
+/sys/class/devlink/platform:31030000.power-controller--platform:3a000000.bpu
+/sys/class/devlink/regulator:regulator.2--platform:3a000000.bpu
+/sys/class/devlink/platform:34210000.hps-clock-controller--platform:3a000000.bpu
+/sys/class/devlink/platform:3a010030.bpu_iommu--platform:3a000000.bpu
+/sys/class/devlink/i2c:2-001c--platform:3a000000.bpu
+/sys/class/devlink/platform:31030000.power-controller--platform:20520000.bpu_qos
+/sys/class/devlink/platform:34210000.reset-controller--platform:3a000000.bpu
+/sys/class/devlink/platform:34210000.hps-clock-controller--platform:20520000.bpu_qos
+/sys/class/devlink/platform:20520000.bpu_qos--platform:3a000000.bpu
+/sys/class/misc/bpu_core0
+/sys/class/misc/bpu
+/sys/class/devfreq/3a000000.bpu
+/sys/class/iommu/3a010030.bpu_iommu
+/sys/class/devlink/platform:3b020004.vpu_iommu--platform:3b000000.vpu
+/sys/class/devlink/platform:31030000.power-controller--platform:3b000000.vpu
+/sys/class/devlink/platform:31030000.power-controller--platform:3b020004.vpu_iommu
+/sys/class/devlink/platform:34210000.hps-clock-controller--platform:3b000000.vpu
+/sys/class/devlink/platform:34210000.reset-controller--platform:3b000000.vpu
+/sys/class/devlink/platform:20530000.video_qos--platform:3b000000.vpu
+/sys/class/vpu
+/sys/class/vpu/vpu
+/sys/class/iommu/3b020004.vpu_iommu
+
+=== OpenCL Libraries ===
+lrwxrwxrwx 1 root root    18  9月 30  2021 /usr/lib/aarch64-linux-gnu/libOpenCL.so.1 -> libOpenCL.so.1.0.0
+-rw-r--r-- 1 root root 60856  9月 30  2021 /usr/lib/aarch64-linux-gnu/libOpenCL.so.1.0.0
+lrwxrwxrwx 1 root root      18  7月 17 00:39 /usr/hobot/lib/libOpenCL.so -> libOpenCL.so.3.0.0
+lrwxrwxrwx 1 root root      18  7月 17 00:39 /usr/hobot/lib/libOpenCL.so.1 -> libOpenCL.so.3.0.0
+lrwxrwxrwx 1 root root      18  7月 17 00:39 /usr/hobot/lib/libOpenCL.so.3 -> libOpenCL.so.3.0.0
+-rwxr-xr-x 1 root root 3290296 12月  5 11:21 /usr/hobot/lib/libOpenCL.so.3.0.0
+
+Number of OpenCL Platforms: 1
+
+=== Platform 0 ===
+  Name: Vivante OpenCL Platform
+  Vendor: Vivante Corporation
+  Version: OpenCL 3.0 V6.4.14.9.674707
+  Number of Devices: 1
+
+    --- Device 0 ---
+    Name: Vivante OpenCL Device GC8000L.6214.0000
+    Max Compute Units: 1
+    Global Memory: 268435456 bytes (256.00 MB)
+    Local Memory: 32768 bytes (32.00 KB)
+    Max Work Group Size: 1024
+    Max Mem Alloc: 134217728 bytes (128.00 MB)
+    Image Support: Yes
