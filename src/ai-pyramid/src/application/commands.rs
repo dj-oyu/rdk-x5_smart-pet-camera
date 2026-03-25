@@ -122,4 +122,8 @@ impl ObservationCommands {
             .update_behavior(source_filename, behavior)
             .await
     }
+
+    pub async fn mark_detected(&self, photo_id: i64) -> AppResult<usize> {
+        self.repository.mark_detected(photo_id).await
+    }
 }

@@ -1,5 +1,7 @@
 import type { EventQuery, PetNames, StatusFilter } from "../lib/api";
 
+const YOLO_CLASSES = ["cat", "dog", "person", "cup", "food_bowl"];
+
 type FilterBarProps = {
   query: EventQuery;
   petNames: PetNames;
@@ -7,6 +9,7 @@ type FilterBarProps = {
   onStatusChange: (status: StatusFilter) => void;
   onPetChange: (petId: string) => void;
   onBehaviorChange?: (behavior: string) => void;
+  onYoloClassToggle?: (cls: string) => void;
 };
 
 const STATUS_OPTIONS: Array<{ value: StatusFilter; label: string }> = [
@@ -16,7 +19,7 @@ const STATUS_OPTIONS: Array<{ value: StatusFilter; label: string }> = [
   { value: "invalid", label: "Rejected" }
 ];
 
-export function FilterBar({ query, petNames, behaviors, onStatusChange, onPetChange, onBehaviorChange }: FilterBarProps) {
+export function FilterBar({ query, petNames, behaviors, onStatusChange, onPetChange, onBehaviorChange, onYoloClassToggle }: FilterBarProps) {
   const petEntries = Object.entries(petNames)
     .map(([id, name]) => ({ value: id, label: name }))
     .sort((a, b) => {
@@ -76,6 +79,22 @@ export function FilterBar({ query, petNames, behaviors, onStatusChange, onPetCha
                 onClick={() => onBehaviorChange(b)}
               >
                 {b}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {onYoloClassToggle && (
+        <div class="filter-group">
+          <span class="filter-label">Detection</span>
+          <div class="filter-cluster">
+            {YOLO_CLASSES.map((cls) => (
+              <button
+                type="button"
+                class={query.yoloClasses.includes(cls) ? "filter-chip active" : "filter-chip"}
+                onClick={() => onYoloClassToggle(cls)}
+              >
+                {cls}
               </button>
             ))}
           </div>
