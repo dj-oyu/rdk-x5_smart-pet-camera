@@ -222,6 +222,9 @@ func classifyPetColor(nv12 []byte, w, h int, bbox BoundingBox) PetColorResult {
 func dominantPetID(panels []capturedPanel) string {
 	scores := map[string]float64{}
 	for _, p := range panels {
+		if p.placeholder {
+			continue
+		}
 		if p.petClass != "" && p.petClass != "other" {
 			scores[p.petClass] += p.petConfidence
 		}
