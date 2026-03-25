@@ -613,10 +613,34 @@ async fn handle_daily_summary(
 
     let photo_count = captions.len();
 
-    // Use VLM to summarize the day's observations (text-only, no image)
+    // Pick a random photo from the day for visual context
+    let random_photo = {
+        let date_prefix = format!("comic_{}", date.replace('-', ""));
+        let mut candidates: Vec<_> = std::fs::read_dir(&state.photos_dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&date_prefix))
+            .collect();
+        if !candidates.is_empty() {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            date.hash(&mut h);
+            let idx = h.finish() as usize % candidates.len();
+            Some(candidates.swap_remove(idx).path())
+        } else {
+            None
+        }
+    };
+
     let vlm_config = state.context.vlm_config();
     let vlm_client = crate::vlm::VlmClient::new(vlm_config);
-    match vlm_client.summarize_day(&captions).await {
+    match vlm_client
+        .summarize_day(&captions, random_photo.as_deref())
+        .await
+    {
         Ok(summary) => Json(DailySummaryResponse {
             date,
             summary,
