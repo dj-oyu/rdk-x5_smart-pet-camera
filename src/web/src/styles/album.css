@@ -1014,6 +1014,68 @@ button {
   50% { transform: translate(5px, -7px); opacity: 1; }
 }
 
+/* --- Smoke detection (progressive scan) --- */
+
+.scan-active {
+  background: rgba(0, 0, 0, 0.08);
+  transition: background 0.3s;
+}
+
+.smoke-detection {
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.35) 0%, rgba(255, 255, 255, 0.1) 40%, transparent 70%);
+  filter: blur(8px);
+  transform: translate(-50%, -50%);
+  animation: smoke-breathe 2.5s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes smoke-breathe {
+  0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 0.4; }
+  50% { transform: translate(-50%, -50%) scale(1.2); opacity: 0.7; }
+}
+
+.detect-now-btn {
+  padding: 3px 10px;
+  border: 1px solid var(--border, rgba(161, 175, 196, 0.22));
+  border-radius: 6px;
+  background: var(--panel, rgba(255, 255, 255, 0.7));
+  color: var(--muted, #5f6c84);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.detect-now-btn:hover {
+  background: var(--bg-soft, #e9eef5);
+  border-color: var(--accent, #2f7bf0);
+  color: var(--accent, #2f7bf0);
+}
+
+.detect-now-status {
+  font-size: 11px;
+  color: var(--muted, #5f6c84);
+  animation: pulse-text 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-text {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+.detail-caption-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.detail-caption-row .detail-caption {
+  flex: 1;
+  margin: 0;
+}
+
 /* --- Backfill button --- */
 
 .backfill-section {

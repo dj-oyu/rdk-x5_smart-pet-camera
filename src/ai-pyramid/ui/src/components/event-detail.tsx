@@ -1,11 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import {
   fetchDetections,
+  detectNow,
   updateDetectionOverride,
   updatePhotoPetId,
   updatePhotoFields,
   photoUrl,
   type Detection,
+  type PartialDetection,
   type EventSummary,
   type PetNames,
 } from "../lib/api";
@@ -74,6 +76,8 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
   const [detections, setDetections] = useState<Detection[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [smokeHits, setSmokeHits] = useState<PartialDetection[]>([]);
+  const [scanning, setScanning] = useState(false);
 
   const [editing, setEditing] = useState(false);
   const [petId, setPetId] = useState(event.pet_id);
@@ -83,6 +87,7 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const { scale, offsetX, offsetY } = useContainerScale(containerRef);
 
+  // Load existing detections (level1 or level2 from DB)
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -98,6 +103,33 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
       });
     return () => { cancelled = true; };
   }, [event.id]);
+
+  // SSE: listen for progressive detection events for this photo
+  useEffect(() => {
+    const source = new EventSource("/api/events");
+    source.addEventListener("detection-partial", (e: MessageEvent) => {
+      const data = JSON.parse(e.data) as PartialDetection;
+      if (data.filename === event.source_filename) {
+        setSmokeHits((prev) => [...prev, data]);
+      }
+    });
+    source.addEventListener("detection-ready", (e: MessageEvent) => {
+      const data = JSON.parse(e.data);
+      if (data.filename === event.source_filename) {
+        setScanning(false);
+        setSmokeHits([]);
+        // Reload final detections from DB
+        fetchDetections(event.id).then(setDetections).catch(() => {});
+      }
+    });
+    return () => source.close();
+  }, [event.id, event.source_filename]);
+
+  function handleDetectNow() {
+    setScanning(true);
+    setSmokeHits([]);
+    detectNow(event.source_filename);
+  }
 
   function handleDetectionOverride(detId: number, newPetId: string) {
     updateDetectionOverride(detId, newPetId).then(() => {
@@ -173,7 +205,8 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
             alt={event.summary ?? event.source_filename}
             class="detail-image"
           />
-          {detections.length > 0 && (
+          {/* Confirmed detections: glass bbox with shine */}
+          {!scanning && detections.length > 0 && (
             <div class="glass-overlay">
               {detections.map((det) => (
                 <div
@@ -203,10 +236,36 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
               ))}
             </div>
           )}
+          {/* Progressive scan: smoke at each partial detection */}
+          {scanning && (
+            <div class="glass-overlay scan-active">
+              {smokeHits.map((hit, i) => (
+                <div
+                  key={i}
+                  class="smoke-detection"
+                  style={{
+                    left: `${offsetX + (hit.bbox_x + hit.bbox_w / 2) * scale}px`,
+                    top: `${offsetY + (hit.bbox_y + hit.bbox_h / 2) * scale}px`,
+                    width: `${Math.max(hit.bbox_w, hit.bbox_h) * scale * 0.8}px`,
+                    height: `${Math.max(hit.bbox_w, hit.bbox_h) * scale * 0.8}px`,
+                    opacity: 0.2 + hit.confidence * 0.6,
+                  }}
+                />
+              ))}
+            </div>
+          )}
         </div>
 
         <div class="detail-info">
-          <p class="detail-caption">{event.summary ?? "No summary"}</p>
+          <div class="detail-caption-row">
+            <p class="detail-caption">{event.summary ?? "No summary"}</p>
+            {!scanning && (
+              <button type="button" class="detect-now-btn" onClick={handleDetectNow} title="Run Level2 detection">
+                Scan
+              </button>
+            )}
+            {scanning && <span class="detect-now-status">Scanning...</span>}
+          </div>
 
           {editing ? (
             <div class="detail-edit-form">

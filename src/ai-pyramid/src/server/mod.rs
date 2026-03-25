@@ -21,12 +21,30 @@ use tokio_stream::wrappers::BroadcastStream;
 static EMBEDDED_UI: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PhotoEvent {
-    pub filename: String,
-    pub is_valid: bool,
-    pub caption: String,
-    pub behavior: String,
-    pub pet_id: Option<String>,
+#[serde(tag = "type")]
+pub enum PhotoEvent {
+    #[serde(rename = "update")]
+    Update {
+        filename: String,
+        is_valid: bool,
+        caption: String,
+        behavior: String,
+        pet_id: Option<String>,
+    },
+    /// A single detection found during progressive scan
+    #[serde(rename = "detection-partial")]
+    DetectionPartial {
+        filename: String,
+        bbox_x: i32,
+        bbox_y: i32,
+        bbox_w: i32,
+        bbox_h: i32,
+        yolo_class: String,
+        confidence: f64,
+    },
+    /// All detections complete for a photo
+    #[serde(rename = "detection-ready")]
+    DetectionReady { filename: String, count: usize },
 }
 
 #[derive(Clone)]
@@ -97,6 +115,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/backfill", post(handle_backfill))
         .route("/api/backfill/status", get(handle_backfill_status))
+        .route("/api/detect-now/{filename}", post(handle_detect_now))
         .route("/api/edit-history", get(handle_edit_history))
         .route("/api/stats", get(handle_stats))
         .route("/api/behaviors", get(handle_behaviors))
@@ -635,7 +654,7 @@ async fn handle_backfill(State(state): State<AppState>) -> impl IntoResponse {
             }
 
             // SSE progress event
-            let _ = sse_tx.send(PhotoEvent {
+            let _ = sse_tx.send(PhotoEvent::Update {
                 filename: photo.source_filename.clone(),
                 is_valid: photo.status == crate::application::EventStatus::Valid,
                 caption: String::new(),
@@ -659,6 +678,104 @@ async fn handle_backfill_status(State(state): State<AppState>) -> impl IntoRespo
     }))
 }
 
+/// POST /api/detect-now/{filename} — run Level2 detection with progressive SSE updates.
+/// Each detection is streamed as a `detection-partial` SSE event as soon as found.
+/// On completion, saves to DB and sends `detection-ready`.
+async fn handle_detect_now(
+    State(state): State<AppState>,
+    Path(filename): Path<String>,
+) -> impl IntoResponse {
+    let local = match &state.local_detector {
+        Some(ld) => ld.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "local detector not available"})),
+            )
+                .into_response();
+        }
+    };
+
+    let safe_name = sanitize_filename(&filename);
+    let photos_dir = state.photos_dir.clone();
+    let commands = state.commands();
+    let sse_tx = state.event_tx.clone();
+
+    // Channel for streaming partial detections
+    let (det_tx, mut det_rx) = tokio::sync::mpsc::channel::<crate::db::DetectionInput>(64);
+    let sse_tx2 = sse_tx.clone();
+    let fname = safe_name.clone();
+
+    // Forward partial detections to SSE as they arrive
+    let relay = tokio::spawn(async move {
+        while let Some(det) = det_rx.recv().await {
+            let _ = sse_tx2.send(PhotoEvent::DetectionPartial {
+                filename: fname.clone(),
+                bbox_x: det.bbox_x,
+                bbox_y: det.bbox_y,
+                bbox_w: det.bbox_w,
+                bbox_h: det.bbox_h,
+                yolo_class: det.yolo_class.clone().unwrap_or_default(),
+                confidence: det.confidence.unwrap_or(0.0),
+            });
+        }
+    });
+
+    // Run streaming detection
+    let result = local
+        .detect_comic_stream(&photos_dir, &safe_name, &det_tx)
+        .await;
+    drop(det_tx); // close channel so relay task finishes
+    let _ = relay.await;
+
+    match result {
+        Ok(dets) => {
+            let det_count = dets.len();
+            if !dets.is_empty() {
+                let captured_at = parse_comic_filename(&safe_name)
+                    .map(|m| m.captured_at)
+                    .unwrap_or_default();
+                if let Err(e) = commands
+                    .ingest_with_detections(&safe_name, captured_at, None, &dets)
+                    .await
+                {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": format!("DB error: {e}")})),
+                    )
+                        .into_response();
+                }
+            } else if let Some(event) = state
+                .queries()
+                .get_event_by_source(&safe_name)
+                .await
+                .ok()
+                .flatten()
+            {
+                let _ = commands.mark_detected(event.id).await;
+            }
+
+            // Signal completion
+            let _ = sse_tx.send(PhotoEvent::DetectionReady {
+                filename: safe_name.clone(),
+                count: det_count,
+            });
+
+            Json(serde_json::json!({
+                "ok": true,
+                "filename": safe_name,
+                "detections": det_count,
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
 async fn handle_stats(State(state): State<AppState>) -> impl IntoResponse {
     match state.queries().activity_stats().await {
         Ok(stats) => Json(stats).into_response(),
@@ -675,9 +792,14 @@ async fn handle_sse(
 ) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
     let rx = state.event_tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(|result| match result {
-        Ok(photo_event) => {
+        Ok(ref photo_event) => {
+            let event_name = match photo_event {
+                PhotoEvent::Update { .. } => "event",
+                PhotoEvent::DetectionPartial { .. } => "detection-partial",
+                PhotoEvent::DetectionReady { .. } => "detection-ready",
+            };
             let json = serde_json::to_string(&photo_event).unwrap_or_default();
-            Some(Ok(Event::default().event("event").data(json)))
+            Some(Ok(Event::default().event(event_name).data(json)))
         }
         Err(_) => None,
     });
@@ -1083,7 +1205,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let mut stream = resp.into_body().into_data_stream();
 
-        tx.send(PhotoEvent {
+        tx.send(PhotoEvent::Update {
             filename: "a.jpg".into(),
             is_valid: true,
             caption: "tabby cat resting".into(),
