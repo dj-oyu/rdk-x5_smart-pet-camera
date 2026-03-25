@@ -194,7 +194,9 @@ func (cc *ComicCapture) tick(now time.Time) bool {
 		}
 
 	case comicCapturing:
-		if catGone || versionStale {
+		// Keep session alive if motion is recent, even when YOLO cat is lost
+		motionActive := !cc.lastMotionSeen.IsZero() && now.Sub(cc.lastMotionSeen) <= cc.DetectionLost
+		if (catGone && !motionActive) || versionStale {
 			cc.prepareFinish()
 			return true
 		}
