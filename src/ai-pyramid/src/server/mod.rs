@@ -85,7 +85,10 @@ pub fn router(state: AppState) -> Router {
             "/api/photos/{filename}",
             get(handle_photo_serve).patch(handle_photo_update),
         )
-        .route("/api/photos/{filename}/panel/{panel}", get(handle_photo_panel))
+        .route(
+            "/api/photos/{filename}/panel/{panel}",
+            get(handle_photo_panel),
+        )
         .route("/api/photos/ingest", post(handle_ingest))
         .route(
             "/api/detections/{id}",
@@ -222,7 +225,7 @@ async fn handle_photo_panel(
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": "not found"})),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -542,7 +545,10 @@ async fn handle_backfill(State(state): State<AppState>) -> impl IntoResponse {
             // Skip invalid photos — no point detecting on rejected images
             if photo.status == crate::application::EventStatus::Invalid {
                 if let Err(e) = commands.mark_detected(photo.id).await {
-                    tracing::warn!("Backfill mark_detected error {}: {e}", photo.source_filename);
+                    tracing::warn!(
+                        "Backfill mark_detected error {}: {e}",
+                        photo.source_filename
+                    );
                 }
                 continue;
             }
