@@ -951,14 +951,15 @@ button {
   background: rgba(255, 255, 255, 0.04);
   overflow: hidden;
   /* Vignette: 4-edge linear gradients composited for uniform edge blur.
-     Avoids elliptical mask that over-blurs corners. */
+     Avoids elliptical mask that over-blurs corners.
+     Narrow clear zone (40-60%) keeps frosted glass depth. */
   -webkit-mask-image:
-    linear-gradient(to right,  black, transparent 20%, transparent 80%, black),
-    linear-gradient(to bottom, black, transparent 20%, transparent 80%, black);
+    linear-gradient(to right,  black, rgba(0,0,0,0.5) 15%, transparent 40%, transparent 60%, rgba(0,0,0,0.5) 85%, black),
+    linear-gradient(to bottom, black, rgba(0,0,0,0.5) 15%, transparent 40%, transparent 60%, rgba(0,0,0,0.5) 85%, black);
   -webkit-mask-composite: source-in;
   mask-image:
-    linear-gradient(to right,  black, transparent 20%, transparent 80%, black),
-    linear-gradient(to bottom, black, transparent 20%, transparent 80%, black);
+    linear-gradient(to right,  black, rgba(0,0,0,0.5) 15%, transparent 40%, transparent 60%, rgba(0,0,0,0.5) 85%, black),
+    linear-gradient(to bottom, black, rgba(0,0,0,0.5) 15%, transparent 40%, transparent 60%, rgba(0,0,0,0.5) 85%, black);
   mask-composite: intersect;
 }
 
