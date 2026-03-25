@@ -1076,49 +1076,86 @@ button {
   margin: 0;
 }
 
-/* --- Backfill button --- */
+/* --- Backfill (collapsible, danger zone) --- */
 
 .backfill-section {
   margin-top: 12px;
+  border: 1px solid var(--border, rgba(161, 175, 196, 0.15));
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.backfill-summary {
+  padding: 6px 10px;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted, #5f6c84);
+  cursor: pointer;
+  user-select: none;
+}
+
+.backfill-summary::-webkit-details-marker {
+  font-size: 8px;
+}
+
+.backfill-content {
+  padding: 6px 10px 10px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
 }
 
 .backfill-btn {
-  width: 100%;
-  padding: 8px 12px;
-  border: 1px solid var(--border, rgba(161, 175, 196, 0.22));
-  border-radius: 8px;
-  background: var(--panel, rgba(255, 255, 255, 0.7));
-  color: var(--text, #162033);
-  font-size: 12px;
+  flex: 1;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  font-size: 11px;
   font-weight: 500;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background 0.15s, opacity 0.15s;
 }
 
-.backfill-btn:hover:not(:disabled) {
-  background: var(--bg-soft, #e9eef5);
-  border-color: var(--accent, #2f7bf0);
+.backfill-btn-danger {
+  background: var(--bad, #d94f4f);
+  color: #fff;
+}
+
+.backfill-btn-danger:hover:not(:disabled) {
+  background: #c43c3c;
 }
 
 .backfill-btn:disabled {
-  opacity: 0.7;
+  opacity: 0.6;
   cursor: not-allowed;
 }
 
 .backfill-btn.running {
+  background: var(--muted, #5f6c84);
+}
+
+.backfill-cancel {
+  padding: 6px 10px;
+  border: 1px solid var(--border, rgba(161, 175, 196, 0.22));
+  border-radius: 6px;
+  background: transparent;
   color: var(--muted, #5f6c84);
+  font-size: 11px;
+  cursor: pointer;
 }
 
 .backfill-spinner {
   display: inline-block;
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--muted, #5f6c84);
-  border-top-color: transparent;
+  width: 10px;
+  height: 10px;
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  border-top-color: #fff;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
