@@ -945,28 +945,28 @@ button {
 
 .glass-bbox {
   position: absolute;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-top-color: rgba(255, 255, 255, 0.45);
+  border-left-color: rgba(255, 255, 255, 0.35);
   border-radius: 4px;
   backdrop-filter: blur(2px);
   background: rgba(255, 255, 255, 0.04);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    inset 1px 0 0 rgba(255, 255, 255, 0.1),
+    0 0 6px rgba(255, 255, 255, 0.06);
   overflow: hidden;
-  /* Vignette: center clear, edges blurred (non-linear falloff) */
-  -webkit-mask-image: radial-gradient(
-    ellipse 55% 55% at center,
-    transparent 0%,
-    transparent 35%,
-    rgba(0, 0, 0, 0.4) 60%,
-    rgba(0, 0, 0, 0.8) 80%,
-    black 100%
-  );
-  mask-image: radial-gradient(
-    ellipse 55% 55% at center,
-    transparent 0%,
-    transparent 35%,
-    rgba(0, 0, 0, 0.4) 60%,
-    rgba(0, 0, 0, 0.8) 80%,
-    black 100%
-  );
+  /* Vignette: 4-edge linear gradients composited for uniform edge blur.
+     Avoids elliptical mask that over-blurs corners.
+     Narrow clear zone (40-60%) keeps frosted glass depth. */
+  -webkit-mask-image:
+    linear-gradient(to right,  black, rgba(0,0,0,0.5) 15%, transparent 40%, transparent 60%, rgba(0,0,0,0.5) 85%, black),
+    linear-gradient(to bottom, black, rgba(0,0,0,0.5) 15%, transparent 40%, transparent 60%, rgba(0,0,0,0.5) 85%, black);
+  -webkit-mask-composite: source-in;
+  mask-image:
+    linear-gradient(to right,  black, rgba(0,0,0,0.5) 15%, transparent 40%, transparent 60%, rgba(0,0,0,0.5) 85%, black),
+    linear-gradient(to bottom, black, rgba(0,0,0,0.5) 15%, transparent 40%, transparent 60%, rgba(0,0,0,0.5) 85%, black);
+  mask-composite: intersect;
 }
 
 .glass-shine {
@@ -986,6 +986,47 @@ button {
 @keyframes shine-travel {
   from { offset-distance: 0%; }
   to { offset-distance: 100%; }
+}
+
+/* --- Bbox interaction states --- */
+
+.glass-overlay {
+  pointer-events: auto;
+}
+
+.glass-bbox {
+  transition: transform 0.2s ease, opacity 0.2s ease, box-shadow 0.2s ease;
+}
+
+.glass-bbox.highlighted {
+  box-shadow: 0 0 12px rgba(255, 255, 255, 0.4);
+  z-index: 10;
+  animation: bbox-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes bbox-pulse {
+  0%, 100% { transform: scale(1.04); box-shadow: 0 0 10px rgba(255, 255, 255, 0.3); }
+  50% { transform: scale(1.08); box-shadow: 0 0 18px rgba(255, 255, 255, 0.5); }
+}
+
+.glass-bbox.dimmed {
+  opacity: 0.15;
+}
+
+.glass-overlay.peek .glass-bbox:not(.highlighted) {
+  backdrop-filter: none;
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.detection-row {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.detection-row.active {
+  background: rgba(47, 123, 240, 0.08);
+  border-radius: 4px;
 }
 
 /* --- Card sparkle particles (detection hint) --- */
@@ -1014,49 +1055,174 @@ button {
   50% { transform: translate(5px, -7px); opacity: 1; }
 }
 
-/* --- Backfill button --- */
+/* --- Smoke detection (progressive scan) --- */
+
+.scan-active {
+  background: rgba(0, 0, 0, 0.06);
+  transition: background 0.3s;
+}
+
+.smoke-detection {
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(255, 255, 255, 0.5) 0%,
+    rgba(200, 220, 255, 0.25) 30%,
+    rgba(255, 255, 255, 0.08) 60%,
+    transparent 80%
+  );
+  filter: url(#smoke-turbulence) blur(6px);
+  transform: translate(-50%, -50%) scale(0);
+  animation: smoke-appear 0.6s ease-out forwards, smoke-drift 3s ease-in-out 0.6s infinite;
+  pointer-events: none;
+}
+
+@keyframes smoke-appear {
+  0% { transform: translate(-50%, -50%) scale(0); opacity: 0; }
+  60% { transform: translate(-50%, -50%) scale(1.3); opacity: 0.7; }
+  100% { transform: translate(-50%, -50%) scale(1); opacity: 0.6; }
+}
+
+@keyframes smoke-drift {
+  0%, 100% {
+    transform: translate(-50%, -50%) scale(1) rotate(0deg);
+    opacity: 0.5;
+  }
+  25% {
+    transform: translate(calc(-50% + 3px), calc(-50% - 4px)) scale(1.1) rotate(2deg);
+    opacity: 0.65;
+  }
+  50% {
+    transform: translate(calc(-50% - 2px), calc(-50% + 3px)) scale(1.15) rotate(-1deg);
+    opacity: 0.7;
+  }
+  75% {
+    transform: translate(calc(-50% + 4px), calc(-50% + 1px)) scale(1.05) rotate(1deg);
+    opacity: 0.55;
+  }
+}
+
+.detect-now-btn {
+  padding: 3px 10px;
+  border: 1px solid var(--border, rgba(161, 175, 196, 0.22));
+  border-radius: 6px;
+  background: var(--panel, rgba(255, 255, 255, 0.7));
+  color: var(--muted, #5f6c84);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.detect-now-btn:hover {
+  background: var(--bg-soft, #e9eef5);
+  border-color: var(--accent, #2f7bf0);
+  color: var(--accent, #2f7bf0);
+}
+
+.detect-now-status {
+  font-size: 11px;
+  color: var(--muted, #5f6c84);
+  animation: pulse-text 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-text {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+.detail-caption-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.detail-caption-row .detail-caption {
+  flex: 1;
+  margin: 0;
+}
+
+/* --- Backfill (collapsible, danger zone) --- */
 
 .backfill-section {
   margin-top: 12px;
+  border: 1px solid var(--border, rgba(161, 175, 196, 0.15));
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.backfill-summary {
+  padding: 6px 10px;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted, #5f6c84);
+  cursor: pointer;
+  user-select: none;
+}
+
+.backfill-summary::-webkit-details-marker {
+  font-size: 8px;
+}
+
+.backfill-content {
+  padding: 6px 10px 10px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
 }
 
 .backfill-btn {
-  width: 100%;
-  padding: 8px 12px;
-  border: 1px solid var(--border, rgba(161, 175, 196, 0.22));
-  border-radius: 8px;
-  background: var(--panel, rgba(255, 255, 255, 0.7));
-  color: var(--text, #162033);
-  font-size: 12px;
+  flex: 1;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  font-size: 11px;
   font-weight: 500;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background 0.15s, opacity 0.15s;
 }
 
-.backfill-btn:hover:not(:disabled) {
-  background: var(--bg-soft, #e9eef5);
-  border-color: var(--accent, #2f7bf0);
+.backfill-btn-danger {
+  background: var(--bad, #d94f4f);
+  color: #fff;
+}
+
+.backfill-btn-danger:hover:not(:disabled) {
+  background: #c43c3c;
 }
 
 .backfill-btn:disabled {
-  opacity: 0.7;
+  opacity: 0.6;
   cursor: not-allowed;
 }
 
 .backfill-btn.running {
+  background: var(--muted, #5f6c84);
+}
+
+.backfill-cancel {
+  padding: 6px 10px;
+  border: 1px solid var(--border, rgba(161, 175, 196, 0.22));
+  border-radius: 6px;
+  background: transparent;
   color: var(--muted, #5f6c84);
+  font-size: 11px;
+  cursor: pointer;
 }
 
 .backfill-spinner {
   display: inline-block;
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--muted, #5f6c84);
-  border-top-color: transparent;
+  width: 10px;
+  height: 10px;
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  border-top-color: #fff;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
