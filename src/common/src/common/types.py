@@ -7,7 +7,7 @@ C実装との互換性を考慮した構造体定義
 
 from dataclasses import dataclass
 from typing import Optional, TypedDict
-from enum import Enum
+from enum import IntEnum, Enum
 import time
 
 
@@ -32,59 +32,25 @@ class CameraType(Enum):
     NIGHT = "night"
 
 
-class DetectionClass(Enum):
-    """検出対象クラス"""
-    CAT = "cat"
-    DOG = "dog"
-    BIRD = "bird"
-    FOOD_BOWL = "food_bowl"
-    WATER_BOWL = "water_bowl"
-    DISH = "dish"
-    PERSON = "person"
-    BACKPACK = "backpack"
-    UMBRELLA = "umbrella"
-    HANDBAG = "handbag"
-    SUITCASE = "suitcase"
-    BOTTLE = "bottle"
-    WINE_GLASS = "wine_glass"
-    CUP = "cup"
-    FORK = "fork"
-    KNIFE = "knife"
-    SPOON = "spoon"
-    BANANA = "banana"
-    APPLE = "apple"
-    SANDWICH = "sandwich"
-    ORANGE = "orange"
-    BROCCOLI = "broccoli"
-    CARROT = "carrot"
-    HOT_DOG = "hot_dog"
-    PIZZA = "pizza"
-    DONUT = "donut"
-    CAKE = "cake"
-    CHAIR = "chair"
-    COUCH = "couch"
-    POTTED_PLANT = "potted_plant"
-    BED = "bed"
-    DINING_TABLE = "dining_table"
-    TOILET = "toilet"
-    TV = "tv"
-    LAPTOP = "laptop"
-    MOUSE = "mouse"
-    REMOTE = "remote"
-    KEYBOARD = "keyboard"
-    BOOK = "book"
-    CLOCK = "clock"
-    VASE = "vase"
-    TEDDY_BEAR = "teddy_bear"
-    HAIR_DRIER = "hair_drier"
-    TOOTHBRUSH = "toothbrush"
-    CELL_PHONE = "cell_phone"
-    MICROWAVE = "microwave"
-    OVEN = "oven"
-    TOASTER = "toaster"
-    SINK = "sink"
-    REFRIGERATOR = "refrigerator"
-    MOTION = "motion"  # Night camera motion detection (not YOLO)
+class DetectionClass(IntEnum):
+    """検出対象クラス (値はCOCO class ID, MOTIONは合成)"""
+    PERSON = 0
+    CAT = 15
+    DOG = 16
+    CUP = 41
+    FOOD_BOWL = 45  # COCO "bowl"
+    CHAIR = 56
+    MOTION = 128    # synthetic, not COCO
+
+    @property
+    def label(self) -> str:
+        """SHM/API用の文字列ラベル"""
+        return self.name.lower()
+
+
+# has_pet判定: PERSON(0), CAT(15), DOG(16) は全て < 32
+# CUP(41), FOOD_BOWL(45), CHAIR(56), MOTION(128) は >= 32
+PET_BOUNDARY = 32
 
 
 class BehaviorType(Enum):
