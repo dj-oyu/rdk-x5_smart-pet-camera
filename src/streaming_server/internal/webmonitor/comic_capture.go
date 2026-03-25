@@ -583,9 +583,12 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 	}
 
 	petID := dominantPetID(panels)
-	// Log confidence scores for calibration
+	// Log confidence scores for calibration (exclude placeholders)
 	scores := map[string]float64{}
 	for _, p := range panels {
+		if p.placeholder {
+			continue
+		}
 		if p.petClass != "" && p.petClass != "other" {
 			scores[p.petClass] += p.petConfidence
 		}
