@@ -59,9 +59,6 @@ jobs:
         working-directory: src/ai-pyramid/ui
         run: bun run build
 
-      - name: Invalidate embedded UI cache
-        run: cargo clean -p pet-album 2>/dev/null || true
-
       - name: Test
         run: cargo test
 
