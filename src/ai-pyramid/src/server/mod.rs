@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use futures_util::stream::Stream;
 use include_dir::{Dir, include_dir};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -382,12 +382,21 @@ async fn handle_photo_update(
     Json(updated).into_response()
 }
 
+fn deserialize_null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::deserialize(deserializer)?.unwrap_or_default())
+}
+
 // POST /api/photos/ingest — rdk-x5 sends comic metadata + detections
 #[derive(Deserialize)]
 struct IngestRequest {
     filename: String,
     captured_at: String,
     pet_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     detections: Vec<DetectionInput>,
 }
 
