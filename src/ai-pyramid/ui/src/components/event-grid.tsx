@@ -66,11 +66,12 @@ function SparkleOverlay({ bboxes }: { bboxes: BboxSummary[] }) {
   for (const b of bboxes) {
     const cx = b.bbox_x + b.bbox_w / 2;
     const cy = b.bbox_y + b.bbox_h / 2;
-    // Spread particles within bbox area using deterministic pseudo-random
+    // Spread particles around bbox center, radius ~60% of bbox size
     const seed = b.bbox_x * 7 + b.bbox_y * 13;
+    const spread = 0.6;
     for (let i = 0; i < 2; i++) {
-      const ox = ((seed + i * 37) % 41 - 20) / 100 * b.bbox_w;
-      const oy = ((seed + i * 53) % 31 - 15) / 100 * b.bbox_h;
+      const ox = ((seed + i * 37) % 61 - 30) / 50 * b.bbox_w * spread;
+      const oy = ((seed + i * 53) % 51 - 25) / 50 * b.bbox_h * spread;
       particles.push({
         left: `${((cx + ox) / COMIC_W) * 100}%`,
         top: `${((cy + oy) / COMIC_H) * 100}%`,
