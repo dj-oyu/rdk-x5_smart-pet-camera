@@ -2,14 +2,15 @@
 """Minimal YOLO BPU test: URL → JPEG → NV12 → detect.
 
 Usage (on RDK X5, camera daemon stopped):
-    python3 test_detect_jpeg.py https://m5stack-ai-pyramid.tail848eb5.ts.net:8082/api/photos/comic_20260325_014639_chatora.jpg/panel/2
+    PYTHONPATH=src/common/src python3 src/detector/test_detect_jpeg.py \
+        https://m5stack-ai-pyramid.tail848eb5.ts.net:8082/api/photos/comic_20260325_014639_chatora.jpg/panel/2
 """
 import ssl
 import sys
 import numpy as np
 from urllib.request import urlopen, Request
-from common.src.detection.image_utils import jpeg_to_yolo_nv12
-from common.src.detection.yolo_detector import YoloDetector
+from detection.image_utils import jpeg_to_yolo_nv12
+from detection.yolo_detector import YoloDetector
 
 url = sys.argv[1]
 
