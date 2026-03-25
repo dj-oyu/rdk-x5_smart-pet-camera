@@ -125,11 +125,15 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
     return () => source.close();
   }, [event.id, event.source_filename]);
 
-  function handleDetectNow() {
-    setScanning(true);
-    setSmokeHits([]);
-    detectNow(event.source_filename);
-  }
+  // Auto-start Level2 scan 3 seconds after modal opens
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setScanning(true);
+      setSmokeHits([]);
+      detectNow(event.source_filename);
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [event.source_filename]);
 
   function handleDetectionOverride(detId: number, newPetId: string) {
     updateDetectionOverride(detId, newPetId).then(() => {
@@ -259,11 +263,6 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
         <div class="detail-info">
           <div class="detail-caption-row">
             <p class="detail-caption">{event.summary ?? "No summary"}</p>
-            {!scanning && (
-              <button type="button" class="detect-now-btn" onClick={handleDetectNow} title="Run Level2 detection">
-                Scan
-              </button>
-            )}
             {scanning && <span class="detect-now-status">Scanning...</span>}
           </div>
 
