@@ -45,6 +45,15 @@ pub struct EditHistoryEntry {
     pub created_at: String,
 }
 
+/// Lightweight bbox for card grid sparkle overlay (no class/confidence).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BboxSummary {
+    pub bbox_x: i32,
+    pub bbox_y: i32,
+    pub bbox_w: i32,
+    pub bbox_h: i32,
+}
+
 /// Input for ingest API. bbox must be in comic image coordinates.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct DetectionInput {
@@ -338,6 +347,44 @@ impl PhotoStore {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(dets)
+    }
+
+    /// Return bboxes grouped by photo_id for a batch of photo IDs (single query).
+    pub fn get_bboxes_for_photos(
+        &self,
+        photo_ids: &[i64],
+    ) -> rusqlite::Result<std::collections::HashMap<i64, Vec<BboxSummary>>> {
+        use std::collections::HashMap;
+        if photo_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders: String = photo_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT photo_id, bbox_x, bbox_y, bbox_w, bbox_h FROM detections WHERE photo_id IN ({placeholders}) ORDER BY photo_id"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<Box<dyn rusqlite::types::ToSql>> = photo_ids
+            .iter()
+            .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>)
+            .collect();
+        let refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut map: HashMap<i64, Vec<BboxSummary>> = HashMap::new();
+        let rows = stmt.query_map(refs.as_slice(), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                BboxSummary {
+                    bbox_x: row.get(1)?,
+                    bbox_y: row.get(2)?,
+                    bbox_w: row.get(3)?,
+                    bbox_h: row.get(4)?,
+                },
+            ))
+        })?;
+        for r in rows {
+            let (pid, bbox) = r?;
+            map.entry(pid).or_default().push(bbox);
+        }
+        Ok(map)
     }
 
     pub fn update_detection_override(
