@@ -63,8 +63,8 @@ function buildParams(query: EventQuery): URLSearchParams {
   if (query.offset > 0) {
     params.set("offset", String(query.offset));
   }
-  for (const cls of query.yoloClasses) {
-    params.append("yolo_class", cls);
+  if (query.yoloClasses.length > 0) {
+    params.set("yolo_class", query.yoloClasses.join(","));
   }
   return params;
 }
@@ -216,7 +216,7 @@ export function readQueryFromLocation(): EventQuery {
     behavior: params.get("behavior") ?? "",
     limit: Number(params.get("limit")) || 0,
     offset: Number(params.get("offset")) || 0,
-    yoloClasses: params.getAll("yolo_class"),
+    yoloClasses: (params.get("yolo_class") ?? "").split(",").filter(Boolean),
   };
 }
 

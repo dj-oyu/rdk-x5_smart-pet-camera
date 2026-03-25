@@ -172,6 +172,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/base_diff", s.handleBaseDiff)
 	mux.HandleFunc("/api/base_diff/stream", s.handleBaseDiffStream)
 	mux.HandleFunc("/api/config", handleConfig)
+	mux.HandleFunc("/detect", s.handleDetectProxy)
 
 	return mux
 }
@@ -582,6 +583,46 @@ func (s *Server) handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.Header().Set("Content-Type", "application/json")
 	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(respBody)
+}
+
+// handleDetectProxy forwards /detect requests to the local Python detector.
+func (s *Server) handleDetectProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSONWithStatus(w, map[string]any{"error": "Invalid request"}, http.StatusBadRequest)
+		return
+	}
+
+	targetURL := fmt.Sprintf("http://127.0.0.1:%s/detect", s.cfg.DetectPort)
+	req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(body))
+	if err != nil {
+		writeJSONWithStatus(w, map[string]any{"error": "Detector unavailable"}, http.StatusBadGateway)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.webrtc.Do(req)
+	if err != nil {
+		writeJSONWithStatus(w, map[string]any{"error": "Detector unavailable"}, http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		writeJSONWithStatus(w, map[string]any{"error": "Detector unavailable"}, http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(respBody)
 }
