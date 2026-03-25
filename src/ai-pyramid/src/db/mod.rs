@@ -10,6 +10,7 @@ pub struct Photo {
     pub is_valid: Option<bool>,
     pub pet_id: Option<String>,
     pub behavior: Option<String>,
+    pub detected_at: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -69,6 +70,7 @@ pub struct PhotoFilter {
     pub offset: Option<i64>,
     pub search: Option<String>,
     pub behavior: Option<String>,
+    pub yolo_classes: Vec<String>,
 }
 
 pub struct PhotoStore {
@@ -137,6 +139,11 @@ impl PhotoStore {
         let _ = self
             .conn
             .execute_batch("ALTER TABLE detections ADD COLUMN color_metrics TEXT;");
+
+        // Migration: track when detection was run on a photo
+        let _ = self
+            .conn
+            .execute_batch("ALTER TABLE photos ADD COLUMN detected_at TEXT;");
 
         // Edit history: records every user correction as a JSON diff
         self.conn.execute_batch(
@@ -273,6 +280,13 @@ impl PhotoStore {
                 params![pet_id, photo_id],
             )?;
         }
+
+        // Mark as detected
+        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        self.conn.execute(
+            "UPDATE photos SET detected_at = COALESCE(detected_at, ?1) WHERE id = ?2",
+            params![now, photo_id],
+        )?;
 
         // Insert detections
         let mut stmt = self.conn.prepare(
@@ -428,7 +442,7 @@ impl PhotoStore {
     /// Return filenames that need VLM processing (is_valid IS NULL, attempts < max).
     pub fn list_pending_filenames(&self, max_attempts: i32) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT filename FROM photos WHERE is_valid IS NULL AND vlm_attempts < ?1 ORDER BY captured_at ASC",
+            "SELECT filename FROM photos WHERE is_valid IS NULL AND vlm_attempts < ?1 ORDER BY captured_at ASC LIMIT 500",
         )?;
         let names = stmt
             .query_map(params![max_attempts], |row| row.get(0))?
@@ -439,7 +453,7 @@ impl PhotoStore {
     pub fn get_by_filename(&self, filename: &str) -> rusqlite::Result<Option<Photo>> {
         self.conn
             .query_row(
-                "SELECT id, filename, captured_at, caption, is_valid, pet_id, behavior
+                "SELECT id, filename, captured_at, caption, is_valid, pet_id, behavior, detected_at
                  FROM photos WHERE filename = ?1",
                 params![filename],
                 row_to_photo,
@@ -450,7 +464,7 @@ impl PhotoStore {
     pub fn get_by_id(&self, id: i64) -> rusqlite::Result<Option<Photo>> {
         self.conn
             .query_row(
-                "SELECT id, filename, captured_at, caption, is_valid, pet_id, behavior
+                "SELECT id, filename, captured_at, caption, is_valid, pet_id, behavior, detected_at
                  FROM photos WHERE id = ?1",
                 params![id],
                 row_to_photo,
@@ -463,23 +477,43 @@ impl PhotoStore {
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
         if filter.is_pending {
-            where_clauses.push("is_valid IS NULL");
+            where_clauses.push("p.is_valid IS NULL".to_string());
         } else if let Some(valid) = filter.is_valid {
-            where_clauses.push("is_valid = ?");
+            where_clauses.push("p.is_valid = ?".to_string());
             param_values.push(Box::new(valid));
         }
         if let Some(ref pid) = filter.pet_id {
-            where_clauses.push("pet_id = ?");
+            where_clauses.push("p.pet_id = ?".to_string());
             param_values.push(Box::new(pid.clone()));
         }
         if let Some(ref search) = filter.search {
-            where_clauses.push("caption LIKE '%' || ? || '%'");
+            where_clauses.push("p.caption LIKE '%' || ? || '%'".to_string());
             param_values.push(Box::new(search.clone()));
         }
         if let Some(ref beh) = filter.behavior {
-            where_clauses.push("behavior = ?");
+            where_clauses.push("p.behavior = ?".to_string());
             param_values.push(Box::new(beh.clone()));
         }
+
+        // yolo_class filter: JOIN detections and filter by class
+        let use_join = !filter.yolo_classes.is_empty();
+        if use_join {
+            let placeholders: Vec<String> = filter
+                .yolo_classes
+                .iter()
+                .map(|_| "?".to_string())
+                .collect();
+            where_clauses.push(format!("d.yolo_class IN ({})", placeholders.join(",")));
+            for cls in &filter.yolo_classes {
+                param_values.push(Box::new(cls.clone()));
+            }
+        }
+
+        let from_sql = if use_join {
+            "photos p JOIN detections d ON d.photo_id = p.id"
+        } else {
+            "photos p"
+        };
 
         let where_sql = if where_clauses.is_empty() {
             String::new()
@@ -487,8 +521,12 @@ impl PhotoStore {
             format!("WHERE {}", where_clauses.join(" AND "))
         };
 
-        // Count
-        let count_sql = format!("SELECT COUNT(*) FROM photos {where_sql}");
+        // Count (DISTINCT when joining)
+        let count_sql = if use_join {
+            format!("SELECT COUNT(DISTINCT p.id) FROM {from_sql} {where_sql}")
+        } else {
+            format!("SELECT COUNT(*) FROM {from_sql} {where_sql}")
+        };
         let params_ref: Vec<&dyn rusqlite::types::ToSql> =
             param_values.iter().map(|p| p.as_ref()).collect();
         let total: i64 = self
@@ -498,10 +536,18 @@ impl PhotoStore {
         // Query
         let limit = filter.limit.unwrap_or(50);
         let offset = filter.offset.unwrap_or(0);
-        let query_sql = format!(
-            "SELECT id, filename, captured_at, caption, is_valid, pet_id, behavior
-             FROM photos {where_sql} ORDER BY captured_at DESC LIMIT ? OFFSET ?"
-        );
+        let select_cols = "p.id, p.filename, p.captured_at, p.caption, p.is_valid, p.pet_id, p.behavior, p.detected_at";
+        let query_sql = if use_join {
+            format!(
+                "SELECT DISTINCT {select_cols}
+                 FROM {from_sql} {where_sql} ORDER BY p.captured_at DESC LIMIT ? OFFSET ?"
+            )
+        } else {
+            format!(
+                "SELECT {select_cols}
+                 FROM {from_sql} {where_sql} ORDER BY p.captured_at DESC LIMIT ? OFFSET ?"
+            )
+        };
         let mut all_params: Vec<Box<dyn rusqlite::types::ToSql>> = param_values;
         all_params.push(Box::new(limit));
         all_params.push(Box::new(offset));
@@ -526,7 +572,7 @@ impl PhotoStore {
 
     pub fn distinct_pet_ids(&self) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT pet_id FROM photos WHERE pet_id IS NOT NULL AND pet_id != '' ORDER BY pet_id",
+            "SELECT DISTINCT pet_id FROM photos WHERE pet_id IS NOT NULL AND pet_id != '' ORDER BY pet_id LIMIT 100",
         )?;
         let ids = stmt
             .query_map([], |row| row.get(0))?
@@ -536,7 +582,7 @@ impl PhotoStore {
 
     pub fn distinct_behaviors(&self) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT behavior FROM photos WHERE behavior IS NOT NULL AND behavior != '' ORDER BY behavior",
+            "SELECT DISTINCT behavior FROM photos WHERE behavior IS NOT NULL AND behavior != '' ORDER BY behavior LIMIT 100",
         )?;
         let behaviors = stmt
             .query_map([], |row| row.get(0))?
@@ -547,7 +593,7 @@ impl PhotoStore {
     /// Return captions for valid photos on a given date (YYYY-MM-DD).
     pub fn captions_for_date(&self, date: &str) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT caption FROM photos WHERE is_valid = 1 AND caption IS NOT NULL AND captured_at LIKE ? || '%' ORDER BY captured_at ASC",
+            "SELECT caption FROM photos WHERE is_valid = 1 AND caption IS NOT NULL AND captured_at LIKE ? || '%' ORDER BY captured_at ASC LIMIT 200",
         )?;
         let captions = stmt
             .query_map(params![date], |row| row.get(0))?
@@ -555,14 +601,22 @@ impl PhotoStore {
         Ok(captions)
     }
 
-    /// Return photos that have no detections in the DB.
-    pub fn list_photos_without_detections(&self, limit: i64) -> rusqlite::Result<Vec<Photo>> {
+    /// Mark a photo as having had detection run, even if zero detections found.
+    pub fn mark_detected(&self, photo_id: i64) -> rusqlite::Result<usize> {
+        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        self.conn.execute(
+            "UPDATE photos SET detected_at = ?1 WHERE id = ?2",
+            params![now, photo_id],
+        )
+    }
+
+    /// Return photos that have not yet been through detection.
+    pub fn list_undetected_photos(&self, limit: i64) -> rusqlite::Result<Vec<Photo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT p.id, p.filename, p.captured_at, p.caption, p.is_valid, p.pet_id, p.behavior
-             FROM photos p
-             LEFT JOIN detections d ON d.photo_id = p.id
-             WHERE d.id IS NULL
-             ORDER BY p.captured_at DESC
+            "SELECT id, filename, captured_at, caption, is_valid, pet_id, behavior, detected_at
+             FROM photos
+             WHERE detected_at IS NULL
+             ORDER BY captured_at DESC
              LIMIT ?1",
         )?;
         let photos = stmt
@@ -620,6 +674,7 @@ fn row_to_photo(row: &rusqlite::Row) -> rusqlite::Result<Photo> {
         is_valid: is_valid_int.map(|v| v != 0),
         pet_id: row.get(5)?,
         behavior: row.get(6)?,
+        detected_at: row.get(7)?,
     })
 }
 
@@ -929,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn list_photos_without_detections_filters_correctly() {
+    fn list_undetected_photos_filters_correctly() {
         let store = setup();
         let ts = dt(2026, 3, 21, 10, 45, 0);
 
@@ -937,11 +992,11 @@ mod tests {
         store.insert("a.jpg", ts, Some("chatora")).unwrap();
         store.insert("b.jpg", ts, Some("mike")).unwrap();
 
-        // Both should appear (no detections)
-        let result = store.list_photos_without_detections(100).unwrap();
+        // Both should appear (detected_at is NULL)
+        let result = store.list_undetected_photos(100).unwrap();
         assert_eq!(result.len(), 2);
 
-        // Add detections to a.jpg
+        // Ingest detections for a.jpg → sets detected_at
         let detections = vec![DetectionInput {
             panel_index: None,
             bbox_x: 10,
@@ -958,9 +1013,82 @@ mod tests {
             .ingest_with_detections("a.jpg", ts, Some("chatora"), &detections)
             .unwrap();
 
-        // Only b.jpg should remain
-        let result = store.list_photos_without_detections(100).unwrap();
+        // Only b.jpg should remain (a.jpg has detected_at set)
+        let result = store.list_undetected_photos(100).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].filename, "b.jpg");
+
+        // mark_detected on b.jpg (zero detections case)
+        let photo_b = store.get_by_filename("b.jpg").unwrap().unwrap();
+        store.mark_detected(photo_b.id).unwrap();
+
+        // Now no undetected photos
+        let result = store.list_undetected_photos(100).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn list_filters_by_yolo_class() {
+        let store = setup();
+        let ts = dt(2026, 3, 21, 10, 45, 0);
+
+        store.insert("cat_only.jpg", ts, Some("chatora")).unwrap();
+        store.insert("dog_only.jpg", ts, Some("mike")).unwrap();
+        store.insert("no_det.jpg", ts, None).unwrap();
+
+        let cat_det = vec![DetectionInput {
+            panel_index: None,
+            bbox_x: 10,
+            bbox_y: 10,
+            bbox_w: 50,
+            bbox_h: 50,
+            yolo_class: Some("cat".into()),
+            pet_class: None,
+            confidence: Some(0.9),
+            detected_at: "2026-03-21T10:45:00".into(),
+            color_metrics: None,
+        }];
+        store
+            .ingest_with_detections("cat_only.jpg", ts, Some("chatora"), &cat_det)
+            .unwrap();
+
+        let dog_det = vec![DetectionInput {
+            panel_index: None,
+            bbox_x: 10,
+            bbox_y: 10,
+            bbox_w: 50,
+            bbox_h: 50,
+            yolo_class: Some("dog".into()),
+            pet_class: None,
+            confidence: Some(0.8),
+            detected_at: "2026-03-21T10:45:00".into(),
+            color_metrics: None,
+        }];
+        store
+            .ingest_with_detections("dog_only.jpg", ts, Some("mike"), &dog_det)
+            .unwrap();
+
+        // Filter by cat
+        let (photos, total) = store
+            .list(&PhotoFilter {
+                yolo_classes: vec!["cat".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(photos[0].filename, "cat_only.jpg");
+
+        // Filter by cat + dog
+        let (photos, total) = store
+            .list(&PhotoFilter {
+                yolo_classes: vec!["cat".into(), "dog".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(total, 2);
+
+        // No filter → all 3
+        let (_, total) = store.list(&PhotoFilter::default()).unwrap();
+        assert_eq!(total, 3);
     }
 }

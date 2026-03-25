@@ -1,4 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
+import { BackfillButton } from "./components/backfill-button";
 import { DailySummary } from "./components/daily-summary";
 import { EventDetail } from "./components/event-detail";
 import { EventGrid } from "./components/event-grid";
@@ -94,6 +95,15 @@ export function App() {
     }));
   }
 
+  function toggleYoloClass(cls: string) {
+    setQuery((current) => {
+      const classes = current.yoloClasses.includes(cls)
+        ? current.yoloClasses.filter((c) => c !== cls)
+        : [...current.yoloClasses, cls];
+      return { ...current, yoloClasses: classes, offset: 0 };
+    });
+  }
+
   const subtitle = query.petId
     ? `${total} events for ${query.petId}`
     : `${total} events`;
@@ -151,8 +161,10 @@ export function App() {
             onStatusChange={(status) => updateQuery({ status })}
             onPetChange={(petId) => updateQuery({ petId })}
             onBehaviorChange={(behavior) => updateQuery({ behavior })}
+            onYoloClassToggle={toggleYoloClass}
           />
           <DailySummary />
+          <BackfillButton />
         </aside>
         <div class="standalone-main">
           <StatsStrip stats={stats} />

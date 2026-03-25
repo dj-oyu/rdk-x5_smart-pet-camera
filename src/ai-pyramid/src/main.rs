@@ -180,6 +180,7 @@ async fn main() {
         event_tx: sse_event_tx,
         pet_names,
         detect_client,
+        backfill_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let app = server::router(app_state);
 
