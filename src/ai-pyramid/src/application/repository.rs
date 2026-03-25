@@ -109,13 +109,33 @@ impl EventRepositoryPort for PhotoStoreRepository {
     }
 
     async fn list_events(&self, query: EventQuery) -> AppResult<(Vec<EventSummary>, i64)> {
-        self.db
+        let (photos, total) = self
+            .db
             .request(|reply| DbCommand::ListPhotos {
                 filter: query.to_photo_filter(),
                 reply,
             })
-            .await
-            .map(|(photos, total)| (photos.into_iter().map(EventSummary::from).collect(), total))
+            .await?;
+
+        let photo_ids: Vec<i64> = photos.iter().map(|p| p.id).collect();
+        let mut events: Vec<EventSummary> = photos.into_iter().map(EventSummary::from).collect();
+
+        if !photo_ids.is_empty() {
+            let bbox_map = self
+                .db
+                .request(|reply| DbCommand::GetBboxesForPhotos { photo_ids, reply })
+                .await
+                .unwrap_or_default();
+            for ev in &mut events {
+                if let Some(bboxes) = bbox_map.get(&ev.id)
+                    && !bboxes.is_empty()
+                {
+                    ev.bboxes = Some(bboxes.clone());
+                }
+            }
+        }
+
+        Ok((events, total))
     }
 
     async fn list_pending_sources(&self, max_attempts: i32) -> AppResult<Vec<String>> {
