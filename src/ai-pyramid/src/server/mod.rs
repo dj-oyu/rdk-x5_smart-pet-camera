@@ -85,6 +85,7 @@ pub fn router(state: AppState) -> Router {
             "/api/photos/{filename}",
             get(handle_photo_serve).patch(handle_photo_update),
         )
+        .route("/api/photos/{filename}/panel/{panel}", get(handle_photo_panel))
         .route("/api/photos/ingest", post(handle_ingest))
         .route(
             "/api/detections/{id}",
@@ -196,6 +197,93 @@ async fn handle_photo_serve(
         )
             .into_response(),
     }
+}
+
+/// GET /api/photos/{filename}/panel/{panel} — serve a single panel (0-3) from a 2×2 comic image.
+async fn handle_photo_panel(
+    State(state): State<AppState>,
+    Path((filename, panel)): Path<(String, u32)>,
+) -> impl IntoResponse {
+    if panel > 3 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "panel must be 0-3"})),
+        )
+            .into_response();
+    }
+
+    let safe_name = sanitize_filename(&filename);
+    let path = state.photos_dir.join(&safe_name);
+
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "not found"})),
+            )
+                .into_response()
+        }
+    };
+
+    // Decode, crop panel, re-encode as JPEG
+    match crop_panel(&bytes, panel) {
+        Ok(jpeg) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "image/jpeg"),
+                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            ],
+            jpeg,
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("crop failed: {e}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// Crop a 2×2 comic panel from a JPEG, stripping borders/margins,
+/// and resize to 640×640 for YOLO input.
+///
+/// Comic layout (848×496): margin=12, border=2, gap=8, panel=404×228
+/// Panel content starts at (margin+border, margin+border) = (14, 14)
+fn crop_panel(jpeg_bytes: &[u8], panel: u32) -> Result<Vec<u8>, String> {
+    const MARGIN: u32 = 12;
+    const BORDER: u32 = 2;
+    const GAP: u32 = 8;
+    const PANEL_W: u32 = 404;
+    const PANEL_H: u32 = 228;
+    const CELL_W: u32 = PANEL_W + 2 * BORDER;
+    const CELL_H: u32 = PANEL_H + 2 * BORDER;
+
+    let img = image::load_from_memory_with_format(jpeg_bytes, image::ImageFormat::Jpeg)
+        .map_err(|e| e.to_string())?;
+
+    let col = panel % 2;
+    let row = panel / 2;
+    let x = MARGIN + BORDER + col * (CELL_W + GAP);
+    let y = MARGIN + BORDER + row * (CELL_H + GAP);
+    let cropped = img.crop_imm(x, y, PANEL_W, PANEL_H);
+
+    // Resize preserving aspect ratio (fit within 640px longest side)
+    let scale = (640.0 / PANEL_W as f64).min(640.0 / PANEL_H as f64);
+    let new_w = (PANEL_W as f64 * scale) as u32;
+    let new_h = (PANEL_H as f64 * scale) as u32;
+    let resized = image::imageops::resize(
+        &cropped.to_rgba8(),
+        new_w,
+        new_h,
+        image::imageops::FilterType::Lanczos3,
+    );
+
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(resized)
+        .write_to(&mut buf, image::ImageFormat::Jpeg)
+        .map_err(|e| e.to_string())?;
+    Ok(buf.into_inner())
 }
 
 #[derive(Deserialize)]
@@ -451,6 +539,13 @@ async fn handle_backfill(State(state): State<AppState>) -> impl IntoResponse {
         let mut fail = 0u32;
 
         for photo in &photos {
+            // Skip invalid photos — no point detecting on rejected images
+            if photo.status == crate::application::EventStatus::Invalid {
+                if let Err(e) = commands.mark_detected(photo.id).await {
+                    tracing::warn!("Backfill mark_detected error {}: {e}", photo.source_filename);
+                }
+                continue;
+            }
             match detect_client.detect(&photo.source_filename).await {
                 Ok(dets) if !dets.is_empty() => {
                     let captured_at = parse_comic_filename(&photo.source_filename)
