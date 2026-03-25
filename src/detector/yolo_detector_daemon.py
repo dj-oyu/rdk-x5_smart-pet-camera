@@ -899,6 +899,24 @@ class YoloDetectorDaemon:
             classes = ",".join(d.class_name.label for d in detection_dicts)
             logger.debug(f"#{self.stats['frames_processed']}: {classes}")
 
+        # Write score_threshold to JSON for web UI (every 30 frames ≈ 1/sec)
+        if self.active_camera == 0 and self.stats["frames_processed"] % 30 == 0:
+            try:
+                import json as _json
+                _json_str = _json.dumps({
+                    "grid": [],
+                    "rows": 0,
+                    "cols": 0,
+                    "base_valid": False,
+                    "quiet_frames": 0,
+                    "score_threshold": round(self.detector.score_threshold, 3),
+                })
+                with open("/tmp/base_diff_grid.json.tmp", "w") as _f:
+                    _f.write(_json_str)
+                Path("/tmp/base_diff_grid.json.tmp").replace("/tmp/base_diff_grid.json")
+            except Exception:
+                pass
+
     def _run_night_iteration(
         self,
         nv12_data: np.ndarray,
@@ -1025,6 +1043,7 @@ class YoloDetectorDaemon:
                                     "cols": grid_size * 2,
                                     "base_valid": True,
                                     "quiet_frames": self._quiet_frames,
+                                    "score_threshold": round(self.detector.score_threshold, 3),
                                 })
                                 with open("/tmp/base_diff_grid.json.tmp", "w") as _f:
                                     _f.write(_json_str)
