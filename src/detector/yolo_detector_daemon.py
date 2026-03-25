@@ -87,6 +87,8 @@ _DAY_ZONE_COL_BOUNDS = (240, 400)  # x boundaries between cols 0/1 and 1/2
 _DAY_ZONE_ROW_BOUND = 180          # y boundary between rows 0 and 1
 
 DAY_MOTION_TIMEOUT = 10.0    # seconds to keep tracking motion after pet lost
+_ADAPTIVE_GAP_TOLERANCE = 1.0  # seconds: pet lost < this → still "continuous"
+_ADAPTIVE_FLOOR = 0.2          # minimum adaptive threshold
 DAY_MOTION_THRESH = 15       # pixel diff threshold (day camera has low noise)
 DAY_MOTION_MIN_AREA_RATIO = 0.005  # min contour area as fraction of zone area
 
@@ -282,6 +284,11 @@ class YoloDetectorDaemon:
         self._day_pet_seen_at: float = 0.0               # timestamp of last pet detection
 
 
+        # Adaptive threshold state
+        self._pet_continuous_since: float = 0.0  # monotonic time when continuous detection started
+        self._pet_last_seen: float = 0.0         # monotonic time of last pet detection
+        self._adaptive_th_active: bool = False    # whether threshold is currently lowered
+
         # Night YOLO false positive filter (IR images cause frequent misdetections)
         self.night_fp_classes = {DetectionClass.CHAIR}
 
@@ -338,6 +345,51 @@ class YoloDetectorDaemon:
         self._day_active_zone = -1
         self._day_last_pet_bbox = None
         self._day_pet_seen_at = 0.0
+
+    def _update_adaptive_threshold(self, has_pet: bool) -> None:
+        """Lower score_threshold progressively during continuous pet detection."""
+        now = time.monotonic()
+        if has_pet:
+            if self._pet_continuous_since == 0.0:
+                self._pet_continuous_since = now
+            self._pet_last_seen = now
+        else:
+            if self._pet_last_seen > 0.0 and (now - self._pet_last_seen) > _ADAPTIVE_GAP_TOLERANCE:
+                self._pet_continuous_since = 0.0
+                self._pet_last_seen = 0.0
+                if self._adaptive_th_active:
+                    self.detector.score_threshold = self.score_threshold
+                    self.detector.conf_thres_raw = -np.log(1 / self.score_threshold - 1)
+                    self._adaptive_th_active = False
+                return
+
+        if self._pet_continuous_since == 0.0:
+            return
+
+        duration = now - self._pet_continuous_since
+        if duration >= 10.0:
+            reduction = 0.15
+        elif duration >= 6.0:
+            reduction = 0.10
+        elif duration >= 3.0:
+            reduction = 0.05
+        else:
+            return
+
+        new_th = max(_ADAPTIVE_FLOOR, self.score_threshold - reduction)
+        if self.detector.score_threshold != new_th:
+            self.detector.score_threshold = new_th
+            self.detector.conf_thres_raw = -np.log(1 / new_th - 1)
+            self._adaptive_th_active = True
+
+    def _reset_adaptive_threshold(self) -> None:
+        """Reset adaptive threshold state (e.g. on camera switch)."""
+        self._pet_continuous_since = 0.0
+        self._pet_last_seen = 0.0
+        if self._adaptive_th_active:
+            self.detector.score_threshold = self.score_threshold
+            self.detector.conf_thres_raw = -np.log(1 / self.score_threshold - 1)
+            self._adaptive_th_active = False
 
     @staticmethod
     def _crop_nv12_to_640(
@@ -761,6 +813,11 @@ class YoloDetectorDaemon:
                 )
             detection_dicts = scaled_dicts
 
+        # Adaptive threshold: lower score_threshold during continuous detection
+        if cycle_complete:
+            has_pet_any = any(d.class_name < PET_BOUNDARY for d in detection_dicts)
+            self._update_adaptive_threshold(has_pet_any)
+
         # Day motion detection: track pet bbox, detect motion when YOLO lost
         if self.active_camera == 0 and cycle_complete:
             has_pet = any(d.class_name < PET_BOUNDARY for d in detection_dicts)
@@ -828,13 +885,14 @@ class YoloDetectorDaemon:
 
         if self.stats["frames_processed"] % 300 == 0:
             clahe_status = "yes" if self.detector.clahe_enabled else "no"
+            adapt = f" th={self.detector.score_threshold:.2f}" if self._adaptive_th_active else ""
             logger.info(
                 f"[{self.stats['frames_processed']}f] "
                 f"det={self.stats['total_detections']} "
                 f"inf={self.stats['avg_inference_time_ms']:.0f}ms "
                 f"cam={self.active_camera} "
                 f"bright={zc_frame.brightness_avg:.1f} "  # type: ignore[attr-defined]
-                f"clahe={clahe_status}"
+                f"clahe={clahe_status}{adapt}"
             )
 
         if is_debug and cycle_complete and detection_dicts:
@@ -1207,6 +1265,11 @@ class YoloDetectorDaemon:
         else:
             detection_dicts = []
 
+        # Adaptive threshold
+        if run_yolo:
+            has_pet_any = any(d.class_name < PET_BOUNDARY for d in detection_dicts)
+            self._update_adaptive_threshold(has_pet_any)
+
         # Stats
         self.stats["frames_processed"] += 1
         timing = self.detector.get_last_timing()
@@ -1275,6 +1338,7 @@ class YoloDetectorDaemon:
                 logger.debug(f"Camera switched to {camera_id} [night ROI mode: {active_roi_count} VSE regions, score_th={self.detector.score_threshold:.2f}]")
 
             self.active_camera = camera_id
+            self._reset_adaptive_threshold()
             self.detector.clahe_enabled = (self.active_camera == 1)
             self.detector.clahe_frequency = 6 if self.active_camera == 1 else 1
             if self.active_camera == 0:
