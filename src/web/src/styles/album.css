@@ -999,9 +999,14 @@ button {
 }
 
 .glass-bbox.highlighted {
-  transform: scale(1.06);
   box-shadow: 0 0 12px rgba(255, 255, 255, 0.4);
   z-index: 10;
+  animation: bbox-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes bbox-pulse {
+  0%, 100% { transform: scale(1.04); box-shadow: 0 0 10px rgba(255, 255, 255, 0.3); }
+  50% { transform: scale(1.08); box-shadow: 0 0 18px rgba(255, 255, 255, 0.5); }
 }
 
 .glass-bbox.dimmed {
