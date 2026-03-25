@@ -165,6 +165,9 @@ src/streaming_server/web_monitor
 certs/
 tests/hw_encoder_stats_test
 
+# Benchmark data
+docs/benchmarks/
+
 # Rust build artifacts
 src/ai-pyramid/target/
 src/ai-pyramid/data/

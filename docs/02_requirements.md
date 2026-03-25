@@ -60,7 +60,7 @@
 - **FR-07-01**: WebRTCによるリアルタイム映像ストリーミング [実装済] - 遅延 <100ms
 - **FR-07-02**: MJPEGフォールバックストリーミング [実装済]
 - **FR-07-03**: Preact Web UIによるビューア [実装済]
-- [制約事項] H.264ビットレート上限: 700kbps（libspcdev制約）
+- [制約事項] H.265ビットレート上限: 700kbps（hb_mm_mc制約）
 
 ## 非機能要件
 
@@ -102,7 +102,7 @@
 - **HW-06**: GPU: Vivante GC8000L - 6.75 GFLOPS [制約事項] OpenCL zero-copy用途のみ実用的
 
 ### ハードウェア制約事項
-- [制約事項] H.264エンコードビットレート上限: 700kbps（libspcdev制約）
+- [制約事項] H.265エンコードビットレート上限: 700kbps（hb_mm_mc制約）
 - [制約事項] BPUはシングルコアのみ使用可能
 - [制約事項] ISPランタイムAPI制限: AWB/3DNR/2DNRのみ動作。Gamma/WDR/CPROCはランタイム変更不可
 - [制約事項] AWBはISP起動後30フレーム経過後に適用が必要
@@ -110,7 +110,7 @@
 
 ### ソフトウェア要件
 - **SW-01**: OS: Linux（RDK X5標準イメージ）
-- **SW-02**: カメラドライバ: libspcdev（V4L2ベース）
+- **SW-02**: カメラパイプライン: hbn_vflow API (VIN→ISP→VSE→Encoder)
 - **SW-03**: C/C++コンパイラ: GCC（ARM向け）
 - **SW-04**: Python: 3.11+（`uv`によるパッケージ管理）
 - **SW-05**: OpenCV: 4.x以上
@@ -171,7 +171,7 @@
 
 ### C-01: ハードウェア制約
 - BPUはシングルコア（10 TOPS INT8）のみ。マルチモデル同時推論は不可
-- H.264ビットレート上限700kbps（libspcdev制約）
+- H.265ビットレート上限700kbps（hb_mm_mc制約）
 - ISPランタイムAPI制限（AWB/3DNR/2DNRのみ、Gamma/WDR/CPROC不可）
 - AWBはISP起動30フレーム後に適用必須
 - 夜間IR カメラはAWB MANUALモード必須
@@ -210,5 +210,5 @@
 
 ### 低（P3 - 将来的に検討）
 - リアルタイムアラート
-- VLM連携（M5Stack AI Pyramid）
+- VLM連携（M5Stack AI Pyramid） [実装済み] - ai-pyramid Rust実装 (axum + rusqlite + Qwen3-VL-2B)
 - クラウド連携

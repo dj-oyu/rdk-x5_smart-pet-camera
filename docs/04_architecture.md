@@ -241,7 +241,7 @@ graph TD
 │   │   ├── isp_brightness.c
 │   │   ├── shared_memory.c / .h
 │   │   ├── shm_constants.h        # SHM名・サイズ定義 (single source of truth)
-│   │   └── mock_camera_daemon.py  # テスト用モック
+│   │   └── mock_detector_daemon.py # POSIX SHMテスト用検出モック
 │   │
 │   ├── detector/                  # 物体検出 (Python)
 │   │   └── YOLOv11n BPU推論

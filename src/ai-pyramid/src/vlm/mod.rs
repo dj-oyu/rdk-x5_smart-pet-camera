@@ -291,10 +291,7 @@ mod tests {
         use std::io::Write;
 
         // Create a valid 1x1 JPEG using image crate
-        let tmp = tempfile::Builder::new()
-            .suffix(".jpg")
-            .tempfile()
-            .unwrap();
+        let tmp = tempfile::Builder::new().suffix(".jpg").tempfile().unwrap();
         let img = image::RgbImage::new(1, 1);
         img.save(tmp.path()).unwrap();
 

@@ -148,4 +148,3 @@ func boolToInt(value bool) int {
 	}
 	return 0
 }
-

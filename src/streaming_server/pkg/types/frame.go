@@ -4,12 +4,12 @@ import "time"
 
 // VideoFrame represents a complete video frame with metadata
 type VideoFrame struct {
-	Data      []byte    // Raw video data (NAL units)
-	Timestamp time.Time // Frame capture timestamp
-	FrameNumber  uint64    // Sequential frame number
-	IsIDR     bool      // True if this frame contains an IDR
-	Width     int       // Frame width
-	Height    int       // Frame height
+	Data        []byte    // Raw video data (NAL units)
+	Timestamp   time.Time // Frame capture timestamp
+	FrameNumber uint64    // Sequential frame number
+	IsIDR       bool      // True if this frame contains an IDR
+	Width       int       // Frame width
+	Height      int       // Frame height
 }
 
 // NALUnit represents a single NAL unit

@@ -33,16 +33,16 @@ type cachedLabel struct {
 
 // FrameBroadcaster manages fanout of JPEG frames to multiple clients.
 type FrameBroadcaster struct {
-	mu                 sync.Mutex
-	clients            map[int]chan []byte
-	nextID             int
-	shm                *shmReader
-	monitor            *Monitor
-	stop               chan struct{}
-	stopped            bool
-	onChange           chan<- struct{} // Notifies connection count changes
-	frameBroadcastBuf  []chan []byte   // Reusable snapshot slice to avoid per-broadcast allocation
-	ttLabelCache       labelCache     // TrueType label cache (re-rendered on detection change)
+	mu                sync.Mutex
+	clients           map[int]chan []byte
+	nextID            int
+	shm               *shmReader
+	monitor           *Monitor
+	stop              chan struct{}
+	stopped           bool
+	onChange          chan<- struct{} // Notifies connection count changes
+	frameBroadcastBuf []chan []byte   // Reusable snapshot slice to avoid per-broadcast allocation
+	ttLabelCache      labelCache      // TrueType label cache (re-rendered on detection change)
 }
 
 // NewFrameBroadcaster creates a broadcaster that generates overlay frames and fans them out.
@@ -310,7 +310,7 @@ type DetectionBroadcaster struct {
 	stopped          bool
 	lastEventVersion int // Track last sent version to avoid duplicates
 	onChange         chan<- struct{}
-	onDetection      func()               // Callback when detection with objects occurs
+	onDetection      func()                 // Callback when detection with objects occurs
 	onDetectionData  func(*DetectionResult) // Callback with detection data
 
 	// Rate monitoring

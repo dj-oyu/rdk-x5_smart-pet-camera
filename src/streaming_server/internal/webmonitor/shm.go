@@ -354,7 +354,6 @@ type frameSnapshot struct {
 
 const frameBufSize = 768 * 432 * 3 / 2 // Max NV12 frame size
 
-
 type shmReader struct {
 	frameShm      *C.ZeroCopyFrameBuffer
 	detectionShm  *C.LatestDetectionResult
@@ -498,8 +497,8 @@ func (r *shmReader) LatestDetection() (*DetectionResult, bool) {
 	r.lastDetVer = version
 
 	result := DetectionResult{
-		FrameNumber: int(snapshot.frame_number),
-		Timestamp: float64(snapshot.timestamp),
+		FrameNumber:   int(snapshot.frame_number),
+		Timestamp:     float64(snapshot.timestamp),
 		NumDetections: int(snapshot.num_detections),
 		Version:       int(version),
 	}
@@ -609,8 +608,8 @@ func nv12ToJPEGHardware(nv12Data []byte, width, height int) ([]byte, error) {
 
 type overlayRect struct {
 	X, Y, W, H       int
-	YVal, UVal, VVal  uint8
-	Thickness         int // 0 = filled, >0 = outline
+	YVal, UVal, VVal uint8
+	Thickness        int // 0 = filled, >0 = outline
 }
 
 type overlayText struct {

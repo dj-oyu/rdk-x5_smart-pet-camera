@@ -133,7 +133,6 @@ const (
 	FormatRGB  = 2
 	FormatH264 = 3
 	FormatH265 = 4
-
 )
 
 // Reader reads H.265 frames from zero-copy shared memory

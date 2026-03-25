@@ -232,7 +232,7 @@ stateDiagram-v2
 
 #### 実装済み機能
 - `scripts/profile_shm.py`: SHM統計スナップショット（FPS、ドロップレート等）
-- `src/capture/mock_camera_daemon.py`: テスト用カメラデーモンモック
+- `src/mock/main.py`: テスト用モックフレームワーク (カメラ・検出・SHM)
 
 #### 未実装機能
 - 自動復旧
@@ -312,7 +312,7 @@ graph TD
 | 項目 | 値 |
 |------|-----|
 | YOLO推論 | 8.9ms (BPU INT8) |
-| H.264エンコード | ハードウェア（libspcdev） |
+| H.265エンコード | ハードウェア（hb_mm_mc） |
 | ストリーミング遅延 | WebRTC: 低遅延 |
 | 夜カメラROI推論 | ~22fps（3 ROI ラウンドロビン） |
 | ビットレート | 600kbps default / 700kbps hard limit |
@@ -347,7 +347,7 @@ graph TD
 ### プロファイラパターン [実装済]
 - `scripts/profile_shm.py` でSHM統計スナップショットを取得
 - JSON出力によるFPS・ドロップレートの定量評価
-- `src/capture/mock_camera_daemon.py` によるカメラデーモンシミュレーション
+- `src/mock/main.py` によるカメラデーモンシミュレーション
 
 ### シナリオテスト
 - 昼夜カメラ切り替えの安定性
