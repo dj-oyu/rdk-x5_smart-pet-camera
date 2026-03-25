@@ -883,11 +883,6 @@ class YoloDetector:
         if not self._nv12_path_debug_logged:
             self._nv12_path_debug_logged = True
 
-        # Debug: save pre-BPU NV12 Y-plane for comparison
-        _debug_path = f"/tmp/nv12_pre_bpu_{width}x{height}.png"
-        _y = input_tensor[:self.input_w * self.input_h].reshape(self.input_h, self.input_w)
-        cv2.imwrite(_debug_path, _y)
-        logger.info(f"[debug] Saved {_debug_path} (clahe={clahe_applied})")
 
         # 2. BPU推論
         start_infer = time.perf_counter()

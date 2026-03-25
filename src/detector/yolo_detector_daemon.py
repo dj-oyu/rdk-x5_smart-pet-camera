@@ -545,7 +545,11 @@ class YoloDetectorDaemon:
 
                 try:
                     nv12, orig_w, orig_h, scale, pad_x, pad_y = jpeg_to_yolo_nv12(jpeg_bytes)
+                    # Debug: save pre-BPU NV12 Y-plane
+                    _y = nv12[:640*640].reshape(640, 640)
+                    cv2.imwrite("/tmp/nv12_pre_bpu.png", _y)
                     detections = detector.detect_nv12(nv12, 640, 640)
+                    logger.info(f"[detect] {orig_w}x{orig_h} scale={scale:.4f} pad=({pad_x},{pad_y}) dets={len(detections)}")
 
                     # Map bbox from 640x640 letterbox back to original image coords
                     result = []
