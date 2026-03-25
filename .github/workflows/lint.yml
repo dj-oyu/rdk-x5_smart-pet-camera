@@ -1,0 +1,104 @@
+name: Lint
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  go:
+    name: "Go: vet"
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(join(github.event.pull_request.*.filename, ' '), 'src/streaming_server/')
+    defaults:
+      run:
+        working-directory: src/streaming_server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: src/streaming_server/go.mod
+          cache-dependency-path: src/streaming_server/go.sum
+      - run: go vet ./...
+
+  rust:
+    name: "Rust: clippy"
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(join(github.event.pull_request.*.filename, ' '), 'src/ai-pyramid/')
+    defaults:
+      run:
+        working-directory: src/ai-pyramid
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/ai-pyramid/target
+          key: lint-cargo-${{ hashFiles('src/ai-pyramid/Cargo.lock') }}
+          restore-keys: lint-cargo-
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
+      - name: Build frontend
+        working-directory: src/ai-pyramid/ui
+        run: bun install --frozen-lockfile && bun run build
+      - run: cargo clippy -- -D warnings
+
+  typescript:
+    name: "TypeScript: tsc"
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(join(github.event.pull_request.*.filename, ' '), 'src/web/')
+    defaults:
+      run:
+        working-directory: src/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
+      - run: bun install --frozen-lockfile
+      - run: bunx tsc --noEmit
+
+  docs:
+    name: "Docs: mermaid"
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(join(github.event.pull_request.*.filename, ' '), 'docs/') ||
+      contains(join(github.event.pull_request.*.filename, ' '), 'CLAUDE.md')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install -g @mermaid-js/mermaid-cli
+      - name: Validate mermaid blocks
+        run: |
+          FAIL=0
+          for file in $(find docs src -name '*.md' -path '*/docs/*' -o -name 'CLAUDE.md' | sort); do
+            BLOCK=0
+            awk '/^```mermaid$/{flag=1; block++; next} /^```$/{if(flag) flag=0; next} flag{print > "/tmp/mermaid_block_" block ".mmd"}' "$file"
+            for mmd in /tmp/mermaid_block_*.mmd; do
+              [ -f "$mmd" ] || continue
+              BLOCK=$((BLOCK+1))
+              if mmdc -i "$mmd" -o /tmp/mermaid_out.svg 2>/dev/null; then
+                echo "OK: $file block #$BLOCK"
+              else
+                echo "FAIL: $file block #$BLOCK"; cat "$mmd"; FAIL=1
+              fi
+              rm -f "$mmd" /tmp/mermaid_out.svg
+            done
+          done
+          [ "$FAIL" -eq 1 ] && exit 1
+          echo "All mermaid blocks valid"

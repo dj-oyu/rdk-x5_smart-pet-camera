@@ -1,0 +1,43 @@
+name: Format
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  go:
+    name: "Go: gofmt"
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(join(github.event.pull_request.*.filename, ' '), 'src/streaming_server/')
+    defaults:
+      run:
+        working-directory: src/streaming_server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: src/streaming_server/go.mod
+          cache-dependency-path: src/streaming_server/go.sum
+      - name: Check format
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::Unformatted files:" && echo "$unformatted"
+            exit 1
+          fi
+
+  rust:
+    name: "Rust: cargo fmt"
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(join(github.event.pull_request.*.filename, ' '), 'src/ai-pyramid/')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --manifest-path src/ai-pyramid/Cargo.toml -- --check
