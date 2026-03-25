@@ -7,7 +7,7 @@ use std::time::Duration;
 const VLM_PROMPT: &str = r#"Analyze this photo of a pet camera feed. Respond with valid JSON only, no markdown.
 {"is_valid": true if a cat is clearly visible else false,
  "caption": "one sentence describing the cat's appearance and action",
- "behavior": one of "eating","sleeping","playing","resting","moving","grooming","other"}"#;
+ "behavior": one of "eating","drinking","sleeping","playing","resting","moving","grooming","other"}"#;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct VlmResponse {

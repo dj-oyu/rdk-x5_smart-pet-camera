@@ -15,7 +15,7 @@ const COMIC_H = 496;
 
 const PET_OPTIONS = ["mike", "chatora", "other"];
 const BEHAVIOR_OPTIONS = [
-  "eating", "sleeping", "playing", "resting", "moving", "grooming", "other",
+  "eating", "drinking", "sleeping", "playing", "resting", "moving", "grooming", "other",
 ];
 
 const CLASS_COLORS: Record<string, string> = {
