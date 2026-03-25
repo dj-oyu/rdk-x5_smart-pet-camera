@@ -15,6 +15,7 @@ import numpy as np
 from urllib.request import urlopen, Request
 from detection.image_utils import jpeg_to_yolo_nv12
 from detection.yolo_detector import YoloDetector
+from common.types import DetectionClass
 
 MODEL = "/tmp/yolo_models/yolov13n_detect_bayese_640x640_nv12.bin"
 url = sys.argv[1]
@@ -35,9 +36,9 @@ detector = YoloDetector(model_path=MODEL, score_threshold=0.01)
 # --- Baseline: single thread ---
 print("=== Baseline (single thread) ===")
 dets = detector.detect_nv12_readonly(nv12_cat, 640, 640)
-cat_count = sum(1 for d in dets if d.class_name.value == "cat")
+cat_count = sum(1 for d in dets if d.class_name is DetectionClass.CAT)
 print(f"Cat image: {len(dets)} dets, {cat_count} cats")
-print(f"  top: {dets[0].class_name.value} {dets[0].confidence:.3f}" if dets else "  (none)")
+print(f"  top: {dets[0].class_name.label} {dets[0].confidence:.3f}" if dets else "  (none)")
 
 dets_black = detector.detect_nv12_readonly(nv12_black, 640, 640)
 print(f"Black image: {len(dets_black)} dets")
@@ -126,7 +127,7 @@ for i in range(100):
     if not cat_dets or not cat_dets[0]:
         detect_errors += 1
     else:
-        cats = sum(1 for d in cat_dets[0] if d.class_name.value == "cat")
+        cats = sum(1 for d in cat_dets[0] if d.class_name is DetectionClass.CAT)
         if cats == 0:
             detect_errors += 1
 
