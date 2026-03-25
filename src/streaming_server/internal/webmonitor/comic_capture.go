@@ -735,19 +735,13 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 	return filename
 }
 
-// albumBaseURL returns the ai-pyramid base URL from PET_ALBUM_HOST env var.
-// Accepts a full URL (e.g. "https://host:8082") or bare hostname (adds https://:8082).
-// Returns empty string if PET_ALBUM_HOST is not set.
+// albumBaseURL returns the ai-pyramid base URL from PET_ALBUM_HOST + PET_ALBUM_PORT env vars.
+// Returns empty string if PET_ALBUM_HOST is not set. Defaults to port 8082 and HTTPS.
 var albumBaseURL = func() string {
 	host := os.Getenv("PET_ALBUM_HOST")
 	if host == "" {
 		return ""
 	}
-	// Full URL: starts with http:// or https://
-	if strings.HasPrefix(host, "http://") || strings.HasPrefix(host, "https://") {
-		return strings.TrimRight(host, "/")
-	}
-	// Bare hostname: add scheme + default port
 	port := os.Getenv("PET_ALBUM_PORT")
 	if port == "" {
 		port = "8082"
