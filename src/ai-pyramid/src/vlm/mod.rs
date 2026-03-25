@@ -34,7 +34,7 @@ pub fn parse_vlm_response(raw: &str) -> Result<VlmResponse, String> {
     serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {e}, raw: {raw}"))
 }
 
-const DAY_SUMMARY_PROMPT: &str = "Summarize this cat's day based on these timestamped observations. Describe activity patterns and notable moments in 2-3 sentences. Respond in plain text, no JSON.";
+const DAY_SUMMARY_PROMPT: &str = "Summarize this cat's day based on these timestamped observations. Describe activity patterns and notable moments in 2-3 sentences. Respond in plain Japanese text, no JSON.";
 
 #[derive(Debug, Clone)]
 pub struct VlmConfig {
@@ -193,8 +193,12 @@ impl VlmClient {
         Err(last_err)
     }
 
-    /// Summarize a day's observations using text-only chat (no image, low NPU cost).
-    pub async fn summarize_day(&self, captions: &[String]) -> Result<String, String> {
+    /// Summarize a day's observations, optionally with a representative photo.
+    pub async fn summarize_day(
+        &self,
+        captions: &[String],
+        photo_path: Option<&Path>,
+    ) -> Result<String, String> {
         // Limit to most recent 50 captions to stay within 3,584 token context
         let recent: &[String] = if captions.len() > 50 {
             &captions[captions.len() - 50..]
@@ -204,11 +208,21 @@ impl VlmClient {
         let observations = recent.join("\n- ");
         let user_text = format!("Observations:\n- {observations}\n\n{DAY_SUMMARY_PROMPT}");
 
+        let mut content = Vec::new();
+        if let Some(path) = photo_path
+            && let Ok(data_url) = encode_resized_jpeg(path, 384, 384)
+        {
+            content.push(ContentPart::ImageUrl {
+                image_url: ImageUrlData { url: data_url },
+            });
+        }
+        content.push(ContentPart::Text { text: user_text });
+
         let request = ChatRequest {
             model: self.config.model.clone(),
             messages: vec![Message {
                 role: "user".into(),
-                content: vec![ContentPart::Text { text: user_text }],
+                content,
             }],
             max_tokens: 256,
             temperature: 0.3,
