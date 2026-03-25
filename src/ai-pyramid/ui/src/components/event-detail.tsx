@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import {
   fetchDetections,
   updateDetectionOverride,
@@ -10,7 +10,6 @@ import {
   type PetNames,
 } from "../lib/api";
 
-// Comic image dimensions (fixed)
 const COMIC_W = 848;
 const COMIC_H = 496;
 
@@ -46,16 +45,41 @@ type Props = {
   onUpdated?: (patch: Partial<EventSummary>) => void;
 };
 
+function useContainerScale(ref: preact.RefObject<HTMLDivElement | null>) {
+  const [layout, setLayout] = useState({ scale: 1, offsetX: 0, offsetY: 0 });
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      const scale = Math.min(w / COMIC_W, h / COMIC_H);
+      setLayout({
+        scale,
+        offsetX: (w - COMIC_W * scale) / 2,
+        offsetY: (h - COMIC_H * scale) / 2,
+      });
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [ref]);
+
+  return layout;
+}
+
 export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
   const [detections, setDetections] = useState<Detection[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<number | null>(null);
 
-  // Photo-level editable fields
   const [editing, setEditing] = useState(false);
   const [petId, setPetId] = useState(event.pet_id);
   const [status, setStatus] = useState(event.status);
   const [behavior, setBehavior] = useState(event.behavior);
+
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const { scale, offsetX, offsetY } = useContainerScale(containerRef);
 
   useEffect(() => {
     let cancelled = false;
@@ -115,54 +139,68 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
     setEditing(false);
   }
 
+  function glassBboxStyle(det: Detection): Record<string, string> {
+    const w = det.bbox_w * scale;
+    const h = det.bbox_h * scale;
+    return {
+      left: `${offsetX + det.bbox_x * scale}px`,
+      top: `${offsetY + det.bbox_y * scale}px`,
+      width: `${w}px`,
+      height: `${h}px`,
+    };
+  }
+
+  function setShineOffsetPath(el: HTMLDivElement | null, det: Detection) {
+    if (!el) return;
+    const w = det.bbox_w * scale;
+    const h = det.bbox_h * scale;
+    const path = `path("M 0,0 L ${w},0 L ${w},${h} L 0,${h} Z")`;
+    (el.style as any).offsetPath = path;
+    const after = el.querySelector(".glass-shine-b") as HTMLElement | null;
+    if (after) (after.style as any).offsetPath = path;
+  }
+
   return (
     <div class="detail-backdrop" onClick={onClose}>
       <div class="detail-modal" onClick={(e) => e.stopPropagation()}>
         <button type="button" class="detail-close" onClick={onClose}>✕</button>
 
-        <div class="detail-image-container">
+        <div class="detail-image-container" ref={containerRef}>
           <img
             src={photoUrl(event.source_filename)}
             alt={event.summary ?? event.source_filename}
             class="detail-image"
           />
-          <svg
-            class="detail-overlay"
-            viewBox={`0 0 ${COMIC_W} ${COMIC_H}`}
-            preserveAspectRatio="xMidYMid meet"
-          >
-            {detections.map((det) => (
-              <g key={det.id}>
-                <rect
-                  x={det.bbox_x}
-                  y={det.bbox_y}
-                  width={det.bbox_w}
-                  height={det.bbox_h}
-                  fill="none"
-                  stroke={bboxColor(det)}
-                  stroke-width="2"
-                  rx="2"
-                />
-                <rect
-                  x={det.bbox_x}
-                  y={Math.max(0, det.bbox_y - 16)}
-                  width={labelText(det, petNames).length * 6.5 + 8}
-                  height="16"
-                  fill={bboxColor(det)}
-                  rx="2"
-                />
-                <text
-                  x={det.bbox_x + 4}
-                  y={Math.max(0, det.bbox_y - 16) + 12}
-                  fill="white"
-                  font-size="11"
-                  font-family="monospace"
+          {detections.length > 0 && (
+            <div class="glass-overlay">
+              {detections.map((det) => (
+                <div
+                  key={det.id}
+                  class="glass-bbox"
+                  style={glassBboxStyle(det)}
                 >
-                  {labelText(det, petNames)}
-                </text>
-              </g>
-            ))}
-          </svg>
+                  <span
+                    class="glass-shine"
+                    ref={(el) => {
+                      if (!el) return;
+                      const w = det.bbox_w * scale;
+                      const h = det.bbox_h * scale;
+                      (el.style as any).offsetPath = `path("M 0,0 L ${w},0 L ${w},${h} L 0,${h} Z")`;
+                    }}
+                  />
+                  <span
+                    class="glass-shine glass-shine-b"
+                    ref={(el) => {
+                      if (!el) return;
+                      const w = det.bbox_w * scale;
+                      const h = det.bbox_h * scale;
+                      (el.style as any).offsetPath = `path("M 0,0 L ${w},0 L ${w},${h} L 0,${h} Z")`;
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div class="detail-info">

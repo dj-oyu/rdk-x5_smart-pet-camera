@@ -390,54 +390,31 @@ HTTP GET image_url → JPEG bytes
 - 合計: **~15-20ms/画像**
 - メインループの SHM フレーム処理と GIL で排他されるため、リアルタイム検出に若干の遅延影響あり
 
-### ai-pyramid 側: backfill 手順
+### ai-pyramid 側: backfill
 
-新規 API やスクリプトは不要。既存 API の組み合わせ + shell ワンライナーで実行。
+#### UI からの実行 (推奨)
 
-#### 手順 (ai-pyramid 実機上で実行)
+Standalone モードのサイドバーに「Run Backfill」ボタンがある。クリックすると `POST /api/backfill` が呼ばれ、`detected_at IS NULL` の写真を最大500枚処理する。
+
+- 排他制御あり (二重実行で 409 Conflict)
+- 500ms/枚のレート制限
+- 検出ゼロの写真も `detected_at` をセット → 再処理対象にならない
+- 進捗: ボタンが "Running..." 表示 + 5秒ポーリングで完了検知
+
+#### API からの実行
 
 ```bash
-# 1. detections が空の photo を検索
-# 2. 各 photo を rdk-x5 で検出
-# 3. 結果を ingest API で DB に INSERT
+# backfill 開始
+curl -X POST http://localhost:3000/api/backfill
 
-sqlite3 data/pet-album.db \
-  "SELECT p.filename FROM photos p LEFT JOIN detections d ON d.photo_id=p.id WHERE d.id IS NULL" | \
-while read f; do
-  echo "Processing: $f"
-
-  # rdk-x5 で検出 (camera が ai-pyramid から画像を直接ダウンロード)
-  DETECT=$(curl -sf -X POST http://<camera-host>:8083/detect \
-    -H 'Content-Type: application/json' \
-    -d "{\"image_url\":\"http://ai-pyramid:3000/api/photos/$f\"}")
-
-  [ -z "$DETECT" ] && echo "  SKIP (detect failed)" && continue
-
-  # detect レスポンスを ingest 形式に変換して投入
-  echo "$DETECT" | jq --arg f "$f" '{
-    filename: $f,
-    captured_at: ($f | capture("comic_(?<d>[0-9]{8})_(?<t>[0-9]{6})") |
-      "\(.d[0:4])-\(.d[4:6])-\(.d[6:8])T\(.t[0:2]):\(.t[2:4]):\(.t[4:6])"),
-    pet_id: ($f | capture("_(?<p>[a-z]+)\\.jpg$") | .p),
-    detections: [.detections[] | {
-      bbox_x: .bbox.x, bbox_y: .bbox.y, bbox_w: .bbox.w, bbox_h: .bbox.h,
-      yolo_class: .class_name,
-      confidence: .confidence,
-      detected_at: ($f | capture("comic_(?<d>[0-9]{8})_(?<t>[0-9]{6})") |
-        "\(.d[0:4])-\(.d[4:6])-\(.d[6:8])T\(.t[0:2]):\(.t[2:4]):\(.t[4:6])")
-    }]
-  }' | curl -sf -X POST http://localhost:3000/api/photos/ingest \
-    -H 'Content-Type: application/json' -d @- > /dev/null
-
-  echo "  OK ($(echo "$DETECT" | jq '.detections | length') detections)"
-  sleep 0.2  # rdk-x5 メインループへの影響軽減
-done
+# ステータス確認
+curl http://localhost:3000/api/backfill/status
+# → {"running": true}
 ```
 
 #### 注意事項
 
 - `pet_class` = NULL (元フレームの NV12 がないため UV scatter 不可)
 - `panel_index` = NULL (backfill ではパネル情報なし)
-- `jq` が必要 (`apt install jq`)
 - camera の detector daemon が起動中である必要あり
 - `sleep 0.2` で BPU 負荷を分散 (リアルタイム検出への影響軽減)

@@ -120,9 +120,13 @@ pub(crate) enum DbCommand {
         date: String,
         reply: oneshot::Sender<AppResult<Vec<String>>>,
     },
-    ListPhotosWithoutDetections {
+    ListUndetectedPhotos {
         limit: i64,
         reply: oneshot::Sender<AppResult<Vec<Photo>>>,
+    },
+    MarkDetected {
+        photo_id: i64,
+        reply: oneshot::Sender<AppResult<usize>>,
     },
     GetEditHistory {
         since: Option<String>,
@@ -216,8 +220,11 @@ fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
             DbCommand::CaptionsForDate { date, reply } => {
                 send_reply(reply, store.captions_for_date(&date))
             }
-            DbCommand::ListPhotosWithoutDetections { limit, reply } => {
-                send_reply(reply, store.list_photos_without_detections(limit))
+            DbCommand::ListUndetectedPhotos { limit, reply } => {
+                send_reply(reply, store.list_undetected_photos(limit))
+            }
+            DbCommand::MarkDetected { photo_id, reply } => {
+                send_reply(reply, store.mark_detected(photo_id))
             }
             DbCommand::GetEditHistory { since, reply } => {
                 send_reply(reply, store.get_edit_history(since.as_deref()))

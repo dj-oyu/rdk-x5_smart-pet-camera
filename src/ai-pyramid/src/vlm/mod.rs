@@ -1,5 +1,6 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use std::io::Cursor;
 use std::path::Path;
 use std::time::Duration;
 
@@ -102,6 +103,25 @@ struct ChoiceMessage {
     content: String,
 }
 
+/// Resize a JPEG to target dimensions and return a data URL with base64 encoding.
+/// Writes directly into a pre-allocated String to minimize copies.
+fn encode_resized_jpeg(path: &Path, w: u32, h: u32) -> Result<String, String> {
+    let img = image::open(path).map_err(|e| format!("image open {}: {e}", path.display()))?;
+    let resized = img.resize_exact(w, h, image::imageops::FilterType::Triangle);
+    let mut jpeg_buf = Cursor::new(Vec::with_capacity(32 * 1024));
+    resized
+        .write_to(&mut jpeg_buf, image::ImageFormat::Jpeg)
+        .map_err(|e| format!("jpeg encode: {e}"))?;
+    let jpeg_bytes = jpeg_buf.into_inner();
+
+    // Build data URL in one allocation
+    let b64_len = jpeg_bytes.len().div_ceil(3) * 4;
+    let mut url = String::with_capacity("data:image/jpeg;base64,".len() + b64_len);
+    url.push_str("data:image/jpeg;base64,");
+    base64::engine::general_purpose::STANDARD.encode_string(&jpeg_bytes, &mut url);
+    Ok(url)
+}
+
 impl VlmClient {
     pub fn new(config: VlmConfig) -> Self {
         let http = reqwest::Client::builder()
@@ -112,11 +132,9 @@ impl VlmClient {
     }
 
     pub async fn analyze(&self, jpeg_path: &Path) -> Result<VlmResponse, String> {
-        let jpeg_data =
-            std::fs::read(jpeg_path).map_err(|e| format!("read {}: {e}", jpeg_path.display()))?;
-
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_data);
-        let data_url = format!("data:image/jpeg;base64,{b64}");
+        // VLM vision encoder uses 384×384 — resize before encoding to save memory & bandwidth.
+        // Comic images are 848×496 (~100-300KB) → 384×384 JPEG (~15-30KB).
+        let data_url = encode_resized_jpeg(jpeg_path, 384, 384)?;
 
         let request = ChatRequest {
             model: self.config.model.clone(),
@@ -272,9 +290,13 @@ mod tests {
         use axum::{Json, Router, routing::post};
         use std::io::Write;
 
-        // Create a tiny test JPEG
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        tmp.as_file().write_all(&[0xFF, 0xD8, 0xFF, 0xD9]).unwrap();
+        // Create a valid 1x1 JPEG using image crate
+        let tmp = tempfile::Builder::new()
+            .suffix(".jpg")
+            .tempfile()
+            .unwrap();
+        let img = image::RgbImage::new(1, 1);
+        img.save(tmp.path()).unwrap();
 
         // Mock VLM API using axum
         let app = Router::new().route("/v1/chat/completions", post(|| async {

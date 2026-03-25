@@ -934,3 +934,96 @@ button {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* --- Glass bbox overlay --- */
+
+.glass-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.glass-bbox {
+  position: absolute;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  backdrop-filter: blur(0.8px);
+  background: rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+}
+
+.glass-shine {
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.45) 0%, transparent 70%);
+  animation: shine-travel 4s linear infinite;
+  pointer-events: none;
+}
+
+.glass-shine-b {
+  animation-delay: -2s;
+}
+
+@keyframes shine-travel {
+  from { offset-distance: 0%; }
+  to { offset-distance: 100%; }
+}
+
+/* --- Backfill button --- */
+
+.backfill-section {
+  margin-top: 12px;
+}
+
+.backfill-btn {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border, rgba(161, 175, 196, 0.22));
+  border-radius: 8px;
+  background: var(--panel, rgba(255, 255, 255, 0.7));
+  color: var(--text, #162033);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.backfill-btn:hover:not(:disabled) {
+  background: var(--bg-soft, #e9eef5);
+  border-color: var(--accent, #2f7bf0);
+}
+
+.backfill-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.backfill-btn.running {
+  color: var(--muted, #5f6c84);
+}
+
+.backfill-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--muted, #5f6c84);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.backfill-error {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--bad, #d94f4f);
+}
