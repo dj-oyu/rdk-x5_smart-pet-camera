@@ -884,11 +884,13 @@ class YoloDetector:
             self._nv12_path_debug_logged = True
 
 
-        # Debug: save post-preprocessing NV12 Y-plane (API requests only)
+        # Debug: save post-preprocessing NV12 as color BGR (API requests only)
         if getattr(self, '_debug_save_next', False):
             self._debug_save_next = False
-            _y = input_tensor[:self.input_w * self.input_h].reshape(self.input_h, self.input_w)
-            cv2.imwrite("/tmp/nv12_post_preprocess.png", _y)
+            _h, _w = self.input_h, self.input_w
+            _nv12_debug = np.array(input_tensor[:_w * _h * 3 // 2]).reshape(_h * 3 // 2, _w)
+            _bgr = cv2.cvtColor(_nv12_debug, cv2.COLOR_YUV2BGR_NV12)
+            cv2.imwrite("/tmp/nv12_post_preprocess.png", _bgr)
             logger.info(f"[debug] Saved /tmp/nv12_post_preprocess.png (clahe={clahe_applied})")
 
         # 2. BPU推論
