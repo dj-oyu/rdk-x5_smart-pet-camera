@@ -16,8 +16,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -158,6 +158,8 @@ recordings/
 # Node/Bun
 node_modules/
 bun.lock
+!src/web/bun.lock
+!src/ai-pyramid/ui/bun.lock
 
 # Go build artifacts in source directory
 src/streaming_server/server

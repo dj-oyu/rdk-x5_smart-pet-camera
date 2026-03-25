@@ -146,7 +146,7 @@ export function VideoControls({
                 onKeyDown={handleKeyDown}
                 maxLength={50}
               />
-              <button class="capture-send" onClick={doCapture} disabled={captureState === 'capturing'}>
+              <button class="capture-send" onClick={doCapture}>
                 📸
               </button>
             </div>
