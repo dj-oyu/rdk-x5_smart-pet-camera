@@ -22,16 +22,21 @@ jobs:
       - name: Validate mermaid blocks
         run: |
           FAIL=0
-          for file in $(find docs src -name '*.md' -path '*/docs/*' -o -name 'CLAUDE.md' | sort); do
-            BLOCK=0
+          for file in $(find docs src -name '*.md' \( -path '*/docs/*' -o -name 'CLAUDE.md' \) | sort); do
+            # Extract mermaid blocks
+            rm -f /tmp/mermaid_block_*.mmd
             awk '/^```mermaid$/{flag=1; block++; next} /^```$/{if(flag) flag=0; next} flag{print > "/tmp/mermaid_block_" block ".mmd"}' "$file"
+            BLOCK=0
             for mmd in /tmp/mermaid_block_*.mmd; do
               [ -f "$mmd" ] || continue
               BLOCK=$((BLOCK+1))
-              if mmdc -i "$mmd" -o /tmp/mermaid_out.svg; then
+              echo "--- Checking $file block #$BLOCK ---"
+              if mmdc -i "$mmd" -o /tmp/mermaid_out.svg 2>&1; then
                 echo "OK: $file block #$BLOCK"
               else
-                echo "FAIL: $file block #$BLOCK"; cat "$mmd"; FAIL=1
+                echo "::error file=$file::FAIL: block #$BLOCK"
+                cat "$mmd"
+                FAIL=1
               fi
               rm -f "$mmd" /tmp/mermaid_out.svg
             done
