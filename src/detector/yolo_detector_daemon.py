@@ -8,6 +8,7 @@ YOLO detection results to detection shared memory.
 
 from __future__ import annotations
 
+import os
 import sys
 import signal
 import time
@@ -498,7 +499,7 @@ class YoloDetectorDaemon:
         """シグナルハンドラ"""
         self.running = False
 
-    def _start_detect_api(self, port: int = 8083) -> None:
+    def _start_detect_api(self, port: int | None = None) -> None:
         """Start HTTP /detect endpoint on a background thread.
 
         Accepts an image URL, downloads the JPEG, runs YOLO detection,
@@ -512,6 +513,9 @@ class YoloDetectorDaemon:
         from http.server import HTTPServer, BaseHTTPRequestHandler
         from urllib.request import urlopen, Request
         from urllib.error import URLError
+
+        if port is None:
+            port = int(os.environ.get("PET_CAMERA_DETECT_PORT", "8083"))
 
         assert self.detector is not None
         detector = self.detector
@@ -1373,7 +1377,7 @@ class YoloDetectorDaemon:
         self._save_thread = threading.Thread(target=self._save_worker, daemon=True)
         self._save_thread.start()
 
-        # HTTP detection API (separate thread, port 8083)
+        # HTTP detection API (separate thread, PET_CAMERA_DETECT_PORT or 8083)
         self._start_detect_api()
 
         logger.debug("Starting detection loop")

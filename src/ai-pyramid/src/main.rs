@@ -147,11 +147,11 @@ async fn main() {
     {
         let camera_host = camera_host.unwrap_or_else(|| "localhost".into());
         let album_host = album_host.unwrap_or_else(|| "localhost".into());
-        let camera_port = std::env::var("PET_CAMERA_DETECT_PORT").unwrap_or_else(|_| "8083".into());
+        let camera_port = std::env::var("PET_CAMERA_PORT").unwrap_or_else(|_| "8080".into());
         let album_port = std::env::var("PET_ALBUM_PORT").unwrap_or_else(|_| "8082".into());
         let config = DetectConfig {
-            camera_base_url: format!("http://{camera_host}:{camera_port}"),
-            self_base_url: format!("http://{album_host}:{album_port}"),
+            camera_base_url: format!("https://{camera_host}:{camera_port}"),
+            self_base_url: format!("https://{album_host}:{album_port}"),
             timeout: Duration::from_secs(30),
         };
         info!(

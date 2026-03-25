@@ -111,8 +111,7 @@ struct PhotosQuery {
     offset: Option<i64>,
     search: Option<String>,
     behavior: Option<String>,
-    #[serde(default)]
-    yolo_class: Vec<String>,
+    yolo_class: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -684,9 +683,12 @@ fn build_event_query(q: &PhotosQuery) -> crate::application::EventQuery {
         behavior: q.behavior.clone().filter(|s| !s.is_empty()),
         yolo_classes: q
             .yolo_class
-            .iter()
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .map(str::trim)
             .filter(|s| !s.is_empty())
-            .cloned()
+            .map(String::from)
             .collect(),
     }
 }

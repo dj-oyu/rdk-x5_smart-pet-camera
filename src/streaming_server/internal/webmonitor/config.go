@@ -23,6 +23,7 @@ type Config struct {
 	TLSKeyFile           string
 	JPEGQuality          int    // JPEG encoding quality (1-100, default 85)
 	DetectionHistoryPath string // gob file for persisting detection history across restarts
+	DetectPort           string // local Python detector port (default "8083")
 }
 
 // DefaultConfig returns a config aligned with the existing Flask monitor behavior.
@@ -42,5 +43,6 @@ func DefaultConfig() Config {
 		RecordingOutputPath:  "./recordings",
 		JPEGQuality:          65,
 		DetectionHistoryPath: filepath.Join("recordings", "detection_history.gob"),
+		DetectPort:           "8083",
 	}
 }

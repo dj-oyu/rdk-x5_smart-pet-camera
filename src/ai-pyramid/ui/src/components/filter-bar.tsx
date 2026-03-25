@@ -1,6 +1,6 @@
 import type { EventQuery, PetNames, StatusFilter } from "../lib/api";
 
-const YOLO_CLASSES = ["cat", "dog", "person", "cup", "food_bowl"];
+const YOLO_CLASSES = ["cat", "dog", "bird", "food_bowl", "water_bowl", "person"];
 
 type FilterBarProps = {
   query: EventQuery;
