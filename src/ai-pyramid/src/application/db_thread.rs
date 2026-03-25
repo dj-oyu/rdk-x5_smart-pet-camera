@@ -1,6 +1,6 @@
 use crate::application::AppResult;
 use crate::db::{
-    Detection, DetectionInput, EditHistoryEntry, Photo, PhotoFilter, PhotoStore, Stats,
+    BboxSummary, Detection, DetectionInput, EditHistoryEntry, Photo, PhotoFilter, PhotoStore, Stats,
 };
 use chrono::NaiveDateTime;
 use std::sync::mpsc;
@@ -132,6 +132,10 @@ pub(crate) enum DbCommand {
         since: Option<String>,
         reply: oneshot::Sender<AppResult<Vec<EditHistoryEntry>>>,
     },
+    GetBboxesForPhotos {
+        photo_ids: Vec<i64>,
+        reply: oneshot::Sender<AppResult<std::collections::HashMap<i64, Vec<BboxSummary>>>>,
+    },
 }
 
 fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
@@ -228,6 +232,9 @@ fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
             }
             DbCommand::GetEditHistory { since, reply } => {
                 send_reply(reply, store.get_edit_history(since.as_deref()))
+            }
+            DbCommand::GetBboxesForPhotos { photo_ids, reply } => {
+                send_reply(reply, store.get_bboxes_for_photos(&photo_ids))
             }
         }
     }
