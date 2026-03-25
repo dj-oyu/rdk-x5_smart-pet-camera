@@ -42,7 +42,7 @@ from detection.image_utils import jpeg_to_yolo_nv12
 
 # hb_mem bindings (required for zero-copy)
 from hb_mem_bindings import init_module as hb_mem_init, import_nv12_graph_buf
-from common.types import DetectionDict as _DetectionDict
+from common.types import DetectionDict as _DetectionDict, DetectionClass, PET_BOUNDARY
 
 # ロガー設定（後でmain()で上書きされる）
 logging.basicConfig(
@@ -61,7 +61,7 @@ class DetBbox(NamedTuple):
     h: int
 
 class DetDict(NamedTuple):
-    class_name: str
+    class_name: DetectionClass
     confidence: float
     bbox: DetBbox
 
@@ -87,6 +87,8 @@ _DAY_ZONE_COL_BOUNDS = (240, 400)  # x boundaries between cols 0/1 and 1/2
 _DAY_ZONE_ROW_BOUND = 180          # y boundary between rows 0 and 1
 
 DAY_MOTION_TIMEOUT = 10.0    # seconds to keep tracking motion after pet lost
+_ADAPTIVE_GAP_TOLERANCE = 1.0  # seconds: pet lost < this → still "continuous"
+_ADAPTIVE_FLOOR = 0.2          # minimum adaptive threshold
 DAY_MOTION_THRESH = 15       # pixel diff threshold (day camera has low noise)
 DAY_MOTION_MIN_AREA_RATIO = 0.005  # min contour area as fraction of zone area
 
@@ -94,7 +96,7 @@ DAY_MOTION_MIN_AREA_RATIO = 0.005  # min contour area as fraction of zone area
 def _det_to_dict(d: DetDict) -> _DetectionDict:
     """Convert a DetDict namedtuple to a plain dict for the SHM write boundary."""
     return {
-        "class_name": d.class_name,
+        "class_name": d.class_name.label,
         "confidence": d.confidence,
         "bbox": {"x": d.bbox.x, "y": d.bbox.y, "w": d.bbox.w, "h": d.bbox.h},
     }
@@ -125,12 +127,12 @@ def _suppress_dog_with_cat(
     inside a larger dog bbox.  Uses containment ratio (intersection /
     min_area) instead of IoU to catch size-mismatched overlaps.
     """
-    cats = [d for d in detections if d.class_name == "cat"]
+    cats = [d for d in detections if d.class_name is DetectionClass.CAT]
     if not cats:
         return detections
     return [
         d for d in detections
-        if d.class_name != "dog" or not any(
+        if d.class_name is not DetectionClass.DOG or not any(
             _containment_ratio(d.bbox, c.bbox) > threshold for c in cats
         )
     ]
@@ -282,8 +284,13 @@ class YoloDetectorDaemon:
         self._day_pet_seen_at: float = 0.0               # timestamp of last pet detection
 
 
+        # Adaptive threshold state
+        self._pet_continuous_since: float = 0.0  # monotonic time when continuous detection started
+        self._pet_last_seen: float = 0.0         # monotonic time of last pet detection
+        self._adaptive_th_active: bool = False    # whether threshold is currently lowered
+
         # Night YOLO false positive filter (IR images cause frequent misdetections)
-        self.night_fp_classes = {"toilet", "sink", "suitcase", "chair"}
+        self.night_fp_classes = {DetectionClass.CHAIR}
 
         # Night frame collection for future fine-tuning
         self.night_collect_dir = Path("/tmp/night_collect")
@@ -325,7 +332,7 @@ class YoloDetectorDaemon:
                 continue
             x, y, w, h = cv2.boundingRect(c)
             results.append(DetDict(
-                class_name="motion",
+                class_name=DetectionClass.MOTION,
                 confidence=min(1.0, area / (320 * 320 * 0.05)),
                 bbox=DetBbox(x=x + zx, y=y + zy, w=w, h=h),
             ))
@@ -338,6 +345,51 @@ class YoloDetectorDaemon:
         self._day_active_zone = -1
         self._day_last_pet_bbox = None
         self._day_pet_seen_at = 0.0
+
+    def _update_adaptive_threshold(self, has_pet: bool) -> None:
+        """Lower score_threshold progressively during continuous pet detection."""
+        now = time.monotonic()
+        if has_pet:
+            if self._pet_continuous_since == 0.0:
+                self._pet_continuous_since = now
+            self._pet_last_seen = now
+        else:
+            if self._pet_last_seen > 0.0 and (now - self._pet_last_seen) > _ADAPTIVE_GAP_TOLERANCE:
+                self._pet_continuous_since = 0.0
+                self._pet_last_seen = 0.0
+                if self._adaptive_th_active:
+                    self.detector.score_threshold = self.score_threshold
+                    self.detector.conf_thres_raw = -np.log(1 / self.score_threshold - 1)
+                    self._adaptive_th_active = False
+                return
+
+        if self._pet_continuous_since == 0.0:
+            return
+
+        duration = now - self._pet_continuous_since
+        if duration >= 10.0:
+            reduction = 0.15
+        elif duration >= 6.0:
+            reduction = 0.10
+        elif duration >= 3.0:
+            reduction = 0.05
+        else:
+            return
+
+        new_th = max(_ADAPTIVE_FLOOR, self.score_threshold - reduction)
+        if self.detector.score_threshold != new_th:
+            self.detector.score_threshold = new_th
+            self.detector.conf_thres_raw = -np.log(1 / new_th - 1)
+            self._adaptive_th_active = True
+
+    def _reset_adaptive_threshold(self) -> None:
+        """Reset adaptive threshold state (e.g. on camera switch)."""
+        self._pet_continuous_since = 0.0
+        self._pet_last_seen = 0.0
+        if self._adaptive_th_active:
+            self.detector.score_threshold = self.score_threshold
+            self.detector.conf_thres_raw = -np.log(1 / self.score_threshold - 1)
+            self._adaptive_th_active = False
 
     @staticmethod
     def _crop_nv12_to_640(
@@ -569,7 +621,7 @@ class YoloDetectorDaemon:
                         w = min(w, orig_w - x)
                         h = min(h, orig_h - y)
                         result.append({
-                            "class_name": d.class_name.value,
+                            "class_name": d.class_name.label,
                             "confidence": round(d.confidence, 3),
                             "bbox": {"x": x, "y": y, "w": w, "h": h},
                         })
@@ -660,7 +712,7 @@ class YoloDetectorDaemon:
 
         detection_dicts = [
             DetDict(
-                class_name=det.class_name.value,
+                class_name=det.class_name,
                 confidence=det.confidence,
                 bbox=DetBbox(x=det.bbox.x, y=det.bbox.y, w=det.bbox.w, h=det.bbox.h),
             )
@@ -675,7 +727,7 @@ class YoloDetectorDaemon:
                 for roi_idx, roi_dets in enumerate(self.detection_cache):
                     all_detections.extend(roi_dets)
                     if roi_dets and is_debug:
-                        classes = [d.class_name for d in roi_dets]
+                        classes = [d.class_name.label for d in roi_dets]
                         logger.debug(f"  Night ROI {roi_idx}: {classes}")
                 if is_debug and all_detections:
                     logger.debug(f"  Night camera: {len(all_detections)} detections before NMS")
@@ -713,7 +765,7 @@ class YoloDetectorDaemon:
                 for roi_idx, roi_dets in enumerate(self.detection_cache):
                     all_detections.extend(roi_dets)
                     if roi_dets and is_debug:
-                        classes = [d.class_name for d in roi_dets]
+                        classes = [d.class_name.label for d in roi_dets]
                         logger.debug(f"  ROI {roi_idx}: {classes}")
                 if is_debug and all_detections:
                     logger.debug(f"  Day ROI: {len(all_detections)} detections")
@@ -761,12 +813,17 @@ class YoloDetectorDaemon:
                 )
             detection_dicts = scaled_dicts
 
+        # Adaptive threshold: lower score_threshold during continuous detection
+        if cycle_complete:
+            has_pet_any = any(d.class_name < PET_BOUNDARY for d in detection_dicts)
+            self._update_adaptive_threshold(has_pet_any)
+
         # Day motion detection: track pet bbox, detect motion when YOLO lost
         if self.active_camera == 0 and cycle_complete:
-            has_pet = any(d.class_name in ("cat", "dog") for d in detection_dicts)
+            has_pet = any(d.class_name < PET_BOUNDARY for d in detection_dicts)
             if has_pet:
                 for d in detection_dicts:
-                    if d.class_name in ("cat", "dog"):
+                    if d.class_name < PET_BOUNDARY:
                         self._day_last_pet_bbox = DetBbox(
                             x=int(d.bbox.x / self.scale_x),
                             y=int(d.bbox.y / self.scale_y),
@@ -786,7 +843,7 @@ class YoloDetectorDaemon:
                 if motion_dets:
                     motion_scaled = [
                         DetDict(
-                            "motion",
+                            DetectionClass.MOTION,
                             d.confidence,
                             DetBbox(
                                 int(d.bbox.x * self.scale_x),
@@ -828,17 +885,18 @@ class YoloDetectorDaemon:
 
         if self.stats["frames_processed"] % 300 == 0:
             clahe_status = "yes" if self.detector.clahe_enabled else "no"
+            adapt = f" th={self.detector.score_threshold:.2f}" if self._adaptive_th_active else ""
             logger.info(
                 f"[{self.stats['frames_processed']}f] "
                 f"det={self.stats['total_detections']} "
                 f"inf={self.stats['avg_inference_time_ms']:.0f}ms "
                 f"cam={self.active_camera} "
                 f"bright={zc_frame.brightness_avg:.1f} "  # type: ignore[attr-defined]
-                f"clahe={clahe_status}"
+                f"clahe={clahe_status}{adapt}"
             )
 
         if is_debug and cycle_complete and detection_dicts:
-            classes = ",".join(d.class_name for d in detection_dicts)
+            classes = ",".join(d.class_name.label for d in detection_dicts)
             logger.debug(f"#{self.stats['frames_processed']}: {classes}")
 
     def _run_night_iteration(
@@ -919,7 +977,7 @@ class YoloDetectorDaemon:
                                     continue
                                 motion_detected_this_frame = True
                                 self._motion_bboxes.append(DetDict(
-                                    class_name="motion",
+                                    class_name=DetectionClass.MOTION,
                                     confidence=min(1.0, area / (small_pixels * 0.05)),
                                     bbox=DetBbox(
                                         x=bx * 2 + roi_ox,
@@ -1110,7 +1168,7 @@ class YoloDetectorDaemon:
                 roi_oy = int(roi_sy * (720.0 / 1080.0))
                 for det in detections:
                     all_yolo_dicts.append(DetDict(
-                        class_name=det.class_name.value,
+                        class_name=det.class_name,
                         confidence=det.confidence,
                         bbox=DetBbox(
                             x=det.bbox.x + roi_ox,
@@ -1145,7 +1203,7 @@ class YoloDetectorDaemon:
                     fc_scale = fc_sz / 640.0
                     for det in fc_detections:
                         all_yolo_dicts.append(DetDict(
-                            class_name=det.class_name.value,
+                            class_name=det.class_name,
                             confidence=det.confidence,
                             bbox=DetBbox(
                                 x=int(det.bbox.x * fc_scale) + fc_x,
@@ -1154,7 +1212,7 @@ class YoloDetectorDaemon:
                                 h=int(det.bbox.h * fc_scale),
                             ),
                         ))
-                    fc_classes = ",".join(d.class_name.value for d in fc_detections) or "none"
+                    fc_classes = ",".join(d.class_name.label for d in fc_detections) or "none"
                     logger.debug(
                         f"focus_crop: roi={self._motion_roi_idx} "
                         f"center=({mcx},{mcy}) size={fc_sz} "
@@ -1207,6 +1265,11 @@ class YoloDetectorDaemon:
         else:
             detection_dicts = []
 
+        # Adaptive threshold
+        if run_yolo:
+            has_pet_any = any(d.class_name < PET_BOUNDARY for d in detection_dicts)
+            self._update_adaptive_threshold(has_pet_any)
+
         # Stats
         self.stats["frames_processed"] += 1
         timing = self.detector.get_last_timing()
@@ -1219,7 +1282,7 @@ class YoloDetectorDaemon:
                 self.stats[f"_cnt_{k}"] += 1
         if run_yolo:
             for d in detection_dicts:
-                if d.class_name == "motion":
+                if d.class_name is DetectionClass.MOTION:
                     self.stats["total_mot"] = self.stats.get("total_mot", 0) + 1
                 else:
                     self.stats["total_yolo"] = self.stats.get("total_yolo", 0) + 1
@@ -1240,7 +1303,7 @@ class YoloDetectorDaemon:
             )
 
         if is_debug and run_yolo and detection_dicts:
-            classes = ",".join(d.class_name for d in detection_dicts)
+            classes = ",".join(d.class_name.label for d in detection_dicts)
             logger.debug(f"#{self.stats['frames_processed']}: {classes}")
 
         # Release Ch1 buffer
@@ -1275,6 +1338,7 @@ class YoloDetectorDaemon:
                 logger.debug(f"Camera switched to {camera_id} [night ROI mode: {active_roi_count} VSE regions, score_th={self.detector.score_threshold:.2f}]")
 
             self.active_camera = camera_id
+            self._reset_adaptive_threshold()
             self.detector.clahe_enabled = (self.active_camera == 1)
             self.detector.clahe_frequency = 6 if self.active_camera == 1 else 1
             if self.active_camera == 0:

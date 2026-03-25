@@ -40,7 +40,7 @@ print(f"Model loaded: {detector.input_h}x{detector.input_w}, th={THRESHOLD}\n")
 def show(dets: list) -> None:
     print(f"  → {len(dets)} detections")
     for d in dets:
-        print(f"    {d.class_name.value}: {d.confidence:.3f} @ ({d.bbox.x},{d.bbox.y},{d.bbox.w},{d.bbox.h})")
+        print(f"    {d.class_name.label}: {d.confidence:.3f} @ ({d.bbox.x},{d.bbox.y},{d.bbox.w},{d.bbox.h})")
     print()
 
 
@@ -74,7 +74,7 @@ for i in range(3):
     dets = detector.detect_nv12(nv12, 640, 640)
     print(f"  call {i+1}: {len(dets)} dets", end="")
     if dets:
-        print(f" (top: {dets[0].class_name.value} {dets[0].confidence:.3f})")
+        print(f" (top: {dets[0].class_name.label} {dets[0].confidence:.3f})")
     else:
         print()
 print()
@@ -92,7 +92,7 @@ except Exception as e:
 dets = detector.detect_nv12(nv12, 640, 640)
 print(f"  after 360p, 640x640: {len(dets)} dets")
 if dets:
-    print(f"    top: {dets[0].class_name.value} {dets[0].confidence:.3f}")
+    print(f"    top: {dets[0].class_name.label} {dets[0].confidence:.3f}")
 print()
 
 # --- Pattern 7: _forward + _postprocess with conf_thres_raw check ---
