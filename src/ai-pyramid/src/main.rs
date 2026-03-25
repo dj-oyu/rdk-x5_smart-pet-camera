@@ -145,13 +145,11 @@ async fn main() {
     let album_host = std::env::var("PET_ALBUM_HOST").ok();
     let detect_client: Option<Arc<DetectClient>> = if camera_host.is_some() || album_host.is_some()
     {
-        let camera_host = camera_host.unwrap_or_else(|| "localhost".into());
-        let album_host = album_host.unwrap_or_else(|| "localhost".into());
-        let camera_port = std::env::var("PET_CAMERA_DETECT_PORT").unwrap_or_else(|_| "8083".into());
-        let album_port = std::env::var("PET_ALBUM_PORT").unwrap_or_else(|_| "8082".into());
+        let camera_url = camera_host.unwrap_or_else(|| "http://localhost:8083".into());
+        let album_url = album_host.unwrap_or_else(|| "http://localhost:8082".into());
         let config = DetectConfig {
-            camera_base_url: format!("http://{camera_host}:{camera_port}"),
-            self_base_url: format!("http://{album_host}:{album_port}"),
+            camera_base_url: camera_url.trim_end_matches('/').to_string(),
+            self_base_url: album_url.trim_end_matches('/').to_string(),
             timeout: Duration::from_secs(30),
         };
         info!(
