@@ -551,7 +551,7 @@ class YoloDetectorDaemon:
                     if req_threshold is not None:
                         detector.score_threshold = float(req_threshold)
                         detector.conf_thres_raw = -np.log(1 / detector.score_threshold - 1)
-                    detections = detector.detect_nv12(nv12, 640, 640)
+                    detections = detector.detect_nv12_readonly(nv12, 640, 640)
                     if req_threshold is not None:
                         detector.score_threshold = orig_threshold
                         detector.conf_thres_raw = -np.log(1 / detector.score_threshold - 1)
