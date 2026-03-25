@@ -555,10 +555,32 @@ CREATE TABLE photos (
     captured_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     caption TEXT,                         -- VLMによるキャプション
     is_valid BOOLEAN,                    -- NULL: 未処理, 1: 良い, 0: イマイチ
-    pet_id TEXT                           -- "mike", "chatora", "other", or NULL
+    pet_id TEXT,                          -- "mike", "chatora", "other", or NULL
                                          -- ファイル名からパース（Go側bbox色分析で判定）
+    behavior TEXT,                        -- VLM判定の行動分類
+    vlm_attempts INTEGER NOT NULL DEFAULT 0,
+    vlm_last_error TEXT,
+    detected_at TEXT                      -- NULL: detect未実行, 非NULL: 実行済み（検出数問わず）
 );
 CREATE INDEX idx_photos_valid ON photos(is_valid, captured_at);
+CREATE INDEX idx_photos_pet_id ON photos(pet_id, captured_at DESC);
+
+CREATE TABLE detections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    photo_id INTEGER NOT NULL REFERENCES photos(id),
+    panel_index INTEGER,                 -- comic panel (0-3), NULL for backfill
+    bbox_x INTEGER NOT NULL,             -- 848x496 座標系
+    bbox_y INTEGER NOT NULL,
+    bbox_w INTEGER NOT NULL,
+    bbox_h INTEGER NOT NULL,
+    yolo_class TEXT,                      -- "cat", "dog", "person", "cup", "food_bowl"
+    pet_class TEXT,                       -- UV scatter分類, backfillではNULL
+    pet_id_override TEXT,                 -- ユーザー手動補正
+    confidence REAL,
+    detected_at TEXT NOT NULL,
+    color_metrics TEXT                    -- カメラからのJSON blob
+);
+CREATE INDEX idx_detections_photo ON detections(photo_id);
 ```
 
 - `is_valid = 0` の写真は削除せず保持（eMMC容量十分）
@@ -596,11 +618,14 @@ AI Pyramid Proが完全なHTMLを配信する独立Webアプリ（Rust / axum / 
 **実装済み（`src/ai-pyramid/`）:**
 - Rust axum HTTPSサーバー（Tailscale cert自動検出）
 - SQLite DB + fsnotify監視 + VLMパイプライン
-- 横スクロールカードギャラリー（wheelイベントで横変換）
-- ホバーでキャプションオーバーレイ、pet_idバッジ
-- 左フェードグラデーション、右端グローエフェクト
-- IntersectionObserverによるインクリメンタルロード
-- RSS 20MB（2GB制約に対して1%）
+- Preact SPA（embedded/standalone 2モード）
+- YOLO detection bbox オーバーレイ（ガラス風CSS: backdrop-filter + 光沢アニメーション）
+- Detection backfill UI（サイドバーボタン、排他制御、ステータスポーリング）
+- Detection クラスフィルター（cat/dog/person/cup/food_bowl、複数選択可）
+- `photos.detected_at` による未検出/検出済み/検出ゼロの区別
+- pet_id_override + 多数決による自動 pet_id 更新
+- SSE によるリアルタイム UI 更新
+- RSS 35-50MB（2GB制約に対して2-3%）
 
 #### 4.6 iframe統合（RDK X5 Preact SPA側）
 

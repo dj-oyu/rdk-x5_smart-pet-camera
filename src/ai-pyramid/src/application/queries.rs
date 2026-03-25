@@ -62,7 +62,7 @@ impl EventQueries {
         self.repository.captions_for_date(date).await
     }
 
-    pub async fn list_photos_without_detections(&self, limit: i64) -> AppResult<Vec<EventSummary>> {
-        self.repository.list_photos_without_detections(limit).await
+    pub async fn list_undetected_photos(&self, limit: i64) -> AppResult<Vec<EventSummary>> {
+        self.repository.list_undetected_photos(limit).await
     }
 }

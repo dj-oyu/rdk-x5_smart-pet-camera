@@ -13,6 +13,8 @@ use include_dir::{Dir, include_dir};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
@@ -33,7 +35,8 @@ pub struct AppState {
     pub photos_dir: PathBuf,
     pub event_tx: tokio::sync::broadcast::Sender<PhotoEvent>,
     pub pet_names: HashMap<String, String>,
-    pub detect_client: Option<std::sync::Arc<DetectClient>>,
+    pub detect_client: Option<Arc<DetectClient>>,
+    pub backfill_running: Arc<AtomicBool>,
 }
 
 /// Load pet display names from environment variables.
@@ -88,6 +91,7 @@ pub fn router(state: AppState) -> Router {
             get(handle_detections_get).patch(handle_detection_update),
         )
         .route("/api/backfill", post(handle_backfill))
+        .route("/api/backfill/status", get(handle_backfill_status))
         .route("/api/edit-history", get(handle_edit_history))
         .route("/api/stats", get(handle_stats))
         .route("/api/behaviors", get(handle_behaviors))
@@ -107,6 +111,8 @@ struct PhotosQuery {
     offset: Option<i64>,
     search: Option<String>,
     behavior: Option<String>,
+    #[serde(default)]
+    yolo_class: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -414,14 +420,29 @@ async fn handle_backfill(State(state): State<AppState>) -> impl IntoResponse {
         }
     };
 
+    // Prevent concurrent backfill runs
+    if state
+        .backfill_running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "backfill already running"})),
+        )
+            .into_response();
+    }
+
+    let backfill_flag = state.backfill_running.clone();
     let context = state.context.clone();
     tokio::spawn(async move {
         let queries = context.event_queries();
         let commands = context.observation_commands();
-        let photos = match queries.list_photos_without_detections(500).await {
+        let photos = match queries.list_undetected_photos(500).await {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!("Backfill query failed: {e}");
+                backfill_flag.store(false, Ordering::SeqCst);
                 return;
             }
         };
@@ -457,7 +478,14 @@ async fn handle_backfill(State(state): State<AppState>) -> impl IntoResponse {
                     }
                 }
                 Ok(_) => {
+                    // Zero detections — still mark as detected so we don't retry
                     tracing::info!("Backfill: no detections for {}", photo.source_filename);
+                    if let Err(e) = commands.mark_detected(photo.id).await {
+                        tracing::warn!(
+                            "Backfill mark_detected error {}: {e}",
+                            photo.source_filename
+                        );
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("Backfill detect error {}: {e}", photo.source_filename);
@@ -471,9 +499,16 @@ async fn handle_backfill(State(state): State<AppState>) -> impl IntoResponse {
             "Backfill complete: {ok} ok, {fail} failed, {} total",
             photos.len()
         );
+        backfill_flag.store(false, Ordering::SeqCst);
     });
 
     Json(serde_json::json!({"ok": true, "message": "backfill started"})).into_response()
+}
+
+async fn handle_backfill_status(State(state): State<AppState>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "running": state.backfill_running.load(Ordering::SeqCst)
+    }))
 }
 
 async fn handle_stats(State(state): State<AppState>) -> impl IntoResponse {
@@ -623,6 +658,12 @@ fn build_event_query(q: &PhotosQuery) -> crate::application::EventQuery {
         offset: q.offset,
         search: q.search.clone().filter(|s| !s.is_empty()),
         behavior: q.behavior.clone().filter(|s| !s.is_empty()),
+        yolo_classes: q
+            .yolo_class
+            .iter()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .collect(),
     }
 }
 
@@ -676,6 +717,7 @@ mod tests {
                 ("chatora".into(), "Chatora".into()),
             ]),
             detect_client: None,
+            backfill_running: Arc::new(AtomicBool::new(false)),
         }
     }
 

@@ -18,6 +18,7 @@ pub struct EventQuery {
     pub offset: Option<i64>,
     pub search: Option<String>,
     pub behavior: Option<String>,
+    pub yolo_classes: Vec<String>,
 }
 
 impl Default for EventQuery {
@@ -29,6 +30,7 @@ impl Default for EventQuery {
             offset: None,
             search: None,
             behavior: None,
+            yolo_classes: Vec::new(),
         }
     }
 }
@@ -47,6 +49,7 @@ impl EventQuery {
             offset: self.offset,
             search: self.search.clone(),
             behavior: self.behavior.clone(),
+            yolo_classes: self.yolo_classes.clone(),
         }
     }
 }

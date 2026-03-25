@@ -30,6 +30,7 @@ export type EventQuery = {
   behavior: string;
   limit: number;
   offset: number;
+  yoloClasses: string[];
 };
 
 export const DEFAULT_QUERY: EventQuery = {
@@ -39,6 +40,7 @@ export const DEFAULT_QUERY: EventQuery = {
   behavior: "",
   limit: 0,
   offset: 0,
+  yoloClasses: [],
 };
 
 function buildParams(query: EventQuery): URLSearchParams {
@@ -60,6 +62,9 @@ function buildParams(query: EventQuery): URLSearchParams {
   }
   if (query.offset > 0) {
     params.set("offset", String(query.offset));
+  }
+  for (const cls of query.yoloClasses) {
+    params.append("yolo_class", cls);
   }
   return params;
 }
@@ -155,6 +160,26 @@ export async function fetchDailySummary(date?: string): Promise<DailySummaryResp
   return response.json();
 }
 
+export async function startBackfill(): Promise<{ ok: boolean; error?: string }> {
+  const response = await fetch("/api/backfill", { method: "POST" });
+  if (response.status === 409) {
+    return { ok: false, error: "already running" };
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    return { ok: false, error: body.error ?? `status ${response.status}` };
+  }
+  return { ok: true };
+}
+
+export async function fetchBackfillStatus(): Promise<{ running: boolean }> {
+  const response = await fetch("/api/backfill/status");
+  if (!response.ok) {
+    return { running: false };
+  }
+  return response.json();
+}
+
 export async function updatePhotoPetId(sourceFilename: string, petId: string): Promise<void> {
   await updatePhotoFields(sourceFilename, { pet_id: petId });
 }
@@ -191,6 +216,7 @@ export function readQueryFromLocation(): EventQuery {
     behavior: params.get("behavior") ?? "",
     limit: Number(params.get("limit")) || 0,
     offset: Number(params.get("offset")) || 0,
+    yoloClasses: params.getAll("yolo_class"),
   };
 }
 
