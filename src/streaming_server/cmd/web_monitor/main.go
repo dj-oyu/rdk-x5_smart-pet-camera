@@ -36,6 +36,11 @@ func main() {
 	flag.StringVar(&cfg.TLSKeyFile, "tls-key", "", "TLS private key file")
 	flag.Parse()
 
+	// Override detect port from env if not set via flag
+	if v := os.Getenv("PET_CAMERA_DETECT_PORT"); v != "" {
+		cfg.DetectPort = v
+	}
+
 	// Initialize logger
 	level, err := logger.ParseLevel(logLevel)
 	if err != nil {
