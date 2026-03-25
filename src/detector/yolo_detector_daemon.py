@@ -544,15 +544,8 @@ class YoloDetectorDaemon:
                     return
 
                 try:
-                    # Debug: save received JPEG and NV12 Y-plane
-                    with open("/tmp/detect_input.jpg", "wb") as _f:
-                        _f.write(jpeg_bytes)
                     nv12, orig_w, orig_h, scale, pad_x, pad_y = jpeg_to_yolo_nv12(jpeg_bytes)
-                    logger.info(f"[detect] {orig_w}x{orig_h} scale={scale:.4f} pad=({pad_x},{pad_y})")
-                    y_plane = nv12[:640*640].reshape(640, 640)
-                    cv2.imwrite("/tmp/detect_nv12_y.png", y_plane)
                     detections = detector.detect_nv12(nv12, 640, 640)
-                    logger.info(f"[detect] {len(detections)} detections")
 
                     # Map bbox from 640x640 letterbox back to original image coords
                     result = []
