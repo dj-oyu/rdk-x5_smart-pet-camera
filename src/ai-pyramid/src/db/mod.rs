@@ -34,6 +34,10 @@ pub struct Detection {
     /// Opaque JSON from pet camera: UV scatter metrics, thresholds, version.
     /// ai-pyramid stores/returns this without parsing.
     pub color_metrics: Option<String>,
+    /// 1=RDK X5 realtime, 2=AI Pyramid high-precision
+    pub det_level: i32,
+    /// Model identifier
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -68,6 +72,16 @@ pub struct DetectionInput {
     pub detected_at: String,
     /// Opaque JSON blob from pet camera (color classification metrics).
     pub color_metrics: Option<serde_json::Value>,
+    /// 1=RDK X5 realtime, 2=AI Pyramid high-precision
+    #[serde(default = "default_det_level")]
+    pub det_level: i32,
+    /// Model identifier (e.g. "yolo26n-bpu", "yolo11s-ax650")
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+fn default_det_level() -> i32 {
+    1
 }
 
 #[derive(Debug, Default)]
@@ -153,6 +167,17 @@ impl PhotoStore {
         let _ = self
             .conn
             .execute_batch("ALTER TABLE photos ADD COLUMN detected_at TEXT;");
+
+        // Migration: detection level and model tracking
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE detections ADD COLUMN det_level INTEGER NOT NULL DEFAULT 1;
+             ALTER TABLE detections ADD COLUMN model TEXT;",
+        );
+
+        // Migration: caption quality level (0=basic VLM, 1=detection-enhanced VLM)
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE photos ADD COLUMN caption_level INTEGER NOT NULL DEFAULT 0;",
+        );
 
         // Edit history: records every user correction as a JSON diff
         self.conn.execute_batch(
@@ -299,8 +324,8 @@ impl PhotoStore {
 
         // Insert detections
         let mut stmt = self.conn.prepare(
-            "INSERT INTO detections (photo_id, panel_index, bbox_x, bbox_y, bbox_w, bbox_h, yolo_class, pet_class, confidence, detected_at, color_metrics)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO detections (photo_id, panel_index, bbox_x, bbox_y, bbox_w, bbox_h, yolo_class, pet_class, confidence, detected_at, color_metrics, det_level, model)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )?;
         for d in detections {
             let metrics_str = d.color_metrics.as_ref().map(|v| v.to_string());
@@ -316,37 +341,47 @@ impl PhotoStore {
                 d.confidence,
                 d.detected_at,
                 metrics_str,
+                d.det_level,
+                d.model,
             ])?;
         }
 
         Ok(photo_id)
     }
 
+    /// Return detections for a photo, preferring highest det_level available.
     pub fn get_detections(&self, photo_id: i64) -> rusqlite::Result<Vec<Detection>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, photo_id, panel_index, bbox_x, bbox_y, bbox_w, bbox_h, yolo_class, pet_class, pet_id_override, confidence, detected_at, color_metrics
-             FROM detections WHERE photo_id = ?1 ORDER BY panel_index",
+            "SELECT id, photo_id, panel_index, bbox_x, bbox_y, bbox_w, bbox_h, yolo_class, pet_class, pet_id_override, confidence, detected_at, color_metrics, det_level, model
+             FROM detections
+             WHERE photo_id = ?1
+               AND det_level = (SELECT COALESCE(MAX(det_level), 1) FROM detections WHERE photo_id = ?1)
+             ORDER BY panel_index",
         )?;
         let dets = stmt
-            .query_map(params![photo_id], |row| {
-                Ok(Detection {
-                    id: row.get(0)?,
-                    photo_id: row.get(1)?,
-                    panel_index: row.get(2)?,
-                    bbox_x: row.get(3)?,
-                    bbox_y: row.get(4)?,
-                    bbox_w: row.get(5)?,
-                    bbox_h: row.get(6)?,
-                    yolo_class: row.get(7)?,
-                    pet_class: row.get(8)?,
-                    pet_id_override: row.get(9)?,
-                    confidence: row.get(10)?,
-                    detected_at: row.get(11)?,
-                    color_metrics: row.get(12)?,
-                })
-            })?
+            .query_map(params![photo_id], Self::map_detection_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(dets)
+    }
+
+    fn map_detection_row(row: &rusqlite::Row) -> rusqlite::Result<Detection> {
+        Ok(Detection {
+            id: row.get(0)?,
+            photo_id: row.get(1)?,
+            panel_index: row.get(2)?,
+            bbox_x: row.get(3)?,
+            bbox_y: row.get(4)?,
+            bbox_w: row.get(5)?,
+            bbox_h: row.get(6)?,
+            yolo_class: row.get(7)?,
+            pet_class: row.get(8)?,
+            pet_id_override: row.get(9)?,
+            confidence: row.get(10)?,
+            detected_at: row.get(11)?,
+            color_metrics: row.get(12)?,
+            det_level: row.get(13)?,
+            model: row.get(14)?,
+        })
     }
 
     /// Return bboxes grouped by photo_id for a batch of photo IDs (single query).
@@ -981,6 +1016,8 @@ mod tests {
                 confidence: Some(0.9),
                 detected_at: "2026-03-21T10:00:00".into(),
                 color_metrics: None,
+                det_level: 1,
+                model: None,
             },
             DetectionInput {
                 panel_index: Some(1),
@@ -993,6 +1030,8 @@ mod tests {
                 confidence: Some(0.8),
                 detected_at: "2026-03-21T10:00:00".into(),
                 color_metrics: None,
+                det_level: 1,
+                model: None,
             },
             DetectionInput {
                 panel_index: Some(0),
@@ -1005,6 +1044,8 @@ mod tests {
                 confidence: Some(0.6),
                 detected_at: "2026-03-21T10:00:00".into(),
                 color_metrics: None,
+                det_level: 1,
+                model: None,
             },
         ];
         store
@@ -1055,6 +1096,8 @@ mod tests {
             confidence: Some(0.9),
             detected_at: "2026-03-21T10:45:00".into(),
             color_metrics: None,
+            det_level: 1,
+            model: None,
         }];
         store
             .ingest_with_detections("a.jpg", ts, Some("chatora"), &detections)
@@ -1094,6 +1137,8 @@ mod tests {
             confidence: Some(0.9),
             detected_at: "2026-03-21T10:45:00".into(),
             color_metrics: None,
+            det_level: 1,
+            model: None,
         }];
         store
             .ingest_with_detections("cat_only.jpg", ts, Some("chatora"), &cat_det)
@@ -1110,6 +1155,8 @@ mod tests {
             confidence: Some(0.8),
             detected_at: "2026-03-21T10:45:00".into(),
             color_metrics: None,
+            det_level: 1,
+            model: None,
         }];
         store
             .ingest_with_detections("dog_only.jpg", ts, Some("mike"), &dog_det)

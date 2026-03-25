@@ -182,12 +182,26 @@ async fn main() {
         info!("Pet names: {:?}", pet_names);
     }
 
+    // Local NPU detector (YOLO11s + YOLO26l on AX650)
+    let local_detector = {
+        let config = pet_album::detect::local::LocalDetectorConfig::default();
+        let ld = pet_album::detect::local::LocalDetector::new(config);
+        if ld.is_available() {
+            info!("Local detection enabled (YOLO11s + YOLO26l on NPU)");
+            Some(std::sync::Arc::new(ld))
+        } else {
+            info!("Local detection unavailable (missing binaries or models)");
+            None
+        }
+    };
+
     let app_state = server::AppState {
         context: app_context,
         photos_dir: args.photos_dir,
         event_tx: sse_event_tx,
         pet_names,
         detect_client,
+        local_detector,
         backfill_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let app = server::router(app_state);

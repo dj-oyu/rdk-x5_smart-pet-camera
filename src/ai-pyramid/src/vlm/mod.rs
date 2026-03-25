@@ -193,6 +193,73 @@ impl VlmClient {
         Err(last_err)
     }
 
+    /// Analyze with detection context injected into the prompt.
+    /// Detection descriptions like "cat (81%), bowl (50%)" help ground the VLM output.
+    pub async fn analyze_with_detections(
+        &self,
+        jpeg_path: &Path,
+        detection_context: &str,
+    ) -> Result<VlmResponse, String> {
+        let data_url = encode_resized_jpeg(jpeg_path, 384, 384)?;
+
+        let prompt = format!(
+            "Analyze this photo of a pet camera feed.\nDetected objects: {detection_context}\nUse these detections as reference. Respond with valid JSON only, no markdown.\n\
+             {{\"is_valid\": true if a cat is clearly visible else false,\n\
+             \"caption\": \"one sentence describing the cat's appearance and action\",\n\
+             \"behavior\": one of \"eating\",\"drinking\",\"sleeping\",\"playing\",\"resting\",\"moving\",\"grooming\",\"other\"}}"
+        );
+
+        let request = ChatRequest {
+            model: self.config.model.clone(),
+            messages: vec![Message {
+                role: "user".into(),
+                content: vec![
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrlData { url: data_url },
+                    },
+                    ContentPart::Text { text: prompt },
+                ],
+            }],
+            max_tokens: self.config.max_tokens,
+            temperature: 0.1,
+        };
+
+        let url = format!("{}/v1/chat/completions", self.config.base_url);
+        let mut last_err = String::new();
+        for attempt in 0..2 {
+            match self.http.post(&url).json(&request).send().await {
+                Ok(resp) => {
+                    if !resp.status().is_success() {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        last_err = format!("VLM API {status}: {body}");
+                        if attempt == 0 {
+                            continue;
+                        }
+                        return Err(last_err);
+                    }
+                    let chat_resp: ChatResponse = resp
+                        .json()
+                        .await
+                        .map_err(|e| format!("VLM response decode: {e}"))?;
+                    let content = chat_resp
+                        .choices
+                        .first()
+                        .map(|c| c.message.content.as_str())
+                        .unwrap_or("");
+                    return parse_vlm_response(content);
+                }
+                Err(e) => {
+                    last_err = format!("VLM request failed: {e}");
+                    if attempt == 0 {
+                        continue;
+                    }
+                }
+            }
+        }
+        Err(last_err)
+    }
+
     /// Summarize a day's observations, optionally with a representative photo.
     pub async fn summarize_day(
         &self,
