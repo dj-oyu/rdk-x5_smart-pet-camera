@@ -121,6 +121,14 @@ export function EventDetail({ event, petNames, onClose, onUpdated, initialPanel 
   const dragRef = useRef<{ startX: number; startY: number; startTx: number; startTy: number; wrapper: HTMLElement } | null>(null);
   const wrapperRefs = useRef<(HTMLDivElement | null)[]>([null, null, null, null]);
 
+  // Upscale state
+  const [upscaleState, setUpscaleState] = useState<Record<number, "raw" | "fast" | "hd">>({});
+  const [hdLoading, setHdLoading] = useState(false);
+  const hdProgressRef = useRef<HTMLDivElement | null>(null);
+  const tfRef = useRef<{ tf: any; backend: string; models: Record<string, any>; cancel: number; queue: Promise<void> }>({
+    tf: null, backend: "", models: {}, cancel: 0, queue: Promise.resolve(),
+  });
+
   // Edit form state
   const [editing, setEditing] = useState(false);
   const [petId, setPetId] = useState(event.pet_id);
@@ -531,6 +539,131 @@ export function EventDetail({ event, petNames, onClose, onUpdated, initialPanel 
   }
 
   // --- Detection list for current view ---
+  // --- Real-ESRGAN upscale ---
+  const TILE = 128, UPSCALE = 4;
+
+  async function ensureTF(): Promise<boolean> {
+    const r = tfRef.current;
+    if (r.tf) return true;
+    try {
+      await import("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js");
+      r.tf = (window as any).tf;
+      await r.tf.ready();
+      try {
+        await import("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu@4.22.0/dist/tf-backend-webgpu.min.js");
+        await r.tf.setBackend("webgpu");
+        await r.tf.ready();
+      } catch { /* webgl fallback */ }
+      r.backend = r.tf.getBackend();
+      return true;
+    } catch { return false; }
+  }
+
+  async function loadModel(name: string) {
+    const r = tfRef.current;
+    if (r.models[name]) return r.models[name];
+    const model = await r.tf.loadGraphModel(`/api/models/tfjs/${name}/model.json`);
+    r.models[name] = model;
+    return model;
+  }
+
+  async function upscaleToCanvas(
+    srcCanvas: HTMLCanvasElement,
+    outCanvas: HTMLCanvasElement,
+    model: any,
+    onProgress: ((done: number, total: number) => void) | null,
+    token: number,
+  ): Promise<boolean> {
+    const r = tfRef.current;
+    const sw = srcCanvas.width, sh = srcCanvas.height;
+    outCanvas.width = sw * UPSCALE;
+    outCanvas.height = sh * UPSCALE;
+    const dCtx = outCanvas.getContext("2d")!;
+    const tilesX = Math.ceil(sw / TILE), tilesY = Math.ceil(sh / TILE);
+    const total = tilesX * tilesY;
+    let done = 0;
+    for (let ty = 0; ty < tilesY; ty++) {
+      for (let tx = 0; tx < tilesX; tx++) {
+        if (token !== r.cancel) return false;
+        const sx = tx * TILE, sy = ty * TILE;
+        const tw = Math.min(TILE, sw - sx), th = Math.min(TILE, sh - sy);
+        const tile = document.createElement("canvas");
+        tile.width = TILE; tile.height = TILE;
+        const tCtx = tile.getContext("2d")!;
+        tCtx.drawImage(srcCanvas, sx, sy, tw, th, 0, 0, tw, th);
+        if (tw < TILE) tCtx.drawImage(tile, tw - 1, 0, 1, th, tw, 0, TILE - tw, th);
+        if (th < TILE) tCtx.drawImage(tile, 0, th - 1, TILE, 1, 0, th, TILE, TILE - th);
+        const out = r.tf.tidy(() => {
+          const inp = r.tf.browser.fromPixels(tile).toFloat().div(255.0).expandDims(0);
+          return model.predict(inp);
+        });
+        const clamped = out.squeeze().clipByValue(0, 1);
+        const pixels = await r.tf.browser.toPixels(clamped);
+        clamped.dispose(); out.dispose();
+        const cropW = tw * UPSCALE, cropH = th * UPSCALE;
+        const imgData = new ImageData(new Uint8ClampedArray(pixels.buffer), TILE * UPSCALE, TILE * UPSCALE);
+        const tmp = document.createElement("canvas");
+        tmp.width = TILE * UPSCALE; tmp.height = TILE * UPSCALE;
+        tmp.getContext("2d")!.putImageData(imgData, 0, 0);
+        dCtx.drawImage(tmp, 0, 0, cropW, cropH, sx * UPSCALE, sy * UPSCALE, cropW, cropH);
+        done++;
+        onProgress?.(done, total);
+      }
+    }
+    return true;
+  }
+
+  function upscalePanel(idx: number, modelName: string) {
+    const r = tfRef.current;
+    const token = ++r.cancel;
+    const job = async () => {
+      try {
+        if (token !== r.cancel) return;
+        if (!await ensureTF()) return;
+        if (token !== r.cancel) return;
+        const model = await loadModel(modelName);
+        if (token !== r.cancel || !comicImage) return;
+        // Crop source panel
+        const src = document.createElement("canvas");
+        const p = PANELS[idx];
+        src.width = p.w; src.height = p.h;
+        src.getContext("2d")!.drawImage(comicImage, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
+        const canvas = canvasRefs.current[idx];
+        if (!canvas) return;
+        if (modelName === "general_plus") setHdLoading(true);
+        const completed = await upscaleToCanvas(src, canvas, model, (done, total) => {
+          if (modelName === "general_plus" && hdProgressRef.current) {
+            hdProgressRef.current.style.width = `${(done / total) * 100}%`;
+          }
+        }, token);
+        if (!completed || token !== r.cancel) return;
+        setUpscaleState(prev => ({ ...prev, [idx]: modelName === "general_plus" ? "hd" : "fast" }));
+        if (modelName === "general_plus") {
+          setHdLoading(false);
+          if (hdProgressRef.current) hdProgressRef.current.style.width = "0";
+        }
+        // Prefetch next panel
+        const next = (idx + 1) % 4;
+        if (!upscaleState[next] && token === r.cancel) {
+          upscalePanel(next, "general_fast");
+        }
+      } catch (e) {
+        console.error("upscale error:", e);
+        setHdLoading(false);
+        if (hdProgressRef.current) hdProgressRef.current.style.width = "0";
+      }
+    };
+    r.queue = r.queue.then(job);
+  }
+
+  // Auto-upscale with general_fast when entering panel view
+  useEffect(() => {
+    if (viewMode !== "panel" || !comicImage) return;
+    if (!upscaleState[activePanel]) {
+      upscalePanel(activePanel, "general_fast");
+    }
+  }, [viewMode, activePanel, comicImage]);
+
   const visibleDets = viewMode === "comic"
     ? detections
     : detsForPanel(detections, activePanel);
@@ -734,6 +867,25 @@ export function EventDetail({ event, petNames, onClose, onUpdated, initialPanel 
                 />
               ))}
             </div>
+            {/* HD upscale button */}
+            <button
+              type="button"
+              class={`hd-btn ${hdLoading ? "loading" : ""} ${upscaleState[activePanel] === "hd" ? "done" : ""}`}
+              onClick={() => {
+                if (!hdLoading && upscaleState[activePanel] !== "hd") {
+                  upscalePanel(activePanel, "general_plus");
+                }
+              }}
+            >
+              {upscaleState[activePanel] === "hd" ? "HD" : "HD"}
+            </button>
+            <div class="hd-progress" ref={hdProgressRef} style={{ width: 0 }} />
+            {/* Upscale quality badge */}
+            {upscaleState[activePanel] && (
+              <span class="upscale-badge">
+                {upscaleState[activePanel] === "hd" ? "4× HD" : "4× fast"}
+              </span>
+            )}
           </div>
         )}
 
