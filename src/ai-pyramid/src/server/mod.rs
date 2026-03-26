@@ -123,6 +123,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pet-names", get(handle_pet_names))
         .route("/api/events", get(handle_sse))
         .route("/health", get(handle_health))
+        .route("/test/websr", get(handle_websr_test))
         .with_state(state)
         .merge(mcp_router)
 }
@@ -969,6 +970,224 @@ fn sanitize_filename(name: &str) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default()
+}
+
+async fn handle_websr_test(State(state): State<AppState>) -> impl IntoResponse {
+    // Pick latest photo for demo
+    let latest = state
+        .queries()
+        .list_events(crate::application::EventQuery {
+            limit: Some(1),
+            ..Default::default()
+        })
+        .await
+        .ok()
+        .and_then(|(events, _)| events.into_iter().next())
+        .map(|e| e.source_filename)
+        .unwrap_or_default();
+
+    let html = format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebSR Upscale Test</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; }}
+body {{ font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 12px; }}
+h1 {{ font-size: 18px; margin-bottom: 8px; }}
+h2 {{ font-size: 14px; color: #8888aa; margin: 16px 0 6px; }}
+.status {{ padding: 6px 12px; border-radius: 6px; background: #262640; margin-bottom: 12px; font-size: 13px; }}
+.status.ok {{ border-left: 3px solid #4caf50; }}
+.status.err {{ border-left: 3px solid #f44336; }}
+.status.loading {{ border-left: 3px solid #ff9800; }}
+.grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 8px; }}
+.card {{ background: #262640; border-radius: 8px; overflow: hidden; }}
+.card-label {{ padding: 6px 10px; font-size: 12px; color: #aaa; display: flex; justify-content: space-between; }}
+.card-label .dim {{ font-size: 11px; color: #666; }}
+.card img, .card canvas {{ width: 100%; display: block; }}
+.full {{ margin-bottom: 16px; }}
+.full img {{ max-width: 100%; border-radius: 8px; }}
+select {{ background: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; padding: 4px 8px; font-size: 13px; }}
+</style>
+</head>
+<body>
+<h1>WebSR Upscale Quality Test</h1>
+
+<div style="margin-bottom:12px">
+  <label>Photo: <select id="photoSelect"></select></label>
+  <label style="margin-left:12px">Model: <select id="modelSelect">
+    <option value="anime4k/cnn-2x-s">2x Small (14KB)</option>
+    <option value="anime4k/cnn-2x-m">2x Medium (35KB)</option>
+    <option value="anime4k/cnn-2x-l">2x Large (114KB)</option>
+  </select></label>
+</div>
+
+<div id="statusBox" class="status loading">Initializing WebGPU...</div>
+
+<h2>Full Comic (Original)</h2>
+<div class="full"><img id="fullImg" crossorigin="anonymous"></div>
+
+<h2>Panel Comparison</h2>
+<div id="panels"></div>
+
+<script type="module">
+import WebSR from "https://esm.sh/@websr/websr@0.0.15";
+
+const MARGIN = 12, BORDER = 2, GAP = 8, PW = 404, PH = 228;
+const CELL_W = PW + 2 * BORDER, CELL_H = PH + 2 * BORDER;
+const panelRegions = [0,1,2,3].map(i => {{
+  const col = i % 2, row = Math.floor(i / 2);
+  return {{
+    x: MARGIN + BORDER + col * (CELL_W + GAP),
+    y: MARGIN + BORDER + row * (CELL_H + GAP),
+    w: PW, h: PH
+  }};
+}});
+
+const statusBox = document.getElementById("statusBox");
+const photoSelect = document.getElementById("photoSelect");
+const modelSelect = document.getElementById("modelSelect");
+const panelsDiv = document.getElementById("panels");
+const fullImg = document.getElementById("fullImg");
+
+// Fetch photo list
+const resp = await fetch("/api/photos?limit=20");
+const data = await resp.json();
+data.events.forEach(e => {{
+  const opt = document.createElement("option");
+  opt.value = e.source_filename;
+  opt.textContent = e.source_filename.replace("comic_","").replace(".jpg","");
+  photoSelect.appendChild(opt);
+}});
+photoSelect.value = "{latest}";
+
+// Init WebGPU
+let gpu = null;
+try {{
+  gpu = await WebSR.initWebGPU();
+  if (!gpu) throw new Error("WebGPU not supported");
+  statusBox.textContent = "WebGPU ready (" + gpu.adapterInfo?.device + ")";
+  statusBox.className = "status ok";
+}} catch (e) {{
+  statusBox.textContent = "WebGPU unavailable: " + e.message;
+  statusBox.className = "status err";
+}}
+
+// Weight cache
+const weightCache = {{}};
+async function getWeights(model) {{
+  if (weightCache[model]) return weightCache[model];
+  const name = model.split("/")[1]; // cnn-2x-s
+  const url = `https://cdn.jsdelivr.net/npm/@websr/websr@0.0.15/weights/anime4k/${{name}}-rl.json`;
+  statusBox.textContent = "Loading weights: " + name + "...";
+  statusBox.className = "status loading";
+  const w = await fetch(url).then(r => r.json());
+  weightCache[model] = w;
+  return w;
+}}
+
+async function upscale(source, canvas, model) {{
+  const weights = await getWeights(model);
+  const websr = new WebSR({{ network_name: model, weights, gpu, canvas }});
+  await websr.render(source);
+  websr.destroy();
+}}
+
+function cropPanel(img, idx) {{
+  const r = panelRegions[idx];
+  const c = document.createElement("canvas");
+  c.width = r.w; c.height = r.h;
+  c.getContext("2d").drawImage(img, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+  return c;
+}}
+
+async function run() {{
+  const filename = photoSelect.value;
+  if (!filename) return;
+
+  // Load original
+  fullImg.src = `/api/photos/${{encodeURIComponent(filename)}}`;
+  await new Promise(r => fullImg.onload = r);
+
+  panelsDiv.innerHTML = "";
+  const model = modelSelect.value;
+
+  for (let i = 0; i < 4; i++) {{
+    const r = panelRegions[i];
+    const row = document.createElement("div");
+    row.innerHTML = `<h2>Panel ${{i}} (${{r.w}}x${{r.h}})</h2>`;
+    const grid = document.createElement("div");
+    grid.className = "grid";
+
+    // 1) Original crop
+    const origCanvas = cropPanel(fullImg, i);
+    const card1 = document.createElement("div");
+    card1.className = "card";
+    card1.innerHTML = `<div class="card-label">Original<span class="dim">${{r.w}}x${{r.h}}</span></div>`;
+    card1.appendChild(origCanvas);
+    grid.appendChild(card1);
+
+    if (gpu) {{
+      // 2) 2x upscale
+      const canvas2x = document.createElement("canvas");
+      const card2 = document.createElement("div");
+      card2.className = "card";
+      card2.innerHTML = `<div class="card-label">WebSR 2x<span class="dim" id="dim2x-${{i}}">...</span></div>`;
+      card2.appendChild(canvas2x);
+      grid.appendChild(card2);
+
+      // 3) 4x upscale (2-pass)
+      const canvas4x = document.createElement("canvas");
+      const card3 = document.createElement("div");
+      card3.className = "card";
+      card3.innerHTML = `<div class="card-label">WebSR 4x (2-pass)<span class="dim" id="dim4x-${{i}}">...</span></div>`;
+      card3.appendChild(canvas4x);
+      grid.appendChild(card3);
+
+      row.appendChild(grid);
+      panelsDiv.appendChild(row);
+
+      // Run 2x
+      statusBox.textContent = `Upscaling panel ${{i}} (2x)...`;
+      statusBox.className = "status loading";
+      const t0 = performance.now();
+      const bitmap2x = await createImageBitmap(origCanvas);
+      await upscale(bitmap2x, canvas2x, model);
+      const t2x = (performance.now() - t0).toFixed(0);
+      document.getElementById(`dim2x-${{i}}`).textContent = `${{canvas2x.width}}x${{canvas2x.height}} (${{t2x}}ms)`;
+
+      // Run 4x (feed 2x result back)
+      statusBox.textContent = `Upscaling panel ${{i}} (4x)...`;
+      const t1 = performance.now();
+      const bitmap4x = await createImageBitmap(canvas2x);
+      await upscale(bitmap4x, canvas4x, model);
+      const t4x = (performance.now() - t1).toFixed(0);
+      document.getElementById(`dim4x-${{i}}`).textContent = `${{canvas4x.width}}x${{canvas4x.height}} (${{t4x}}ms)`;
+    }} else {{
+      row.appendChild(grid);
+      panelsDiv.appendChild(row);
+    }}
+  }}
+
+  statusBox.textContent = "Done";
+  statusBox.className = "status ok";
+}}
+
+photoSelect.addEventListener("change", run);
+modelSelect.addEventListener("change", run);
+run();
+</script>
+</body>
+</html>"##
+    );
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
 }
 
 #[cfg(test)]

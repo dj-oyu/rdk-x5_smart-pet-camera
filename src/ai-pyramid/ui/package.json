@@ -6,6 +6,7 @@
     "build": "bun run build.ts"
   },
   "dependencies": {
+    "@websr/websr": "^0.0.15",
     "preact": "^10.27.2"
   },
   "devDependencies": {
