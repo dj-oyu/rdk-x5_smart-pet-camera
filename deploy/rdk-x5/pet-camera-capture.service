@@ -1,0 +1,21 @@
+[Unit]
+Description=Pet Camera Daemon (camera_daemon_drobotics)
+PartOf=pet-camera.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/smart-pet-camera
+EnvironmentFile=-/opt/smart-pet-camera/.env
+
+# SHM cleanup before start (stale segments cause layout mismatch)
+ExecStartPre=/bin/sh -c 'rm -f /dev/shm/pet_camera_*'
+ExecStart=/opt/smart-pet-camera/build/camera_daemon_drobotics -W 1280 -H 720
+
+Restart=on-failure
+RestartSec=3
+
+# camera daemon needs /dev/video*, SHM, Horizon SDK
+SupplementaryGroups=video
+
+[Install]
+WantedBy=pet-camera.target
