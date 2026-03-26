@@ -1148,19 +1148,24 @@ async function getWeights(model) {{
   return w;
 }}
 
-async function upscale(source, canvas, model) {{
+// Single offscreen work canvas to avoid WebSR global context conflicts
+const workCanvas = document.createElement("canvas");
+
+async function upscale(source, displayCanvas, model) {{
   const weights = await getWeights(model);
   log(`Creating WebSR instance: model=${{model}}, source=${{source.width}}x${{source.height}}`);
-  const websr = new WebSR({{ network_name: model, weights, gpu, canvas }});
+  const websr = new WebSR({{ network_name: model, weights, gpu, canvas: workCanvas }});
   log("Calling render...");
   await websr.render(source);
-  // Wait for GPU to actually finish processing
   await gpu.queue.onSubmittedWorkDone();
-  log(`Render done: canvas=${{canvas.width}}x${{canvas.height}}`);
-  // Let the frame paint before destroying
-  await new Promise(r => requestAnimationFrame(r));
+  log(`Render done: workCanvas=${{workCanvas.width}}x${{workCanvas.height}}`);
+  // Copy from WebGPU work canvas to display canvas via 2D context
+  displayCanvas.width = workCanvas.width;
+  displayCanvas.height = workCanvas.height;
+  const ctx = displayCanvas.getContext("2d");
+  ctx.drawImage(workCanvas, 0, 0);
+  log(`Copied to display canvas: ${{displayCanvas.width}}x${{displayCanvas.height}}`);
   await websr.destroy();
-  log("Destroyed WebSR instance");
 }}
 
 function cropPanel(img, idx) {{
