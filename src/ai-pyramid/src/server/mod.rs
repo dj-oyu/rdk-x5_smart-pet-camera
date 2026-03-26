@@ -1361,7 +1361,7 @@ async fn handle_esrgan_test(State(state): State<AppState>) -> impl IntoResponse 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Real-ESRGAN Test</title>
+<title>Real-ESRGAN Test (TF.js)</title>
 <style>
 * {{ box-sizing: border-box; margin: 0; }}
 body {{ font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 12px; }}
@@ -1393,10 +1393,14 @@ label {{ cursor: pointer; }}
 
 <div style="margin-bottom:12px">
   <label>Photo: <select id="photoSelect"></select></label>
+  <label style="margin-left:12px">Model: <select id="modelSelect">
+    <option value="general_fast">general_fast (2.4MB)</option>
+    <option value="general_plus">general_plus (33MB)</option>
+  </select></label>
   <label style="margin-left:12px"><input type="checkbox" id="actualSize"> Actual pixel size</label>
 </div>
 
-<div id="statusBox" class="status loading">Loading onnxruntime...</div>
+<div id="statusBox" class="status loading">Loading TF.js...</div>
 <div class="log-wrap"><div id="logBox" class="log"></div><button class="log-copy" onclick="navigator.clipboard.writeText(logBox.innerText).then(()=>this.textContent='Copied!').catch(()=>this.textContent='Failed');setTimeout(()=>this.textContent='Copy',1500)">Copy</button></div>
 
 <h2>Full Comic (Original)</h2>
@@ -1415,7 +1419,7 @@ function addLog(msg, cls) {{
   logBox.scrollTop = logBox.scrollHeight;
 }}
 window._addLog = addLog;
-addLog("v1-esrgan");
+addLog("v2-esrgan-tfjs");
 </script>
 
 <script type="module">
@@ -1424,6 +1428,7 @@ const logErr = (...args) => {{ console.error("[esrgan]", ...args); window._addLo
 
 const statusBox = document.getElementById("statusBox");
 const photoSelect = document.getElementById("photoSelect");
+const modelSelect = document.getElementById("modelSelect");
 const panelsDiv = document.getElementById("panels");
 const fullImg = document.getElementById("fullImg");
 
@@ -1445,72 +1450,80 @@ data.events.forEach(e => {{
 }});
 photoSelect.value = "{latest}";
 
-// Load onnxruntime-web from CDN (v1.20.1 for Safari compat)
-log("Loading onnxruntime-web 1.20.1...");
-let ort;
+// Load TF.js with WebGPU → WebGL fallback
+log("Loading TF.js...");
+let tf;
 try {{
-  ort = await import("https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.all.min.mjs");
-  ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
-  log("ort loaded");
+  tf = await import("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js");
+  if (!tf.ready) tf = window.tf; // CDN sets global
+  await tf.ready();
+  log("TF.js loaded, backend: " + tf.getBackend());
 }} catch (e) {{
-  logErr("ort load failed: " + e.message);
+  logErr("TF.js load failed: " + e.message);
   statusBox.textContent = "Failed: " + e.message;
   statusBox.className = "status err";
   throw e;
 }}
 
-// Load ONNX model
-log("Loading Real-ESRGAN model...");
-statusBox.textContent = "Loading model (4.7MB)...";
-statusBox.className = "status loading";
-let session;
-try {{
-  session = await ort.InferenceSession.create(
-    "/test/models/x4v3-fp32.onnx",
-    {{ executionProviders: ["webgl"] }}
-  );
-  log("Model loaded: inputs=" + session.inputNames + " outputs=" + session.outputNames);
-  statusBox.textContent = "Model ready (WebGL)";
-  statusBox.className = "status ok";
-}} catch (e) {{
-  logErr("Model load failed: " + e.message);
-  statusBox.textContent = "Model failed: " + e.message;
-  statusBox.className = "status err";
-  throw e;
+// Try WebGPU, fall back to WebGL
+let backend = tf.getBackend();
+if (backend !== "webgpu") {{
+  try {{
+    await import("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu@4.22.0/dist/tf-backend-webgpu.min.js");
+    await tf.setBackend("webgpu");
+    await tf.ready();
+    backend = "webgpu";
+  }} catch (e) {{
+    log("WebGPU unavailable, using " + tf.getBackend());
+    backend = tf.getBackend();
+  }}
 }}
+log("Backend: " + backend);
+
+// Load model
+const modelCache = {{}};
+let currentModel = null;
+
+async function loadModel(name) {{
+  if (modelCache[name]) {{
+    currentModel = modelCache[name];
+    return;
+  }}
+  statusBox.textContent = `Loading ${{name}}...`;
+  statusBox.className = "status loading";
+  const url = `/test/models/tfjs/${{name}}/model.json`;
+  log("Loading model: " + url);
+  const model = await tf.loadGraphModel(url);
+  modelCache[name] = model;
+  currentModel = model;
+  log("Model loaded: " + name);
+}}
+
+await loadModel(modelSelect.value);
+statusBox.textContent = `Ready (${{backend}})`;
+statusBox.className = "status ok";
 
 const TILE = 128;
 const SCALE = 4;
 
-function imageToTensor(canvas, x, y, w, h) {{
-  const ctx = canvas.getContext("2d");
-  const imgData = ctx.getImageData(x, y, w, h).data;
-  const float32 = new Float32Array(3 * TILE * TILE);
-  for (let ty = 0; ty < TILE; ty++) {{
-    for (let tx = 0; tx < TILE; tx++) {{
-      const sx = Math.min(tx, w - 1);
-      const sy = Math.min(ty, h - 1);
-      const si = (sy * w + sx) * 4;
-      const di = ty * TILE + tx;
-      float32[di]                    = imgData[si]     / 255.0;
-      float32[di + TILE * TILE]      = imgData[si + 1] / 255.0;
-      float32[di + TILE * TILE * 2]  = imgData[si + 2] / 255.0;
-    }}
-  }}
-  return new ort.Tensor("float32", float32, [1, 3, TILE, TILE]);
-}}
+function upscaleTile(srcCanvas, sx, sy, tw, th) {{
+  return tf.tidy(() => {{
+    const ctx = srcCanvas.getContext("2d");
+    const imgData = ctx.getImageData(sx, sy, tw, th);
+    // Create padded TILE x TILE canvas if tile is smaller
+    const tileCanvas = document.createElement("canvas");
+    tileCanvas.width = TILE;
+    tileCanvas.height = TILE;
+    const tCtx = tileCanvas.getContext("2d");
+    tCtx.putImageData(imgData, 0, 0);
+    // Edge-extend padding
+    if (tw < TILE) tCtx.drawImage(tileCanvas, tw-1, 0, 1, th, tw, 0, TILE-tw, th);
+    if (th < TILE) tCtx.drawImage(tileCanvas, 0, th-1, TILE, 1, 0, th, TILE, TILE-th);
 
-function tensorToImageData(tensor) {{
-  const [, , h, w] = tensor.dims;
-  const d = tensor.data;
-  const pixels = new Uint8ClampedArray(w * h * 4);
-  for (let i = 0; i < w * h; i++) {{
-    pixels[i * 4]     = Math.min(255, Math.max(0, d[i] * 255));
-    pixels[i * 4 + 1] = Math.min(255, Math.max(0, d[i + w * h] * 255));
-    pixels[i * 4 + 2] = Math.min(255, Math.max(0, d[i + w * h * 2] * 255));
-    pixels[i * 4 + 3] = 255;
-  }}
-  return new ImageData(pixels, w, h);
+    const input = tf.browser.fromPixels(tileCanvas).toFloat().div(255.0).expandDims(0);
+    const output = currentModel.predict(input);
+    return output;
+  }});
 }}
 
 async function upscalePanel(srcCanvas, displayCanvas) {{
@@ -1524,7 +1537,6 @@ async function upscalePanel(srcCanvas, displayCanvas) {{
 
   const tilesX = Math.ceil(sw / TILE);
   const tilesY = Math.ceil(sh / TILE);
-  let tileCount = 0;
   const totalTiles = tilesX * tilesY;
 
   for (let ty = 0; ty < tilesY; ty++) {{
@@ -1534,24 +1546,19 @@ async function upscalePanel(srcCanvas, displayCanvas) {{
       const tw = Math.min(TILE, sw - sx);
       const th = Math.min(TILE, sh - sy);
 
-      const inputTensor = imageToTensor(srcCanvas, sx, sy, tw, th);
-      const feeds = {{ [session.inputNames[0]]: inputTensor }};
-      const results = await session.run(feeds);
-      const outputTensor = results[session.outputNames[0]];
-      const tileImg = tensorToImageData(outputTensor);
+      const outputTensor = upscaleTile(srcCanvas, sx, sy, tw, th);
+      const pixels = await tf.browser.toPixels(outputTensor.squeeze());
+      outputTensor.dispose();
 
-      // Place tile (crop to actual output size if source tile was smaller than TILE)
+      // Place tile (crop to actual size)
       const cropW = tw * SCALE;
       const cropH = th * SCALE;
+      const tileImgData = new ImageData(new Uint8ClampedArray(pixels.buffer), TILE * SCALE, TILE * SCALE);
       const tempCanvas = document.createElement("canvas");
-      tempCanvas.width = tileImg.width;
-      tempCanvas.height = tileImg.height;
-      tempCanvas.getContext("2d").putImageData(tileImg, 0, 0);
+      tempCanvas.width = TILE * SCALE;
+      tempCanvas.height = TILE * SCALE;
+      tempCanvas.getContext("2d").putImageData(tileImgData, 0, 0);
       dCtx.drawImage(tempCanvas, 0, 0, cropW, cropH, sx * SCALE, sy * SCALE, cropW, cropH);
-
-      tileCount++;
-      inputTensor.dispose();
-      outputTensor.dispose();
     }}
   }}
   return totalTiles;
@@ -1568,6 +1575,8 @@ function cropPanel(img, idx) {{
 async function run() {{
   const filename = photoSelect.value;
   if (!filename) return;
+
+  await loadModel(modelSelect.value);
 
   fullImg.src = `/api/photos/${{encodeURIComponent(filename)}}`;
   await new Promise((resolve, reject) => {{
@@ -1623,6 +1632,7 @@ async function run() {{
 }}
 
 photoSelect.addEventListener("change", run);
+modelSelect.addEventListener("change", run);
 document.getElementById("actualSize").addEventListener("change", run);
 run();
 </script>
