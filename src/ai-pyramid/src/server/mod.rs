@@ -1046,7 +1046,7 @@ function addLog(msg, cls) {{
   logBox.scrollTop = logBox.scrollHeight;
 }}
 window._addLog = addLog;
-addLog("WebSR Test v8 (fresh-instance-per-render)");
+addLog("WebSR Test v9 (shared-canvas+fresh-instance)");
 addLog("navigator.gpu: " + (navigator.gpu ? "available" : "UNAVAILABLE"));
 addLog("User-Agent: " + navigator.userAgent.slice(0, 80));
 window.addEventListener("error", (e) => addLog("JS Error: " + e.message + " @ " + e.filename + ":" + e.lineno, "err"));
@@ -1148,23 +1148,26 @@ async function getWeights(model) {{
   return w;
 }}
 
-// WebSR bugs that require workarounds:
-// 1. destroy() calls device.destroy() → kills shared GPUDevice permanently
-// 2. render() caches input texture in bind group → same image for all renders
-// Solution: fresh instance + fresh canvas per render, never destroy.
+// WebSR workarounds:
+// 1. destroy() kills shared GPUDevice → never call destroy
+// 2. render() caches input texture → new instance per render
+// 3. Safari limits WebGPU contexts → reuse single canvas
+const workCanvas = document.createElement("canvas");
+
 async function upscale(source, displayCanvas, model) {{
   const weights = await getWeights(model);
   const w = source.width || source.naturalWidth;
   const h = source.height || source.naturalHeight;
-  log(`Upscale: ${{w}}x${{h}} model=${{model}}`);
+  log(`Upscale: ${{w}}x${{h}}`);
 
-  const canvas = document.createElement("canvas");
-  const websr = new WebSR({{ network_name: model, weights, gpu, canvas }});
+  // New instance (fresh input texture binding) on shared canvas
+  const websr = new WebSR({{ network_name: model, weights, gpu, canvas: workCanvas }});
   await websr.render(source);
   await gpu.queue.onSubmittedWorkDone();
   await new Promise(r => requestAnimationFrame(r));
 
-  const bitmap = await createImageBitmap(canvas);
+  // Capture before next render overwrites workCanvas
+  const bitmap = await createImageBitmap(workCanvas);
   displayCanvas.width = bitmap.width;
   displayCanvas.height = bitmap.height;
   displayCanvas.getContext("2d").drawImage(bitmap, 0, 0);
