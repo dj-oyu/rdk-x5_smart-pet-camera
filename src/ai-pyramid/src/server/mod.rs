@@ -1049,7 +1049,7 @@ function addLog(msg, cls) {{
   logBox.scrollTop = logBox.scrollHeight;
 }}
 window._addLog = addLog;
-addLog("v19 (copyTexToBuffer)");
+addLog("v20 (monkeypatch+copyTex)");
 addLog("navigator.gpu: " + (navigator.gpu ? "available" : "UNAVAILABLE"));
 addLog("User-Agent: " + navigator.userAgent.slice(0, 80));
 window.addEventListener("error", (e) => addLog("JS Error: " + e.message + " @ " + e.filename + ":" + e.lineno, "err"));
@@ -1065,6 +1065,13 @@ window.addEventListener("unhandledrejection", (e) => addLog("Unhandled rejection
 <script type="module">
 const log = (...args) => {{ console.log("[websr-test]", ...args); window._addLog?.(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ")); }};
 const logErr = (...args) => {{ console.error("[websr-test]", ...args); window._addLog?.(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" "), "err"); }};
+
+// Patch configure() to always include COPY_SRC so we can read output textures
+const _origConfigure = GPUCanvasContext.prototype.configure;
+GPUCanvasContext.prototype.configure = function(config) {{
+  config.usage = (config.usage || GPUTextureUsage.RENDER_ATTACHMENT) | GPUTextureUsage.COPY_SRC;
+  return _origConfigure.call(this, config);
+}};
 
 let WebSR;
 try {{
@@ -1140,15 +1147,6 @@ async function upscale(source, displayCanvas, model) {{
   const rid = ++renderCount;
 
   const websr = new WebSR({{ network_name: model, weights, gpu, canvas: workCanvas }});
-
-  // Reconfigure canvas with COPY_SRC so we can read the output texture directly
-  const gpuCtx = workCanvas.getContext("webgpu");
-  gpuCtx.configure({{
-    device: gpu,
-    format: navigator.gpu.getPreferredCanvasFormat(),
-    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
-  }});
-
   const t0 = performance.now();
   await websr.render(source);
 
