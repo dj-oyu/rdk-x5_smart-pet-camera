@@ -125,7 +125,9 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(handle_health))
         .route("/test/websr", get(handle_websr_test))
         .route("/test/esrgan", get(handle_esrgan_test))
+        .route("/test/carousel", get(handle_carousel_demo))
         .route("/test/models/{*path}", get(handle_test_model))
+        .route("/api/models/{*path}", get(handle_test_model))
         .with_state(state)
         .merge(mcp_router)
 }
@@ -1320,8 +1322,8 @@ async fn handle_test_model(Path(path): Path<String>) -> impl IntoResponse {
     let file_path = std::path::Path::new("/tmp/esrgan-models").join(&safe_path);
     match tokio::fs::read(&file_path).await {
         Ok(data) => {
-            let mime = if safe_path.ends_with(".onnx") {
-                "application/octet-stream"
+            let mime = if safe_path.ends_with(".json") {
+                "application/json"
             } else {
                 "application/octet-stream"
             };
@@ -1338,8 +1340,879 @@ async fn handle_test_model(Path(path): Path<String>) -> impl IntoResponse {
             )
                 .into_response()
         }
-        Err(_) => (StatusCode::NOT_FOUND, format!("model not found: {safe_path}")).into_response(),
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            format!("model not found: {safe_path}"),
+        )
+            .into_response(),
     }
+}
+
+async fn handle_carousel_demo(State(state): State<AppState>) -> impl IntoResponse {
+    let latest = state
+        .queries()
+        .list_events(crate::application::EventQuery {
+            limit: Some(1),
+            ..Default::default()
+        })
+        .await
+        .ok()
+        .and_then(|(events, _)| events.into_iter().next())
+        .map(|e| e.source_filename)
+        .unwrap_or_default();
+
+    let html = format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Panel Carousel Demo</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: #0f172a;
+  color: #e2e8f0;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}}
+
+/* Backdrop */
+.backdrop {{
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.6);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}}
+
+/* Modal */
+.modal {{
+  position: relative;
+  width: min(96vw, 880px);
+  max-height: 92vh;
+  overflow-y: auto;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.22);
+  color: #1e293b;
+  animation: modal-enter 160ms ease-out;
+}}
+@keyframes modal-enter {{
+  from {{ opacity: 0; transform: scale(0.97) translateY(8px); }}
+  to {{ opacity: 1; transform: none; }}
+}}
+
+/* Breadcrumb */
+.breadcrumb {{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  font-size: 13px;
+  color: #64748b;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}}
+.crumb {{
+  cursor: pointer;
+  color: #3b82f6;
+  transition: color 0.15s;
+}}
+.crumb:hover {{ color: #2563eb; }}
+.crumb.current {{
+  color: #1e293b;
+  cursor: default;
+  font-weight: 600;
+}}
+.crumb-sep {{ color: #94a3b8; font-size: 11px; }}
+
+/* Image container */
+.image-container {{
+  position: relative;
+  line-height: 0;
+  overflow: hidden;
+}}
+.comic-image {{
+  width: 100%;
+  display: block;
+  border-radius: 16px 16px 0 0;
+  cursor: pointer;
+}}
+
+/* Panel hover regions */
+.panel-regions {{
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 0;
+}}
+.panel-region {{
+  cursor: zoom-in;
+  transition: box-shadow 0.2s, background 0.2s;
+  border-radius: 2px;
+}}
+@media (hover: hover) {{
+  .panel-region:hover {{
+    box-shadow: inset 0 0 0 2px rgba(59, 130, 246, 0.4);
+    background: rgba(59, 130, 246, 0.05);
+  }}
+}}
+
+/* === Carousel === */
+.carousel-container {{
+  position: relative;
+}}
+.panel-carousel {{
+  display: flex;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}}
+.panel-carousel::-webkit-scrollbar {{ display: none; }}
+
+.panel-slide {{
+  position: relative;
+  flex: 0 0 100%;
+  scroll-snap-align: center;
+  scroll-snap-stop: always;
+  min-height: 200px;
+  background: #f8fafc;
+}}
+.panel-slide canvas {{
+  width: 100%;
+  height: auto;
+  display: block;
+}}
+.panel-slide:first-child canvas {{
+  border-radius: 16px 16px 0 0;
+}}
+
+/* Nav arrows */
+.nav-btn {{
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.3);
+  background: rgba(255,255,255,0.2);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: #fff;
+  font-size: 16px;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}}
+.nav-btn:hover {{ opacity: 1; }}
+.nav-btn.prev {{ left: 8px; }}
+.nav-btn.next {{ right: 8px; }}
+.nav-btn:disabled {{ opacity: 0.2; cursor: default; }}
+
+/* Dots */
+.panel-dots {{
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 0;
+  background: rgba(255,255,255,0.92);
+}}
+.panel-dot {{
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.15);
+  border: none;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.2s;
+}}
+.panel-dot.active {{
+  background: #3b82f6;
+  transform: scale(1.4);
+}}
+
+/* HD button */
+.hd-btn {{
+  position: absolute;
+  bottom: 12px; right: 12px;
+  padding: 4px 12px;
+  font-size: 11px; font-weight: 700;
+  letter-spacing: 0.5px;
+  background: rgba(0,0,0,0.25);
+  color: rgba(255,255,255,0.4);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 6px;
+  cursor: pointer;
+  z-index: 5;
+  transition: background 0.2s, color 0.2s, border-color 0.2s;
+  user-select: none;
+  -webkit-user-select: none;
+}}
+.hd-btn:hover {{ background: rgba(0,0,0,0.35); color: rgba(255,255,255,0.6); }}
+.hd-btn.loading {{ opacity: 0.5; pointer-events: none; }}
+.hd-btn.done {{
+  background: rgba(59,130,246,0.5);
+  color: #fff;
+  border-color: rgba(59,130,246,0.3);
+}}
+.hd-btn.done:hover {{ background: rgba(59,130,246,0.35); }}
+
+/* HD progress */
+.hd-progress {{
+  position: absolute;
+  bottom: 0; left: 0;
+  height: 2px;
+  background: #3b82f6;
+  transition: width 0.15s;
+  z-index: 5;
+}}
+
+/* Upscale badge */
+.upscale-badge {{
+  position: absolute;
+  top: 10px; right: 12px;
+  font-size: 10px;
+  padding: 2px 8px;
+  background: rgba(0,0,0,0.4);
+  backdrop-filter: blur(4px);
+  color: rgba(255,255,255,0.7);
+  border-radius: 4px;
+  z-index: 5;
+  pointer-events: none;
+}}
+
+/* Info section */
+.info {{
+  padding: 12px 16px;
+  border-top: 1px solid rgba(0,0,0,0.06);
+}}
+.caption {{
+  font-size: 14px;
+  color: #334155;
+  margin-bottom: 8px;
+  line-height: 1.4;
+}}
+.meta {{
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 13px;
+}}
+.pill {{
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+}}
+.pill.pet {{ background: #dbeafe; color: #1e40af; }}
+.pill.valid {{ background: #dcfce7; color: #166534; }}
+.pill.time {{ color: #64748b; }}
+
+/* Detection list */
+.detections {{
+  padding: 8px 16px 16px;
+  border-top: 1px solid rgba(0,0,0,0.06);
+}}
+.detections-title {{
+  font-size: 13px;
+  font-weight: 600;
+  color: #475569;
+  margin-bottom: 6px;
+}}
+.det-list {{ list-style: none; }}
+.det-item {{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 13px;
+  transition: background 0.15s;
+  cursor: default;
+}}
+.det-item:hover {{ background: rgba(0,0,0,0.04); }}
+.det-color {{
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}}
+.det-class {{ font-weight: 500; color: #1e293b; }}
+.det-pet {{ color: #3b82f6; }}
+.det-conf {{ color: #94a3b8; font-size: 11px; margin-left: auto; }}
+
+/* Photo selector */
+.controls {{
+  position: fixed;
+  bottom: 16px; left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  background: rgba(30,41,59,0.9);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  padding: 8px 16px;
+  border-radius: 12px;
+  z-index: 200;
+  font-size: 13px;
+  color: #e2e8f0;
+}}
+.controls select {{
+  background: rgba(255,255,255,0.1);
+  color: #e2e8f0;
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+}}
+
+/* Status bar */
+.status-bar {{
+  position: fixed;
+  top: 12px; right: 12px;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(30,41,59,0.85);
+  color: #94a3b8;
+  z-index: 200;
+}}
+.status-bar.ok {{ color: #4ade80; }}
+.status-bar.loading {{ color: #fbbf24; }}
+.status-bar.err {{ color: #f87171; }}
+</style>
+</head>
+<body>
+
+<div id="statusBar" class="status-bar loading">Loading...</div>
+
+<div class="backdrop">
+  <div class="modal">
+    <!-- Breadcrumb -->
+    <nav class="breadcrumb" id="breadcrumb">
+      <span class="crumb current">All panels</span>
+    </nav>
+
+    <!-- Comic view (default) -->
+    <div id="comicView" class="image-container">
+      <img id="comicImg" class="comic-image" crossorigin="anonymous" alt="Comic">
+      <div class="panel-regions" id="panelRegions">
+        <div class="panel-region" data-panel="0"></div>
+        <div class="panel-region" data-panel="1"></div>
+        <div class="panel-region" data-panel="2"></div>
+        <div class="panel-region" data-panel="3"></div>
+      </div>
+    </div>
+
+    <!-- Carousel view (hidden initially) -->
+    <div id="carouselView" class="carousel-container" style="display:none">
+      <div class="panel-carousel" id="carousel">
+        <div class="panel-slide" data-panel="0"><canvas id="pc0"></canvas></div>
+        <div class="panel-slide" data-panel="1"><canvas id="pc1"></canvas></div>
+        <div class="panel-slide" data-panel="2"><canvas id="pc2"></canvas></div>
+        <div class="panel-slide" data-panel="3"><canvas id="pc3"></canvas></div>
+      </div>
+      <button class="nav-btn prev" id="prevBtn">&#8249;</button>
+      <button class="nav-btn next" id="nextBtn">&#8250;</button>
+      <button class="hd-btn" id="hdBtn">HD</button>
+      <div class="hd-progress" id="hdProgress" style="width:0"></div>
+      <div class="upscale-badge" id="upscaleBadge" style="display:none"></div>
+      <div class="panel-dots" id="dots">
+        <button class="panel-dot active" data-panel="0"></button>
+        <button class="panel-dot" data-panel="1"></button>
+        <button class="panel-dot" data-panel="2"></button>
+        <button class="panel-dot" data-panel="3"></button>
+      </div>
+    </div>
+
+    <!-- Info -->
+    <div class="info">
+      <p class="caption" id="caption">Loading...</p>
+      <div class="meta">
+        <span class="pill pet" id="petPill">-</span>
+        <span class="pill valid" id="statusPill">-</span>
+        <span class="pill time" id="timePill">-</span>
+      </div>
+    </div>
+
+    <!-- Detections -->
+    <div class="detections">
+      <div class="detections-title" id="detTitle">Detections</div>
+      <ul class="det-list" id="detList"></ul>
+    </div>
+  </div>
+</div>
+
+<!-- Photo selector -->
+<div class="controls">
+  <label>Photo: <select id="photoSelect"></select></label>
+</div>
+
+<script type="module">
+// ── Constants ──
+const MARGIN = 12, BORDER = 2, GAP = 8, PW = 404, PH = 228;
+const CELL_W = PW + 2 * BORDER, CELL_H = PH + 2 * BORDER;
+const PANELS = [0,1,2,3].map(i => {{
+  const col = i % 2, row = Math.floor(i / 2);
+  return {{ x: MARGIN + BORDER + col * (CELL_W + GAP), y: MARGIN + BORDER + row * (CELL_H + GAP), w: PW, h: PH }};
+}});
+
+const CLASS_COLORS = {{
+  cat: "#6EFF9E", dog: "#FFC878", bird: "#A0DCFF",
+  food_bowl: "#78C8FF", water_bowl: "#FF8C8C",
+  person: "#FFF08C", cup: "#FFBED2"
+}};
+
+// ── Mock detections (comic-space coordinates) ──
+const MOCK_DETECTIONS = [
+  {{ id:1, bbox_x:60,  bbox_y:40,  bbox_w:130, bbox_h:170, yolo_class:"cat",       pet_id:"chatora", confidence:0.95 }},
+  {{ id:2, bbox_x:300, bbox_y:120, bbox_w:90,  bbox_h:70,  yolo_class:"food_bowl", pet_id:null,      confidence:0.88 }},
+  {{ id:3, bbox_x:480, bbox_y:50,  bbox_w:140, bbox_h:160, yolo_class:"cat",       pet_id:"mike",    confidence:0.92 }},
+  {{ id:4, bbox_x:720, bbox_y:80,  bbox_w:80,  bbox_h:60,  yolo_class:"cup",       pet_id:null,      confidence:0.76 }},
+  {{ id:5, bbox_x:50,  bbox_y:290, bbox_w:150, bbox_h:160, yolo_class:"cat",       pet_id:"chatora", confidence:0.97 }},
+  {{ id:6, bbox_x:280, bbox_y:330, bbox_w:100, bbox_h:70,  yolo_class:"water_bowl",pet_id:null,      confidence:0.85 }},
+  {{ id:7, bbox_x:470, bbox_y:280, bbox_w:130, bbox_h:170, yolo_class:"cat",       pet_id:"mike",    confidence:0.91 }},
+  {{ id:8, bbox_x:650, bbox_y:310, bbox_w:120, bbox_h:140, yolo_class:"cat",       pet_id:"chatora", confidence:0.89 }},
+];
+
+function panelOf(det) {{
+  const cx = det.bbox_x + det.bbox_w / 2;
+  const cy = det.bbox_y + det.bbox_h / 2;
+  return PANELS.findIndex(p => cx >= p.x && cx < p.x + p.w && cy >= p.y && cy < p.y + p.h);
+}}
+
+function detsForPanel(idx) {{
+  return MOCK_DETECTIONS.filter(d => panelOf(d) === idx);
+}}
+
+// ── DOM refs ──
+const statusBar = document.getElementById("statusBar");
+const breadcrumb = document.getElementById("breadcrumb");
+const comicView = document.getElementById("comicView");
+const carouselView = document.getElementById("carouselView");
+const comicImg = document.getElementById("comicImg");
+const carousel = document.getElementById("carousel");
+const prevBtn = document.getElementById("prevBtn");
+const nextBtn = document.getElementById("nextBtn");
+const hdBtn = document.getElementById("hdBtn");
+const hdProgress = document.getElementById("hdProgress");
+const upscaleBadge = document.getElementById("upscaleBadge");
+const dots = document.querySelectorAll(".panel-dot");
+const detTitle = document.getElementById("detTitle");
+const detList = document.getElementById("detList");
+const photoSelect = document.getElementById("photoSelect");
+const canvases = [0,1,2,3].map(i => document.getElementById("pc" + i));
+
+let activePanel = 0;
+let viewMode = "comic"; // "comic" | "panel"
+let upscaleState = {{}}; // panelIdx -> "raw"|"fast"|"hd"
+
+// ── Photo list ──
+const resp = await fetch("/api/photos?limit=30");
+const data = await resp.json();
+data.events.forEach(e => {{
+  const opt = document.createElement("option");
+  opt.value = e.source_filename;
+  opt.textContent = e.source_filename.replace("comic_","").replace(".jpg","");
+  photoSelect.appendChild(opt);
+}});
+if ("{latest}") photoSelect.value = "{latest}";
+
+// ── TF.js loading ──
+let tf = null;
+let backend = "";
+let modelCache = {{}};
+let currentModel = null;
+let resultCache = {{}};
+
+async function ensureTF() {{
+  if (tf) return true;
+  statusBar.textContent = "Loading TF.js...";
+  statusBar.className = "status-bar loading";
+  try {{
+    await import("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js");
+    tf = window.tf;
+    await tf.ready();
+    // Try WebGPU
+    try {{
+      await import("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu@4.22.0/dist/tf-backend-webgpu.min.js");
+      await tf.setBackend("webgpu");
+      await tf.ready();
+    }} catch {{}}
+    backend = tf.getBackend();
+    statusBar.textContent = "Ready (" + backend + ")";
+    statusBar.className = "status-bar ok";
+    return true;
+  }} catch (e) {{
+    statusBar.textContent = "TF.js failed: " + e.message;
+    statusBar.className = "status-bar err";
+    return false;
+  }}
+}}
+
+async function loadModel(name) {{
+  if (modelCache[name]) {{ currentModel = modelCache[name]; return; }}
+  statusBar.textContent = "Loading " + name + "...";
+  statusBar.className = "status-bar loading";
+  const model = await tf.loadGraphModel("/api/models/tfjs/" + name + "/model.json");
+  modelCache[name] = model;
+  currentModel = model;
+}}
+
+// ── Upscale ──
+const TILE = 128, SCALE = 4;
+
+function cropPanelCanvas(img, idx) {{
+  const p = PANELS[idx];
+  const c = document.createElement("canvas");
+  c.width = p.w; c.height = p.h;
+  c.getContext("2d").drawImage(img, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
+  return c;
+}}
+
+// Cancellation token for upscale operations
+let cancelToken = 0;
+
+async function upscaleToCanvas(srcCanvas, outCanvas, onProgress, token) {{
+  const sw = srcCanvas.width, sh = srcCanvas.height;
+  const outW = sw * SCALE, outH = sh * SCALE;
+  outCanvas.width = outW; outCanvas.height = outH;
+  const dCtx = outCanvas.getContext("2d");
+  const tilesX = Math.ceil(sw / TILE), tilesY = Math.ceil(sh / TILE);
+  const total = tilesX * tilesY;
+  let done = 0;
+  for (let ty = 0; ty < tilesY; ty++) {{
+    for (let tx = 0; tx < tilesX; tx++) {{
+      if (token !== cancelToken) return false; // cancelled
+      const sx = tx * TILE, sy = ty * TILE;
+      const tw = Math.min(TILE, sw - sx), th = Math.min(TILE, sh - sy);
+      const tileCanvas = document.createElement("canvas");
+      tileCanvas.width = TILE; tileCanvas.height = TILE;
+      const tCtx = tileCanvas.getContext("2d");
+      tCtx.drawImage(srcCanvas, sx, sy, tw, th, 0, 0, tw, th);
+      if (tw < TILE) tCtx.drawImage(tileCanvas, tw-1, 0, 1, th, tw, 0, TILE-tw, th);
+      if (th < TILE) tCtx.drawImage(tileCanvas, 0, th-1, TILE, 1, 0, th, TILE, TILE-th);
+      const outputTensor = tf.tidy(() => {{
+        const input = tf.browser.fromPixels(tileCanvas).toFloat().div(255.0).expandDims(0);
+        return currentModel.predict(input);
+      }});
+      const clamped = outputTensor.squeeze().clipByValue(0, 1);
+      const pixels = await tf.browser.toPixels(clamped);
+      clamped.dispose(); outputTensor.dispose();
+      const cropW = tw * SCALE, cropH = th * SCALE;
+      const imgData = new ImageData(new Uint8ClampedArray(pixels.buffer), TILE * SCALE, TILE * SCALE);
+      const tmp = document.createElement("canvas");
+      tmp.width = TILE * SCALE; tmp.height = TILE * SCALE;
+      tmp.getContext("2d").putImageData(imgData, 0, 0);
+      dCtx.drawImage(tmp, 0, 0, cropW, cropH, sx * SCALE, sy * SCALE, cropW, cropH);
+      done++;
+      onProgress?.(done, total);
+    }}
+  }}
+  return true; // completed
+}}
+
+// Serialized upscale queue — only one operation at a time, new requests cancel the current one
+let upscaleQueue = Promise.resolve();
+let upscaleBusy = false;
+
+function upscalePanel(idx, modelName) {{
+  const token = ++cancelToken; // cancel any in-flight operation
+  const job = async () => {{
+    upscaleBusy = true;
+    try {{
+      if (token !== cancelToken) return; // already superseded
+      if (!await ensureTF()) return;
+      if (token !== cancelToken) return;
+      await loadModel(modelName);
+      if (token !== cancelToken) return;
+      const src = cropPanelCanvas(comicImg, idx);
+      const canvas = canvases[idx];
+      const t0 = performance.now();
+      const label = modelName === "general_plus" ? "HD" : "fast";
+      statusBar.textContent = "Upscaling P" + idx + " (" + label + ")...";
+      statusBar.className = "status-bar loading";
+      const completed = await upscaleToCanvas(src, canvas, (done, total) => {{
+        if (modelName === "general_plus") {{
+          hdProgress.style.width = (done / total * 100) + "%";
+        }}
+      }}, token);
+      if (!completed || token !== cancelToken) return; // was cancelled
+      const ms = (performance.now() - t0).toFixed(0);
+      upscaleState[idx] = modelName === "general_plus" ? "hd" : "fast";
+      statusBar.textContent = "P" + idx + " " + label + " " + ms + "ms (" + backend + ")";
+      statusBar.className = "status-bar ok";
+      hdProgress.style.width = "0";
+      hdBtn.classList.remove("loading");
+      if (idx === activePanel) updateUpscaleBadge(idx);
+      resultCache[idx + ":" + modelName] = true;
+      // Prefetch next panel with fast
+      const next = (idx + 1) % 4;
+      if (!resultCache[next + ":general_fast"] && token === cancelToken) {{
+        upscalePanel(next, "general_fast");
+      }}
+    }} catch (e) {{
+      console.error("upscale error:", e);
+      statusBar.textContent = "Error: " + e.message;
+      statusBar.className = "status-bar err";
+      hdBtn.classList.remove("loading");
+      hdProgress.style.width = "0";
+    }} finally {{
+      upscaleBusy = false;
+    }}
+  }};
+  // Chain onto queue so operations never overlap
+  upscaleQueue = upscaleQueue.then(job);
+}}
+
+// ── View switching ──
+function showComic() {{
+  viewMode = "comic";
+  comicView.style.display = "";
+  carouselView.style.display = "none";
+  updateBreadcrumb();
+  renderDetections(null);
+}}
+
+function showPanel(idx) {{
+  viewMode = "panel";
+  activePanel = idx;
+  comicView.style.display = "none";
+  carouselView.style.display = "";
+  // Draw raw crops for all panels
+  for (let i = 0; i < 4; i++) {{
+    if (!upscaleState[i]) {{
+      const src = cropPanelCanvas(comicImg, i);
+      const c = canvases[i];
+      c.width = src.width; c.height = src.height;
+      c.getContext("2d").drawImage(src, 0, 0);
+      upscaleState[i] = "raw";
+    }}
+  }}
+  // Scroll to target panel
+  carousel.scrollTo({{ left: idx * carousel.clientWidth, behavior: "instant" }});
+  updateDots(idx);
+  updateBreadcrumb();
+  updateNavBtns();
+  renderDetections(idx);
+  updateUpscaleBadge(idx);
+  // Auto-upscale with fast
+  if (!resultCache[idx + ":general_fast"]) {{
+    upscalePanel(idx, "general_fast");
+  }}
+}}
+
+function updateBreadcrumb() {{
+  if (viewMode === "comic") {{
+    breadcrumb.innerHTML = '<span class="crumb current">All panels</span>';
+  }} else {{
+    breadcrumb.innerHTML =
+      '<span class="crumb" onclick="window._showComic()">All panels</span>' +
+      '<span class="crumb-sep">\u2192</span>' +
+      '<span class="crumb current">Panel ' + activePanel + '</span>';
+  }}
+}}
+
+function updateDots(idx) {{
+  dots.forEach((d, i) => d.classList.toggle("active", i === idx));
+}}
+
+function updateNavBtns() {{
+  prevBtn.disabled = activePanel <= 0;
+  nextBtn.disabled = activePanel >= 3;
+}}
+
+function updateUpscaleBadge(idx) {{
+  const state = upscaleState[idx];
+  if (state === "fast") {{
+    upscaleBadge.style.display = "";
+    upscaleBadge.textContent = "4x fast \u00b7 " + backend;
+  }} else if (state === "hd") {{
+    upscaleBadge.style.display = "";
+    upscaleBadge.textContent = "4x HD \u00b7 " + backend;
+  }} else {{
+    upscaleBadge.style.display = "none";
+  }}
+  // Update HD button state
+  hdBtn.classList.toggle("done", state === "hd");
+  hdBtn.classList.remove("loading");
+}}
+
+// ── Detections rendering ──
+function renderDetections(panelIdx) {{
+  const dets = panelIdx === null ? MOCK_DETECTIONS : detsForPanel(panelIdx);
+  detTitle.textContent = panelIdx === null
+    ? "Detections (" + MOCK_DETECTIONS.length + ")"
+    : "Panel " + panelIdx + " detections (" + dets.length + ")";
+  detList.innerHTML = dets.map(d => {{
+    const color = CLASS_COLORS[d.yolo_class] || "#94a3b8";
+    const pet = d.pet_id ? ' <span class="det-pet">(' + d.pet_id + ')</span>' : '';
+    const conf = d.confidence ? (d.confidence * 100).toFixed(0) + "%" : "";
+    return '<li class="det-item">' +
+      '<span class="det-color" style="background:' + color + '"></span>' +
+      '<span class="det-class">' + d.yolo_class + '</span>' +
+      pet +
+      '<span class="det-conf">' + conf + '</span>' +
+      '</li>';
+  }}).join("");
+}}
+
+// ── Event handlers ──
+// Panel region clicks
+document.querySelectorAll(".panel-region").forEach(el => {{
+  el.addEventListener("click", () => showPanel(parseInt(el.dataset.panel)));
+}});
+
+// Carousel scroll snap
+carousel.addEventListener("scrollend", () => {{
+  const idx = Math.round(carousel.scrollLeft / carousel.clientWidth);
+  if (idx !== activePanel) {{
+    activePanel = idx;
+    updateDots(idx);
+    updateBreadcrumb();
+    updateNavBtns();
+    renderDetections(idx);
+    updateUpscaleBadge(idx);
+    if (!resultCache[idx + ":general_fast"]) {{
+      upscalePanel(idx, "general_fast");
+    }}
+  }}
+}});
+
+// Fallback for browsers without scrollend
+let scrollTimer;
+carousel.addEventListener("scroll", () => {{
+  clearTimeout(scrollTimer);
+  scrollTimer = setTimeout(() => {{
+    const idx = Math.round(carousel.scrollLeft / carousel.clientWidth);
+    if (idx !== activePanel) {{
+      activePanel = idx;
+      updateDots(idx);
+      updateBreadcrumb();
+      updateNavBtns();
+      renderDetections(idx);
+      updateUpscaleBadge(idx);
+      if (!resultCache[idx + ":general_fast"]) {{
+        upscalePanel(idx, "general_fast");
+      }}
+    }}
+  }}, 150);
+}});
+
+// Nav buttons
+prevBtn.addEventListener("click", () => {{
+  if (activePanel > 0) {{
+    carousel.scrollTo({{ left: (activePanel - 1) * carousel.clientWidth, behavior: "smooth" }});
+  }}
+}});
+nextBtn.addEventListener("click", () => {{
+  if (activePanel < 3) {{
+    carousel.scrollTo({{ left: (activePanel + 1) * carousel.clientWidth, behavior: "smooth" }});
+  }}
+}});
+
+// Dots
+dots.forEach(d => {{
+  d.addEventListener("click", () => {{
+    const idx = parseInt(d.dataset.panel);
+    carousel.scrollTo({{ left: idx * carousel.clientWidth, behavior: "smooth" }});
+  }});
+}});
+
+// HD button
+hdBtn.addEventListener("click", () => {{
+  if (hdBtn.classList.contains("loading")) return;
+  hdBtn.classList.add("loading");
+  if (upscaleState[activePanel] === "hd") {{
+    // Toggle back to fast
+    hdBtn.classList.remove("done");
+    upscalePanel(activePanel, "general_fast");
+  }} else {{
+    // Upgrade to HD
+    hdBtn.classList.remove("done");
+    upscalePanel(activePanel, "general_plus");
+  }}
+}});
+
+// Keyboard nav
+document.addEventListener("keydown", (e) => {{
+  if (viewMode !== "panel") return;
+  if (e.key === "ArrowLeft" && activePanel > 0) {{
+    carousel.scrollTo({{ left: (activePanel - 1) * carousel.clientWidth, behavior: "smooth" }});
+  }} else if (e.key === "ArrowRight" && activePanel < 3) {{
+    carousel.scrollTo({{ left: (activePanel + 1) * carousel.clientWidth, behavior: "smooth" }});
+  }} else if (e.key === "Escape") {{
+    showComic();
+  }}
+}});
+
+// Global functions for breadcrumb onclick
+window._showComic = showComic;
+
+// Photo selector
+photoSelect.addEventListener("change", () => {{
+  loadPhoto(photoSelect.value);
+}});
+
+async function loadPhoto(filename) {{
+  if (!filename) return;
+  upscaleState = {{}};
+  resultCache = {{}};
+  comicImg.src = "/api/photos/" + encodeURIComponent(filename);
+  await new Promise((resolve, reject) => {{
+    comicImg.onload = resolve;
+    comicImg.onerror = reject;
+  }});
+  // Update info
+  const evt = data.events.find(e => e.source_filename === filename);
+  if (evt) {{
+    document.getElementById("caption").textContent = evt.summary || "No summary";
+    document.getElementById("petPill").textContent = evt.pet_id || "unknown";
+    document.getElementById("statusPill").textContent = evt.status || "pending";
+    document.getElementById("timePill").textContent = evt.observed_at
+      ? new Date(evt.observed_at).toLocaleString() : "";
+  }}
+  // Always return to comic view on photo change
+  showComic();
+  }}
+  statusBar.textContent = "Loaded";
+  statusBar.className = "status-bar ok";
+}}
+
+// Initial load
+loadPhoto(photoSelect.value);
+statusBar.textContent = "Ready";
+statusBar.className = "status-bar ok";
+</script>
+</body>
+</html>"##
+    );
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
 }
 
 async fn handle_esrgan_test(State(state): State<AppState>) -> impl IntoResponse {
