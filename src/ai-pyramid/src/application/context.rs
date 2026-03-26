@@ -63,4 +63,16 @@ impl AppContext {
     pub fn vlm_config(&self) -> VlmConfig {
         self.vlm_config.clone()
     }
+
+    /// Notify listeners that detections were added for a photo.
+    /// Bridges to SSE via PetEvent → PhotoEvent::Update.
+    pub fn notify_detection_complete(&self, source_filename: &str, pet_id: Option<String>) {
+        let _ = self.event_tx.send(PetEvent {
+            source_filename: source_filename.to_string(),
+            is_valid: true,
+            summary: String::new(),
+            behavior: String::new(),
+            pet_id,
+        });
+    }
 }
