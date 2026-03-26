@@ -1148,8 +1148,8 @@ async function getWeights(model) {{
   return w;
 }}
 
-// WebSR.destroy() calls device.destroy() which kills the GPUDevice permanently.
-// Solution: never destroy, reuse one WebSR instance per resolution.
+// WebSR.destroy() calls device.destroy() which kills the GPUDevice.
+// Reuse instance per resolution, never destroy.
 const workCanvas = document.createElement("canvas");
 let currentWebSR = null;
 let currentRes = "";
@@ -1158,26 +1158,27 @@ async function upscale(source, displayCanvas, model) {{
   const weights = await getWeights(model);
   const w = source.width || source.naturalWidth;
   const h = source.height || source.naturalHeight;
-  const resKey = `${{w}}x${{h}}`;
-  log(`Upscale: model=${{model}}, source=${{resKey}}`);
+  const resKey = `${{w}}x${{h}}_${{model}}`;
 
-  // Create or reconfigure WebSR only when resolution changes
   if (!currentWebSR || currentRes !== resKey) {{
-    // Don't destroy old instance - just create new one on same canvas
     currentWebSR = new WebSR({{ network_name: model, weights, gpu, canvas: workCanvas }});
     currentRes = resKey;
-    log("Created new WebSR instance for " + resKey);
+    log("New WebSR instance: " + resKey);
   }}
 
   await currentWebSR.render(source);
   await gpu.queue.onSubmittedWorkDone();
-  log(`Render done: ${{workCanvas.width}}x${{workCanvas.height}}`);
+  // Safari: rAF ensures the WebGPU canvas texture is presented
+  await new Promise(r => requestAnimationFrame(r));
+  log(`Rendered: ${{workCanvas.width}}x${{workCanvas.height}}`);
 
-  // Copy from WebGPU canvas to 2D display canvas
-  displayCanvas.width = workCanvas.width;
-  displayCanvas.height = workCanvas.height;
-  displayCanvas.getContext("2d").drawImage(workCanvas, 0, 0);
-  log(`Copied to display: ${{displayCanvas.width}}x${{displayCanvas.height}}`);
+  // createImageBitmap forces GPU→CPU readback (reliable on Safari)
+  const bitmap = await createImageBitmap(workCanvas);
+  displayCanvas.width = bitmap.width;
+  displayCanvas.height = bitmap.height;
+  displayCanvas.getContext("2d").drawImage(bitmap, 0, 0);
+  bitmap.close();
+  log(`Copied: ${{displayCanvas.width}}x${{displayCanvas.height}}`);
 }}
 
 function cropPanel(img, idx) {{
@@ -1203,6 +1204,11 @@ async function run() {{
   panelsDiv.innerHTML = "";
   const model = modelSelect.value;
 
+  const useActual = document.getElementById("actualSize").checked;
+  const cardClass = useActual ? "card actual" : "card fit";
+
+  // Build DOM structure and collect render targets
+  const panels = [];
   for (let i = 0; i < 4; i++) {{
     const r = panelRegions[i];
     const row = document.createElement("div");
@@ -1210,10 +1216,6 @@ async function run() {{
     const grid = document.createElement("div");
     grid.className = "grid";
 
-    const useActual = document.getElementById("actualSize").checked;
-    const cardClass = useActual ? "card actual" : "card fit";
-
-    // 1) Original crop
     const origCanvas = cropPanel(fullImg, i);
     const card1 = document.createElement("div");
     card1.className = cardClass;
@@ -1221,57 +1223,58 @@ async function run() {{
     card1.querySelector(".card-scroll").appendChild(origCanvas);
     grid.appendChild(card1);
 
-    if (gpu) {{
-      // 2) 2x upscale
-      const canvas2x = document.createElement("canvas");
-      const card2 = document.createElement("div");
-      card2.className = cardClass;
-      card2.innerHTML = `<div class="card-label">WebSR 2x<span class="dim" id="dim2x-${{i}}">processing...</span></div><div class="card-scroll"></div>`;
-      card2.querySelector(".card-scroll").appendChild(canvas2x);
-      grid.appendChild(card2);
+    const canvas2x = document.createElement("canvas");
+    const card2 = document.createElement("div");
+    card2.className = cardClass;
+    card2.innerHTML = `<div class="card-label">WebSR 2x<span class="dim" id="dim2x-${{i}}">queued</span></div><div class="card-scroll"></div>`;
+    card2.querySelector(".card-scroll").appendChild(canvas2x);
+    grid.appendChild(card2);
 
-      // 3) 4x upscale (2-pass)
-      const canvas4x = document.createElement("canvas");
-      const card3 = document.createElement("div");
-      card3.className = cardClass;
-      card3.innerHTML = `<div class="card-label">WebSR 4x (2-pass)<span class="dim" id="dim4x-${{i}}">waiting...</span></div><div class="card-scroll"></div>`;
-      card3.querySelector(".card-scroll").appendChild(canvas4x);
-      grid.appendChild(card3);
+    const canvas4x = document.createElement("canvas");
+    const card3 = document.createElement("div");
+    card3.className = cardClass;
+    card3.innerHTML = `<div class="card-label">WebSR 4x (2-pass)<span class="dim" id="dim4x-${{i}}">queued</span></div><div class="card-scroll"></div>`;
+    card3.querySelector(".card-scroll").appendChild(canvas4x);
+    grid.appendChild(card3);
 
-      row.appendChild(grid);
-      panelsDiv.appendChild(row);
+    row.appendChild(grid);
+    panelsDiv.appendChild(row);
+    panels.push({{ origCanvas, canvas2x, canvas4x }});
+  }}
 
-      try {{
-        // Run 2x
-        statusBox.textContent = `Upscaling panel ${{i}} (2x)...`;
-        statusBox.className = "status loading";
-        const t0 = performance.now();
-        const bitmap2x = await createImageBitmap(origCanvas);
-        await upscale(bitmap2x, canvas2x, model);
-        bitmap2x.close();
-        const t2x = (performance.now() - t0).toFixed(0);
-        document.getElementById(`dim2x-${{i}}`).textContent = `${{canvas2x.width}}x${{canvas2x.height}} (${{t2x}}ms)`;
+  if (!gpu) return;
 
-        // Run 4x (feed 2x result back)
-        statusBox.textContent = `Upscaling panel ${{i}} (4x)...`;
-        document.getElementById(`dim4x-${{i}}`).textContent = "processing...";
-        const t1 = performance.now();
-        const bitmap4x = await createImageBitmap(canvas2x);
-        await upscale(bitmap4x, canvas4x, model);
-        bitmap4x.close();
-        const t4x = (performance.now() - t1).toFixed(0);
-        document.getElementById(`dim4x-${{i}}`).textContent = `${{canvas4x.width}}x${{canvas4x.height}} (${{t4x}}ms)`;
-      }} catch (e) {{
-        logErr(`Panel ${{i}} upscale failed:`, e);
-        statusBox.textContent = `Panel ${{i}} failed: ${{e.message}}`;
-        statusBox.className = "status err";
-        document.getElementById(`dim2x-${{i}}`).textContent = "ERROR";
-        document.getElementById(`dim4x-${{i}}`).textContent = "ERROR";
-      }}
-    }} else {{
-      row.appendChild(grid);
-      panelsDiv.appendChild(row);
+  try {{
+    // Batch 1: all 2x renders (same input resolution = same WebSR instance)
+    statusBox.textContent = "Upscaling all panels (2x)...";
+    statusBox.className = "status loading";
+    for (let i = 0; i < 4; i++) {{
+      const t0 = performance.now();
+      const bmp = await createImageBitmap(panels[i].origCanvas);
+      await upscale(bmp, panels[i].canvas2x, model);
+      bmp.close();
+      const ms = (performance.now() - t0).toFixed(0);
+      document.getElementById(`dim2x-${{i}}`).textContent =
+        `${{panels[i].canvas2x.width}}x${{panels[i].canvas2x.height}} (${{ms}}ms)`;
     }}
+
+    // Batch 2: all 4x renders (feed 2x results, same resolution)
+    statusBox.textContent = "Upscaling all panels (4x)...";
+    for (let i = 0; i < 4; i++) {{
+      document.getElementById(`dim4x-${{i}}`).textContent = "processing...";
+      const t0 = performance.now();
+      const bmp = await createImageBitmap(panels[i].canvas2x);
+      await upscale(bmp, panels[i].canvas4x, model);
+      bmp.close();
+      const ms = (performance.now() - t0).toFixed(0);
+      document.getElementById(`dim4x-${{i}}`).textContent =
+        `${{panels[i].canvas4x.width}}x${{panels[i].canvas4x.height}} (${{ms}}ms)`;
+    }}
+  }} catch (e) {{
+    logErr("Upscale failed:", e);
+    statusBox.textContent = "Error: " + e.message;
+    statusBox.className = "status err";
+    return;
   }}
 
   statusBox.textContent = "Done";
