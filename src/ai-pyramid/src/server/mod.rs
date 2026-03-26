@@ -1046,7 +1046,7 @@ function addLog(msg, cls) {{
   logBox.scrollTop = logBox.scrollHeight;
 }}
 window._addLog = addLog;
-addLog("WebSR Test v10 (VideoFrame+reuse-instance)");
+addLog("WebSR Test v11 (internal-hack+texture-refresh)");
 addLog("navigator.gpu: " + (navigator.gpu ? "available" : "UNAVAILABLE"));
 addLog("User-Agent: " + navigator.userAgent.slice(0, 80));
 window.addEventListener("error", (e) => addLog("JS Error: " + e.message + " @ " + e.filename + ":" + e.lineno, "err"));
@@ -1148,15 +1148,14 @@ async function getWeights(model) {{
   return w;
 }}
 
-// WebSR workarounds:
-// 1. destroy() kills shared GPUDevice → never call destroy
-// 2. render() caches input texture for ImageSource → use VideoFrame
-//    to force video path (GPUExternalTexture, refreshed each frame)
-// 3. Safari limits WebGPU contexts → reuse single canvas + instance
+// WebSR internal hacks for Safari compatibility:
+// 1. destroy() kills GPUDevice → never destroy
+// 2. Output texture cached from getCurrentTexture() once → expires after frame
+// 3. Input texture bound once in lazyLoadSetup() → never updated
+// Fix: patch internals before each render
 const workCanvas = document.createElement("canvas");
 let currentWebSR = null;
 let currentRes = "";
-const hasVideoFrame = typeof VideoFrame !== "undefined";
 
 async function upscale(source, displayCanvas, model) {{
   const weights = await getWeights(model);
@@ -1165,22 +1164,37 @@ async function upscale(source, displayCanvas, model) {{
   const resKey = `${{w}}x${{h}}_${{model}}`;
   log(`Upscale: ${{w}}x${{h}}`);
 
-  if (!currentWebSR || currentRes !== resKey) {{
+  const isNew = !currentWebSR || currentRes !== resKey;
+  if (isNew) {{
     currentWebSR = new WebSR({{ network_name: model, weights, gpu, canvas: workCanvas }});
     currentRes = resKey;
     log("New instance: " + resKey);
   }}
 
-  // Use VideoFrame to force video path (refreshes GPU texture each render)
-  // Falls back to ImageBitmap on browsers without VideoFrame support
-  if (hasVideoFrame) {{
-    const frame = new VideoFrame(source, {{ timestamp: Date.now() * 1000 }});
-    await currentWebSR.render(frame);
-    frame.close();
-  }} else {{
-    await currentWebSR.render(source);
+  // First render initializes the pipeline; subsequent renders need hacks
+  if (!isNew) {{
+    const ctx = currentWebSR.context;
+    if (ctx) {{
+      // HACK 1: Refresh output texture (Safari expires after each frame)
+      ctx.textures["output"] = ctx.context.getCurrentTexture();
+
+      // HACK 2: Re-write source pixels to input texture
+      // Find the input texture (first texture that isn't 'output')
+      for (const [key, tex] of Object.entries(ctx.textures)) {{
+        if (key !== "output" && tex.width === w && tex.height === h) {{
+          gpu.queue.copyExternalImageToTexture(
+            {{ source, flipY: false }},
+            {{ texture: tex }},
+            {{ width: w, height: h }}
+          );
+          log("Updated input texture: " + key);
+          break;
+        }}
+      }}
+    }}
   }}
 
+  await currentWebSR.render(source);
   await gpu.queue.onSubmittedWorkDone();
   await new Promise(r => requestAnimationFrame(r));
 
