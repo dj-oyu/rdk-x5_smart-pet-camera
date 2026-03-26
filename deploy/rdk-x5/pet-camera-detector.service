@@ -14,7 +14,7 @@ Environment=YOLO_SCORE_THRESHOLD=0.6
 Environment=YOLO_NMS_THRESHOLD=0.7
 Environment=LOG_LEVEL=info
 
-ExecStart=/bin/sh -c 'exec uv run src/detector/yolo_detector_daemon.py \
+ExecStart=/bin/sh -c 'exec /home/sunrise/.local/bin/uv run src/detector/yolo_detector_daemon.py \
   --model-path "$(scripts/resolve-model.sh ${YOLO_MODEL})" \
   --score-threshold ${YOLO_SCORE_THRESHOLD} \
   --nms-threshold ${YOLO_NMS_THRESHOLD} \
