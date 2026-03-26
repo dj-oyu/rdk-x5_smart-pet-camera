@@ -1006,7 +1006,14 @@ h2 {{ font-size: 14px; color: #8888aa; margin: 16px 0 6px; }}
 .card {{ background: #262640; border-radius: 8px; overflow: hidden; }}
 .card-label {{ padding: 6px 10px; font-size: 12px; color: #aaa; display: flex; justify-content: space-between; }}
 .card-label .dim {{ font-size: 11px; color: #666; }}
-.card img, .card canvas {{ width: 100%; display: block; }}
+.card img, .card canvas {{ display: block; }}
+.card.fit .card-scroll canvas, .card.fit img {{ width: 100%; }}
+.card.actual canvas {{ max-width: none; image-rendering: pixelated; }}
+.card-scroll {{ overflow-x: auto; }}
+.log {{ padding: 6px 10px; background: #1e1e3a; border-radius: 6px; font-size: 11px; font-family: monospace; max-height: 200px; overflow-y: auto; margin-bottom: 12px; white-space: pre-wrap; word-break: break-all; }}
+.log .err {{ color: #f44336; }}
+.log .info {{ color: #8888cc; }}
+label {{ cursor: pointer; }}
 .full {{ margin-bottom: 16px; }}
 .full img {{ max-width: 100%; border-radius: 8px; }}
 select {{ background: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; padding: 4px 8px; font-size: 13px; }}
@@ -1022,9 +1029,29 @@ select {{ background: #333; color: #e0e0e0; border: 1px solid #555; border-radiu
     <option value="anime4k/cnn-2x-m">2x Medium (35KB)</option>
     <option value="anime4k/cnn-2x-l">2x Large (114KB)</option>
   </select></label>
+  <label style="margin-left:12px"><input type="checkbox" id="actualSize"> Actual pixel size</label>
 </div>
 
-<div id="statusBox" class="status loading">Initializing WebGPU...</div>
+<div id="statusBox" class="status loading">Initializing...</div>
+<div id="logBox" class="log"></div>
+
+<script>
+// Pre-module diagnostics (runs even if module fails)
+const logBox = document.getElementById("logBox");
+function addLog(msg, cls) {{
+  const d = document.createElement("div");
+  d.className = cls || "info";
+  d.textContent = new Date().toISOString().slice(11,23) + " " + msg;
+  logBox.appendChild(d);
+  logBox.scrollTop = logBox.scrollHeight;
+}}
+window._addLog = addLog;
+addLog("Page loaded, checking environment...");
+addLog("navigator.gpu: " + (navigator.gpu ? "available" : "UNAVAILABLE"));
+addLog("User-Agent: " + navigator.userAgent.slice(0, 80));
+window.addEventListener("error", (e) => addLog("JS Error: " + e.message + " @ " + e.filename + ":" + e.lineno, "err"));
+window.addEventListener("unhandledrejection", (e) => addLog("Unhandled rejection: " + (e.reason?.message || e.reason), "err"));
+</script>
 
 <h2>Full Comic (Original)</h2>
 <div class="full"><img id="fullImg" crossorigin="anonymous"></div>
@@ -1033,7 +1060,21 @@ select {{ background: #333; color: #e0e0e0; border: 1px solid #555; border-radiu
 <div id="panels"></div>
 
 <script type="module">
-import WebSR from "https://esm.sh/@websr/websr@0.0.15";
+const log = (...args) => {{ console.log("[websr-test]", ...args); window._addLog?.(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ")); }};
+const logErr = (...args) => {{ console.error("[websr-test]", ...args); window._addLog?.(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" "), "err"); }};
+
+log("Loading WebSR from esm.sh...");
+let WebSR;
+try {{
+  const mod = await import("https://esm.sh/@websr/websr@0.0.15");
+  WebSR = mod.default;
+  log("WebSR module loaded:", WebSR);
+}} catch (e) {{
+  logErr("Failed to load WebSR module:", e);
+  document.getElementById("statusBox").textContent = "Failed to load WebSR: " + e.message;
+  document.getElementById("statusBox").className = "status err";
+  throw e;
+}}
 
 const MARGIN = 12, BORDER = 2, GAP = 8, PW = 404, PH = 228;
 const CELL_W = PW + 2 * BORDER, CELL_H = PH + 2 * BORDER;
@@ -1063,14 +1104,29 @@ data.events.forEach(e => {{
 }});
 photoSelect.value = "{latest}";
 
+// Check WebGPU support
+log("navigator.gpu:", navigator.gpu);
+if (!navigator.gpu) {{
+  statusBox.textContent = "WebGPU not available in this browser (navigator.gpu is undefined)";
+  statusBox.className = "status err";
+}}
+
 // Init WebGPU
 let gpu = null;
 try {{
-  gpu = await WebSR.initWebGPU();
-  if (!gpu) throw new Error("WebGPU not supported");
-  statusBox.textContent = "WebGPU ready (" + gpu.adapterInfo?.device + ")";
+  log("Calling WebSR.initWebGPU()...");
+  const result = await WebSR.initWebGPU();
+  log("initWebGPU result:", result, "type:", typeof result);
+  if (!result || result === false) {{
+    throw new Error("initWebGPU returned " + String(result));
+  }}
+  gpu = result;
+  const info = gpu.adapterInfo || {{}};
+  statusBox.textContent = `WebGPU ready (vendor: ${{info.vendor || "?"}}, device: ${{info.device || "?"}}, arch: ${{info.architecture || "?"}})`;
   statusBox.className = "status ok";
+  log("GPU device:", gpu);
 }} catch (e) {{
+  logErr("WebGPU init failed:", e);
   statusBox.textContent = "WebGPU unavailable: " + e.message;
   statusBox.className = "status err";
 }}
@@ -1081,18 +1137,26 @@ async function getWeights(model) {{
   if (weightCache[model]) return weightCache[model];
   const name = model.split("/")[1]; // cnn-2x-s
   const url = `https://cdn.jsdelivr.net/npm/@websr/websr@0.0.15/weights/anime4k/${{name}}-rl.json`;
+  log("Fetching weights:", url);
   statusBox.textContent = "Loading weights: " + name + "...";
   statusBox.className = "status loading";
-  const w = await fetch(url).then(r => r.json());
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`Weight fetch failed: ${{r.status}} ${{r.statusText}}`);
+  const w = await r.json();
+  log("Weights loaded, keys:", Object.keys(w).length);
   weightCache[model] = w;
   return w;
 }}
 
 async function upscale(source, canvas, model) {{
   const weights = await getWeights(model);
+  log(`Creating WebSR instance: model=${{model}}, source=${{source.width}}x${{source.height}}`);
   const websr = new WebSR({{ network_name: model, weights, gpu, canvas }});
+  log("Calling render...");
   await websr.render(source);
-  websr.destroy();
+  log(`Render done: canvas=${{canvas.width}}x${{canvas.height}}`);
+  await websr.destroy();
+  log("Destroyed WebSR instance");
 }}
 
 function cropPanel(img, idx) {{
@@ -1107,9 +1171,13 @@ async function run() {{
   const filename = photoSelect.value;
   if (!filename) return;
 
-  // Load original
+  log("Loading photo:", filename);
   fullImg.src = `/api/photos/${{encodeURIComponent(filename)}}`;
-  await new Promise(r => fullImg.onload = r);
+  await new Promise((resolve, reject) => {{
+    fullImg.onload = resolve;
+    fullImg.onerror = () => reject(new Error("Image load failed"));
+  }});
+  log(`Photo loaded: ${{fullImg.naturalWidth}}x${{fullImg.naturalHeight}}`);
 
   panelsDiv.innerHTML = "";
   const model = modelSelect.value;
@@ -1121,50 +1189,64 @@ async function run() {{
     const grid = document.createElement("div");
     grid.className = "grid";
 
+    const useActual = document.getElementById("actualSize").checked;
+    const cardClass = useActual ? "card actual" : "card fit";
+
     // 1) Original crop
     const origCanvas = cropPanel(fullImg, i);
     const card1 = document.createElement("div");
-    card1.className = "card";
-    card1.innerHTML = `<div class="card-label">Original<span class="dim">${{r.w}}x${{r.h}}</span></div>`;
-    card1.appendChild(origCanvas);
+    card1.className = cardClass;
+    card1.innerHTML = `<div class="card-label">Original<span class="dim">${{r.w}}x${{r.h}}</span></div><div class="card-scroll"></div>`;
+    card1.querySelector(".card-scroll").appendChild(origCanvas);
     grid.appendChild(card1);
 
     if (gpu) {{
       // 2) 2x upscale
       const canvas2x = document.createElement("canvas");
       const card2 = document.createElement("div");
-      card2.className = "card";
-      card2.innerHTML = `<div class="card-label">WebSR 2x<span class="dim" id="dim2x-${{i}}">...</span></div>`;
-      card2.appendChild(canvas2x);
+      card2.className = cardClass;
+      card2.innerHTML = `<div class="card-label">WebSR 2x<span class="dim" id="dim2x-${{i}}">processing...</span></div><div class="card-scroll"></div>`;
+      card2.querySelector(".card-scroll").appendChild(canvas2x);
       grid.appendChild(card2);
 
       // 3) 4x upscale (2-pass)
       const canvas4x = document.createElement("canvas");
       const card3 = document.createElement("div");
-      card3.className = "card";
-      card3.innerHTML = `<div class="card-label">WebSR 4x (2-pass)<span class="dim" id="dim4x-${{i}}">...</span></div>`;
-      card3.appendChild(canvas4x);
+      card3.className = cardClass;
+      card3.innerHTML = `<div class="card-label">WebSR 4x (2-pass)<span class="dim" id="dim4x-${{i}}">waiting...</span></div><div class="card-scroll"></div>`;
+      card3.querySelector(".card-scroll").appendChild(canvas4x);
       grid.appendChild(card3);
 
       row.appendChild(grid);
       panelsDiv.appendChild(row);
 
-      // Run 2x
-      statusBox.textContent = `Upscaling panel ${{i}} (2x)...`;
-      statusBox.className = "status loading";
-      const t0 = performance.now();
-      const bitmap2x = await createImageBitmap(origCanvas);
-      await upscale(bitmap2x, canvas2x, model);
-      const t2x = (performance.now() - t0).toFixed(0);
-      document.getElementById(`dim2x-${{i}}`).textContent = `${{canvas2x.width}}x${{canvas2x.height}} (${{t2x}}ms)`;
+      try {{
+        // Run 2x
+        statusBox.textContent = `Upscaling panel ${{i}} (2x)...`;
+        statusBox.className = "status loading";
+        const t0 = performance.now();
+        const bitmap2x = await createImageBitmap(origCanvas);
+        await upscale(bitmap2x, canvas2x, model);
+        bitmap2x.close();
+        const t2x = (performance.now() - t0).toFixed(0);
+        document.getElementById(`dim2x-${{i}}`).textContent = `${{canvas2x.width}}x${{canvas2x.height}} (${{t2x}}ms)`;
 
-      // Run 4x (feed 2x result back)
-      statusBox.textContent = `Upscaling panel ${{i}} (4x)...`;
-      const t1 = performance.now();
-      const bitmap4x = await createImageBitmap(canvas2x);
-      await upscale(bitmap4x, canvas4x, model);
-      const t4x = (performance.now() - t1).toFixed(0);
-      document.getElementById(`dim4x-${{i}}`).textContent = `${{canvas4x.width}}x${{canvas4x.height}} (${{t4x}}ms)`;
+        // Run 4x (feed 2x result back)
+        statusBox.textContent = `Upscaling panel ${{i}} (4x)...`;
+        document.getElementById(`dim4x-${{i}}`).textContent = "processing...";
+        const t1 = performance.now();
+        const bitmap4x = await createImageBitmap(canvas2x);
+        await upscale(bitmap4x, canvas4x, model);
+        bitmap4x.close();
+        const t4x = (performance.now() - t1).toFixed(0);
+        document.getElementById(`dim4x-${{i}}`).textContent = `${{canvas4x.width}}x${{canvas4x.height}} (${{t4x}}ms)`;
+      }} catch (e) {{
+        logErr(`Panel ${{i}} upscale failed:`, e);
+        statusBox.textContent = `Panel ${{i}} failed: ${{e.message}}`;
+        statusBox.className = "status err";
+        document.getElementById(`dim2x-${{i}}`).textContent = "ERROR";
+        document.getElementById(`dim4x-${{i}}`).textContent = "ERROR";
+      }}
     }} else {{
       row.appendChild(grid);
       panelsDiv.appendChild(row);
@@ -1177,6 +1259,7 @@ async function run() {{
 
 photoSelect.addEventListener("change", run);
 modelSelect.addEventListener("change", run);
+document.getElementById("actualSize").addEventListener("change", run);
 run();
 </script>
 </body>
