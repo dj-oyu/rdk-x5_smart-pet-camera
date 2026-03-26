@@ -1049,7 +1049,7 @@ function addLog(msg, cls) {{
   logBox.scrollTop = logBox.scrollHeight;
 }}
 window._addLog = addLog;
-addLog("v13");
+addLog("v14");
 addLog("navigator.gpu: " + (navigator.gpu ? "available" : "UNAVAILABLE"));
 addLog("User-Agent: " + navigator.userAgent.slice(0, 80));
 window.addEventListener("error", (e) => addLog("JS Error: " + e.message + " @ " + e.filename + ":" + e.lineno, "err"));
@@ -1066,16 +1066,12 @@ window.addEventListener("unhandledrejection", (e) => addLog("Unhandled rejection
 const log = (...args) => {{ console.log("[websr-test]", ...args); window._addLog?.(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ")); }};
 const logErr = (...args) => {{ console.error("[websr-test]", ...args); window._addLog?.(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" "), "err"); }};
 
-log("Loading WebSR from esm.sh...");
 let WebSR;
 try {{
-  const mod = await import("https://esm.sh/@websr/websr@0.0.15");
-  WebSR = mod.default;
-  log("WebSR module loaded:", WebSR);
+  WebSR = (await import("https://esm.sh/@websr/websr@0.0.15")).default;
 }} catch (e) {{
-  logErr("Failed to load WebSR module:", e);
-  document.getElementById("statusBox").textContent = "Failed to load WebSR: " + e.message;
-  document.getElementById("statusBox").className = "status err";
+  logErr("WebSR load failed: " + e.message);
+  statusBox.textContent = "Failed: " + e.message; statusBox.className = "status err";
   throw e;
 }}
 
@@ -1107,30 +1103,16 @@ data.events.forEach(e => {{
 }});
 photoSelect.value = "{latest}";
 
-// Check WebGPU support
-log("navigator.gpu:", navigator.gpu);
-if (!navigator.gpu) {{
-  statusBox.textContent = "WebGPU not available in this browser (navigator.gpu is undefined)";
-  statusBox.className = "status err";
-}}
-
-// Init WebGPU
 let gpu = null;
 try {{
-  log("Calling WebSR.initWebGPU()...");
   const result = await WebSR.initWebGPU();
-  log("initWebGPU result:", result, "type:", typeof result);
-  if (!result || result === false) {{
-    throw new Error("initWebGPU returned " + String(result));
-  }}
+  if (!result || result === false) throw new Error("not supported");
   gpu = result;
-  const info = gpu.adapterInfo || {{}};
-  statusBox.textContent = `WebGPU ready (vendor: ${{info.vendor || "?"}}, device: ${{info.device || "?"}}, arch: ${{info.architecture || "?"}})`;
+  const i = gpu.adapterInfo || {{}};
+  statusBox.textContent = `WebGPU: ${{i.vendor||"?"}} ${{i.architecture||""}}`;
   statusBox.className = "status ok";
-  log("GPU device:", gpu);
 }} catch (e) {{
-  logErr("WebGPU init failed:", e);
-  statusBox.textContent = "WebGPU unavailable: " + e.message;
+  statusBox.textContent = "WebGPU: " + e.message;
   statusBox.className = "status err";
 }}
 
@@ -1138,15 +1120,10 @@ try {{
 const weightCache = {{}};
 async function getWeights(model) {{
   if (weightCache[model]) return weightCache[model];
-  const name = model.split("/")[1]; // cnn-2x-s
-  const url = `https://cdn.jsdelivr.net/npm/@websr/websr@0.0.15/weights/anime4k/${{name}}-rl.json`;
-  log("Fetching weights:", url);
-  statusBox.textContent = "Loading weights: " + name + "...";
-  statusBox.className = "status loading";
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`Weight fetch failed: ${{r.status}} ${{r.statusText}}`);
+  const name = model.split("/")[1];
+  const r = await fetch(`https://cdn.jsdelivr.net/npm/@websr/websr@0.0.15/weights/anime4k/${{name}}-rl.json`);
+  if (!r.ok) throw new Error(`Weights ${{r.status}}`);
   const w = await r.json();
-  log("Weights loaded, keys:", Object.keys(w).length);
   weightCache[model] = w;
   return w;
 }}
@@ -1190,13 +1167,11 @@ async function run() {{
   const filename = photoSelect.value;
   if (!filename) return;
 
-  log("Loading photo:", filename);
   fullImg.src = `/api/photos/${{encodeURIComponent(filename)}}`;
   await new Promise((resolve, reject) => {{
     fullImg.onload = resolve;
-    fullImg.onerror = () => reject(new Error("Image load failed"));
+    fullImg.onerror = () => reject(new Error("img load failed"));
   }});
-  log(`Photo loaded: ${{fullImg.naturalWidth}}x${{fullImg.naturalHeight}}`);
 
   panelsDiv.innerHTML = "";
   const model = modelSelect.value;
