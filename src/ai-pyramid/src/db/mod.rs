@@ -322,6 +322,25 @@ impl PhotoStore {
             params![now, photo_id],
         )?;
 
+        // Build pet_class lookup from existing Level 1 cat detections (per panel)
+        // so Level 2 detections can inherit pet identity
+        let mut l1_pet: std::collections::HashMap<Option<i32>, String> =
+            std::collections::HashMap::new();
+        {
+            let mut q = self.conn.prepare_cached(
+                "SELECT panel_index, COALESCE(pet_id_override, pet_class) \
+                 FROM detections \
+                 WHERE photo_id = ?1 AND yolo_class = 'cat' AND det_level = 1 \
+                   AND COALESCE(pet_id_override, pet_class) IS NOT NULL",
+            )?;
+            let rows = q.query_map(params![photo_id], |row| {
+                Ok((row.get::<_, Option<i32>>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for (panel, pet) in rows.flatten() {
+                l1_pet.entry(panel).or_insert(pet);
+            }
+        }
+
         // Insert detections
         let mut stmt = self.conn.prepare_cached(
             "INSERT INTO detections (photo_id, panel_index, bbox_x, bbox_y, bbox_w, bbox_h, yolo_class, pet_class, confidence, detected_at, color_metrics, det_level, model)
@@ -329,6 +348,14 @@ impl PhotoStore {
         )?;
         for d in detections {
             let metrics_str = d.color_metrics.as_ref().map(|v| v.to_string());
+            // Inherit pet_class from Level 1 for cat detections without pet info
+            let pet_class = if d.pet_class.is_some() {
+                d.pet_class.clone()
+            } else if d.yolo_class.as_deref() == Some("cat") {
+                l1_pet.get(&d.panel_index).cloned()
+            } else {
+                None
+            };
             stmt.execute(params![
                 photo_id,
                 d.panel_index,
@@ -337,7 +364,7 @@ impl PhotoStore {
                 d.bbox_w,
                 d.bbox_h,
                 d.yolo_class,
-                d.pet_class,
+                pet_class,
                 d.confidence,
                 d.detected_at,
                 metrics_str,

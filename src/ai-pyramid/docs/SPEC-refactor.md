@@ -203,14 +203,56 @@ pub type SharedEventRepository = Arc<dyn EventRepositoryPort>;
 
 ---
 
+## 5. UI State Management (event-detail.tsx)
+
+### 5.1 useEffect カスケード問題
+
+現状の `event-detail.tsx` は useState → useEffect の連鎖が3段ある:
+
+```
+event.id 変更
+  → useEffect: fetchDetections → setDetections
+  → useEffect: Image.onload → setComicImage
+    → useEffect: comicImage → canvas描画
+      → 再レンダリング → panelBboxStyle が canvas.width 参照
+```
+
+本来やりたいことは「画像と detections が揃ったら描画」だけ。
+effect chain はデータフローが暗黙的で追いにくい。
+
+**改善案:**
+
+1. **Promise.all で統合**: 画像ロードと detections fetch を1つの effect 内で並行実行し、両方揃ったら1回の setState で完了
+2. **useReducer**: `detections`, `comicImage`, `loading` を1つの reducer にまとめ、`LOADED` action で一括更新
+3. **derived state**: canvas.width > 0 のチェックを state ではなく ref で行う
+
+### 5.2 Preact Signals による最適化
+
+`@preact/signals` でコンポーネント全体の再レンダリングを回避できる候補:
+
+| State | 変更頻度 | Signals の効果 |
+|-------|---------|---------------|
+| `hoveredDetId` | マウス移動のたび | bbox 2個 + det-item 2個だけ DOM 更新 |
+| `activePanel` | スワイプのたび | dot 2個 + breadcrumb だけ更新 |
+| `zoomedDetId` | クリックのたび | 該当 bbox の class 変更だけ |
+
+効果が薄いもの: `detections` (全体再描画が必要)、`viewMode` (構造変化)。
+
+**導入判断**: 現状パフォーマンス問題なし → カクつきが出てから。
+`@preact/signals` 追加 + `useState` → `signal()` 置換で移行可能。
+
+---
+
 ## Priority & Impact
 
 | Item | Effort | Impact | Priority |
 |------|--------|--------|----------|
-| Stats 4→1 query | 小 | 小 (4 SELECTが1に) | P0 — すぐやる |
-| `prepare` → `prepare_cached` | 小 | 中 (全クエリに効く) | P0 — 一括置換 |
+| Stats 4→1 query | 小 | 小 (4 SELECTが1に) | ~~P0~~ Done |
+| `prepare` → `prepare_cached` | 小 | 中 (全クエリに効く) | ~~P0~~ Done |
 | Web asset extraction | 中 | 中 (可読性・保守性) | P1 |
 | 動的 WHERE 最適化 | 中 | 中 (キャッシュ効率) | P1 |
+| useEffect cascade 整理 | 中 | 中 (保守性) | P1 |
 | Clone reduction (DB params) | 中 | 小 (マイクロ最適化) | P2 |
 | Box<dyn ToSql> 排除 | 中 | 小 | P2 |
+| Preact Signals 導入 | 中 | 小-中 (hover性能) | P2 — 問題が出てから |
 | Cow<str> 導入 | 大 | 小 | P3 — 型変更の波及大 |
