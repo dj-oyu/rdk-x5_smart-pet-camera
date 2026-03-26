@@ -124,6 +124,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events", get(handle_sse))
         .route("/health", get(handle_health))
         .route("/test/websr", get(handle_websr_test))
+        .route("/test/esrgan", get(handle_esrgan_test))
+        .route("/test/models/{*path}", get(handle_test_model))
         .with_state(state)
         .merge(mcp_router)
 }
@@ -1299,6 +1301,328 @@ async function run() {{
 
 photoSelect.addEventListener("change", run);
 modelSelect.addEventListener("change", run);
+document.getElementById("actualSize").addEventListener("change", run);
+run();
+</script>
+</body>
+</html>"##
+    );
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
+}
+
+async fn handle_test_model(Path(path): Path<String>) -> impl IntoResponse {
+    let safe_path = path.trim_start_matches('/').replace("..", "");
+    let file_path = std::path::Path::new("/tmp/esrgan-models").join(&safe_path);
+    match tokio::fs::read(&file_path).await {
+        Ok(data) => {
+            let mime = if safe_path.ends_with(".onnx") {
+                "application/octet-stream"
+            } else {
+                "application/octet-stream"
+            };
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, mime.to_string()),
+                    (
+                        header::CACHE_CONTROL,
+                        "public, max-age=31536000, immutable".to_string(),
+                    ),
+                ],
+                data,
+            )
+                .into_response()
+        }
+        Err(_) => (StatusCode::NOT_FOUND, format!("model not found: {safe_path}")).into_response(),
+    }
+}
+
+async fn handle_esrgan_test(State(state): State<AppState>) -> impl IntoResponse {
+    let latest = state
+        .queries()
+        .list_events(crate::application::EventQuery {
+            limit: Some(1),
+            ..Default::default()
+        })
+        .await
+        .ok()
+        .and_then(|(events, _)| events.into_iter().next())
+        .map(|e| e.source_filename)
+        .unwrap_or_default();
+
+    let html = format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Real-ESRGAN Test</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; }}
+body {{ font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 12px; }}
+h1 {{ font-size: 18px; margin-bottom: 8px; }}
+h2 {{ font-size: 14px; color: #8888aa; margin: 16px 0 6px; }}
+.status {{ padding: 6px 12px; border-radius: 6px; background: #262640; margin-bottom: 12px; font-size: 13px; }}
+.status.ok {{ border-left: 3px solid #4caf50; }}
+.status.err {{ border-left: 3px solid #f44336; }}
+.status.loading {{ border-left: 3px solid #ff9800; }}
+.grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 8px; }}
+.card {{ background: #262640; border-radius: 8px; overflow: hidden; }}
+.card-label {{ padding: 6px 10px; font-size: 12px; color: #aaa; display: flex; justify-content: space-between; }}
+.card-label .dim {{ font-size: 11px; color: #666; }}
+.card canvas {{ width: 100%; display: block; }}
+.full {{ margin-bottom: 16px; }}
+.full img {{ max-width: 100%; border-radius: 8px; }}
+select {{ background: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; padding: 4px 8px; font-size: 13px; }}
+.log-wrap {{ position: relative; margin-bottom: 12px; }}
+.log {{ padding: 6px 10px; background: #1e1e3a; border-radius: 6px; font-size: 10px; font-family: monospace; max-height: 120px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }}
+.log-copy {{ position: absolute; top: 4px; right: 4px; background: #444; color: #ccc; border: none; border-radius: 4px; padding: 2px 8px; font-size: 10px; cursor: pointer; }}
+.log-copy:active {{ background: #666; }}
+.log .err {{ color: #f44336; }}
+.log .info {{ color: #8888cc; }}
+label {{ cursor: pointer; }}
+</style>
+</head>
+<body>
+<h1>Real-ESRGAN 4x Upscale Test</h1>
+
+<div style="margin-bottom:12px">
+  <label>Photo: <select id="photoSelect"></select></label>
+  <label style="margin-left:12px"><input type="checkbox" id="actualSize"> Actual pixel size</label>
+</div>
+
+<div id="statusBox" class="status loading">Loading onnxruntime...</div>
+<div class="log-wrap"><div id="logBox" class="log"></div><button class="log-copy" onclick="navigator.clipboard.writeText(logBox.innerText).then(()=>this.textContent='Copied!').catch(()=>this.textContent='Failed');setTimeout(()=>this.textContent='Copy',1500)">Copy</button></div>
+
+<h2>Full Comic (Original)</h2>
+<div class="full"><img id="fullImg" crossorigin="anonymous"></div>
+
+<h2>Panel Comparison (Original vs Real-ESRGAN 4x)</h2>
+<div id="panels"></div>
+
+<script>
+const logBox = document.getElementById("logBox");
+function addLog(msg, cls) {{
+  const d = document.createElement("div");
+  d.className = cls || "info";
+  d.textContent = new Date().toISOString().slice(11,23) + " " + msg;
+  logBox.appendChild(d);
+  logBox.scrollTop = logBox.scrollHeight;
+}}
+window._addLog = addLog;
+addLog("v1-esrgan");
+</script>
+
+<script type="module">
+const log = (...args) => {{ console.log("[esrgan]", ...args); window._addLog?.(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ")); }};
+const logErr = (...args) => {{ console.error("[esrgan]", ...args); window._addLog?.(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" "), "err"); }};
+
+const statusBox = document.getElementById("statusBox");
+const photoSelect = document.getElementById("photoSelect");
+const panelsDiv = document.getElementById("panels");
+const fullImg = document.getElementById("fullImg");
+
+const MARGIN = 12, BORDER = 2, GAP = 8, PW = 404, PH = 228;
+const CELL_W = PW + 2 * BORDER, CELL_H = PH + 2 * BORDER;
+const panelRegions = [0,1,2,3].map(i => {{
+  const col = i % 2, row = Math.floor(i / 2);
+  return {{ x: MARGIN + BORDER + col * (CELL_W + GAP), y: MARGIN + BORDER + row * (CELL_H + GAP), w: PW, h: PH }};
+}});
+
+// Load photo list
+const resp = await fetch("/api/photos?limit=20");
+const data = await resp.json();
+data.events.forEach(e => {{
+  const opt = document.createElement("option");
+  opt.value = e.source_filename;
+  opt.textContent = e.source_filename.replace("comic_","").replace(".jpg","");
+  photoSelect.appendChild(opt);
+}});
+photoSelect.value = "{latest}";
+
+// Load onnxruntime-web from CDN (v1.20.1 for Safari compat)
+log("Loading onnxruntime-web 1.20.1...");
+let ort;
+try {{
+  ort = await import("https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.all.min.mjs");
+  ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/";
+  log("ort loaded");
+}} catch (e) {{
+  logErr("ort load failed: " + e.message);
+  statusBox.textContent = "Failed: " + e.message;
+  statusBox.className = "status err";
+  throw e;
+}}
+
+// Load ONNX model
+log("Loading Real-ESRGAN model...");
+statusBox.textContent = "Loading model (4.7MB)...";
+statusBox.className = "status loading";
+let session;
+try {{
+  session = await ort.InferenceSession.create(
+    "/test/models/x4v3-fp32/real_esrgan_general_x4v3-onnx-float/real_esrgan_general_x4v3.onnx",
+    {{ executionProviders: ["webgl"] }}
+  );
+  log("Model loaded: inputs=" + session.inputNames + " outputs=" + session.outputNames);
+  statusBox.textContent = "Model ready (WebGL)";
+  statusBox.className = "status ok";
+}} catch (e) {{
+  logErr("Model load failed: " + e.message);
+  statusBox.textContent = "Model failed: " + e.message;
+  statusBox.className = "status err";
+  throw e;
+}}
+
+const TILE = 128;
+const SCALE = 4;
+
+function imageToTensor(canvas, x, y, w, h) {{
+  const ctx = canvas.getContext("2d");
+  const imgData = ctx.getImageData(x, y, w, h).data;
+  const float32 = new Float32Array(3 * TILE * TILE);
+  for (let ty = 0; ty < TILE; ty++) {{
+    for (let tx = 0; tx < TILE; tx++) {{
+      const sx = Math.min(tx, w - 1);
+      const sy = Math.min(ty, h - 1);
+      const si = (sy * w + sx) * 4;
+      const di = ty * TILE + tx;
+      float32[di]                    = imgData[si]     / 255.0;
+      float32[di + TILE * TILE]      = imgData[si + 1] / 255.0;
+      float32[di + TILE * TILE * 2]  = imgData[si + 2] / 255.0;
+    }}
+  }}
+  return new ort.Tensor("float32", float32, [1, 3, TILE, TILE]);
+}}
+
+function tensorToImageData(tensor) {{
+  const [, , h, w] = tensor.dims;
+  const d = tensor.data;
+  const pixels = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) {{
+    pixels[i * 4]     = Math.min(255, Math.max(0, d[i] * 255));
+    pixels[i * 4 + 1] = Math.min(255, Math.max(0, d[i + w * h] * 255));
+    pixels[i * 4 + 2] = Math.min(255, Math.max(0, d[i + w * h * 2] * 255));
+    pixels[i * 4 + 3] = 255;
+  }}
+  return new ImageData(pixels, w, h);
+}}
+
+async function upscalePanel(srcCanvas, displayCanvas) {{
+  const sw = srcCanvas.width;
+  const sh = srcCanvas.height;
+  const outW = sw * SCALE;
+  const outH = sh * SCALE;
+  displayCanvas.width = outW;
+  displayCanvas.height = outH;
+  const dCtx = displayCanvas.getContext("2d");
+
+  const tilesX = Math.ceil(sw / TILE);
+  const tilesY = Math.ceil(sh / TILE);
+  let tileCount = 0;
+  const totalTiles = tilesX * tilesY;
+
+  for (let ty = 0; ty < tilesY; ty++) {{
+    for (let tx = 0; tx < tilesX; tx++) {{
+      const sx = tx * TILE;
+      const sy = ty * TILE;
+      const tw = Math.min(TILE, sw - sx);
+      const th = Math.min(TILE, sh - sy);
+
+      const inputTensor = imageToTensor(srcCanvas, sx, sy, tw, th);
+      const feeds = {{ [session.inputNames[0]]: inputTensor }};
+      const results = await session.run(feeds);
+      const outputTensor = results[session.outputNames[0]];
+      const tileImg = tensorToImageData(outputTensor);
+
+      // Place tile (crop to actual output size if source tile was smaller than TILE)
+      const cropW = tw * SCALE;
+      const cropH = th * SCALE;
+      const tempCanvas = document.createElement("canvas");
+      tempCanvas.width = tileImg.width;
+      tempCanvas.height = tileImg.height;
+      tempCanvas.getContext("2d").putImageData(tileImg, 0, 0);
+      dCtx.drawImage(tempCanvas, 0, 0, cropW, cropH, sx * SCALE, sy * SCALE, cropW, cropH);
+
+      tileCount++;
+      inputTensor.dispose();
+      outputTensor.dispose();
+    }}
+  }}
+  return totalTiles;
+}}
+
+function cropPanel(img, idx) {{
+  const r = panelRegions[idx];
+  const c = document.createElement("canvas");
+  c.width = r.w; c.height = r.h;
+  c.getContext("2d").drawImage(img, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+  return c;
+}}
+
+async function run() {{
+  const filename = photoSelect.value;
+  if (!filename) return;
+
+  fullImg.src = `/api/photos/${{encodeURIComponent(filename)}}`;
+  await new Promise((resolve, reject) => {{
+    fullImg.onload = resolve;
+    fullImg.onerror = () => reject(new Error("img load failed"));
+  }});
+
+  panelsDiv.innerHTML = "";
+  const useActual = document.getElementById("actualSize").checked;
+
+  for (let i = 0; i < 4; i++) {{
+    const r = panelRegions[i];
+    const row = document.createElement("div");
+    row.innerHTML = `<h2>Panel ${{i}} (${{r.w}}x${{r.h}})</h2>`;
+    const grid = document.createElement("div");
+    grid.className = "grid";
+
+    const origCanvas = cropPanel(fullImg, i);
+    const card1 = document.createElement("div");
+    card1.className = "card";
+    card1.innerHTML = `<div class="card-label">Original<span class="dim">${{r.w}}x${{r.h}}</span></div>`;
+    if (!useActual) origCanvas.style.width = "100%";
+    card1.appendChild(origCanvas);
+    grid.appendChild(card1);
+
+    const upCanvas = document.createElement("canvas");
+    const card2 = document.createElement("div");
+    card2.className = "card";
+    card2.innerHTML = `<div class="card-label">Real-ESRGAN 4x<span class="dim" id="dim-${{i}}">processing...</span></div>`;
+    if (!useActual) upCanvas.style.width = "100%";
+    card2.appendChild(upCanvas);
+    grid.appendChild(card2);
+
+    row.appendChild(grid);
+    panelsDiv.appendChild(row);
+
+    statusBox.textContent = `Upscaling panel ${{i}}...`;
+    statusBox.className = "status loading";
+    const t0 = performance.now();
+    try {{
+      const tiles = await upscalePanel(origCanvas, upCanvas);
+      const ms = (performance.now() - t0).toFixed(0);
+      document.getElementById(`dim-${{i}}`).textContent = `${{upCanvas.width}}x${{upCanvas.height}} ${{ms}}ms (${{tiles}} tiles)`;
+      log(`P${{i}} ${{r.w}}x${{r.h}}→${{upCanvas.width}}x${{upCanvas.height}} ${{ms}}ms ${{tiles}}tiles`);
+    }} catch (e) {{
+      logErr(`P${{i}} failed: ${{e.message}}`);
+      document.getElementById(`dim-${{i}}`).textContent = "ERROR";
+    }}
+  }}
+
+  statusBox.textContent = "Done";
+  statusBox.className = "status ok";
+}}
+
+photoSelect.addEventListener("change", run);
 document.getElementById("actualSize").addEventListener("change", run);
 run();
 </script>
