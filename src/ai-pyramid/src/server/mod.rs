@@ -1049,7 +1049,7 @@ function addLog(msg, cls) {{
   logBox.scrollTop = logBox.scrollHeight;
 }}
 window._addLog = addLog;
-addLog("v18 (DOM+rAF+toBlob)");
+addLog("v19 (copyTexToBuffer)");
 addLog("navigator.gpu: " + (navigator.gpu ? "available" : "UNAVAILABLE"));
 addLog("User-Agent: " + navigator.userAgent.slice(0, 80));
 window.addEventListener("error", (e) => addLog("JS Error: " + e.message + " @ " + e.filename + ":" + e.lineno, "err"));
@@ -1140,25 +1140,50 @@ async function upscale(source, displayCanvas, model) {{
   const rid = ++renderCount;
 
   const websr = new WebSR({{ network_name: model, weights, gpu, canvas: workCanvas }});
+
+  // Reconfigure canvas with COPY_SRC so we can read the output texture directly
+  const gpuCtx = workCanvas.getContext("webgpu");
+  gpuCtx.configure({{
+    device: gpu,
+    format: navigator.gpu.getPreferredCanvasFormat(),
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+  }});
+
   const t0 = performance.now();
   await websr.render(source);
-  await gpu.queue.onSubmittedWorkDone();
-  // Wait for frame presentation (drawing buffer updated at rAF boundary)
-  await new Promise(r => requestAnimationFrame(r));
 
-  // toBlob → createImageBitmap(blob) → drawImage
-  // Avoids createImageBitmap(canvas) which is unreliable on Safari WebGPU
-  const blob = await new Promise(r => workCanvas.toBlob(r));
-  const bitmap = await createImageBitmap(blob);
-  displayCanvas.width = bitmap.width;
-  displayCanvas.height = bitmap.height;
-  const dCtx = displayCanvas.getContext("2d");
-  dCtx.drawImage(bitmap, 0, 0);
-  const px = dCtx.getImageData(bitmap.width / 2, bitmap.height / 2, 1, 1).data;
-  bitmap.close();
+  // Get the texture that was just rendered to (same frame = same texture)
+  const outTex = gpuCtx.getCurrentTexture();
+  const outW = outTex.width;
+  const outH = outTex.height;
+  const bytesPerRow = Math.ceil(outW * 4 / 256) * 256;
+  const readBuf = gpu.createBuffer({{
+    size: bytesPerRow * outH,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+  }});
+  const enc = gpu.createCommandEncoder();
+  enc.copyTextureToBuffer({{ texture: outTex }}, {{ buffer: readBuf, bytesPerRow }}, [outW, outH]);
+  gpu.queue.submit([enc.finish()]);
+  await readBuf.mapAsync(GPUMapMode.READ);
+  const raw = new Uint8Array(readBuf.getMappedRange());
+
+  // Write to display canvas via ImageData (strip row alignment padding)
+  const rowBytes = outW * 4;
+  const pixels = new Uint8ClampedArray(outW * outH * 4);
+  for (let y = 0; y < outH; y++) {{
+    pixels.set(raw.subarray(y * bytesPerRow, y * bytesPerRow + rowBytes), y * rowBytes);
+  }}
+  readBuf.unmap();
+  readBuf.destroy();
+
+  displayCanvas.width = outW;
+  displayCanvas.height = outH;
+  displayCanvas.getContext("2d").putImageData(new ImageData(pixels, outW, outH), 0, 0);
+
   const ms = (performance.now() - t0).toFixed(0);
-  const ok = px[0] + px[1] + px[2] > 0;
-  log(`R${{rid}} ${{w}}x${{h}}→${{displayCanvas.width}}x${{displayCanvas.height}} ${{ms}}ms px=[${{px[0]}},${{px[1]}},${{px[2]}}] ${{ok ? "OK" : "BLACK"}}`);
+  const mid = ((outH / 2) * outW + outW / 2) * 4;
+  const ok = pixels[mid] + pixels[mid+1] + pixels[mid+2] > 0;
+  log(`R${{rid}} ${{w}}x${{h}}→${{outW}}x${{outH}} ${{ms}}ms px=[${{pixels[mid]}},${{pixels[mid+1]}},${{pixels[mid+2]}}] ${{ok ? "OK" : "BLACK"}}`);
 }}
 
 function cropPanel(img, idx) {{
