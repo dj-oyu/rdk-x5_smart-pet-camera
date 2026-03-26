@@ -1,0 +1,38 @@
+[Unit]
+Description=Pet Camera Web Monitor
+After=pet-camera-capture.service
+PartOf=pet-camera-capture.service
+PartOf=pet-camera.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/smart-pet-camera
+EnvironmentFile=-/opt/smart-pet-camera/.env
+
+Environment=MONITOR_HOST=0.0.0.0
+Environment=MONITOR_PORT=8080
+Environment=HTTP_ONLY_PORT=8082
+Environment=JPEG_QUALITY=65
+Environment=LOG_LEVEL=info
+
+ExecStart=/bin/sh -c 'TLS_ARGS=""; \
+  [ -n "${PET_CAMERA_TLS_CERT}" ] && TLS_ARGS="-tls-cert ${PET_CAMERA_TLS_CERT} -tls-key ${PET_CAMERA_TLS_KEY}"; \
+  HTTP_ONLY_ARGS=""; \
+  [ -n "${HTTP_ONLY_PORT}" ] && HTTP_ONLY_ARGS="-http-only ${MONITOR_HOST}:${HTTP_ONLY_PORT}"; \
+  exec build/web_monitor \
+    -http "${MONITOR_HOST}:${MONITOR_PORT}" \
+    -assets src/web \
+    -assets-build build/web \
+    -frame-shm /pet_camera_mjpeg_zc \
+    -detection-shm /pet_camera_detections \
+    -webrtc-base "http://localhost:${PET_CAMERA_STREAMING_PORT:-8081}" \
+    -fps 30 \
+    -jpeg-quality "${JPEG_QUALITY}" \
+    -log-level "${LOG_LEVEL}" \
+    ${TLS_ARGS} ${HTTP_ONLY_ARGS}'
+
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=pet-camera.target

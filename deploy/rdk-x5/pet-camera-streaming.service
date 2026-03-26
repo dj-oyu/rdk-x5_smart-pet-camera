@@ -1,0 +1,35 @@
+[Unit]
+Description=Pet Camera Streaming Server (WebRTC)
+After=pet-camera-capture.service
+PartOf=pet-camera-capture.service
+PartOf=pet-camera.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/smart-pet-camera
+EnvironmentFile=-/opt/smart-pet-camera/.env
+
+Environment=STREAMING_HOST=0.0.0.0
+Environment=STREAMING_PORT=8081
+Environment=METRICS_PORT=9090
+Environment=PPROF_PORT=6060
+Environment=STREAMING_MAX_CLIENTS=10
+Environment=STREAMING_SHM=/pet_camera_h265_zc
+Environment=RECORDING_PATH=/opt/smart-pet-camera/recordings
+Environment=LOG_LEVEL=info
+
+ExecStartPre=/bin/mkdir -p ${RECORDING_PATH}
+ExecStart=/opt/smart-pet-camera/build/streaming-server \
+  -shm "${STREAMING_SHM}" \
+  -http "${STREAMING_HOST}:${STREAMING_PORT}" \
+  -metrics ":${METRICS_PORT}" \
+  -pprof ":${PPROF_PORT}" \
+  -record-path "${RECORDING_PATH}" \
+  -max-clients "${STREAMING_MAX_CLIENTS}" \
+  -log-level "${LOG_LEVEL}"
+
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=pet-camera.target
