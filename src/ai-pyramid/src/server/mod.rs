@@ -1049,7 +1049,7 @@ function addLog(msg, cls) {{
   logBox.scrollTop = logBox.scrollHeight;
 }}
 window._addLog = addLog;
-addLog("v17 (toBlob)");
+addLog("v18 (DOM+rAF+toBlob)");
 addLog("navigator.gpu: " + (navigator.gpu ? "available" : "UNAVAILABLE"));
 addLog("User-Agent: " + navigator.userAgent.slice(0, 80));
 window.addEventListener("error", (e) => addLog("JS Error: " + e.message + " @ " + e.filename + ":" + e.lineno, "err"));
@@ -1129,6 +1129,8 @@ async function getWeights(model) {{
 }}
 
 const workCanvas = document.createElement("canvas");
+workCanvas.style.cssText = "position:fixed;top:-9999px;left:-9999px;pointer-events:none";
+document.body.appendChild(workCanvas);
 let renderCount = 0;
 
 async function upscale(source, displayCanvas, model) {{
@@ -1141,6 +1143,8 @@ async function upscale(source, displayCanvas, model) {{
   const t0 = performance.now();
   await websr.render(source);
   await gpu.queue.onSubmittedWorkDone();
+  // Wait for frame presentation (drawing buffer updated at rAF boundary)
+  await new Promise(r => requestAnimationFrame(r));
 
   // toBlob → createImageBitmap(blob) → drawImage
   // Avoids createImageBitmap(canvas) which is unreliable on Safari WebGPU
