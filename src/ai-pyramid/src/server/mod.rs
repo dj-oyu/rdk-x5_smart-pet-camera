@@ -1547,7 +1547,9 @@ async function upscalePanel(srcCanvas, displayCanvas) {{
       const th = Math.min(TILE, sh - sy);
 
       const outputTensor = upscaleTile(srcCanvas, sx, sy, tw, th);
-      const pixels = await tf.browser.toPixels(outputTensor.squeeze());
+      const clamped = outputTensor.squeeze().clipByValue(0, 1);
+      const pixels = await tf.browser.toPixels(clamped);
+      clamped.dispose();
       outputTensor.dispose();
 
       // Place tile (crop to actual size)
