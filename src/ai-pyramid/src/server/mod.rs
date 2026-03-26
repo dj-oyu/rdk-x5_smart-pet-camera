@@ -1046,7 +1046,7 @@ function addLog(msg, cls) {{
   logBox.scrollTop = logBox.scrollHeight;
 }}
 window._addLog = addLog;
-addLog("WebSR Test v6 (batch+rAF+bitmap)");
+addLog("WebSR Test v7 (warmup+batch+rAF+bitmap)");
 addLog("navigator.gpu: " + (navigator.gpu ? "available" : "UNAVAILABLE"));
 addLog("User-Agent: " + navigator.userAgent.slice(0, 80));
 window.addEventListener("error", (e) => addLog("JS Error: " + e.message + " @ " + e.filename + ":" + e.lineno, "err"));
@@ -1164,6 +1164,17 @@ async function upscale(source, displayCanvas, model) {{
     currentWebSR = new WebSR({{ network_name: model, weights, gpu, canvas: workCanvas }});
     currentRes = resKey;
     log("New WebSR instance: " + resKey);
+    // Warm-up render: Safari GPU pipeline needs a throwaway frame after init
+    const warmup = new OffscreenCanvas(w, h);
+    const wCtx = warmup.getContext("2d");
+    wCtx.fillStyle = "#888";
+    wCtx.fillRect(0, 0, w, h);
+    const warmupBmp = await createImageBitmap(warmup);
+    await currentWebSR.render(warmupBmp);
+    await gpu.queue.onSubmittedWorkDone();
+    await new Promise(r => requestAnimationFrame(r));
+    warmupBmp.close();
+    log("Warm-up render done");
   }}
 
   await currentWebSR.render(source);
