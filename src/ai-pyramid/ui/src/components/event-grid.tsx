@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useSignal, useSignalEffect } from "@preact/signals";
 import { isEmbedded, type BboxSummary, type EventSummary, type PetNames } from "../lib/api";
 import { photoUrl } from "../lib/api";
 
@@ -36,15 +36,16 @@ function notifyParentLightbox(event: EventSummary): void {
 }
 
 function FeaturedOverlay({ event, petNames }: { event: EventSummary; petNames: PetNames }) {
-  const [faded, setFaded] = useState(false);
+  const faded = useSignal(false);
 
-  useEffect(() => {
-    const timer = setTimeout(() => setFaded(true), 3000);
+  useSignalEffect(() => {
+    faded.value = false;
+    const timer = setTimeout(() => { faded.value = true; }, 3000);
     return () => clearTimeout(timer);
-  }, [event.id]);
+  });
 
   return (
-    <div class={`event-image-overlay ${faded ? "overlay-faded" : ""}`}>
+    <div class={`event-image-overlay ${faded.value ? "overlay-faded" : ""}`}>
       <span class="event-kicker">Latest</span>
       <span class="event-overlay-time">{formatObservedAt(event.observed_at)}</span>
       <div class="event-meta-row overlay-meta-row featured-meta-overlay">

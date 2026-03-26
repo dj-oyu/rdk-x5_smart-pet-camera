@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useSignal, useSignalEffect } from "@preact/signals";
 import { fetchDailySummary, type DailySummaryResponse } from "../lib/api";
 
 function todayString(): string {
@@ -7,46 +7,37 @@ function todayString(): string {
 }
 
 export function DailySummary() {
-  const [date, setDate] = useState(todayString);
-  const [data, setData] = useState<DailySummaryResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const date = useSignal(todayString());
+  const data = useSignal<DailySummaryResponse | null>(null);
+  const loading = useSignal(false);
+  const error = useSignal<string | null>(null);
 
-  useEffect(() => {
+  useSignalEffect(() => {
+    const d = date.value;
+    loading.value = true;
+    error.value = null;
     let cancelled = false;
-    setLoading(true);
-    setError(null);
-    fetchDailySummary(date)
-      .then((result) => {
-        if (!cancelled) setData(result);
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : "Failed");
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+    fetchDailySummary(d)
+      .then(r => { if (!cancelled) data.value = r; })
+      .catch(e => { if (!cancelled) error.value = e instanceof Error ? e.message : "Failed"; })
+      .finally(() => { if (!cancelled) loading.value = false; });
     return () => { cancelled = true; };
-  }, [date]);
+  });
 
   return (
     <div class="daily-summary">
       <div class="daily-summary-header">
         <strong>Daily Summary</strong>
-        <input
-          type="date"
-          class="daily-summary-date"
-          value={date}
-          onChange={(e) => setDate((e.target as HTMLInputElement).value)}
-        />
+        <input type="date" class="daily-summary-date" value={date.value}
+          onChange={e => { date.value = (e.target as HTMLInputElement).value; }} />
       </div>
       <div class="daily-summary-body">
-        {loading && <span class="daily-summary-loading">Generating...</span>}
-        {error && <span class="daily-summary-error">{error}</span>}
-        {data && !loading && (
+        {loading.value && <span class="daily-summary-loading">Generating...</span>}
+        {error.value && <span class="daily-summary-error">{error.value}</span>}
+        {data.value && !loading.value && (
           <>
-            <p class="daily-summary-text">{data.summary}</p>
-            <span class="daily-summary-count">{data.photo_count} photos</span>
+            <p class="daily-summary-text">{data.value.summary}</p>
+            <span class="daily-summary-count">{data.value.photo_count} photos</span>
           </>
         )}
       </div>

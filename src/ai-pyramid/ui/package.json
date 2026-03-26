@@ -6,6 +6,7 @@
     "build": "bun run build.ts"
   },
   "dependencies": {
+    "@preact/signals": "^2.8.2",
     "@websr/websr": "^0.0.15",
     "onnxruntime-web": "1.20.1",
     "preact": "^10.27.2"
