@@ -1046,7 +1046,7 @@ function addLog(msg, cls) {{
   logBox.scrollTop = logBox.scrollHeight;
 }}
 window._addLog = addLog;
-addLog("WebSR Test v11 (internal-hack+texture-refresh)");
+addLog("WebSR Test v12 (clean+diagnostic)");
 addLog("navigator.gpu: " + (navigator.gpu ? "available" : "UNAVAILABLE"));
 addLog("User-Agent: " + navigator.userAgent.slice(0, 80));
 window.addEventListener("error", (e) => addLog("JS Error: " + e.message + " @ " + e.filename + ":" + e.lineno, "err"));
@@ -1148,62 +1148,82 @@ async function getWeights(model) {{
   return w;
 }}
 
-// WebSR internal hacks for Safari compatibility:
-// 1. destroy() kills GPUDevice → never destroy
-// 2. Output texture cached from getCurrentTexture() once → expires after frame
-// 3. Input texture bound once in lazyLoadSetup() → never updated
-// Fix: patch internals before each render
+// Clean implementation: new instance per render, shared canvas, no destroy.
+// Known issue: Safari shows black for some/all renders.
+// Debug logging enabled to diagnose.
 const workCanvas = document.createElement("canvas");
-let currentWebSR = null;
-let currentRes = "";
+let renderCount = 0;
 
 async function upscale(source, displayCanvas, model) {{
   const weights = await getWeights(model);
   const w = source.width || source.naturalWidth;
   const h = source.height || source.naturalHeight;
-  const resKey = `${{w}}x${{h}}_${{model}}`;
-  log(`Upscale: ${{w}}x${{h}}`);
+  const rid = ++renderCount;
+  log(`[R${{rid}}] start: ${{w}}x${{h}} model=${{model}}`);
 
-  const isNew = !currentWebSR || currentRes !== resKey;
-  if (isNew) {{
-    currentWebSR = new WebSR({{ network_name: model, weights, gpu, canvas: workCanvas }});
-    currentRes = resKey;
-    log("New instance: " + resKey);
+  // Fresh instance per render (WebSR caches input texture in bind group)
+  const websr = new WebSR({{ network_name: model, weights, gpu, canvas: workCanvas }});
+
+  // Debug: inspect internal state after construction
+  const ctx = websr.context;
+  if (ctx) {{
+    const texKeys = Object.keys(ctx.textures || {{}});
+    const bufKeys = Object.keys(ctx.buffers || {{}});
+    log(`[R${{rid}}] ctx: textures=[${{texKeys}}] buffers=[${{bufKeys}}] destroyed=${{ctx.destroyed}}`);
+  }} else {{
+    log(`[R${{rid}}] ctx: null (not yet initialized)`);
   }}
 
-  // First render initializes the pipeline; subsequent renders need hacks
-  if (!isNew) {{
-    const ctx = currentWebSR.context;
-    if (ctx) {{
-      // HACK 1: Refresh output texture (Safari expires after each frame)
-      ctx.textures["output"] = ctx.context.getCurrentTexture();
+  const t0 = performance.now();
+  await websr.render(source);
+  const tRender = performance.now();
 
-      // HACK 2: Re-write source pixels to input texture
-      // Find the input texture (first texture that isn't 'output')
-      for (const [key, tex] of Object.entries(ctx.textures)) {{
-        if (key !== "output" && tex.width === w && tex.height === h) {{
-          gpu.queue.copyExternalImageToTexture(
-            {{ source, flipY: false }},
-            {{ texture: tex }},
-            {{ width: w, height: h }}
-          );
-          log("Updated input texture: " + key);
-          break;
-        }}
-      }}
+  // Debug: inspect state after render
+  if (websr.context) {{
+    const texKeys = Object.keys(websr.context.textures || {{}});
+    log(`[R${{rid}}] post-render textures=[${{texKeys}}]`);
+  }}
+
+  await gpu.queue.onSubmittedWorkDone();
+  const tGpu = performance.now();
+  await new Promise(r => requestAnimationFrame(r));
+  const tRaf = performance.now();
+
+  // Test multiple readback methods
+  let copyOk = false;
+
+  // Method 1: createImageBitmap
+  try {{
+    const bitmap = await createImageBitmap(workCanvas);
+    displayCanvas.width = bitmap.width;
+    displayCanvas.height = bitmap.height;
+    const dCtx = displayCanvas.getContext("2d");
+    dCtx.drawImage(bitmap, 0, 0);
+    // Sample a pixel to check if content is non-black
+    const pixel = dCtx.getImageData(bitmap.width / 2, bitmap.height / 2, 1, 1).data;
+    copyOk = pixel[0] + pixel[1] + pixel[2] > 0;
+    bitmap.close();
+    log(`[R${{rid}}] bitmap: ${{bitmap.width}}x${{bitmap.height}} pixel=[${{pixel[0]}},${{pixel[1]}},${{pixel[2]}}] ok=${{copyOk}}`);
+  }} catch (e) {{
+    log(`[R${{rid}}] bitmap failed: ${{e.message}}`);
+  }}
+
+  // Method 2: if bitmap was black, try direct drawImage
+  if (!copyOk) {{
+    try {{
+      const dCtx = displayCanvas.getContext("2d");
+      dCtx.drawImage(workCanvas, 0, 0);
+      const pixel = dCtx.getImageData(displayCanvas.width / 2, displayCanvas.height / 2, 1, 1).data;
+      const ok2 = pixel[0] + pixel[1] + pixel[2] > 0;
+      log(`[R${{rid}}] drawImage fallback: pixel=[${{pixel[0]}},${{pixel[1]}},${{pixel[2]}}] ok=${{ok2}}`);
+    }} catch (e) {{
+      log(`[R${{rid}}] drawImage failed: ${{e.message}}`);
     }}
   }}
 
-  await currentWebSR.render(source);
-  await gpu.queue.onSubmittedWorkDone();
-  await new Promise(r => requestAnimationFrame(r));
-
-  const bitmap = await createImageBitmap(workCanvas);
-  displayCanvas.width = bitmap.width;
-  displayCanvas.height = bitmap.height;
-  displayCanvas.getContext("2d").drawImage(bitmap, 0, 0);
-  bitmap.close();
-  log(`Done: ${{displayCanvas.width}}x${{displayCanvas.height}}`);
+  const ms = (tRaf - t0).toFixed(0);
+  const gpuMs = (tGpu - tRender).toFixed(0);
+  log(`[R${{rid}}] done: render=${{(tRender-t0).toFixed(0)}}ms gpu=${{gpuMs}}ms raf=${{(tRaf-tGpu).toFixed(0)}}ms total=${{ms}}ms`);
 }}
 
 function cropPanel(img, idx) {{
