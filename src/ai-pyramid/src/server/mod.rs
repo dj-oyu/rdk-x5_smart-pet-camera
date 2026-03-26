@@ -1010,7 +1010,10 @@ h2 {{ font-size: 14px; color: #8888aa; margin: 16px 0 6px; }}
 .card.fit .card-scroll canvas, .card.fit img {{ width: 100%; }}
 .card.actual canvas {{ max-width: none; image-rendering: pixelated; }}
 .card-scroll {{ overflow-x: auto; }}
-.log {{ padding: 6px 10px; background: #1e1e3a; border-radius: 6px; font-size: 11px; font-family: monospace; max-height: 200px; overflow-y: auto; margin-bottom: 12px; white-space: pre-wrap; word-break: break-all; }}
+.log-wrap {{ position: relative; margin-bottom: 12px; }}
+.log {{ padding: 6px 10px; background: #1e1e3a; border-radius: 6px; font-size: 10px; font-family: monospace; max-height: 120px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }}
+.log-copy {{ position: absolute; top: 4px; right: 4px; background: #444; color: #ccc; border: none; border-radius: 4px; padding: 2px 8px; font-size: 10px; cursor: pointer; }}
+.log-copy:active {{ background: #666; }}
 .log .err {{ color: #f44336; }}
 .log .info {{ color: #8888cc; }}
 label {{ cursor: pointer; }}
@@ -1033,7 +1036,7 @@ select {{ background: #333; color: #e0e0e0; border: 1px solid #555; border-radiu
 </div>
 
 <div id="statusBox" class="status loading">Initializing...</div>
-<div id="logBox" class="log"></div>
+<div class="log-wrap"><div id="logBox" class="log"></div><button class="log-copy" onclick="navigator.clipboard.writeText(logBox.innerText).then(()=>this.textContent='Copied!').catch(()=>this.textContent='Failed');setTimeout(()=>this.textContent='Copy',1500)">Copy</button></div>
 
 <script>
 // Pre-module diagnostics (runs even if module fails)
@@ -1046,7 +1049,7 @@ function addLog(msg, cls) {{
   logBox.scrollTop = logBox.scrollHeight;
 }}
 window._addLog = addLog;
-addLog("WebSR Test v12 (clean+diagnostic)");
+addLog("v13");
 addLog("navigator.gpu: " + (navigator.gpu ? "available" : "UNAVAILABLE"));
 addLog("User-Agent: " + navigator.userAgent.slice(0, 80));
 window.addEventListener("error", (e) => addLog("JS Error: " + e.message + " @ " + e.filename + ":" + e.lineno, "err"));
@@ -1148,9 +1151,6 @@ async function getWeights(model) {{
   return w;
 }}
 
-// Clean implementation: new instance per render, shared canvas, no destroy.
-// Known issue: Safari shows black for some/all renders.
-// Debug logging enabled to diagnose.
 const workCanvas = document.createElement("canvas");
 let renderCount = 0;
 
@@ -1159,71 +1159,23 @@ async function upscale(source, displayCanvas, model) {{
   const w = source.width || source.naturalWidth;
   const h = source.height || source.naturalHeight;
   const rid = ++renderCount;
-  log(`[R${{rid}}] start: ${{w}}x${{h}} model=${{model}}`);
 
-  // Fresh instance per render (WebSR caches input texture in bind group)
   const websr = new WebSR({{ network_name: model, weights, gpu, canvas: workCanvas }});
-
-  // Debug: inspect internal state after construction
-  const ctx = websr.context;
-  if (ctx) {{
-    const texKeys = Object.keys(ctx.textures || {{}});
-    const bufKeys = Object.keys(ctx.buffers || {{}});
-    log(`[R${{rid}}] ctx: textures=[${{texKeys}}] buffers=[${{bufKeys}}] destroyed=${{ctx.destroyed}}`);
-  }} else {{
-    log(`[R${{rid}}] ctx: null (not yet initialized)`);
-  }}
-
   const t0 = performance.now();
   await websr.render(source);
-  const tRender = performance.now();
-
-  // Debug: inspect state after render
-  if (websr.context) {{
-    const texKeys = Object.keys(websr.context.textures || {{}});
-    log(`[R${{rid}}] post-render textures=[${{texKeys}}]`);
-  }}
-
   await gpu.queue.onSubmittedWorkDone();
-  const tGpu = performance.now();
   await new Promise(r => requestAnimationFrame(r));
-  const tRaf = performance.now();
+  const ms = (performance.now() - t0).toFixed(0);
 
-  // Test multiple readback methods
-  let copyOk = false;
-
-  // Method 1: createImageBitmap
-  try {{
-    const bitmap = await createImageBitmap(workCanvas);
-    displayCanvas.width = bitmap.width;
-    displayCanvas.height = bitmap.height;
-    const dCtx = displayCanvas.getContext("2d");
-    dCtx.drawImage(bitmap, 0, 0);
-    // Sample a pixel to check if content is non-black
-    const pixel = dCtx.getImageData(bitmap.width / 2, bitmap.height / 2, 1, 1).data;
-    copyOk = pixel[0] + pixel[1] + pixel[2] > 0;
-    bitmap.close();
-    log(`[R${{rid}}] bitmap: ${{bitmap.width}}x${{bitmap.height}} pixel=[${{pixel[0]}},${{pixel[1]}},${{pixel[2]}}] ok=${{copyOk}}`);
-  }} catch (e) {{
-    log(`[R${{rid}}] bitmap failed: ${{e.message}}`);
-  }}
-
-  // Method 2: if bitmap was black, try direct drawImage
-  if (!copyOk) {{
-    try {{
-      const dCtx = displayCanvas.getContext("2d");
-      dCtx.drawImage(workCanvas, 0, 0);
-      const pixel = dCtx.getImageData(displayCanvas.width / 2, displayCanvas.height / 2, 1, 1).data;
-      const ok2 = pixel[0] + pixel[1] + pixel[2] > 0;
-      log(`[R${{rid}}] drawImage fallback: pixel=[${{pixel[0]}},${{pixel[1]}},${{pixel[2]}}] ok=${{ok2}}`);
-    }} catch (e) {{
-      log(`[R${{rid}}] drawImage failed: ${{e.message}}`);
-    }}
-  }}
-
-  const ms = (tRaf - t0).toFixed(0);
-  const gpuMs = (tGpu - tRender).toFixed(0);
-  log(`[R${{rid}}] done: render=${{(tRender-t0).toFixed(0)}}ms gpu=${{gpuMs}}ms raf=${{(tRaf-tGpu).toFixed(0)}}ms total=${{ms}}ms`);
+  const bitmap = await createImageBitmap(workCanvas);
+  displayCanvas.width = bitmap.width;
+  displayCanvas.height = bitmap.height;
+  const dCtx = displayCanvas.getContext("2d");
+  dCtx.drawImage(bitmap, 0, 0);
+  const px = dCtx.getImageData(bitmap.width / 2, bitmap.height / 2, 1, 1).data;
+  bitmap.close();
+  const ok = px[0] + px[1] + px[2] > 0;
+  log(`R${{rid}} ${{w}}x${{h}}→${{displayCanvas.width}}x${{displayCanvas.height}} ${{ms}}ms px=[${{px[0]}},${{px[1]}},${{px[2]}}] ${{ok ? "OK" : "BLACK"}}`);
 }}
 
 function cropPanel(img, idx) {{
