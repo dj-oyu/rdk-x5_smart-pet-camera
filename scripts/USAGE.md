@@ -116,3 +116,25 @@ graph TD
 - capture 停止時は detector/monitor/streaming も連動停止 (`PartOf=`)
 - SHM 未準備時は `Restart=on-failure` で自動リトライ (3秒間隔)
 - ログは全て journald (`journalctl -u <service> -f`)
+
+### sudoers NOPASSWD 設定 (任意)
+
+開発中の `sudo systemctl restart` 等をパスワード不要にする:
+
+```bash
+sed 's/__USER__/youruser/' deploy/rdk-x5/sudoers-pet-camera.example > /tmp/sudoers-pet-camera
+sudo visudo -cf /tmp/sudoers-pet-camera
+sudo cp /tmp/sudoers-pet-camera /etc/sudoers.d/pet-camera
+sudo chmod 440 /etc/sudoers.d/pet-camera
+```
+
+### サービスファイル編集時の注意
+
+- `ExecStart` 内で `EnvironmentFile` (`.env`) の変数を参照する場合は `$$` でエスケープすること。systemd は `${VAR}` を `Environment=` の値で先に展開するため、`.env` にしかない変数は空になる。
+  ```ini
+  # NG: systemd が展開 → .env の値が使われない
+  ExecStart=/bin/sh -c '[ -n "${MY_VAR}" ] && ...'
+  # OK: sh が展開 → .env の値が使われる
+  ExecStart=/bin/sh -c '[ -n "$${MY_VAR}" ] && ...'
+  ```
+- `Environment=` で定義した変数は `$` のままでよい (systemd が展開する)
