@@ -1,0 +1,38 @@
+# /etc/sudoers.d/pet-camera
+# Pet Camera systemd operations — NOPASSWD
+# Copy this file and replace __USER__ with your username:
+#   sed 's/__USER__/youruser/' sudoers-pet-camera.example > sudoers-pet-camera
+#   sudo visudo -cf sudoers-pet-camera && sudo cp sudoers-pet-camera /etc/sudoers.d/pet-camera && sudo chmod 440 /etc/sudoers.d/pet-camera
+
+# systemctl operations on pet-camera units
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start pet-camera*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl stop pet-camera*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl restart pet-camera*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl enable pet-camera*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl disable pet-camera*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl status pet-camera*
+
+# comic-sync service
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start comic-sync*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl stop comic-sync*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl restart comic-sync*
+
+# daemon-reload (needed after editing .service files)
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload
+
+# journalctl (systemd logs) — sudoers requires exact arg match
+__USER__ ALL=(root) NOPASSWD: /usr/bin/journalctl -u pet-camera*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/journalctl -u comic-sync*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/journalctl -u pet-camera* -f
+__USER__ ALL=(root) NOPASSWD: /usr/bin/journalctl -u comic-sync* -f
+__USER__ ALL=(root) NOPASSWD: /usr/bin/journalctl -u pet-camera* --no-pager
+__USER__ ALL=(root) NOPASSWD: /usr/bin/journalctl -u comic-sync* --no-pager
+__USER__ ALL=(root) NOPASSWD: /usr/bin/journalctl -u pet-camera* --no-pager -n *
+__USER__ ALL=(root) NOPASSWD: /usr/bin/journalctl -u comic-sync* --no-pager -n *
+
+# install script
+__USER__ ALL=(root) NOPASSWD: /opt/smart-pet-camera/scripts/install-services.sh *
+
+# copy service files to systemd
+__USER__ ALL=(root) NOPASSWD: /usr/bin/cp /opt/smart-pet-camera/deploy/rdk-x5/*.service /etc/systemd/system/*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/cp /opt/smart-pet-camera/deploy/rdk-x5/*.target /etc/systemd/system/*
