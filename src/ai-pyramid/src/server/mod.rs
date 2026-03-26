@@ -1466,7 +1466,7 @@ statusBox.className = "status loading";
 let session;
 try {{
   session = await ort.InferenceSession.create(
-    "/test/models/x4v3-fp32/real_esrgan_general_x4v3-onnx-float/real_esrgan_general_x4v3.onnx",
+    "/test/models/x4v3-fp32.onnx",
     {{ executionProviders: ["webgl"] }}
   );
   log("Model loaded: inputs=" + session.inputNames + " outputs=" + session.outputNames);
