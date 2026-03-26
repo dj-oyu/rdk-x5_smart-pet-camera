@@ -13,11 +13,24 @@ cargo test          # 52 tests
 cargo build --release  # optimized (opt-level=z, LTO, strip)
 ```
 
-## Run
+## Run (manual)
 ```bash
 ./run_album          # release build + run (production)
 ./run_album --debug  # debug build + run (test data)
 ```
+
+## systemd (production)
+```bash
+sudo systemctl start pet-album.service     # 起動
+sudo systemctl stop pet-album.service      # 停止
+sudo systemctl restart pet-album.service   # 再起動 (コード変更後)
+systemctl status pet-album.service         # 状態確認
+journalctl -u pet-album -f                 # ログをリアルタイム表示
+journalctl -u pet-album --since "5min ago" # 直近5分のログ
+```
+
+開発時は `cargo build --release` 後に `sudo systemctl restart pet-album.service` で反映。
+サービスファイル: `deploy/ai-pyramid/pet-album.service`
 
 ## Deploy (GitHub Actions artifact)
 `src/ai-pyramid/**` への変更がmainにマージされると、GitHub Actionsの
