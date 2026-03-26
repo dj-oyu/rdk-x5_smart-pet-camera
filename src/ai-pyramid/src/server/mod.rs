@@ -1148,23 +1148,30 @@ async function getWeights(model) {{
   return w;
 }}
 
-// Single offscreen work canvas to avoid WebSR global context conflicts
-const workCanvas = document.createElement("canvas");
-
+// Use a fresh work canvas per render to avoid WebGPU context reuse issues
 async function upscale(source, displayCanvas, model) {{
   const weights = await getWeights(model);
-  log(`Creating WebSR instance: model=${{model}}, source=${{source.width}}x${{source.height}}`);
+  log(`Creating WebSR: model=${{model}}, source=${{source.width}}x${{source.height}}`);
+
+  // Fresh canvas each time - WebSR's global context conflict means
+  // we can't reuse the same canvas either
+  const workCanvas = document.createElement("canvas");
   const websr = new WebSR({{ network_name: model, weights, gpu, canvas: workCanvas }});
-  log("Calling render...");
   await websr.render(source);
   await gpu.queue.onSubmittedWorkDone();
-  log(`Render done: workCanvas=${{workCanvas.width}}x${{workCanvas.height}}`);
-  // Copy from WebGPU work canvas to display canvas via 2D context
-  displayCanvas.width = workCanvas.width;
-  displayCanvas.height = workCanvas.height;
+  // Wait for the frame to actually paint
+  await new Promise(r => setTimeout(r, 50));
+  log(`Render done: ${{workCanvas.width}}x${{workCanvas.height}}`);
+
+  // Read pixels from WebGPU canvas via bitmap, write to 2D display canvas
+  const bitmap = await createImageBitmap(workCanvas);
+  displayCanvas.width = bitmap.width;
+  displayCanvas.height = bitmap.height;
   const ctx = displayCanvas.getContext("2d");
-  ctx.drawImage(workCanvas, 0, 0);
-  log(`Copied to display canvas: ${{displayCanvas.width}}x${{displayCanvas.height}}`);
+  ctx.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  log(`Copied to display: ${{displayCanvas.width}}x${{displayCanvas.height}}`);
+
   await websr.destroy();
 }}
 
