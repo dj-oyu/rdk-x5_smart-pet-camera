@@ -1148,31 +1148,36 @@ async function getWeights(model) {{
   return w;
 }}
 
-// Use a fresh work canvas per render to avoid WebGPU context reuse issues
+// WebSR.destroy() calls device.destroy() which kills the GPUDevice permanently.
+// Solution: never destroy, reuse one WebSR instance per resolution.
+const workCanvas = document.createElement("canvas");
+let currentWebSR = null;
+let currentRes = "";
+
 async function upscale(source, displayCanvas, model) {{
   const weights = await getWeights(model);
-  log(`Creating WebSR: model=${{model}}, source=${{source.width}}x${{source.height}}`);
+  const w = source.width || source.naturalWidth;
+  const h = source.height || source.naturalHeight;
+  const resKey = `${{w}}x${{h}}`;
+  log(`Upscale: model=${{model}}, source=${{resKey}}`);
 
-  // Fresh canvas each time - WebSR's global context conflict means
-  // we can't reuse the same canvas either
-  const workCanvas = document.createElement("canvas");
-  const websr = new WebSR({{ network_name: model, weights, gpu, canvas: workCanvas }});
-  await websr.render(source);
+  // Create or reconfigure WebSR only when resolution changes
+  if (!currentWebSR || currentRes !== resKey) {{
+    // Don't destroy old instance - just create new one on same canvas
+    currentWebSR = new WebSR({{ network_name: model, weights, gpu, canvas: workCanvas }});
+    currentRes = resKey;
+    log("Created new WebSR instance for " + resKey);
+  }}
+
+  await currentWebSR.render(source);
   await gpu.queue.onSubmittedWorkDone();
-  // Wait for the frame to actually paint
-  await new Promise(r => setTimeout(r, 50));
   log(`Render done: ${{workCanvas.width}}x${{workCanvas.height}}`);
 
-  // Read pixels from WebGPU canvas via bitmap, write to 2D display canvas
-  const bitmap = await createImageBitmap(workCanvas);
-  displayCanvas.width = bitmap.width;
-  displayCanvas.height = bitmap.height;
-  const ctx = displayCanvas.getContext("2d");
-  ctx.drawImage(bitmap, 0, 0);
-  bitmap.close();
+  // Copy from WebGPU canvas to 2D display canvas
+  displayCanvas.width = workCanvas.width;
+  displayCanvas.height = workCanvas.height;
+  displayCanvas.getContext("2d").drawImage(workCanvas, 0, 0);
   log(`Copied to display: ${{displayCanvas.width}}x${{displayCanvas.height}}`);
-
-  await websr.destroy();
 }}
 
 function cropPanel(img, idx) {{
