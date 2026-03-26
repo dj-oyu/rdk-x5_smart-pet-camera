@@ -64,7 +64,7 @@ async function loadData(): Promise<void> {
     if (isCancelled(e)) return;
     error.value = e instanceof Error ? e.message : "Failed to load data";
   } finally {
-    if (!sig.aborted) loading.value = false;
+    loading.value = false;
   }
 }
 

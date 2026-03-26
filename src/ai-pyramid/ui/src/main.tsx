@@ -1,4 +1,5 @@
 import { render } from "preact";
+import "@preact/signals";  // install Preact signals integration (side effect)
 import { App } from "./app";
 import { initStore } from "./lib/store";
 import "./styles.css";

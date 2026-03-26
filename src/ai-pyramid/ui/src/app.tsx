@@ -1,3 +1,5 @@
+import { useState } from "preact/hooks";
+import { useSignalEffect } from "@preact/signals";
 import { BackfillButton } from "./components/backfill-button";
 import { DailySummary } from "./components/daily-summary";
 import { EventDetail } from "./components/event-detail";
@@ -27,6 +29,16 @@ import {
 } from "./lib/store";
 
 export function App() {
+  // Bridge: signal changes → component re-render
+  // @preact/signals auto-subscribe may not work with Bun's bundler
+  const [, rerender] = useState(0);
+  useSignalEffect(() => {
+    // Read all signals that affect this component's output
+    query.value; events.value; total.value; stats.value;
+    loading.value; error.value; selectedEvent.value;
+    initialPanel.value; petNames.value; behaviors.value;
+    rerender(c => c + 1);
+  });
   if (embed.embedded) {
     return (
       <main class="app-shell compact-shell" data-embed={embed.host ?? undefined}>

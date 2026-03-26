@@ -13,7 +13,7 @@ const result = await Bun.build({
   outdir: distDir,
   target: "browser",
   format: "iife",
-  minify: true,
+  minify: false,
   sourcemap: "none"
 });
 
