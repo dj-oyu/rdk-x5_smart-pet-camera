@@ -1049,7 +1049,7 @@ function addLog(msg, cls) {{
   logBox.scrollTop = logBox.scrollHeight;
 }}
 window._addLog = addLog;
-addLog("v15 (no-rAF)");
+addLog("v16 (GPU-readback)");
 addLog("navigator.gpu: " + (navigator.gpu ? "available" : "UNAVAILABLE"));
 addLog("User-Agent: " + navigator.userAgent.slice(0, 80));
 window.addEventListener("error", (e) => addLog("JS Error: " + e.message + " @ " + e.filename + ":" + e.lineno, "err"));
@@ -1137,21 +1137,44 @@ async function upscale(source, displayCanvas, model) {{
   const h = source.height || source.naturalHeight;
   const rid = ++renderCount;
 
-  const websr = new WebSR({{ network_name: model, weights, gpu, canvas: workCanvas }});
+  // Enable debug mode so output texture gets COPY_SRC usage
+  const websr = new WebSR({{ network_name: model, weights, gpu, canvas: workCanvas, debug: true }});
   const t0 = performance.now();
   await websr.render(source);
-  await gpu.queue.onSubmittedWorkDone();
+
+  // Read pixels directly from GPU texture (bypass canvas readback)
+  const ctx = websr.context;
+  const outW = workCanvas.width;
+  const outH = workCanvas.height;
+  let pixelData;
+  try {{
+    // readTexture returns Uint8ClampedArray for rgba8unorm
+    pixelData = await ctx.readTexture("output");
+  }} catch (e) {{
+    log(`R${{rid}} readTexture failed: ${{e.message}}, fallback to bitmap`);
+    // Fallback to createImageBitmap
+    await gpu.queue.onSubmittedWorkDone();
+    const bitmap = await createImageBitmap(workCanvas);
+    displayCanvas.width = bitmap.width;
+    displayCanvas.height = bitmap.height;
+    displayCanvas.getContext("2d").drawImage(bitmap, 0, 0);
+    bitmap.close();
+    log(`R${{rid}} ${{w}}x${{h}}→${{displayCanvas.width}}x${{displayCanvas.height}} (fallback)`);
+    return;
+  }}
   const ms = (performance.now() - t0).toFixed(0);
 
-  const bitmap = await createImageBitmap(workCanvas);
-  displayCanvas.width = bitmap.width;
-  displayCanvas.height = bitmap.height;
+  // Write pixel data to display canvas via ImageData
+  displayCanvas.width = outW;
+  displayCanvas.height = outH;
   const dCtx = displayCanvas.getContext("2d");
-  dCtx.drawImage(bitmap, 0, 0);
-  const px = dCtx.getImageData(bitmap.width / 2, bitmap.height / 2, 1, 1).data;
-  bitmap.close();
+  const imgData = new ImageData(new Uint8ClampedArray(pixelData.buffer), outW, outH);
+  dCtx.putImageData(imgData, 0, 0);
+
+  const mid = ((outH / 2) * outW + outW / 2) * 4;
+  const px = [pixelData[mid], pixelData[mid+1], pixelData[mid+2]];
   const ok = px[0] + px[1] + px[2] > 0;
-  log(`R${{rid}} ${{w}}x${{h}}→${{displayCanvas.width}}x${{displayCanvas.height}} ${{ms}}ms px=[${{px[0]}},${{px[1]}},${{px[2]}}] ${{ok ? "OK" : "BLACK"}}`);
+  log(`R${{rid}} ${{w}}x${{h}}→${{outW}}x${{outH}} ${{ms}}ms px=[${{px.join(",")}}] ${{ok ? "OK" : "BLACK"}}`);
 }}
 
 function cropPanel(img, idx) {{
