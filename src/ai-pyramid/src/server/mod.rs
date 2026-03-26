@@ -126,6 +126,7 @@ pub fn router(state: AppState) -> Router {
         .route("/test/websr", get(handle_websr_test))
         .route("/test/esrgan", get(handle_esrgan_test))
         .route("/test/carousel", get(handle_carousel_demo))
+        .route("/test/carousel.js", get(handle_carousel_js))
         .route("/test/models/{*path}", get(handle_test_model))
         .route("/api/models/{*path}", get(handle_test_model))
         .with_state(state)
@@ -1363,7 +1364,7 @@ async fn handle_carousel_demo(State(state): State<AppState>) -> impl IntoRespons
 
     let html = format!(
         r##"<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-latest-photo="{latest}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -1490,6 +1491,13 @@ body {{
   scroll-snap-stop: always;
   min-height: 200px;
   background: #f8fafc;
+  overflow: hidden;
+}}
+.zoom-wrapper {{
+  position: relative;
+  transform-origin: 0 0;
+  transition: transform 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+  will-change: transform;
 }}
 .panel-slide canvas {{
   width: 100%;
@@ -1627,6 +1635,18 @@ body {{
 .pill.pet {{ background: #dbeafe; color: #1e40af; }}
 .pill.valid {{ background: #dcfce7; color: #166534; }}
 .pill.time {{ color: #64748b; }}
+.pill.dl {{
+  background: rgba(59,130,246,0.08);
+  color: #3b82f6;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.15s, color 0.15s;
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}}
+.pill.dl:hover {{ background: rgba(59,130,246,0.15); color: #2563eb; }}
 
 /* Detection list */
 .detections {{
@@ -1647,8 +1667,9 @@ body {{
   padding: 6px 8px;
   border-radius: 8px;
   font-size: 13px;
-  transition: background 0.15s;
-  cursor: default;
+  transition: background 0.15s, border-left 0.15s, padding-left 0.15s;
+  cursor: pointer;
+  border-left: 2px solid transparent;
 }}
 .det-item:hover {{ background: rgba(0,0,0,0.04); }}
 .det-color {{
@@ -1658,7 +1679,78 @@ body {{
 }}
 .det-class {{ font-weight: 500; color: #1e293b; }}
 .det-pet {{ color: #3b82f6; }}
-.det-conf {{ color: #94a3b8; font-size: 11px; margin-left: auto; }}
+.det-conf-bar {{
+  display: inline-block;
+  flex: 1;
+  min-width: 32px;
+  max-width: 56px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(0,0,0,0.06);
+  margin-left: auto;
+  overflow: hidden;
+  vertical-align: middle;
+}}
+.det-conf-fill {{
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  opacity: 0.6;
+}}
+.det-conf {{ color: #94a3b8; font-size: 11px; min-width: 28px; text-align: right; }}
+
+/* Bbox overlay on panel slides */
+.bbox-overlay {{
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none;
+  z-index: 3;
+}}
+.bbox-overlay .bbox {{
+  position: absolute;
+  border: 1.5px solid rgba(255,255,255,0.45);
+  border-top-color: rgba(255,255,255,0.6);
+  border-left-color: rgba(255,255,255,0.5);
+  border-radius: 3px;
+  background: rgba(255,255,255,0.04);
+  box-shadow: 0 0 6px rgba(255,255,255,0.12), inset 0 1px 0 rgba(255,255,255,0.15);
+  pointer-events: auto;
+  cursor: pointer;
+  transition: box-shadow 0.2s, border-color 0.2s, background 0.2s, opacity 0.2s;
+}}
+.bbox-overlay .bbox.highlighted {{
+  border-color: rgba(255,255,255,0.85);
+  box-shadow: 0 0 14px rgba(255,255,255,0.4);
+  background: rgba(255,255,255,0.1);
+  z-index: 10;
+}}
+.bbox-overlay .bbox.dimmed {{
+  opacity: 0.18;
+}}
+.bbox-overlay .bbox.zoom-target {{
+  border-color: rgba(255,255,255,0.9);
+  box-shadow: 0 0 16px rgba(255,255,255,0.5);
+  background: rgba(255,255,255,0.1);
+  z-index: 20;
+}}
+.bbox .bbox-label {{
+  position: absolute;
+  top: -1px; left: -1px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 3px 0 3px 0;
+  color: #fff;
+  white-space: nowrap;
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.4);
+}}
+
+.det-item.highlighted {{
+  background: rgba(59,130,246,0.12);
+  border-left: 2px solid #3b82f6;
+  padding-left: 6px;
+}}
 
 /* Photo selector */
 .controls {{
@@ -1711,6 +1803,7 @@ body {{
     <!-- Breadcrumb -->
     <nav class="breadcrumb" id="breadcrumb">
       <span class="crumb current">All panels</span>
+      <a class="pill dl" id="dlBtn" download>JPEG</a>
     </nav>
 
     <!-- Comic view (default) -->
@@ -1727,10 +1820,10 @@ body {{
     <!-- Carousel view (hidden initially) -->
     <div id="carouselView" class="carousel-container" style="display:none">
       <div class="panel-carousel" id="carousel">
-        <div class="panel-slide" data-panel="0"><canvas id="pc0"></canvas></div>
-        <div class="panel-slide" data-panel="1"><canvas id="pc1"></canvas></div>
-        <div class="panel-slide" data-panel="2"><canvas id="pc2"></canvas></div>
-        <div class="panel-slide" data-panel="3"><canvas id="pc3"></canvas></div>
+        <div class="panel-slide" data-panel="0"><div class="zoom-wrapper"><canvas id="pc0"></canvas></div></div>
+        <div class="panel-slide" data-panel="1"><div class="zoom-wrapper"><canvas id="pc1"></canvas></div></div>
+        <div class="panel-slide" data-panel="2"><div class="zoom-wrapper"><canvas id="pc2"></canvas></div></div>
+        <div class="panel-slide" data-panel="3"><div class="zoom-wrapper"><canvas id="pc3"></canvas></div></div>
       </div>
       <button class="nav-btn prev" id="prevBtn">&#8249;</button>
       <button class="nav-btn next" id="nextBtn">&#8250;</button>
@@ -1768,442 +1861,7 @@ body {{
   <label>Photo: <select id="photoSelect"></select></label>
 </div>
 
-<script type="module">
-// ── Constants ──
-const MARGIN = 12, BORDER = 2, GAP = 8, PW = 404, PH = 228;
-const CELL_W = PW + 2 * BORDER, CELL_H = PH + 2 * BORDER;
-const PANELS = [0,1,2,3].map(i => {{
-  const col = i % 2, row = Math.floor(i / 2);
-  return {{ x: MARGIN + BORDER + col * (CELL_W + GAP), y: MARGIN + BORDER + row * (CELL_H + GAP), w: PW, h: PH }};
-}});
-
-const CLASS_COLORS = {{
-  cat: "#6EFF9E", dog: "#FFC878", bird: "#A0DCFF",
-  food_bowl: "#78C8FF", water_bowl: "#FF8C8C",
-  person: "#FFF08C", cup: "#FFBED2"
-}};
-
-// ── Mock detections (comic-space coordinates) ──
-const MOCK_DETECTIONS = [
-  {{ id:1, bbox_x:60,  bbox_y:40,  bbox_w:130, bbox_h:170, yolo_class:"cat",       pet_id:"chatora", confidence:0.95 }},
-  {{ id:2, bbox_x:300, bbox_y:120, bbox_w:90,  bbox_h:70,  yolo_class:"food_bowl", pet_id:null,      confidence:0.88 }},
-  {{ id:3, bbox_x:480, bbox_y:50,  bbox_w:140, bbox_h:160, yolo_class:"cat",       pet_id:"mike",    confidence:0.92 }},
-  {{ id:4, bbox_x:720, bbox_y:80,  bbox_w:80,  bbox_h:60,  yolo_class:"cup",       pet_id:null,      confidence:0.76 }},
-  {{ id:5, bbox_x:50,  bbox_y:290, bbox_w:150, bbox_h:160, yolo_class:"cat",       pet_id:"chatora", confidence:0.97 }},
-  {{ id:6, bbox_x:280, bbox_y:330, bbox_w:100, bbox_h:70,  yolo_class:"water_bowl",pet_id:null,      confidence:0.85 }},
-  {{ id:7, bbox_x:470, bbox_y:280, bbox_w:130, bbox_h:170, yolo_class:"cat",       pet_id:"mike",    confidence:0.91 }},
-  {{ id:8, bbox_x:650, bbox_y:310, bbox_w:120, bbox_h:140, yolo_class:"cat",       pet_id:"chatora", confidence:0.89 }},
-];
-
-function panelOf(det) {{
-  const cx = det.bbox_x + det.bbox_w / 2;
-  const cy = det.bbox_y + det.bbox_h / 2;
-  return PANELS.findIndex(p => cx >= p.x && cx < p.x + p.w && cy >= p.y && cy < p.y + p.h);
-}}
-
-function detsForPanel(idx) {{
-  return MOCK_DETECTIONS.filter(d => panelOf(d) === idx);
-}}
-
-// ── DOM refs ──
-const statusBar = document.getElementById("statusBar");
-const breadcrumb = document.getElementById("breadcrumb");
-const comicView = document.getElementById("comicView");
-const carouselView = document.getElementById("carouselView");
-const comicImg = document.getElementById("comicImg");
-const carousel = document.getElementById("carousel");
-const prevBtn = document.getElementById("prevBtn");
-const nextBtn = document.getElementById("nextBtn");
-const hdBtn = document.getElementById("hdBtn");
-const hdProgress = document.getElementById("hdProgress");
-const upscaleBadge = document.getElementById("upscaleBadge");
-const dots = document.querySelectorAll(".panel-dot");
-const detTitle = document.getElementById("detTitle");
-const detList = document.getElementById("detList");
-const photoSelect = document.getElementById("photoSelect");
-const canvases = [0,1,2,3].map(i => document.getElementById("pc" + i));
-
-let activePanel = 0;
-let viewMode = "comic"; // "comic" | "panel"
-let upscaleState = {{}}; // panelIdx -> "raw"|"fast"|"hd"
-
-// ── Photo list ──
-const resp = await fetch("/api/photos?limit=30");
-const data = await resp.json();
-data.events.forEach(e => {{
-  const opt = document.createElement("option");
-  opt.value = e.source_filename;
-  opt.textContent = e.source_filename.replace("comic_","").replace(".jpg","");
-  photoSelect.appendChild(opt);
-}});
-if ("{latest}") photoSelect.value = "{latest}";
-
-// ── TF.js loading ──
-let tf = null;
-let backend = "";
-let modelCache = {{}};
-let currentModel = null;
-let resultCache = {{}};
-
-async function ensureTF() {{
-  if (tf) return true;
-  statusBar.textContent = "Loading TF.js...";
-  statusBar.className = "status-bar loading";
-  try {{
-    await import("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js");
-    tf = window.tf;
-    await tf.ready();
-    // Try WebGPU
-    try {{
-      await import("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu@4.22.0/dist/tf-backend-webgpu.min.js");
-      await tf.setBackend("webgpu");
-      await tf.ready();
-    }} catch {{}}
-    backend = tf.getBackend();
-    statusBar.textContent = "Ready (" + backend + ")";
-    statusBar.className = "status-bar ok";
-    return true;
-  }} catch (e) {{
-    statusBar.textContent = "TF.js failed: " + e.message;
-    statusBar.className = "status-bar err";
-    return false;
-  }}
-}}
-
-async function loadModel(name) {{
-  if (modelCache[name]) {{ currentModel = modelCache[name]; return; }}
-  statusBar.textContent = "Loading " + name + "...";
-  statusBar.className = "status-bar loading";
-  const model = await tf.loadGraphModel("/api/models/tfjs/" + name + "/model.json");
-  modelCache[name] = model;
-  currentModel = model;
-}}
-
-// ── Upscale ──
-const TILE = 128, SCALE = 4;
-
-function cropPanelCanvas(img, idx) {{
-  const p = PANELS[idx];
-  const c = document.createElement("canvas");
-  c.width = p.w; c.height = p.h;
-  c.getContext("2d").drawImage(img, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
-  return c;
-}}
-
-// Cancellation token for upscale operations
-let cancelToken = 0;
-
-async function upscaleToCanvas(srcCanvas, outCanvas, onProgress, token) {{
-  const sw = srcCanvas.width, sh = srcCanvas.height;
-  const outW = sw * SCALE, outH = sh * SCALE;
-  outCanvas.width = outW; outCanvas.height = outH;
-  const dCtx = outCanvas.getContext("2d");
-  const tilesX = Math.ceil(sw / TILE), tilesY = Math.ceil(sh / TILE);
-  const total = tilesX * tilesY;
-  let done = 0;
-  for (let ty = 0; ty < tilesY; ty++) {{
-    for (let tx = 0; tx < tilesX; tx++) {{
-      if (token !== cancelToken) return false; // cancelled
-      const sx = tx * TILE, sy = ty * TILE;
-      const tw = Math.min(TILE, sw - sx), th = Math.min(TILE, sh - sy);
-      const tileCanvas = document.createElement("canvas");
-      tileCanvas.width = TILE; tileCanvas.height = TILE;
-      const tCtx = tileCanvas.getContext("2d");
-      tCtx.drawImage(srcCanvas, sx, sy, tw, th, 0, 0, tw, th);
-      if (tw < TILE) tCtx.drawImage(tileCanvas, tw-1, 0, 1, th, tw, 0, TILE-tw, th);
-      if (th < TILE) tCtx.drawImage(tileCanvas, 0, th-1, TILE, 1, 0, th, TILE, TILE-th);
-      const outputTensor = tf.tidy(() => {{
-        const input = tf.browser.fromPixels(tileCanvas).toFloat().div(255.0).expandDims(0);
-        return currentModel.predict(input);
-      }});
-      const clamped = outputTensor.squeeze().clipByValue(0, 1);
-      const pixels = await tf.browser.toPixels(clamped);
-      clamped.dispose(); outputTensor.dispose();
-      const cropW = tw * SCALE, cropH = th * SCALE;
-      const imgData = new ImageData(new Uint8ClampedArray(pixels.buffer), TILE * SCALE, TILE * SCALE);
-      const tmp = document.createElement("canvas");
-      tmp.width = TILE * SCALE; tmp.height = TILE * SCALE;
-      tmp.getContext("2d").putImageData(imgData, 0, 0);
-      dCtx.drawImage(tmp, 0, 0, cropW, cropH, sx * SCALE, sy * SCALE, cropW, cropH);
-      done++;
-      onProgress?.(done, total);
-    }}
-  }}
-  return true; // completed
-}}
-
-// Serialized upscale queue — only one operation at a time, new requests cancel the current one
-let upscaleQueue = Promise.resolve();
-let upscaleBusy = false;
-
-function upscalePanel(idx, modelName) {{
-  const token = ++cancelToken; // cancel any in-flight operation
-  const job = async () => {{
-    upscaleBusy = true;
-    try {{
-      if (token !== cancelToken) return; // already superseded
-      if (!await ensureTF()) return;
-      if (token !== cancelToken) return;
-      await loadModel(modelName);
-      if (token !== cancelToken) return;
-      const src = cropPanelCanvas(comicImg, idx);
-      const canvas = canvases[idx];
-      const t0 = performance.now();
-      const label = modelName === "general_plus" ? "HD" : "fast";
-      statusBar.textContent = "Upscaling P" + idx + " (" + label + ")...";
-      statusBar.className = "status-bar loading";
-      const completed = await upscaleToCanvas(src, canvas, (done, total) => {{
-        if (modelName === "general_plus") {{
-          hdProgress.style.width = (done / total * 100) + "%";
-        }}
-      }}, token);
-      if (!completed || token !== cancelToken) return; // was cancelled
-      const ms = (performance.now() - t0).toFixed(0);
-      upscaleState[idx] = modelName === "general_plus" ? "hd" : "fast";
-      statusBar.textContent = "P" + idx + " " + label + " " + ms + "ms (" + backend + ")";
-      statusBar.className = "status-bar ok";
-      hdProgress.style.width = "0";
-      hdBtn.classList.remove("loading");
-      if (idx === activePanel) updateUpscaleBadge(idx);
-      resultCache[idx + ":" + modelName] = true;
-      // Prefetch next panel with fast
-      const next = (idx + 1) % 4;
-      if (!resultCache[next + ":general_fast"] && token === cancelToken) {{
-        upscalePanel(next, "general_fast");
-      }}
-    }} catch (e) {{
-      console.error("upscale error:", e);
-      statusBar.textContent = "Error: " + e.message;
-      statusBar.className = "status-bar err";
-      hdBtn.classList.remove("loading");
-      hdProgress.style.width = "0";
-    }} finally {{
-      upscaleBusy = false;
-    }}
-  }};
-  // Chain onto queue so operations never overlap
-  upscaleQueue = upscaleQueue.then(job);
-}}
-
-// ── View switching ──
-function showComic() {{
-  viewMode = "comic";
-  comicView.style.display = "";
-  carouselView.style.display = "none";
-  updateBreadcrumb();
-  renderDetections(null);
-}}
-
-function showPanel(idx) {{
-  viewMode = "panel";
-  activePanel = idx;
-  comicView.style.display = "none";
-  carouselView.style.display = "";
-  // Draw raw crops for all panels
-  for (let i = 0; i < 4; i++) {{
-    if (!upscaleState[i]) {{
-      const src = cropPanelCanvas(comicImg, i);
-      const c = canvases[i];
-      c.width = src.width; c.height = src.height;
-      c.getContext("2d").drawImage(src, 0, 0);
-      upscaleState[i] = "raw";
-    }}
-  }}
-  // Scroll to target panel
-  carousel.scrollTo({{ left: idx * carousel.clientWidth, behavior: "instant" }});
-  updateDots(idx);
-  updateBreadcrumb();
-  updateNavBtns();
-  renderDetections(idx);
-  updateUpscaleBadge(idx);
-  // Auto-upscale with fast
-  if (!resultCache[idx + ":general_fast"]) {{
-    upscalePanel(idx, "general_fast");
-  }}
-}}
-
-function updateBreadcrumb() {{
-  if (viewMode === "comic") {{
-    breadcrumb.innerHTML = '<span class="crumb current">All panels</span>';
-  }} else {{
-    breadcrumb.innerHTML =
-      '<span class="crumb" onclick="window._showComic()">All panels</span>' +
-      '<span class="crumb-sep">\u2192</span>' +
-      '<span class="crumb current">Panel ' + activePanel + '</span>';
-  }}
-}}
-
-function updateDots(idx) {{
-  dots.forEach((d, i) => d.classList.toggle("active", i === idx));
-}}
-
-function updateNavBtns() {{
-  prevBtn.disabled = activePanel <= 0;
-  nextBtn.disabled = activePanel >= 3;
-}}
-
-function updateUpscaleBadge(idx) {{
-  const state = upscaleState[idx];
-  if (state === "fast") {{
-    upscaleBadge.style.display = "";
-    upscaleBadge.textContent = "4x fast \u00b7 " + backend;
-  }} else if (state === "hd") {{
-    upscaleBadge.style.display = "";
-    upscaleBadge.textContent = "4x HD \u00b7 " + backend;
-  }} else {{
-    upscaleBadge.style.display = "none";
-  }}
-  // Update HD button state
-  hdBtn.classList.toggle("done", state === "hd");
-  hdBtn.classList.remove("loading");
-}}
-
-// ── Detections rendering ──
-function renderDetections(panelIdx) {{
-  const dets = panelIdx === null ? MOCK_DETECTIONS : detsForPanel(panelIdx);
-  detTitle.textContent = panelIdx === null
-    ? "Detections (" + MOCK_DETECTIONS.length + ")"
-    : "Panel " + panelIdx + " detections (" + dets.length + ")";
-  detList.innerHTML = dets.map(d => {{
-    const color = CLASS_COLORS[d.yolo_class] || "#94a3b8";
-    const pet = d.pet_id ? ' <span class="det-pet">(' + d.pet_id + ')</span>' : '';
-    const conf = d.confidence ? (d.confidence * 100).toFixed(0) + "%" : "";
-    return '<li class="det-item">' +
-      '<span class="det-color" style="background:' + color + '"></span>' +
-      '<span class="det-class">' + d.yolo_class + '</span>' +
-      pet +
-      '<span class="det-conf">' + conf + '</span>' +
-      '</li>';
-  }}).join("");
-}}
-
-// ── Event handlers ──
-// Panel region clicks
-document.querySelectorAll(".panel-region").forEach(el => {{
-  el.addEventListener("click", () => showPanel(parseInt(el.dataset.panel)));
-}});
-
-// Carousel scroll snap
-carousel.addEventListener("scrollend", () => {{
-  const idx = Math.round(carousel.scrollLeft / carousel.clientWidth);
-  if (idx !== activePanel) {{
-    activePanel = idx;
-    updateDots(idx);
-    updateBreadcrumb();
-    updateNavBtns();
-    renderDetections(idx);
-    updateUpscaleBadge(idx);
-    if (!resultCache[idx + ":general_fast"]) {{
-      upscalePanel(idx, "general_fast");
-    }}
-  }}
-}});
-
-// Fallback for browsers without scrollend
-let scrollTimer;
-carousel.addEventListener("scroll", () => {{
-  clearTimeout(scrollTimer);
-  scrollTimer = setTimeout(() => {{
-    const idx = Math.round(carousel.scrollLeft / carousel.clientWidth);
-    if (idx !== activePanel) {{
-      activePanel = idx;
-      updateDots(idx);
-      updateBreadcrumb();
-      updateNavBtns();
-      renderDetections(idx);
-      updateUpscaleBadge(idx);
-      if (!resultCache[idx + ":general_fast"]) {{
-        upscalePanel(idx, "general_fast");
-      }}
-    }}
-  }}, 150);
-}});
-
-// Nav buttons
-prevBtn.addEventListener("click", () => {{
-  if (activePanel > 0) {{
-    carousel.scrollTo({{ left: (activePanel - 1) * carousel.clientWidth, behavior: "smooth" }});
-  }}
-}});
-nextBtn.addEventListener("click", () => {{
-  if (activePanel < 3) {{
-    carousel.scrollTo({{ left: (activePanel + 1) * carousel.clientWidth, behavior: "smooth" }});
-  }}
-}});
-
-// Dots
-dots.forEach(d => {{
-  d.addEventListener("click", () => {{
-    const idx = parseInt(d.dataset.panel);
-    carousel.scrollTo({{ left: idx * carousel.clientWidth, behavior: "smooth" }});
-  }});
-}});
-
-// HD button
-hdBtn.addEventListener("click", () => {{
-  if (hdBtn.classList.contains("loading")) return;
-  hdBtn.classList.add("loading");
-  if (upscaleState[activePanel] === "hd") {{
-    // Toggle back to fast
-    hdBtn.classList.remove("done");
-    upscalePanel(activePanel, "general_fast");
-  }} else {{
-    // Upgrade to HD
-    hdBtn.classList.remove("done");
-    upscalePanel(activePanel, "general_plus");
-  }}
-}});
-
-// Keyboard nav
-document.addEventListener("keydown", (e) => {{
-  if (viewMode !== "panel") return;
-  if (e.key === "ArrowLeft" && activePanel > 0) {{
-    carousel.scrollTo({{ left: (activePanel - 1) * carousel.clientWidth, behavior: "smooth" }});
-  }} else if (e.key === "ArrowRight" && activePanel < 3) {{
-    carousel.scrollTo({{ left: (activePanel + 1) * carousel.clientWidth, behavior: "smooth" }});
-  }} else if (e.key === "Escape") {{
-    showComic();
-  }}
-}});
-
-// Global functions for breadcrumb onclick
-window._showComic = showComic;
-
-// Photo selector
-photoSelect.addEventListener("change", () => {{
-  loadPhoto(photoSelect.value);
-}});
-
-async function loadPhoto(filename) {{
-  if (!filename) return;
-  upscaleState = {{}};
-  resultCache = {{}};
-  comicImg.src = "/api/photos/" + encodeURIComponent(filename);
-  await new Promise((resolve, reject) => {{
-    comicImg.onload = resolve;
-    comicImg.onerror = reject;
-  }});
-  // Update info
-  const evt = data.events.find(e => e.source_filename === filename);
-  if (evt) {{
-    document.getElementById("caption").textContent = evt.summary || "No summary";
-    document.getElementById("petPill").textContent = evt.pet_id || "unknown";
-    document.getElementById("statusPill").textContent = evt.status || "pending";
-    document.getElementById("timePill").textContent = evt.observed_at
-      ? new Date(evt.observed_at).toLocaleString() : "";
-  }}
-  // Always return to comic view on photo change
-  showComic();
-  }}
-  statusBar.textContent = "Loaded";
-  statusBar.className = "status-bar ok";
-}}
-
-// Initial load
-loadPhoto(photoSelect.value);
-statusBar.textContent = "Ready";
-statusBar.className = "status-bar ok";
-</script>
+<script type="module" src="/test/carousel.js"></script>
 </body>
 </html>"##
     );
@@ -2212,6 +1870,17 @@ statusBar.className = "status-bar ok";
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         html,
+    )
+}
+
+async fn handle_carousel_js() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        include_str!("../../static/carousel.js"),
     )
 }
 
