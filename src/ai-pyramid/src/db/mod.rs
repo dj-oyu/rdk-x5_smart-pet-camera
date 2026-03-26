@@ -395,7 +395,14 @@ impl PhotoStore {
         }
         let placeholders: String = photo_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
-            "SELECT photo_id, bbox_x, bbox_y, bbox_w, bbox_h FROM detections WHERE photo_id IN ({placeholders}) ORDER BY photo_id"
+            "SELECT d.photo_id, d.bbox_x, d.bbox_y, d.bbox_w, d.bbox_h \
+             FROM detections d \
+             WHERE d.photo_id IN ({placeholders}) \
+               AND d.det_level = ( \
+                   SELECT COALESCE(MAX(d2.det_level), 1) \
+                   FROM detections d2 WHERE d2.photo_id = d.photo_id \
+               ) \
+             ORDER BY d.photo_id"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let params: Vec<Box<dyn rusqlite::types::ToSql>> = photo_ids
@@ -1184,5 +1191,145 @@ mod tests {
         // No filter → all 3
         let (_, total) = store.list(&PhotoFilter::default()).unwrap();
         assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn bboxes_prefer_max_det_level() {
+        let store = setup();
+        let ts = dt(2026, 3, 21, 11, 0, 0);
+
+        // Photo with L1 detections (3 bboxes)
+        let l1_dets = vec![
+            DetectionInput {
+                panel_index: Some(0),
+                bbox_x: 10,
+                bbox_y: 20,
+                bbox_w: 100,
+                bbox_h: 80,
+                yolo_class: Some("cat".into()),
+                pet_class: None,
+                confidence: Some(0.7),
+                detected_at: "2026-03-21T11:00:00".into(),
+                color_metrics: None,
+                det_level: 1,
+                model: None,
+            },
+            DetectionInput {
+                panel_index: Some(1),
+                bbox_x: 200,
+                bbox_y: 30,
+                bbox_w: 90,
+                bbox_h: 70,
+                yolo_class: Some("cat".into()),
+                pet_class: None,
+                confidence: Some(0.6),
+                detected_at: "2026-03-21T11:00:00".into(),
+                color_metrics: None,
+                det_level: 1,
+                model: None,
+            },
+            DetectionInput {
+                panel_index: Some(2),
+                bbox_x: 50,
+                bbox_y: 250,
+                bbox_w: 80,
+                bbox_h: 60,
+                yolo_class: Some("cup".into()),
+                pet_class: None,
+                confidence: Some(0.5),
+                detected_at: "2026-03-21T11:00:00".into(),
+                color_metrics: None,
+                det_level: 1,
+                model: None,
+            },
+        ];
+        store
+            .ingest_with_detections("mixed.jpg", ts, Some("chatora"), &l1_dets)
+            .unwrap();
+
+        // Add L2 detections (2 bboxes, different positions)
+        let l2_dets = vec![
+            DetectionInput {
+                panel_index: Some(0),
+                bbox_x: 15,
+                bbox_y: 25,
+                bbox_w: 95,
+                bbox_h: 75,
+                yolo_class: Some("cat".into()),
+                pet_class: None,
+                confidence: Some(0.9),
+                detected_at: "2026-03-21T11:00:00".into(),
+                color_metrics: None,
+                det_level: 2,
+                model: Some("yolo11s-ax650".into()),
+            },
+            DetectionInput {
+                panel_index: Some(1),
+                bbox_x: 205,
+                bbox_y: 35,
+                bbox_w: 85,
+                bbox_h: 65,
+                yolo_class: Some("cat".into()),
+                pet_class: None,
+                confidence: Some(0.85),
+                detected_at: "2026-03-21T11:00:00".into(),
+                color_metrics: None,
+                det_level: 2,
+                model: Some("yolo11s-ax650".into()),
+            },
+        ];
+        store
+            .ingest_with_detections("mixed.jpg", ts, Some("chatora"), &l2_dets)
+            .unwrap();
+
+        // Photo with L1 only
+        let l1_only = vec![DetectionInput {
+            panel_index: Some(0),
+            bbox_x: 30,
+            bbox_y: 40,
+            bbox_w: 110,
+            bbox_h: 90,
+            yolo_class: Some("cat".into()),
+            pet_class: None,
+            confidence: Some(0.8),
+            detected_at: "2026-03-21T11:00:00".into(),
+            color_metrics: None,
+            det_level: 1,
+            model: None,
+        }];
+        store
+            .ingest_with_detections("l1only.jpg", ts, Some("mike"), &l1_only)
+            .unwrap();
+
+        // get_bboxes_for_photos: mixed.jpg should return only L2 (2 bboxes)
+        let mixed_id: i64 = store
+            .conn
+            .query_row(
+                "SELECT id FROM photos WHERE filename='mixed.jpg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let l1only_id: i64 = store
+            .conn
+            .query_row(
+                "SELECT id FROM photos WHERE filename='l1only.jpg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let map = store.get_bboxes_for_photos(&[mixed_id, l1only_id]).unwrap();
+
+        // mixed.jpg: only L2 bboxes (2, not 5)
+        let mixed_bboxes = map.get(&mixed_id).unwrap();
+        assert_eq!(mixed_bboxes.len(), 2);
+        assert_eq!(mixed_bboxes[0].bbox_x, 15); // L2 coordinate
+        assert_eq!(mixed_bboxes[1].bbox_x, 205);
+
+        // l1only.jpg: L1 bboxes (1)
+        let l1_bboxes = map.get(&l1only_id).unwrap();
+        assert_eq!(l1_bboxes.len(), 1);
+        assert_eq!(l1_bboxes[0].bbox_x, 30);
     }
 }
