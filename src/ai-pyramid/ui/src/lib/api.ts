@@ -111,7 +111,35 @@ export type Detection = {
   pet_id_override: string | null;
   confidence: number | null;
   detected_at: string;
+  det_level: number;
+  model: string | null;
 };
+
+export type PartialDetection = {
+  type: "detection-partial";
+  filename: string;
+  bbox_x: number;
+  bbox_y: number;
+  bbox_w: number;
+  bbox_h: number;
+  yolo_class: string;
+  confidence: number;
+};
+
+export type DetectionReady = {
+  type: "detection-ready";
+  filename: string;
+  count: number;
+};
+
+export async function detectNow(filename: string): Promise<{ ok: boolean; detections?: number; error?: string }> {
+  const response = await fetch(`/api/detect-now/${encodeURIComponent(filename)}`, { method: "POST" });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    return { ok: false, error: body.error ?? `status ${response.status}` };
+  }
+  return response.json();
+}
 
 export async function fetchDetections(photoId: number): Promise<Detection[]> {
   const response = await fetch(`/api/detections/${photoId}`);

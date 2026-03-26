@@ -2,6 +2,7 @@ use crate::db::DetectionInput;
 use crate::ingest::filename::parse_comic_filename;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 
 /// COCO class IDs worth keeping for pet camera context.
 const KEEP_CLASSES: &[i32] = &[
@@ -253,6 +254,85 @@ impl LocalDetector {
         Ok(all_inputs)
     }
 
+    /// Streaming variant: sends each detection via `tx` as soon as it's found,
+    /// then returns the final merged list for DB storage.
+    pub async fn detect_comic_stream(
+        &self,
+        photos_dir: &Path,
+        filename: &str,
+        tx: &mpsc::Sender<DetectionInput>,
+    ) -> Result<Vec<DetectionInput>, String> {
+        let jpeg_path = photos_dir.join(filename);
+        if !jpeg_path.exists() {
+            return Err(format!("file not found: {}", jpeg_path.display()));
+        }
+
+        let detected_at = parse_comic_filename(filename)
+            .map(|m| m.captured_at.format("%Y-%m-%dT%H:%M:%S").to_string())
+            .unwrap_or_else(|_| chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
+
+        const MARGIN: i32 = 12;
+        const BORDER: i32 = 2;
+        const GAP: i32 = 8;
+        const PANEL_W: i32 = 404;
+        const PANEL_H: i32 = 228;
+        const CELL_W: i32 = PANEL_W + 2 * BORDER;
+        const CELL_H: i32 = PANEL_H + 2 * BORDER;
+
+        let img =
+            image::open(&jpeg_path).map_err(|e| format!("open {}: {e}", jpeg_path.display()))?;
+
+        let mut all_inputs = Vec::new();
+
+        for panel in 0..4u32 {
+            let col = panel as i32 % 2;
+            let row = panel as i32 / 2;
+            let x = MARGIN + BORDER + col * (CELL_W + GAP);
+            let y = MARGIN + BORDER + row * (CELL_H + GAP);
+
+            let panel_img = img.crop_imm(x as u32, y as u32, PANEL_W as u32, PANEL_H as u32);
+            let tmp_path = std::env::temp_dir().join(format!("panel_{panel}.jpg"));
+            panel_img
+                .save(&tmp_path)
+                .map_err(|e| format!("save panel: {e}"))?;
+
+            let dets = self.detect_image(&tmp_path).await?;
+            let _ = std::fs::remove_file(&tmp_path);
+
+            for d in dets {
+                if !KEEP_CLASSES.contains(&d.class_id) {
+                    continue;
+                }
+                let class_name = if d.class_id == 16 {
+                    "cat".to_string()
+                } else {
+                    d.class_name
+                };
+
+                let input = DetectionInput {
+                    panel_index: Some(panel as i32),
+                    bbox_x: x + d.bbox_x.max(0),
+                    bbox_y: y + d.bbox_y.max(0),
+                    bbox_w: d.bbox_w.min(PANEL_W - d.bbox_x.max(0)),
+                    bbox_h: d.bbox_h.min(PANEL_H - d.bbox_y.max(0)),
+                    yolo_class: Some(class_name),
+                    pet_class: None,
+                    confidence: Some(d.confidence),
+                    detected_at: detected_at.clone(),
+                    color_metrics: None,
+                    det_level: 2,
+                    model: Some("yolo11s+yolo26l-ax650".into()),
+                };
+
+                // Stream each detection immediately
+                let _ = tx.send(input.clone()).await;
+                all_inputs.push(input);
+            }
+        }
+
+        Ok(all_inputs)
+    }
+
     async fn run_model(
         &self,
         binary: &str,
@@ -356,20 +436,39 @@ fn parse_ax_output(stdout: &str) -> Result<Vec<RawLocalDetection>, String> {
 }
 
 /// Merge detections from dual models: deduplicate overlapping bboxes by IoU.
+/// When both models agree (IoU > 0.5, same class), boost confidence:
+///   boosted = 1 - (1 - conf_a) * (1 - conf_b)
+/// Two-pass merge:
+/// 1. Same-class IoU > 0.5 → boost confidence (dual-model agreement)
+/// 2. Cross-class IoU > 0.3 → same object, keep higher confidence
 fn merge_detections(mut dets: Vec<RawLocalDetection>) -> Vec<RawLocalDetection> {
-    // Sort by confidence descending
     dets.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
 
-    let mut merged: Vec<RawLocalDetection> = Vec::new();
+    // Pass 1: same-class merge with confidence boost
+    let mut pass1: Vec<RawLocalDetection> = Vec::new();
     for det in dets {
-        let dominated = merged
-            .iter()
-            .any(|m| m.class_id == det.class_id && iou(m, &det) > 0.5);
-        if !dominated {
-            merged.push(det);
+        if let Some(existing) = pass1
+            .iter_mut()
+            .find(|m| m.class_id == det.class_id && iou(m, &det) > 0.5)
+        {
+            let boosted = 1.0 - (1.0 - existing.confidence) * (1.0 - det.confidence);
+            existing.confidence = boosted;
+        } else {
+            pass1.push(det);
         }
     }
-    merged
+
+    // Pass 2: cross-class proximity merge (same object, different label)
+    // Keep highest confidence detection, discard overlapping lower-conf ones
+    pass1.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+    let mut pass2: Vec<RawLocalDetection> = Vec::new();
+    for det in pass1 {
+        let dominated = pass2.iter().any(|m| iou(m, &det) > 0.3);
+        if !dominated {
+            pass2.push(det);
+        }
+    }
+    pass2
 }
 
 fn iou(a: &RawLocalDetection, b: &RawLocalDetection) -> f64 {
@@ -446,7 +545,8 @@ detection num: 3
         ];
         let merged = merge_detections(dets);
         assert_eq!(merged.len(), 1);
-        assert!((merged[0].confidence - 0.81).abs() < 0.01);
+        // Boosted: 1 - (1-0.81)*(1-0.71) = 1 - 0.19*0.29 ≈ 0.9449
+        assert!((merged[0].confidence - 0.9449).abs() < 0.01);
     }
 
     #[test]

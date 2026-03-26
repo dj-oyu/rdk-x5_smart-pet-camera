@@ -131,7 +131,7 @@ async fn main() {
     let sse_bridge = sse_event_tx.clone();
     tokio::spawn(async move {
         while let Ok(event) = app_events.recv().await {
-            let _ = sse_bridge.send(server::PhotoEvent {
+            let _ = sse_bridge.send(server::PhotoEvent::Update {
                 filename: event.source_filename,
                 is_valid: event.is_valid,
                 caption: event.summary,

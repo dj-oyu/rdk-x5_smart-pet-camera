@@ -245,6 +245,8 @@ impl PhotoWatcher {
                                     &dets,
                                 )
                                 .await;
+                            self.app
+                                .notify_detection_complete(&filename, meta.pet_id.clone());
                             info!("Detection: {filename} ({} dets)", dets.len());
                         }
                     }
