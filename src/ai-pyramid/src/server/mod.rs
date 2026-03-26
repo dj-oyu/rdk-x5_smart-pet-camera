@@ -1165,11 +1165,26 @@ async function upscale(source, displayCanvas, model) {{
   await readBuf.mapAsync(GPUMapMode.READ);
   const raw = new Uint8Array(readBuf.getMappedRange());
 
-  // Write to display canvas via ImageData (strip row alignment padding)
+  // Write to display canvas via ImageData (strip row padding + BGRA→RGBA swap)
   const rowBytes = outW * 4;
   const pixels = new Uint8ClampedArray(outW * outH * 4);
+  const isBGRA = navigator.gpu.getPreferredCanvasFormat() === "bgra8unorm";
   for (let y = 0; y < outH; y++) {{
-    pixels.set(raw.subarray(y * bytesPerRow, y * bytesPerRow + rowBytes), y * rowBytes);
+    const src = y * bytesPerRow;
+    const dst = y * rowBytes;
+    for (let x = 0; x < rowBytes; x += 4) {{
+      if (isBGRA) {{
+        pixels[dst+x]   = raw[src+x+2]; // R←B
+        pixels[dst+x+1] = raw[src+x+1]; // G
+        pixels[dst+x+2] = raw[src+x];   // B←R
+        pixels[dst+x+3] = raw[src+x+3]; // A
+      }} else {{
+        pixels[dst+x]   = raw[src+x];
+        pixels[dst+x+1] = raw[src+x+1];
+        pixels[dst+x+2] = raw[src+x+2];
+        pixels[dst+x+3] = raw[src+x+3];
+      }}
+    }}
   }}
   readBuf.unmap();
   readBuf.destroy();
