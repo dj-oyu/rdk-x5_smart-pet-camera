@@ -123,6 +123,7 @@ export function EventDetail({ event, petNames, onClose, onUpdated, initialPanel 
 
   // Upscale state
   const [upscaleState, setUpscaleState] = useState<Record<number, "raw" | "fast" | "hd">>({});
+  const upscaleStateRef = useRef<Record<number, string>>({});
   const [hdLoading, setHdLoading] = useState(false);
   const hdProgressRef = useRef<HTMLDivElement | null>(null);
   const tfRef = useRef<{ tf: any; backend: string; models: Record<string, any>; cancel: number; queue: Promise<void> }>({
@@ -385,13 +386,14 @@ export function EventDetail({ event, petNames, onClose, onUpdated, initialPanel 
     // Canvas display size for coordinate transform
     const canvasW = canvas.clientWidth;
     const canvasH = canvas.clientHeight;
+    const mult = canvas.width > PW ? canvas.width / PW : 1;
     const scaleX = canvasW / canvas.width;
     const scaleY = canvasH / canvas.height;
 
-    const bboxCx = (localX + det.bbox_w / 2) * scaleX;
-    const bboxCy = (localY + det.bbox_h / 2) * scaleY;
-    const bboxDW = det.bbox_w * scaleX;
-    const bboxDH = det.bbox_h * scaleY;
+    const bboxCx = (localX + det.bbox_w / 2) * mult * scaleX;
+    const bboxCy = (localY + det.bbox_h / 2) * mult * scaleY;
+    const bboxDW = det.bbox_w * mult * scaleX;
+    const bboxDH = det.bbox_h * mult * scaleY;
 
     // Viewport = slide, Content = canvas display size
     const viewW = slide.clientWidth;
@@ -526,15 +528,17 @@ export function EventDetail({ event, petNames, onClose, onUpdated, initialPanel 
     const p = PANELS[panelIdx];
     const localX = det.bbox_x - p.x;
     const localY = det.bbox_y - p.y;
+    // If canvas was upscaled (4x), coords need to be multiplied too
+    const mult = canvas.width > PW ? canvas.width / PW : 1;
     const displayW = canvas.clientWidth;
     const displayH = canvas.clientHeight;
     const scaleX = displayW / canvas.width;
     const scaleY = displayH / canvas.height;
     return {
-      left: `${localX * scaleX}px`,
-      top: `${localY * scaleY}px`,
-      width: `${det.bbox_w * scaleX}px`,
-      height: `${det.bbox_h * scaleY}px`,
+      left: `${localX * mult * scaleX}px`,
+      top: `${localY * mult * scaleY}px`,
+      width: `${det.bbox_w * mult * scaleX}px`,
+      height: `${det.bbox_h * mult * scaleY}px`,
     };
   }
 
@@ -637,14 +641,16 @@ export function EventDetail({ event, petNames, onClose, onUpdated, initialPanel 
           }
         }, token);
         if (!completed || token !== r.cancel) return;
-        setUpscaleState(prev => ({ ...prev, [idx]: modelName === "general_plus" ? "hd" : "fast" }));
+        const level = modelName === "general_plus" ? "hd" : "fast";
+        upscaleStateRef.current[idx] = level;
+        setUpscaleState(prev => ({ ...prev, [idx]: level as "fast" | "hd" }));
         if (modelName === "general_plus") {
           setHdLoading(false);
           if (hdProgressRef.current) hdProgressRef.current.style.width = "0";
         }
-        // Prefetch next panel
+        // Prefetch next panel (use ref to avoid stale closure)
         const next = (idx + 1) % 4;
-        if (!upscaleState[next] && token === r.cancel) {
+        if (!upscaleStateRef.current[next] && token === r.cancel) {
           upscalePanel(next, "general_fast");
         }
       } catch (e) {
@@ -659,7 +665,7 @@ export function EventDetail({ event, petNames, onClose, onUpdated, initialPanel 
   // Auto-upscale with general_fast when entering panel view
   useEffect(() => {
     if (viewMode !== "panel" || !comicImage) return;
-    if (!upscaleState[activePanel]) {
+    if (!upscaleStateRef.current[activePanel]) {
       upscalePanel(activePanel, "general_fast");
     }
   }, [viewMode, activePanel, comicImage]);

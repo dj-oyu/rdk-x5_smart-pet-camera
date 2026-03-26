@@ -290,6 +290,10 @@ export function writeQueryToLocation(query: EventQuery): void {
     params.set("embed", embed);
   }
   const search = params.toString();
-  const url = search ? `/app?${search}` : "/app";
+  // Preserve deep link path (e.g. /app/photo/42/panel/1) — only rewrite if on /app
+  const basePath = window.location.pathname.startsWith("/app/photo/")
+    ? window.location.pathname
+    : "/app";
+  const url = search ? `${basePath}?${search}` : basePath;
   window.history.replaceState({}, "", url);
 }
