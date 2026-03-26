@@ -1046,7 +1046,7 @@ function addLog(msg, cls) {{
   logBox.scrollTop = logBox.scrollHeight;
 }}
 window._addLog = addLog;
-addLog("WebSR Test v9 (shared-canvas+fresh-instance)");
+addLog("WebSR Test v10 (VideoFrame+reuse-instance)");
 addLog("navigator.gpu: " + (navigator.gpu ? "available" : "UNAVAILABLE"));
 addLog("User-Agent: " + navigator.userAgent.slice(0, 80));
 window.addEventListener("error", (e) => addLog("JS Error: " + e.message + " @ " + e.filename + ":" + e.lineno, "err"));
@@ -1150,23 +1150,40 @@ async function getWeights(model) {{
 
 // WebSR workarounds:
 // 1. destroy() kills shared GPUDevice → never call destroy
-// 2. render() caches input texture → new instance per render
-// 3. Safari limits WebGPU contexts → reuse single canvas
+// 2. render() caches input texture for ImageSource → use VideoFrame
+//    to force video path (GPUExternalTexture, refreshed each frame)
+// 3. Safari limits WebGPU contexts → reuse single canvas + instance
 const workCanvas = document.createElement("canvas");
+let currentWebSR = null;
+let currentRes = "";
+const hasVideoFrame = typeof VideoFrame !== "undefined";
 
 async function upscale(source, displayCanvas, model) {{
   const weights = await getWeights(model);
   const w = source.width || source.naturalWidth;
   const h = source.height || source.naturalHeight;
+  const resKey = `${{w}}x${{h}}_${{model}}`;
   log(`Upscale: ${{w}}x${{h}}`);
 
-  // New instance (fresh input texture binding) on shared canvas
-  const websr = new WebSR({{ network_name: model, weights, gpu, canvas: workCanvas }});
-  await websr.render(source);
+  if (!currentWebSR || currentRes !== resKey) {{
+    currentWebSR = new WebSR({{ network_name: model, weights, gpu, canvas: workCanvas }});
+    currentRes = resKey;
+    log("New instance: " + resKey);
+  }}
+
+  // Use VideoFrame to force video path (refreshes GPU texture each render)
+  // Falls back to ImageBitmap on browsers without VideoFrame support
+  if (hasVideoFrame) {{
+    const frame = new VideoFrame(source, {{ timestamp: Date.now() * 1000 }});
+    await currentWebSR.render(frame);
+    frame.close();
+  }} else {{
+    await currentWebSR.render(source);
+  }}
+
   await gpu.queue.onSubmittedWorkDone();
   await new Promise(r => requestAnimationFrame(r));
 
-  // Capture before next render overwrites workCanvas
   const bitmap = await createImageBitmap(workCanvas);
   displayCanvas.width = bitmap.width;
   displayCanvas.height = bitmap.height;
