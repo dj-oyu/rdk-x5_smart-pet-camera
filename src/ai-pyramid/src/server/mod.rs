@@ -1154,7 +1154,11 @@ async function upscale(source, canvas, model) {{
   const websr = new WebSR({{ network_name: model, weights, gpu, canvas }});
   log("Calling render...");
   await websr.render(source);
+  // Wait for GPU to actually finish processing
+  await gpu.queue.onSubmittedWorkDone();
   log(`Render done: canvas=${{canvas.width}}x${{canvas.height}}`);
+  // Let the frame paint before destroying
+  await new Promise(r => requestAnimationFrame(r));
   await websr.destroy();
   log("Destroyed WebSR instance");
 }}
