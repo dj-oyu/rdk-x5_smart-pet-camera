@@ -1151,7 +1151,7 @@ async function upscale(source, displayCanvas, model) {{
   await websr.render(source);
 
   // Get the texture that was just rendered to (same frame = same texture)
-  const outTex = gpuCtx.getCurrentTexture();
+  const outTex = workCanvas.getContext("webgpu").getCurrentTexture();
   const outW = outTex.width;
   const outH = outTex.height;
   const bytesPerRow = Math.ceil(outW * 4 / 256) * 256;
