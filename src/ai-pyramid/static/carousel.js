@@ -240,6 +240,7 @@ function showComic() {
   carouselView.style.display = "none";
   updateBreadcrumb();
   renderDetections(null);
+  renderComicBboxes();
   updateDownloadLink();
 }
 
@@ -413,6 +414,44 @@ function renderBboxes(panelIdx) {
 
 function renderAllBboxes() {
   for (let i = 0; i < 4; i++) renderBboxes(i);
+}
+
+// ── Comic-view bbox overlay (glass style, non-interactive) ──
+const comicBboxOverlay = document.getElementById("comicBboxOverlay");
+
+function renderComicBboxes() {
+  comicBboxOverlay.innerHTML = "";
+  if (!comicImg.naturalWidth) return;
+  // Scale: comic natural size (848×496) → displayed size
+  const displayW = comicImg.clientWidth;
+  const displayH = comicImg.clientHeight;
+  const scaleX = displayW / comicImg.naturalWidth;
+  const scaleY = displayH / comicImg.naturalHeight;
+
+  MOCK_DETECTIONS.forEach(d => {
+    const w = d.bbox_w * scaleX;
+    const h = d.bbox_h * scaleY;
+    const div = document.createElement("div");
+    div.className = "comic-bbox";
+    div.style.left = (d.bbox_x * scaleX) + "px";
+    div.style.top = (d.bbox_y * scaleY) + "px";
+    div.style.width = w + "px";
+    div.style.height = h + "px";
+
+    // Shine elements with offset-path tracing the bbox perimeter
+    const path = 'path("M 0,0 L ' + w + ',0 L ' + w + ',' + h + ' L 0,' + h + ' Z")';
+    const shine1 = document.createElement("div");
+    shine1.className = "comic-shine";
+    shine1.style.offsetPath = path;
+    div.appendChild(shine1);
+
+    const shine2 = document.createElement("div");
+    shine2.className = "comic-shine comic-shine-b";
+    shine2.style.offsetPath = path;
+    div.appendChild(shine2);
+
+    comicBboxOverlay.appendChild(div);
+  });
 }
 
 // ── Highlight & zoom linkage ──

@@ -1470,6 +1470,58 @@ body {{
   }}
 }}
 
+/* Comic-view bbox overlay (glass style, non-interactive) */
+.comic-bbox-overlay {{
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+}}
+.comic-bbox {{
+  position: absolute;
+  border: 1px solid rgba(255,255,255,0.35);
+  border-top-color: rgba(255,255,255,0.55);
+  border-left-color: rgba(255,255,255,0.45);
+  border-radius: 4px;
+  backdrop-filter: blur(2px);
+  background: rgba(255,255,255,0.04);
+  box-shadow:
+    /* inner bloom — soft white glow along inside edges */
+    inset 0 0 8px rgba(255,255,255,0.15),
+    inset 0 1px 0 rgba(255,255,255,0.25),
+    inset 1px 0 0 rgba(255,255,255,0.15),
+    /* outer glow — dark shadow for contrast + white bloom */
+    0 0 4px rgba(0,0,0,0.25),
+    0 0 10px rgba(255,255,255,0.08);
+  overflow: hidden;
+  pointer-events: none;
+  /* Wider clear zone (25-75%) so border/shadow stays visible at small sizes */
+  -webkit-mask-image:
+    linear-gradient(to right,  black, black 10%, rgba(0,0,0,0.6) 25%, transparent 40%, transparent 60%, rgba(0,0,0,0.6) 75%, black 90%, black),
+    linear-gradient(to bottom, black, black 10%, rgba(0,0,0,0.6) 25%, transparent 40%, transparent 60%, rgba(0,0,0,0.6) 75%, black 90%, black);
+  -webkit-mask-composite: source-in;
+  mask-image:
+    linear-gradient(to right,  black, black 10%, rgba(0,0,0,0.6) 25%, transparent 40%, transparent 60%, rgba(0,0,0,0.6) 75%, black 90%, black),
+    linear-gradient(to bottom, black, black 10%, rgba(0,0,0,0.6) 25%, transparent 40%, transparent 60%, rgba(0,0,0,0.6) 75%, black 90%, black);
+  mask-composite: intersect;
+}}
+.comic-bbox .comic-shine {{
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255,255,255,0.45) 0%, transparent 70%);
+  animation: comic-shine-travel 4s linear infinite;
+  pointer-events: none;
+}}
+.comic-bbox .comic-shine-b {{
+  animation-delay: -2s;
+}}
+@keyframes comic-shine-travel {{
+  from {{ offset-distance: 0%; }}
+  to {{ offset-distance: 100%; }}
+}}
+
 /* === Carousel === */
 .carousel-container {{
   position: relative;
@@ -1809,6 +1861,7 @@ body {{
     <!-- Comic view (default) -->
     <div id="comicView" class="image-container">
       <img id="comicImg" class="comic-image" crossorigin="anonymous" alt="Comic">
+      <div class="comic-bbox-overlay" id="comicBboxOverlay"></div>
       <div class="panel-regions" id="panelRegions">
         <div class="panel-region" data-panel="0"></div>
         <div class="panel-region" data-panel="1"></div>
