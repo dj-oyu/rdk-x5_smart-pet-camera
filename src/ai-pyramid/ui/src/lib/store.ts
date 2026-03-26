@@ -15,6 +15,7 @@ import {
   type PetNames,
 } from "./api";
 import { startSSE } from "./sse";
+import { createCancellable, isCancelled } from "./cancellable";
 
 const STANDALONE_LIMIT = 24;
 
@@ -45,28 +46,25 @@ export const subtitle = computed(() => {
 });
 
 // --- Actions ---
-let fetchController: AbortController | null = null;
+const fetchCancel = createCancellable();
 
 async function loadData(): Promise<void> {
-  fetchController?.abort();
-  const ctrl = new AbortController();
-  fetchController = ctrl;
+  const { signal: sig } = fetchCancel.reset();
   loading.value = true;
   error.value = null;
   try {
     const [eventResult, statsResult] = await Promise.all([
-      fetchEvents(query.value),
-      fetchStats(),
+      fetchEvents(query.value, sig),
+      fetchStats(sig),
     ]);
-    if (ctrl.signal.aborted) return;
     events.value = eventResult.events;
     total.value = eventResult.total;
     stats.value = statsResult;
   } catch (e) {
-    if (ctrl.signal.aborted) return;
+    if (isCancelled(e)) return;
     error.value = e instanceof Error ? e.message : "Failed to load data";
   } finally {
-    if (!ctrl.signal.aborted) loading.value = false;
+    if (!sig.aborted) loading.value = false;
   }
 }
 
@@ -149,5 +147,5 @@ export function initStore(): void {
 export function disposeStore(): void {
   queryEffectDisposer?.();
   if (popstateHandler) window.removeEventListener("popstate", popstateHandler);
-  fetchController?.abort();
+  fetchCancel.abort();
 }

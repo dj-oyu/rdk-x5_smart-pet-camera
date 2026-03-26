@@ -8,7 +8,7 @@ import {
   type EventSummary,
 } from "./api";
 import { setDetectionHandlers } from "./sse";
-import { createCancellable, autoCancelOn, abortable, isCancelled } from "./cancellable";
+import { createCancellable, autoCancelOn, abortable, isCancelled, type Cancellable } from "./cancellable";
 import { ensureTF, loadModel, upscaleTiled, enqueue } from "./upscaler";
 
 // Panel layout constants
@@ -102,9 +102,9 @@ export function createDetailStore(event: EventSummary, initPanel: number | null)
 
   // --- Init: fetch detections + preload image ---
   const initSignal = fetchCancel.controller.signal;
-  fetchDetections(event.id)
-    .then(dets => { if (!initSignal.aborted) detections.value = dets; })
-    .catch(() => { if (!initSignal.aborted) detections.value = []; })
+  fetchDetections(event.id, initSignal)
+    .then(dets => { detections.value = dets; })
+    .catch(e => { if (!isCancelled(e)) detections.value = []; })
     .finally(() => { if (!initSignal.aborted) detLoading.value = false; });
 
   const img = new Image();
