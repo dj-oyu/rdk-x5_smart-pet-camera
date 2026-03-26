@@ -62,11 +62,50 @@ export function createCancellable(): Cancellable {
  *   autoCancelOn(cancellable, () => { activePanel.value; viewMode.value; });
  *   // → whenever activePanel or viewMode changes, cancellable.reset() is called
  */
+/** Error thrown when an abortable operation is cancelled. */
+export class CancelledError extends Error {
+  readonly reason: string;
+  constructor(reason = "operation cancelled") {
+    super(reason);
+    this.name = "CancelledError";
+    this.reason = reason;
+  }
+}
+
+/**
+ * Race a promise against an AbortSignal.
+ * Rejects with CancelledError if the signal fires before the promise settles.
+ * The reason string includes the caller context for traceability.
+ */
+export function abortable<T>(promise: Promise<T>, signal: AbortSignal, reason?: string): Promise<T> {
+  const msg = reason ? `cancelled: ${reason}` : "operation cancelled";
+  if (signal.aborted) return Promise.reject(new CancelledError(msg));
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      signal.addEventListener(
+        "abort",
+        () => reject(new CancelledError(msg)),
+        { once: true },
+      );
+    }),
+  ]);
+}
+
+/** Check if an error is a CancelledError (or a fetch AbortError) */
+export function isCancelled(e: unknown): boolean {
+  if (e instanceof CancelledError) return true;
+  return e instanceof DOMException && e.name === "AbortError";
+}
+
 export function autoCancelOn(c: Cancellable, track: () => void): () => void {
-  let first = true;
+  // undefined → first run (subscribe only). Defined → cancel + reissue.
+  // peek() avoids subscribing to prev itself → no infinite loop.
+  const prev = signal<AbortController | undefined>(undefined);
   return effect(() => {
-    track(); // subscribe to signals
-    if (first) { first = false; return; } // skip initial run
-    c.reset();
+    track();
+    prev.peek()?.abort();
+    if (prev.peek()) c.reset();
+    prev.value = c.controller;
   });
 }

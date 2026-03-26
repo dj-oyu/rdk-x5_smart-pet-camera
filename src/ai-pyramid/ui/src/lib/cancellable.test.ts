@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { signal } from "@preact/signals";
-import { createCancellable, autoCancelOn } from "./cancellable";
+import { createCancellable, autoCancelOn, abortable, isCancelled, CancelledError } from "./cancellable";
 
 describe("createCancellable", () => {
   test("starts not aborted", () => {
@@ -166,5 +166,65 @@ describe("autoCancelOn", () => {
     const ctrl = c.controller;
     panel.value = 99;
     expect(ctrl.signal.aborted).toBe(false); // no cancel after dispose
+  });
+});
+
+describe("abortable", () => {
+  test("resolves when signal not aborted", async () => {
+    const ctrl = new AbortController();
+    const result = await abortable(Promise.resolve(42), ctrl.signal);
+    expect(result).toBe(42);
+  });
+
+  test("rejects immediately if signal already aborted", async () => {
+    const ctrl = new AbortController();
+    ctrl.abort();
+    try {
+      await abortable(Promise.resolve(42), ctrl.signal);
+      expect(true).toBe(false); // should not reach
+    } catch (e) {
+      expect(e).toBeInstanceOf(CancelledError);
+      expect((e as CancelledError).reason).toBe("operation cancelled");
+    }
+  });
+
+  test("rejects with reason when signal fires mid-flight", async () => {
+    const ctrl = new AbortController();
+    const slow = new Promise(r => setTimeout(r, 1000));
+    const task = abortable(slow, ctrl.signal, "loadModel");
+    ctrl.abort();
+    try {
+      await task;
+      expect(true).toBe(false);
+    } catch (e) {
+      expect(e).toBeInstanceOf(CancelledError);
+      expect((e as CancelledError).reason).toBe("cancelled: loadModel");
+    }
+  });
+
+  test("reason appears in stack trace / message", async () => {
+    const ctrl = new AbortController();
+    ctrl.abort();
+    try {
+      await abortable(Promise.resolve(), ctrl.signal, "upscale panel 2");
+    } catch (e) {
+      expect((e as Error).message).toContain("upscale panel 2");
+      expect((e as Error).stack).toBeDefined();
+    }
+  });
+});
+
+describe("isCancelled", () => {
+  test("detects CancelledError", () => {
+    expect(isCancelled(new CancelledError())).toBe(true);
+  });
+
+  test("detects DOMException AbortError (from fetch)", () => {
+    expect(isCancelled(new DOMException("", "AbortError"))).toBe(true);
+  });
+
+  test("rejects other errors", () => {
+    expect(isCancelled(new Error("oops"))).toBe(false);
+    expect(isCancelled(null)).toBe(false);
   });
 });
