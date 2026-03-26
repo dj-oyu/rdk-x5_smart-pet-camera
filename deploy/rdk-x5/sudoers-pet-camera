@@ -17,9 +17,15 @@ sunrise ALL=(root) NOPASSWD: /usr/bin/systemctl restart comic-sync*
 # daemon-reload (needed after editing .service files)
 sunrise ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload
 
-# journalctl (systemd logs)
+# journalctl (systemd logs) — exact arg match, so list common patterns
 sunrise ALL=(root) NOPASSWD: /usr/bin/journalctl -u pet-camera*
 sunrise ALL=(root) NOPASSWD: /usr/bin/journalctl -u comic-sync*
+sunrise ALL=(root) NOPASSWD: /usr/bin/journalctl -u pet-camera* -f
+sunrise ALL=(root) NOPASSWD: /usr/bin/journalctl -u comic-sync* -f
+sunrise ALL=(root) NOPASSWD: /usr/bin/journalctl -u pet-camera* --no-pager
+sunrise ALL=(root) NOPASSWD: /usr/bin/journalctl -u comic-sync* --no-pager
+sunrise ALL=(root) NOPASSWD: /usr/bin/journalctl -u pet-camera* --no-pager -n *
+sunrise ALL=(root) NOPASSWD: /usr/bin/journalctl -u comic-sync* --no-pager -n *
 
 # install script
 sunrise ALL=(root) NOPASSWD: /opt/smart-pet-camera/scripts/install-services.sh *
