@@ -73,6 +73,7 @@ type Props = {
   petNames: PetNames;
   onClose: () => void;
   onUpdated?: (patch: Partial<EventSummary>) => void;
+  initialPanel?: number | null;
 };
 
 function useContainerScale(ref: preact.RefObject<HTMLDivElement | null>) {
@@ -98,7 +99,7 @@ function useContainerScale(ref: preact.RefObject<HTMLDivElement | null>) {
   return layout;
 }
 
-export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
+export function EventDetail({ event, petNames, onClose, onUpdated, initialPanel }: Props) {
   const [detections, setDetections] = useState<Detection[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -110,8 +111,8 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
   const activeDetId = pinnedDetId ?? hoveredDetId;
 
   // Carousel state
-  const [viewMode, setViewMode] = useState<ViewMode>("comic");
-  const [activePanel, setActivePanel] = useState(0);
+  const [viewMode, setViewMode] = useState<ViewMode>(initialPanel != null ? "panel" : "comic");
+  const [activePanel, setActivePanel] = useState(initialPanel ?? 0);
   const carouselRef = useRef<HTMLDivElement | null>(null);
 
   // Zoom/pan state
@@ -223,7 +224,10 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
       scrollTimer = setTimeout(() => {
         if (!el) return;
         const idx = Math.round(el.scrollLeft / el.clientWidth);
-        if (idx >= 0 && idx <= 3) setActivePanel(idx);
+        if (idx >= 0 && idx <= 3) {
+          setActivePanel(idx);
+          history.replaceState(null, "", `/app/photo/${event.id}/panel/${idx}${location.search}`);
+        }
       }, 50);
     }
     el.addEventListener("scroll", onScroll, { passive: true });
@@ -247,9 +251,10 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
   const scrollToPanel = useCallback((idx: number) => {
     resetZoom();
     setActivePanel(idx);
+    history.replaceState(null, "", `/app/photo/${event.id}/panel/${idx}${location.search}`);
     const el = carouselRef.current;
     if (el) el.scrollTo({ left: idx * el.clientWidth, behavior: "smooth" });
-  }, []);
+  }, [event.id]);
 
   function showPanel(idx: number) {
     setViewMode("panel");
@@ -530,6 +535,14 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
     ? detections
     : detsForPanel(detections, activePanel);
 
+  const [copied, setCopied] = useState(false);
+  function handleShare() {
+    navigator.clipboard.writeText(location.href).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
   const dlHref = viewMode === "panel"
     ? `${photoUrl(event.source_filename)}/panel/${activePanel}`
     : photoUrl(event.source_filename);
@@ -558,6 +571,7 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
             <span class="crumb-sep">/</span>
             <span class="crumb current">Panel {activePanel}</span>
             <a class="pill dl" href={dlHref} download={dlFilename}>JPEG P{activePanel}</a>
+            <button type="button" class="pill dl" onClick={handleShare}>{copied ? "Copied!" : "Share"}</button>
           </div>
         )}
 
@@ -728,7 +742,10 @@ export function EventDetail({ event, petNames, onClose, onUpdated }: Props) {
             <p class="detail-caption">{event.summary ?? "No summary"}</p>
             {scanning && <span class="detect-now-status">Scanning...</span>}
             {viewMode === "comic" && (
-              <a class="pill dl" href={photoUrl(event.source_filename)} download={event.source_filename}>JPEG</a>
+              <>
+                <a class="pill dl" href={photoUrl(event.source_filename)} download={event.source_filename}>JPEG</a>
+                <button type="button" class="pill dl" onClick={handleShare}>{copied ? "Copied!" : "Share"}</button>
+              </>
             )}
           </div>
 

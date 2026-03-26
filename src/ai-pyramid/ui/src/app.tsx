@@ -9,10 +9,12 @@ import { SearchBar } from "./components/search-bar";
 import { StatsStrip } from "./components/stats-strip";
 import {
   fetchBehaviors,
+  fetchEventById,
   fetchEvents,
   fetchPetNames,
   fetchStats,
   isEmbedded,
+  parseDeepLink,
   readQueryFromLocation,
   writeQueryToLocation,
   type ActivityStats,
@@ -40,6 +42,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
   const [selectedEvent, setSelectedEvent] = useState<EventSummary | null>(null);
+  const [initialPanel, setInitialPanel] = useState<number | null>(null);
   const [petNames, setPetNames] = useState<PetNames>({});
   const [behaviors, setBehaviors] = useState<string[]>([]);
 
@@ -77,6 +80,14 @@ export function App() {
     if (!embed.embedded) {
       fetchBehaviors().then(setBehaviors);
     }
+    // Deep link: open photo if URL has /app/photo/{id}[/panel/{n}]
+    const { photoId, panelIndex } = parseDeepLink(location.pathname);
+    if (photoId) {
+      if (panelIndex != null) setInitialPanel(panelIndex);
+      fetchEventById(photoId).then(ev => {
+        if (ev) setSelectedEvent(ev);
+      });
+    }
   }, []);
 
   useEffect(() => {
@@ -86,6 +97,32 @@ export function App() {
     });
     return () => source.close();
   }, []);
+
+  function openModal(event: EventSummary) {
+    setSelectedEvent(event);
+    setInitialPanel(null);
+    history.pushState(null, "", `/app/photo/${event.id}${location.search}`);
+  }
+
+  function closeModal() {
+    setSelectedEvent(null);
+    setInitialPanel(null);
+    history.pushState(null, "", `/app${location.search}`);
+  }
+
+  // Back/forward button: sync modal state with URL
+  useEffect(() => {
+    function onPop() {
+      const { photoId } = parseDeepLink(location.pathname);
+      if (photoId && !selectedEvent) {
+        fetchEventById(photoId).then(ev => { if (ev) setSelectedEvent(ev); });
+      } else if (!photoId && selectedEvent) {
+        setSelectedEvent(null);
+      }
+    }
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [selectedEvent]);
 
   function updateQuery(patch: Partial<EventQuery>) {
     setQuery((current) => ({
@@ -120,14 +157,15 @@ export function App() {
           loading={loading}
           error={error}
           petNames={petNames}
-          onOpenEvent={(event) => setSelectedEvent(event)}
+          onOpenEvent={openModal}
         />
         {selectedEvent && (
           <EventDetail
             event={selectedEvent}
             petNames={petNames}
-            onClose={() => setSelectedEvent(null)}
+            onClose={closeModal}
             onUpdated={() => setRefreshTick((c) => c + 1)}
+            initialPanel={initialPanel}
           />
         )}
         <section class="secondary-stack">
@@ -173,7 +211,7 @@ export function App() {
             loading={loading}
             error={error}
             petNames={petNames}
-            onOpenEvent={(event) => setSelectedEvent(event)}
+            onOpenEvent={openModal}
           />
           <Pagination
             total={total}
@@ -187,7 +225,7 @@ export function App() {
         <EventDetail
           event={selectedEvent}
           petNames={petNames}
-          onClose={() => setSelectedEvent(null)}
+          onClose={closeModal}
           onUpdated={() => setRefreshTick((c) => c + 1)}
         />
       )}

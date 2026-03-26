@@ -98,6 +98,27 @@ export function photoUrl(sourceFilename: string): string {
   return `/api/photos/${encodeURIComponent(sourceFilename)}`;
 }
 
+export async function fetchEventById(id: number): Promise<EventSummary | null> {
+  const response = await fetch(`/api/event/${id}`);
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`failed to fetch event: ${response.status}`);
+  return response.json();
+}
+
+export type DeepLink = {
+  photoId: number | null;
+  panelIndex: number | null;
+};
+
+export function parseDeepLink(pathname: string): DeepLink {
+  const m = pathname.match(/^\/app\/photo\/(\d+)(?:\/panel\/([0-3]))?$/);
+  if (!m) return { photoId: null, panelIndex: null };
+  return {
+    photoId: parseInt(m[1], 10),
+    panelIndex: m[2] != null ? parseInt(m[2], 10) : null,
+  };
+}
+
 export type Detection = {
   id: number;
   photo_id: number;
