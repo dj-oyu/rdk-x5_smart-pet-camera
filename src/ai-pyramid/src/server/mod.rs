@@ -1049,7 +1049,7 @@ function addLog(msg, cls) {{
   logBox.scrollTop = logBox.scrollHeight;
 }}
 window._addLog = addLog;
-addLog("v14");
+addLog("v15 (no-rAF)");
 addLog("navigator.gpu: " + (navigator.gpu ? "available" : "UNAVAILABLE"));
 addLog("User-Agent: " + navigator.userAgent.slice(0, 80));
 window.addEventListener("error", (e) => addLog("JS Error: " + e.message + " @ " + e.filename + ":" + e.lineno, "err"));
@@ -1141,7 +1141,6 @@ async function upscale(source, displayCanvas, model) {{
   const t0 = performance.now();
   await websr.render(source);
   await gpu.queue.onSubmittedWorkDone();
-  await new Promise(r => requestAnimationFrame(r));
   const ms = (performance.now() - t0).toFixed(0);
 
   const bitmap = await createImageBitmap(workCanvas);
