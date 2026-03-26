@@ -1,0 +1,29 @@
+# /etc/sudoers.d/pet-camera
+# Pet Camera systemd operations — NOPASSWD for sunrise user
+
+# systemctl operations on pet-camera units
+sunrise ALL=(root) NOPASSWD: /usr/bin/systemctl start pet-camera*
+sunrise ALL=(root) NOPASSWD: /usr/bin/systemctl stop pet-camera*
+sunrise ALL=(root) NOPASSWD: /usr/bin/systemctl restart pet-camera*
+sunrise ALL=(root) NOPASSWD: /usr/bin/systemctl enable pet-camera*
+sunrise ALL=(root) NOPASSWD: /usr/bin/systemctl disable pet-camera*
+sunrise ALL=(root) NOPASSWD: /usr/bin/systemctl status pet-camera*
+
+# comic-sync service
+sunrise ALL=(root) NOPASSWD: /usr/bin/systemctl start comic-sync*
+sunrise ALL=(root) NOPASSWD: /usr/bin/systemctl stop comic-sync*
+sunrise ALL=(root) NOPASSWD: /usr/bin/systemctl restart comic-sync*
+
+# daemon-reload (needed after editing .service files)
+sunrise ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload
+
+# journalctl (systemd logs)
+sunrise ALL=(root) NOPASSWD: /usr/bin/journalctl -u pet-camera*
+sunrise ALL=(root) NOPASSWD: /usr/bin/journalctl -u comic-sync*
+
+# install script
+sunrise ALL=(root) NOPASSWD: /opt/smart-pet-camera/scripts/install-services.sh *
+
+# copy service files to systemd
+sunrise ALL=(root) NOPASSWD: /usr/bin/cp /opt/smart-pet-camera/deploy/rdk-x5/*.service /etc/systemd/system/*
+sunrise ALL=(root) NOPASSWD: /usr/bin/cp /opt/smart-pet-camera/deploy/rdk-x5/*.target /etc/systemd/system/*

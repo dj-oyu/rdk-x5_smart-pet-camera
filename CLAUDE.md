@@ -41,6 +41,22 @@
 | `tool_profile_shm_design.md` | profile_shm.py tool design |
 | `development_roadmap.md` | Project timeline and roadmap |
 
+## systemd Services (rdk-x5)
+
+Production deployment uses systemd. See `scripts/USAGE.md` for full details.
+
+- **Install**: `sudo ./scripts/install-services.sh rdk-x5`
+- **Start/Stop all**: `sudo systemctl start|stop pet-camera.target`
+- **Individual restart**: `sudo systemctl restart pet-camera-<module>`
+- **Logs**: `sudo journalctl -u pet-camera-<module> -f`
+- **Build + restart**: `./scripts/build.sh <module>` (builds and restarts the systemd service)
+
+Services: `pet-camera-capture`, `pet-camera-detector`, `pet-camera-monitor`, `pet-camera-streaming`, `comic-sync`
+
+Service files are in `deploy/rdk-x5/`. After editing, copy to `/etc/systemd/system/` and `daemon-reload`.
+
+**Note**: detector runs via `uv` — the service file must use the absolute path to `uv` since systemd's PATH doesn't include user-local bins.
+
 ## Future Tasks
 - [ ] JSON event recording (schema defined, not coded)
 - [ ] Unified YAML config (params hardcoded across C/Python/Go)
