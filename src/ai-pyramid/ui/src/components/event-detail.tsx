@@ -501,9 +501,8 @@ export function EventDetail({ event, petNames, onClose, onUpdated, initialPanel 
               type="button"
               class={`hd-btn ${s.hdLoading.value ? "loading" : ""} ${s.upscaleState.value[s.activePanel.value] === "hd" ? "done" : ""}`}
               onClick={() => {
-                if (!s.hdLoading.value && s.upscaleState.value[s.activePanel.value] !== "hd") {
-                  s.upscalePanel(s.activePanel.value, "general_plus", canvasRefs.current, hdProgressRef.current);
-                }
+                if (s.hdLoading.value) return;
+                s.toggleUpscale(s.activePanel.value, canvasRefs.current, hdProgressRef.current);
               }}
             >HD</button>
             <div class="hd-progress" ref={hdProgressRef} style={{ width: 0 }} />

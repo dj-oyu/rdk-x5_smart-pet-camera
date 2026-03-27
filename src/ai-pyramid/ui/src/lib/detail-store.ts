@@ -71,6 +71,8 @@ export function createDetailStore(event: EventSummary, initPanel: number | null)
 
   const upscaleState = signal<Record<number, "raw" | "fast" | "hd">>({});
   const hdLoading = signal(false);
+  // Cached upscaled pixels per panel — instant toggle between fast/hd
+  const upscaleCache: Record<string, ImageData> = {}; // key: `${panelIdx}-${level}`
 
   const editingId = signal<number | null>(null);
   const editing = signal(false);
@@ -168,7 +170,11 @@ export function createDetailStore(event: EventSummary, initPanel: number | null)
         });
         if (!completed) return; // aborted inside tile loop
 
-        upscaleState.value = { ...upscaleState.peek(), [idx]: isHD ? "hd" : "fast" };
+        const level = isHD ? "hd" : "fast";
+        // Cache the upscaled pixels for instant toggle
+        const ctx = canvas.getContext("2d");
+        if (ctx) upscaleCache[`${idx}-${level}`] = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        upscaleState.value = { ...upscaleState.peek(), [idx]: level };
         if (isHD) {
           hdLoading.value = false;
           if (hdProgressEl) hdProgressEl.style.width = "0";
@@ -190,6 +196,31 @@ export function createDetailStore(event: EventSummary, initPanel: number | null)
     });
   }
 
+  // --- Toggle HD/fast from cache ---
+  function toggleUpscale(
+    idx: number,
+    canvasRefs: (HTMLCanvasElement | null)[],
+    hdProgressEl: HTMLDivElement | null,
+  ): void {
+    const current = upscaleState.peek()[idx];
+    if (!current || current === "raw") return;
+    const target = current === "hd" ? "fast" : "hd";
+    const cached = upscaleCache[`${idx}-${target}`];
+    if (cached) {
+      // Instant restore from cache
+      const canvas = canvasRefs[idx];
+      if (!canvas) return;
+      canvas.width = cached.width;
+      canvas.height = cached.height;
+      canvas.getContext("2d")?.putImageData(cached, 0, 0);
+      upscaleState.value = { ...upscaleState.peek(), [idx]: target };
+    } else {
+      // No cache for target — run upscale
+      const modelName = target === "hd" ? "general_plus" : "general_fast";
+      upscalePanel(idx, modelName, canvasRefs, hdProgressEl);
+    }
+  }
+
   // --- Cleanup ---
   function dispose(): void {
     fetchCancel.abort();
@@ -205,6 +236,6 @@ export function createDetailStore(event: EventSummary, initPanel: number | null)
     upscaleState, hdLoading,
     editingId, editing, formPetId, formStatus, formBehavior,
     comicImage, copied, visibleDets,
-    upscalePanel, dispose, event,
+    upscalePanel, toggleUpscale, dispose, event,
   };
 }
