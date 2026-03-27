@@ -85,6 +85,18 @@ export function EventDetail({ event, petNames, onClose, onUpdated, initialPanel 
     }
   });
 
+  // --- Initial scroll for deep link panel ---
+  useEffect(() => {
+    if (s.viewMode.value === "panel" && s.activePanel.value > 0) {
+      requestAnimationFrame(() => {
+        carouselRef.current?.scrollTo({
+          left: s.activePanel.value * (carouselRef.current?.clientWidth ?? 0),
+          behavior: "auto",
+        });
+      });
+    }
+  }, []);
+
   // --- Auto upscale ---
   useSignalEffect(() => {
     if (s.viewMode.value !== "panel" || !s.comicImage.value) return;
