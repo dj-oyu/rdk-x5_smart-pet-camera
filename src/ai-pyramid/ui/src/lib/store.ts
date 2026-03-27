@@ -81,8 +81,10 @@ export const AppStore = createModel(() => {
   });
 
   const openModal = action((event: EventSummary) => {
+    console.log("[openModal] called with:", event.id, "current selectedEvent:", selectedEvent.peek()?.id ?? "null");
     selectedEvent.value = event;
     initialPanel.value = null;
+    console.log("[openModal] after set:", selectedEvent.peek()?.id ?? "null");
     history.pushState(null, "", `/app/photo/${event.id}${location.search}`);
   });
 

@@ -12,6 +12,7 @@ import { AppStore, embed } from "./lib/store";
 
 export function App() {
   const store = useModel(AppStore);
+  console.log("[App render] selectedEvent:", store.selectedEvent.value?.id ?? "null");
 
   if (embed.embedded) {
     return (
