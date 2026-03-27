@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, useMemo } from "preact/hooks";
+import { useSignalEffect } from "@preact/signals";
 import {
   updateDetectionOverride,
   updatePhotoFields,
@@ -71,7 +72,7 @@ export function EventDetail({ event, petNames, onClose, onUpdated, initialPanel 
   const dragRef = useRef<{ startX: number; startY: number; startTx: number; startTy: number; wrapper: HTMLElement } | null>(null);
 
   // --- Draw panel crops when viewMode=panel and image ready ---
-  useEffect(() => {
+  useSignalEffect(() => {
     if (s.viewMode.value !== "panel" || !s.comicImage.value) return;
     const img = s.comicImage.value;
     for (let i = 0; i < 4; i++) {
@@ -82,15 +83,15 @@ export function EventDetail({ event, petNames, onClose, onUpdated, initialPanel 
       canvas.height = p.h;
       canvas.getContext("2d")?.drawImage(img, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
     }
-  }, [s.viewMode.value, s.comicImage.value]);
+  });
 
   // --- Auto upscale ---
-  useEffect(() => {
+  useSignalEffect(() => {
     if (s.viewMode.value !== "panel" || !s.comicImage.value) return;
     if (!s.upscaleState.peek()[s.activePanel.value]) {
       s.upscalePanel(s.activePanel.value, "general_fast", canvasRefs.current, hdProgressRef.current);
     }
-  }, [s.viewMode.value, s.activePanel.value, s.comicImage.value]);
+  });
 
   // --- Keyboard navigation ---
   useEffect(() => {

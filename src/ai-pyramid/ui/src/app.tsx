@@ -1,5 +1,5 @@
-import { useState } from "preact/hooks";
-import { useModel, useSignalEffect } from "@preact/signals";
+import { useModel } from "@preact/signals";
+import { Show } from "@preact/signals/utils";
 import { BackfillButton } from "./components/backfill-button";
 import { DailySummary } from "./components/daily-summary";
 import { EventDetail } from "./components/event-detail";
@@ -13,16 +13,6 @@ import { AppStore, embed } from "./lib/store";
 export function App() {
   const store = useModel(AppStore);
 
-  // Signal → useState bridge for re-render triggers
-  const [selectedEvent, setSelectedEvent] = useState(store.selectedEvent.value);
-  const [eventList, setEventList] = useState(store.events.peek());
-  const [isLoading, setIsLoading] = useState(store.loading.peek());
-  const [errMsg, setErrMsg] = useState(store.error.peek());
-  useSignalEffect(() => { setSelectedEvent(store.selectedEvent.value); });
-  useSignalEffect(() => { setEventList(store.events.value); });
-  useSignalEffect(() => { setIsLoading(store.loading.value); });
-  useSignalEffect(() => { setErrMsg(store.error.value); });
-
   if (embed.embedded) {
     return (
       <main class="app-shell compact-shell" data-embed={embed.host ?? undefined}>
@@ -31,21 +21,23 @@ export function App() {
           <span>{store.subtitle.value}</span>
         </div>
         <EventGrid
-          events={eventList}
-          loading={isLoading}
-          error={errMsg}
+          events={store.events.value}
+          loading={store.loading.value}
+          error={store.error.value}
           petNames={store.petNames.value}
           onOpenEvent={store.openModal}
         />
-        {selectedEvent && (
-          <EventDetail
-            event={selectedEvent}
-            petNames={store.petNames.value}
-            onClose={store.closeModal}
-            onUpdated={store.loadData}
-            initialPanel={store.initialPanel.value}
-          />
-        )}
+        <Show when={store.selectedEvent}>
+          {(ev) => (
+            <EventDetail
+              event={ev}
+              petNames={store.petNames.value}
+              onClose={store.closeModal}
+              onUpdated={store.loadData}
+              initialPanel={store.initialPanel.value}
+            />
+          )}
+        </Show>
         <section class="secondary-stack">
           <FilterBar
             query={store.query.value}
@@ -85,9 +77,9 @@ export function App() {
         <div class="standalone-main">
           <StatsStrip stats={store.stats.value} />
           <EventGrid
-            events={eventList}
-            loading={isLoading}
-            error={errMsg}
+            events={store.events.value}
+            loading={store.loading.value}
+            error={store.error.value}
             petNames={store.petNames.value}
             onOpenEvent={store.openModal}
           />
@@ -99,15 +91,17 @@ export function App() {
           />
         </div>
       </div>
-      {selectedEvent && (
-        <EventDetail
-          event={selectedEvent}
-          petNames={store.petNames.value}
-          onClose={store.closeModal}
-          onUpdated={store.loadData}
-          initialPanel={store.initialPanel.value}
-        />
-      )}
+      <Show when={store.selectedEvent}>
+        {(ev) => (
+          <EventDetail
+            event={ev}
+            petNames={store.petNames.value}
+            onClose={store.closeModal}
+            onUpdated={store.loadData}
+            initialPanel={store.initialPanel.value}
+          />
+        )}
+      </Show>
     </main>
   );
 }
