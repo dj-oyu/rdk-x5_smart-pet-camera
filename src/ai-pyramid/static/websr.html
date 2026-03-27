@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebSR Upscale Test</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; }}
+body {{ font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 12px; }}
+h1 {{ font-size: 18px; margin-bottom: 8px; }}
+h2 {{ font-size: 14px; color: #8888aa; margin: 16px 0 6px; }}
+.status {{ padding: 6px 12px; border-radius: 6px; background: #262640; margin-bottom: 12px; font-size: 13px; }}
+.status.ok {{ border-left: 3px solid #4caf50; }}
+.status.err {{ border-left: 3px solid #f44336; }}
+.status.loading {{ border-left: 3px solid #ff9800; }}
+.grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 8px; }}
+.card {{ background: #262640; border-radius: 8px; overflow: hidden; }}
+.card-label {{ padding: 6px 10px; font-size: 12px; color: #aaa; display: flex; justify-content: space-between; }}
+.card-label .dim {{ font-size: 11px; color: #666; }}
+.card img, .card canvas {{ display: block; }}
+.card.fit .card-scroll canvas, .card.fit img {{ width: 100%; }}
+.card.actual canvas {{ max-width: none; image-rendering: pixelated; }}
+.card-scroll {{ overflow-x: auto; }}
+.log-wrap {{ position: relative; margin-bottom: 12px; }}
+.log {{ padding: 6px 10px; background: #1e1e3a; border-radius: 6px; font-size: 10px; font-family: monospace; max-height: 120px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }}
+.log-copy {{ position: absolute; top: 4px; right: 4px; background: #444; color: #ccc; border: none; border-radius: 4px; padding: 2px 8px; font-size: 10px; cursor: pointer; }}
+.log-copy:active {{ background: #666; }}
+.log .err {{ color: #f44336; }}
+.log .info {{ color: #8888cc; }}
+label {{ cursor: pointer; }}
+.full {{ margin-bottom: 16px; }}
+.full img {{ max-width: 100%; border-radius: 8px; }}
+select {{ background: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; padding: 4px 8px; font-size: 13px; }}
+</style>
+</head>
+<body>
+<h1>WebSR Upscale Quality Test</h1>
+
+<div style="margin-bottom:12px">
+  <label>Photo: <select id="photoSelect"></select></label>
+  <label style="margin-left:12px">Model: <select id="modelSelect">
+    <option value="anime4k/cnn-2x-s">2x Small (14KB)</option>
+    <option value="anime4k/cnn-2x-m">2x Medium (35KB)</option>
+    <option value="anime4k/cnn-2x-l">2x Large (114KB)</option>
+  </select></label>
+  <label style="margin-left:12px"><input type="checkbox" id="actualSize"> Actual pixel size</label>
+</div>
+
+<div id="statusBox" class="status loading">Initializing...</div>
+<div class="log-wrap"><div id="logBox" class="log"></div><button class="log-copy" onclick="navigator.clipboard.writeText(logBox.innerText).then(()=>this.textContent='Copied!').catch(()=>this.textContent='Failed');setTimeout(()=>this.textContent='Copy',1500)">Copy</button></div>
+
+<script>
+// Pre-module diagnostics (runs even if module fails)
+const logBox = document.getElementById("logBox");
+function addLog(msg, cls) {{
+  const d = document.createElement("div");
+  d.className = cls || "info";
+  d.textContent = new Date().toISOString().slice(11,23) + " " + msg;
+  logBox.appendChild(d);
+  logBox.scrollTop = logBox.scrollHeight;
+}}
+window._addLog = addLog;
+addLog("v20 (monkeypatch+copyTex)");
+addLog("navigator.gpu: " + (navigator.gpu ? "available" : "UNAVAILABLE"));
+addLog("User-Agent: " + navigator.userAgent.slice(0, 80));
+window.addEventListener("error", (e) => addLog("JS Error: " + e.message + " @ " + e.filename + ":" + e.lineno, "err"));
+window.addEventListener("unhandledrejection", (e) => addLog("Unhandled rejection: " + (e.reason?.message || e.reason), "err"));
+</script>
+
+<h2>Full Comic (Original)</h2>
+<div class="full"><img id="fullImg" crossorigin="anonymous"></div>
+
+<h2>Panel Comparison</h2>
+<div id="panels"></div>
+
+<script type="module">
+const log = (...args) => {{ console.log("[websr-test]", ...args); window._addLog?.(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ")); }};
+const logErr = (...args) => {{ console.error("[websr-test]", ...args); window._addLog?.(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" "), "err"); }};
+
+// Patch configure() to always include COPY_SRC so we can read output textures
+const _origConfigure = GPUCanvasContext.prototype.configure;
+GPUCanvasContext.prototype.configure = function(config) {{
+  config.usage = (config.usage || GPUTextureUsage.RENDER_ATTACHMENT) | GPUTextureUsage.COPY_SRC;
+  return _origConfigure.call(this, config);
+}};
+
+let WebSR;
+try {{
+  WebSR = (await import("https://esm.sh/@websr/websr@0.0.15")).default;
+}} catch (e) {{
+  logErr("WebSR load failed: " + e.message);
+  statusBox.textContent = "Failed: " + e.message; statusBox.className = "status err";
+  throw e;
+}}
+
+const MARGIN = 12, BORDER = 2, GAP = 8, PW = 404, PH = 228;
+const CELL_W = PW + 2 * BORDER, CELL_H = PH + 2 * BORDER;
+const panelRegions = [0,1,2,3].map(i => {{
+  const col = i % 2, row = Math.floor(i / 2);
+  return {{
+    x: MARGIN + BORDER + col * (CELL_W + GAP),
+    y: MARGIN + BORDER + row * (CELL_H + GAP),
+    w: PW, h: PH
+  }};
+}});
+
+const statusBox = document.getElementById("statusBox");
+const photoSelect = document.getElementById("photoSelect");
+const modelSelect = document.getElementById("modelSelect");
+const panelsDiv = document.getElementById("panels");
+const fullImg = document.getElementById("fullImg");
+
+// Fetch photo list
+const resp = await fetch("/api/photos?limit=20");
+const data = await resp.json();
+data.events.forEach(e => {{
+  const opt = document.createElement("option");
+  opt.value = e.source_filename;
+  opt.textContent = e.source_filename.replace("comic_","").replace(".jpg","");
+  photoSelect.appendChild(opt);
+}});
+photoSelect.value = "__LATEST__";
+
+let gpu = null;
+try {{
+  const result = await WebSR.initWebGPU();
+  if (!result || result === false) throw new Error("not supported");
+  gpu = result;
+  const i = gpu.adapterInfo || {{}};
+  statusBox.textContent = `WebGPU: ${{i.vendor||"?"}} ${{i.architecture||""}}`;
+  statusBox.className = "status ok";
+}} catch (e) {{
+  statusBox.textContent = "WebGPU: " + e.message;
+  statusBox.className = "status err";
+}}
+
+// Weight cache
+const weightCache = {{}};
+async function getWeights(model) {{
+  if (weightCache[model]) return weightCache[model];
+  const name = model.split("/")[1];
+  const r = await fetch(`https://cdn.jsdelivr.net/npm/@websr/websr@0.0.15/weights/anime4k/${{name}}-rl.json`);
+  if (!r.ok) throw new Error(`Weights ${{r.status}}`);
+  const w = await r.json();
+  weightCache[model] = w;
+  return w;
+}}
+
+const workCanvas = document.createElement("canvas");
+workCanvas.style.cssText = "position:fixed;top:-9999px;left:-9999px;pointer-events:none";
+document.body.appendChild(workCanvas);
+let renderCount = 0;
+
+async function upscale(source, displayCanvas, model) {{
+  const weights = await getWeights(model);
+  const w = source.width || source.naturalWidth;
+  const h = source.height || source.naturalHeight;
+  const rid = ++renderCount;
+
+  const websr = new WebSR({{ network_name: model, weights, gpu, canvas: workCanvas }});
+  const t0 = performance.now();
+  await websr.render(source);
+
+  // Get the texture that was just rendered to (same frame = same texture)
+  const outTex = workCanvas.getContext("webgpu").getCurrentTexture();
+  const outW = outTex.width;
+  const outH = outTex.height;
+  const bytesPerRow = Math.ceil(outW * 4 / 256) * 256;
+  const readBuf = gpu.createBuffer({{
+    size: bytesPerRow * outH,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+  }});
+  const enc = gpu.createCommandEncoder();
+  enc.copyTextureToBuffer({{ texture: outTex }}, {{ buffer: readBuf, bytesPerRow }}, [outW, outH]);
+  gpu.queue.submit([enc.finish()]);
+  await readBuf.mapAsync(GPUMapMode.READ);
+  const raw = new Uint8Array(readBuf.getMappedRange());
+
+  // Write to display canvas via ImageData (strip row padding + BGRA→RGBA swap)
+  const rowBytes = outW * 4;
+  const pixels = new Uint8ClampedArray(outW * outH * 4);
+  const isBGRA = navigator.gpu.getPreferredCanvasFormat() === "bgra8unorm";
+  for (let y = 0; y < outH; y++) {{
+    const src = y * bytesPerRow;
+    const dst = y * rowBytes;
+    for (let x = 0; x < rowBytes; x += 4) {{
+      if (isBGRA) {{
+        pixels[dst+x]   = raw[src+x+2]; // R←B
+        pixels[dst+x+1] = raw[src+x+1]; // G
+        pixels[dst+x+2] = raw[src+x];   // B←R
+        pixels[dst+x+3] = raw[src+x+3]; // A
+      }} else {{
+        pixels[dst+x]   = raw[src+x];
+        pixels[dst+x+1] = raw[src+x+1];
+        pixels[dst+x+2] = raw[src+x+2];
+        pixels[dst+x+3] = raw[src+x+3];
+      }}
+    }}
+  }}
+  readBuf.unmap();
+  readBuf.destroy();
+
+  displayCanvas.width = outW;
+  displayCanvas.height = outH;
+  displayCanvas.getContext("2d").putImageData(new ImageData(pixels, outW, outH), 0, 0);
+
+  const ms = (performance.now() - t0).toFixed(0);
+  const mid = ((outH / 2) * outW + outW / 2) * 4;
+  const ok = pixels[mid] + pixels[mid+1] + pixels[mid+2] > 0;
+  log(`R${{rid}} ${{w}}x${{h}}→${{outW}}x${{outH}} ${{ms}}ms px=[${{pixels[mid]}},${{pixels[mid+1]}},${{pixels[mid+2]}}] ${{ok ? "OK" : "BLACK"}}`);
+}}
+
+function cropPanel(img, idx) {{
+  const r = panelRegions[idx];
+  const c = document.createElement("canvas");
+  c.width = r.w; c.height = r.h;
+  c.getContext("2d").drawImage(img, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+  return c;
+}}
+
+async function run() {{
+  const filename = photoSelect.value;
+  if (!filename) return;
+
+  fullImg.src = `/api/photos/${{encodeURIComponent(filename)}}`;
+  await new Promise((resolve, reject) => {{
+    fullImg.onload = resolve;
+    fullImg.onerror = () => reject(new Error("img load failed"));
+  }});
+
+  panelsDiv.innerHTML = "";
+  const model = modelSelect.value;
+
+  const useActual = document.getElementById("actualSize").checked;
+  const cardClass = useActual ? "card actual" : "card fit";
+
+  // Build DOM structure and collect render targets
+  const panels = [];
+  for (let i = 0; i < 4; i++) {{
+    const r = panelRegions[i];
+    const row = document.createElement("div");
+    row.innerHTML = `<h2>Panel ${{i}} (${{r.w}}x${{r.h}})</h2>`;
+    const grid = document.createElement("div");
+    grid.className = "grid";
+
+    const origCanvas = cropPanel(fullImg, i);
+    const card1 = document.createElement("div");
+    card1.className = cardClass;
+    card1.innerHTML = `<div class="card-label">Original<span class="dim">${{r.w}}x${{r.h}}</span></div><div class="card-scroll"></div>`;
+    card1.querySelector(".card-scroll").appendChild(origCanvas);
+    grid.appendChild(card1);
+
+    const canvas2x = document.createElement("canvas");
+    const card2 = document.createElement("div");
+    card2.className = cardClass;
+    card2.innerHTML = `<div class="card-label">WebSR 2x<span class="dim" id="dim2x-${{i}}">queued</span></div><div class="card-scroll"></div>`;
+    card2.querySelector(".card-scroll").appendChild(canvas2x);
+    grid.appendChild(card2);
+
+    const canvas4x = document.createElement("canvas");
+    const card3 = document.createElement("div");
+    card3.className = cardClass;
+    card3.innerHTML = `<div class="card-label">WebSR 4x (2-pass)<span class="dim" id="dim4x-${{i}}">queued</span></div><div class="card-scroll"></div>`;
+    card3.querySelector(".card-scroll").appendChild(canvas4x);
+    grid.appendChild(card3);
+
+    row.appendChild(grid);
+    panelsDiv.appendChild(row);
+    panels.push({{ origCanvas, canvas2x, canvas4x }});
+  }}
+
+  if (!gpu) return;
+
+  try {{
+    // Batch 1: all 2x renders (same input resolution = same WebSR instance)
+    statusBox.textContent = "Upscaling all panels (2x)...";
+    statusBox.className = "status loading";
+    for (let i = 0; i < 4; i++) {{
+      const t0 = performance.now();
+      const bmp = await createImageBitmap(panels[i].origCanvas);
+      await upscale(bmp, panels[i].canvas2x, model);
+      bmp.close();
+      const ms = (performance.now() - t0).toFixed(0);
+      document.getElementById(`dim2x-${{i}}`).textContent =
+        `${{panels[i].canvas2x.width}}x${{panels[i].canvas2x.height}} (${{ms}}ms)`;
+    }}
+
+    // Batch 2: all 4x renders (feed 2x results, same resolution)
+    statusBox.textContent = "Upscaling all panels (4x)...";
+    for (let i = 0; i < 4; i++) {{
+      document.getElementById(`dim4x-${{i}}`).textContent = "processing...";
+      const t0 = performance.now();
+      const bmp = await createImageBitmap(panels[i].canvas2x);
+      await upscale(bmp, panels[i].canvas4x, model);
+      bmp.close();
+      const ms = (performance.now() - t0).toFixed(0);
+      document.getElementById(`dim4x-${{i}}`).textContent =
+        `${{panels[i].canvas4x.width}}x${{panels[i].canvas4x.height}} (${{ms}}ms)`;
+    }}
+  }} catch (e) {{
+    logErr("Upscale failed:", e);
+    statusBox.textContent = "Error: " + e.message;
+    statusBox.className = "status err";
+    return;
+  }}
+
+  statusBox.textContent = "Done";
+  statusBox.className = "status ok";
+}}
+
+photoSelect.addEventListener("change", run);
+modelSelect.addEventListener("change", run);
+document.getElementById("actualSize").addEventListener("change", run);
+run();
+</script>
+</body>
+</html>

@@ -322,13 +322,40 @@ impl PhotoStore {
             params![now, photo_id],
         )?;
 
+        // Build pet_class lookup from existing Level 1 cat detections (per panel)
+        // so Level 2 detections can inherit pet identity
+        let mut l1_pet: std::collections::HashMap<Option<i32>, String> =
+            std::collections::HashMap::new();
+        {
+            let mut q = self.conn.prepare_cached(
+                "SELECT panel_index, COALESCE(pet_id_override, pet_class) \
+                 FROM detections \
+                 WHERE photo_id = ?1 AND yolo_class = 'cat' AND det_level = 1 \
+                   AND COALESCE(pet_id_override, pet_class) IS NOT NULL",
+            )?;
+            let rows = q.query_map(params![photo_id], |row| {
+                Ok((row.get::<_, Option<i32>>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for (panel, pet) in rows.flatten() {
+                l1_pet.entry(panel).or_insert(pet);
+            }
+        }
+
         // Insert detections
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "INSERT INTO detections (photo_id, panel_index, bbox_x, bbox_y, bbox_w, bbox_h, yolo_class, pet_class, confidence, detected_at, color_metrics, det_level, model)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )?;
         for d in detections {
             let metrics_str = d.color_metrics.as_ref().map(|v| v.to_string());
+            // Inherit pet_class from Level 1 for cat detections without pet info
+            let pet_class = if d.pet_class.is_some() {
+                d.pet_class.clone()
+            } else if d.yolo_class.as_deref() == Some("cat") {
+                l1_pet.get(&d.panel_index).cloned()
+            } else {
+                None
+            };
             stmt.execute(params![
                 photo_id,
                 d.panel_index,
@@ -337,7 +364,7 @@ impl PhotoStore {
                 d.bbox_w,
                 d.bbox_h,
                 d.yolo_class,
-                d.pet_class,
+                pet_class,
                 d.confidence,
                 d.detected_at,
                 metrics_str,
@@ -351,7 +378,7 @@ impl PhotoStore {
 
     /// Return detections for a photo, preferring highest det_level available.
     pub fn get_detections(&self, photo_id: i64) -> rusqlite::Result<Vec<Detection>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, photo_id, panel_index, bbox_x, bbox_y, bbox_w, bbox_h, yolo_class, pet_class, pet_id_override, confidence, detected_at, color_metrics, det_level, model
              FROM detections
              WHERE photo_id = ?1
@@ -404,7 +431,7 @@ impl PhotoStore {
                ) \
              ORDER BY d.photo_id"
         );
-        let mut stmt = self.conn.prepare(&sql)?;
+        let mut stmt = self.conn.prepare_cached(&sql)?;
         let params: Vec<Box<dyn rusqlite::types::ToSql>> = photo_ids
             .iter()
             .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>)
@@ -478,7 +505,7 @@ impl PhotoStore {
                 None,
             ),
         };
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare_cached(sql)?;
         let rows = if let Some(p) = param {
             stmt.query_map(params![p], Self::map_edit_history_row)?
         } else {
@@ -530,7 +557,7 @@ impl PhotoStore {
 
     /// Return filenames that need VLM processing (is_valid IS NULL, attempts < max).
     pub fn list_pending_filenames(&self, max_attempts: i32) -> rusqlite::Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT filename FROM photos WHERE is_valid IS NULL AND vlm_attempts < ?1 ORDER BY captured_at ASC LIMIT 500",
         )?;
         let names = stmt
@@ -643,7 +670,7 @@ impl PhotoStore {
         let all_ref: Vec<&dyn rusqlite::types::ToSql> =
             all_params.iter().map(|p| p.as_ref()).collect();
 
-        let mut stmt = self.conn.prepare(&query_sql)?;
+        let mut stmt = self.conn.prepare_cached(&query_sql)?;
         let photos = stmt
             .query_map(all_ref.as_slice(), row_to_photo)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -660,7 +687,7 @@ impl PhotoStore {
     }
 
     pub fn distinct_pet_ids(&self) -> rusqlite::Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT DISTINCT pet_id FROM photos WHERE pet_id IS NOT NULL AND pet_id != '' ORDER BY pet_id LIMIT 100",
         )?;
         let ids = stmt
@@ -670,7 +697,7 @@ impl PhotoStore {
     }
 
     pub fn distinct_behaviors(&self) -> rusqlite::Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT DISTINCT behavior FROM photos WHERE behavior IS NOT NULL AND behavior != '' ORDER BY behavior LIMIT 100",
         )?;
         let behaviors = stmt
@@ -681,7 +708,7 @@ impl PhotoStore {
 
     /// Return captions for valid photos on a given date (YYYY-MM-DD).
     pub fn captions_for_date(&self, date: &str) -> rusqlite::Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT caption FROM photos WHERE is_valid = 1 AND caption IS NOT NULL AND captured_at LIKE ? || '%' ORDER BY captured_at ASC LIMIT 200",
         )?;
         let captions = stmt
@@ -701,7 +728,7 @@ impl PhotoStore {
 
     /// Return photos that have not yet been through detection.
     pub fn list_undetected_photos(&self, limit: i64) -> rusqlite::Result<Vec<Photo>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, filename, captured_at, caption, is_valid, pet_id, behavior, detected_at
              FROM photos
              WHERE detected_at IS NULL
@@ -715,30 +742,22 @@ impl PhotoStore {
     }
 
     pub fn stats(&self) -> rusqlite::Result<Stats> {
-        let total: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))?;
-        let valid: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM photos WHERE is_valid = 1", [], |r| {
-                    r.get(0)
-                })?;
-        let invalid: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM photos WHERE is_valid = 0", [], |r| {
-                    r.get(0)
-                })?;
-        let pending: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM photos WHERE is_valid IS NULL",
+        self.conn.query_row(
+            "SELECT COUNT(*) AS total,
+                    COUNT(CASE WHEN is_valid = 1 THEN 1 END) AS valid,
+                    COUNT(CASE WHEN is_valid = 0 THEN 1 END) AS invalid,
+                    COUNT(CASE WHEN is_valid IS NULL THEN 1 END) AS pending
+             FROM photos",
             [],
-            |r| r.get(0),
-        )?;
-        Ok(Stats {
-            total,
-            valid,
-            invalid,
-            pending,
-        })
+            |r| {
+                Ok(Stats {
+                    total: r.get(0)?,
+                    valid: r.get(1)?,
+                    invalid: r.get(2)?,
+                    pending: r.get(3)?,
+                })
+            },
+        )
     }
 }
 

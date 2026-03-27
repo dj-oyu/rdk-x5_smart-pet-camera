@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Real-ESRGAN Test (TF.js)</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; }}
+body {{ font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 12px; }}
+h1 {{ font-size: 18px; margin-bottom: 8px; }}
+h2 {{ font-size: 14px; color: #8888aa; margin: 16px 0 6px; }}
+.status {{ padding: 6px 12px; border-radius: 6px; background: #262640; margin-bottom: 12px; font-size: 13px; }}
+.status.ok {{ border-left: 3px solid #4caf50; }}
+.status.err {{ border-left: 3px solid #f44336; }}
+.status.loading {{ border-left: 3px solid #ff9800; }}
+.grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 8px; }}
+.card {{ background: #262640; border-radius: 8px; overflow: hidden; }}
+.card-label {{ padding: 6px 10px; font-size: 12px; color: #aaa; display: flex; justify-content: space-between; }}
+.card-label .dim {{ font-size: 11px; color: #666; }}
+.card canvas {{ width: 100%; display: block; }}
+.full {{ margin-bottom: 16px; }}
+.full img {{ max-width: 100%; border-radius: 8px; }}
+select {{ background: #333; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; padding: 4px 8px; font-size: 13px; }}
+.log-wrap {{ position: relative; margin-bottom: 12px; }}
+.log {{ padding: 6px 10px; background: #1e1e3a; border-radius: 6px; font-size: 10px; font-family: monospace; max-height: 120px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }}
+.log-copy {{ position: absolute; top: 4px; right: 4px; background: #444; color: #ccc; border: none; border-radius: 4px; padding: 2px 8px; font-size: 10px; cursor: pointer; }}
+.log-copy:active {{ background: #666; }}
+.log .err {{ color: #f44336; }}
+.log .info {{ color: #8888cc; }}
+label {{ cursor: pointer; }}
+</style>
+</head>
+<body>
+<h1>Real-ESRGAN 4x Upscale Test</h1>
+
+<div style="margin-bottom:12px">
+  <label>Photo: <select id="photoSelect"></select></label>
+  <label style="margin-left:12px">Model: <select id="modelSelect">
+    <option value="general_fast">general_fast (2.4MB)</option>
+    <option value="general_plus">general_plus (33MB)</option>
+  </select></label>
+  <label style="margin-left:12px"><input type="checkbox" id="actualSize"> Actual pixel size</label>
+</div>
+
+<div id="statusBox" class="status loading">Loading TF.js...</div>
+<div class="log-wrap"><div id="logBox" class="log"></div><button class="log-copy" onclick="navigator.clipboard.writeText(logBox.innerText).then(()=>this.textContent='Copied!').catch(()=>this.textContent='Failed');setTimeout(()=>this.textContent='Copy',1500)">Copy</button></div>
+
+<h2>Full Comic (Original)</h2>
+<div class="full"><img id="fullImg" crossorigin="anonymous"></div>
+
+<h2>Panel Comparison (Original vs Real-ESRGAN 4x)</h2>
+<div id="panels"></div>
+
+<script>
+const logBox = document.getElementById("logBox");
+function addLog(msg, cls) {{
+  const d = document.createElement("div");
+  d.className = cls || "info";
+  d.textContent = new Date().toISOString().slice(11,23) + " " + msg;
+  logBox.appendChild(d);
+  logBox.scrollTop = logBox.scrollHeight;
+}}
+window._addLog = addLog;
+addLog("v2-esrgan-tfjs");
+</script>
+
+<script type="module">
+const log = (...args) => {{ console.log("[esrgan]", ...args); window._addLog?.(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ")); }};
+const logErr = (...args) => {{ console.error("[esrgan]", ...args); window._addLog?.(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" "), "err"); }};
+
+const statusBox = document.getElementById("statusBox");
+const photoSelect = document.getElementById("photoSelect");
+const modelSelect = document.getElementById("modelSelect");
+const panelsDiv = document.getElementById("panels");
+const fullImg = document.getElementById("fullImg");
+
+const MARGIN = 12, BORDER = 2, GAP = 8, PW = 404, PH = 228;
+const CELL_W = PW + 2 * BORDER, CELL_H = PH + 2 * BORDER;
+const panelRegions = [0,1,2,3].map(i => {{
+  const col = i % 2, row = Math.floor(i / 2);
+  return {{ x: MARGIN + BORDER + col * (CELL_W + GAP), y: MARGIN + BORDER + row * (CELL_H + GAP), w: PW, h: PH }};
+}});
+
+// Load photo list
+const resp = await fetch("/api/photos?limit=20");
+const data = await resp.json();
+data.events.forEach(e => {{
+  const opt = document.createElement("option");
+  opt.value = e.source_filename;
+  opt.textContent = e.source_filename.replace("comic_","").replace(".jpg","");
+  photoSelect.appendChild(opt);
+}});
+photoSelect.value = "__LATEST__";
+
+// Load TF.js with WebGPU → WebGL fallback
+log("Loading TF.js...");
+let tf;
+try {{
+  tf = await import("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js");
+  if (!tf.ready) tf = window.tf; // CDN sets global
+  await tf.ready();
+  log("TF.js loaded, backend: " + tf.getBackend());
+}} catch (e) {{
+  logErr("TF.js load failed: " + e.message);
+  statusBox.textContent = "Failed: " + e.message;
+  statusBox.className = "status err";
+  throw e;
+}}
+
+// Try WebGPU, fall back to WebGL
+let backend = tf.getBackend();
+if (backend !== "webgpu") {{
+  try {{
+    await import("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu@4.22.0/dist/tf-backend-webgpu.min.js");
+    await tf.setBackend("webgpu");
+    await tf.ready();
+    backend = "webgpu";
+  }} catch (e) {{
+    log("WebGPU unavailable, using " + tf.getBackend());
+    backend = tf.getBackend();
+  }}
+}}
+log("Backend: " + backend);
+
+// Load model
+const modelCache = {{}};
+let currentModel = null;
+
+async function loadModel(name) {{
+  if (modelCache[name]) {{
+    currentModel = modelCache[name];
+    return;
+  }}
+  statusBox.textContent = `Loading ${{name}}...`;
+  statusBox.className = "status loading";
+  const url = `/test/models/tfjs/${{name}}/model.json`;
+  log("Loading model: " + url);
+  const model = await tf.loadGraphModel(url);
+  modelCache[name] = model;
+  currentModel = model;
+  log("Model loaded: " + name);
+}}
+
+await loadModel(modelSelect.value);
+statusBox.textContent = `Ready (${{backend}})`;
+statusBox.className = "status ok";
+
+const TILE = 128;
+const SCALE = 4;
+
+function upscaleTile(srcCanvas, sx, sy, tw, th) {{
+  return tf.tidy(() => {{
+    const ctx = srcCanvas.getContext("2d");
+    const imgData = ctx.getImageData(sx, sy, tw, th);
+    // Create padded TILE x TILE canvas if tile is smaller
+    const tileCanvas = document.createElement("canvas");
+    tileCanvas.width = TILE;
+    tileCanvas.height = TILE;
+    const tCtx = tileCanvas.getContext("2d");
+    tCtx.putImageData(imgData, 0, 0);
+    // Edge-extend padding
+    if (tw < TILE) tCtx.drawImage(tileCanvas, tw-1, 0, 1, th, tw, 0, TILE-tw, th);
+    if (th < TILE) tCtx.drawImage(tileCanvas, 0, th-1, TILE, 1, 0, th, TILE, TILE-th);
+
+    const input = tf.browser.fromPixels(tileCanvas).toFloat().div(255.0).expandDims(0);
+    const output = currentModel.predict(input);
+    return output;
+  }});
+}}
+
+async function upscalePanel(srcCanvas, displayCanvas) {{
+  const sw = srcCanvas.width;
+  const sh = srcCanvas.height;
+  const outW = sw * SCALE;
+  const outH = sh * SCALE;
+  displayCanvas.width = outW;
+  displayCanvas.height = outH;
+  const dCtx = displayCanvas.getContext("2d");
+
+  const tilesX = Math.ceil(sw / TILE);
+  const tilesY = Math.ceil(sh / TILE);
+  const totalTiles = tilesX * tilesY;
+
+  for (let ty = 0; ty < tilesY; ty++) {{
+    for (let tx = 0; tx < tilesX; tx++) {{
+      const sx = tx * TILE;
+      const sy = ty * TILE;
+      const tw = Math.min(TILE, sw - sx);
+      const th = Math.min(TILE, sh - sy);
+
+      const outputTensor = upscaleTile(srcCanvas, sx, sy, tw, th);
+      const clamped = outputTensor.squeeze().clipByValue(0, 1);
+      const pixels = await tf.browser.toPixels(clamped);
+      clamped.dispose();
+      outputTensor.dispose();
+
+      // Place tile (crop to actual size)
+      const cropW = tw * SCALE;
+      const cropH = th * SCALE;
+      const tileImgData = new ImageData(new Uint8ClampedArray(pixels.buffer), TILE * SCALE, TILE * SCALE);
+      const tempCanvas = document.createElement("canvas");
+      tempCanvas.width = TILE * SCALE;
+      tempCanvas.height = TILE * SCALE;
+      tempCanvas.getContext("2d").putImageData(tileImgData, 0, 0);
+      dCtx.drawImage(tempCanvas, 0, 0, cropW, cropH, sx * SCALE, sy * SCALE, cropW, cropH);
+    }}
+  }}
+  return totalTiles;
+}}
+
+function cropPanel(img, idx) {{
+  const r = panelRegions[idx];
+  const c = document.createElement("canvas");
+  c.width = r.w; c.height = r.h;
+  c.getContext("2d").drawImage(img, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+  return c;
+}}
+
+async function run() {{
+  const filename = photoSelect.value;
+  if (!filename) return;
+
+  await loadModel(modelSelect.value);
+
+  fullImg.src = `/api/photos/${{encodeURIComponent(filename)}}`;
+  await new Promise((resolve, reject) => {{
+    fullImg.onload = resolve;
+    fullImg.onerror = () => reject(new Error("img load failed"));
+  }});
+
+  panelsDiv.innerHTML = "";
+  const useActual = document.getElementById("actualSize").checked;
+
+  for (let i = 0; i < 4; i++) {{
+    const r = panelRegions[i];
+    const row = document.createElement("div");
+    row.innerHTML = `<h2>Panel ${{i}} (${{r.w}}x${{r.h}})</h2>`;
+    const grid = document.createElement("div");
+    grid.className = "grid";
+
+    const origCanvas = cropPanel(fullImg, i);
+    const card1 = document.createElement("div");
+    card1.className = "card";
+    card1.innerHTML = `<div class="card-label">Original<span class="dim">${{r.w}}x${{r.h}}</span></div>`;
+    if (!useActual) origCanvas.style.width = "100%";
+    card1.appendChild(origCanvas);
+    grid.appendChild(card1);
+
+    const upCanvas = document.createElement("canvas");
+    const card2 = document.createElement("div");
+    card2.className = "card";
+    card2.innerHTML = `<div class="card-label">Real-ESRGAN 4x<span class="dim" id="dim-${{i}}">processing...</span></div>`;
+    if (!useActual) upCanvas.style.width = "100%";
+    card2.appendChild(upCanvas);
+    grid.appendChild(card2);
+
+    row.appendChild(grid);
+    panelsDiv.appendChild(row);
+
+    statusBox.textContent = `Upscaling panel ${{i}}...`;
+    statusBox.className = "status loading";
+    const t0 = performance.now();
+    try {{
+      const tiles = await upscalePanel(origCanvas, upCanvas);
+      const ms = (performance.now() - t0).toFixed(0);
+      document.getElementById(`dim-${{i}}`).textContent = `${{upCanvas.width}}x${{upCanvas.height}} ${{ms}}ms (${{tiles}} tiles)`;
+      log(`P${{i}} ${{r.w}}x${{r.h}}→${{upCanvas.width}}x${{upCanvas.height}} ${{ms}}ms ${{tiles}}tiles`);
+    }} catch (e) {{
+      logErr(`P${{i}} failed: ${{e.message}}`);
+      document.getElementById(`dim-${{i}}`).textContent = "ERROR";
+    }}
+  }}
+
+  statusBox.textContent = "Done";
+  statusBox.className = "status ok";
+}}
+
+photoSelect.addEventListener("change", run);
+modelSelect.addEventListener("change", run);
+document.getElementById("actualSize").addEventListener("change", run);
+run();
+</script>
+</body>
+</html>

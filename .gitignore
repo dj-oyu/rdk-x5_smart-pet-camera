@@ -173,6 +173,11 @@ docs/benchmarks/
 # Rust build artifacts
 src/ai-pyramid/target/
 src/ai-pyramid/data/
+
+# ai-pyramid: ML model archives (download separately)
+src/ai-pyramid/ui/*.zip
+
+# TLS certs (Tailscale)
 *.ts.net.crt
 *.ts.net.key
 

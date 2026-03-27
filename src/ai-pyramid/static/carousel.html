@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en" data-latest-photo="__LATEST__">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Panel Carousel Demo</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: #0f172a;
+  color: #e2e8f0;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}}
+
+/* Backdrop */
+.backdrop {{
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.6);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}}
+
+/* Modal */
+.modal {{
+  position: relative;
+  width: min(96vw, 880px);
+  max-height: 92vh;
+  overflow-y: auto;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.22);
+  color: #1e293b;
+  animation: modal-enter 160ms ease-out;
+}}
+@keyframes modal-enter {{
+  from {{ opacity: 0; transform: scale(0.97) translateY(8px); }}
+  to {{ opacity: 1; transform: none; }}
+}}
+
+/* Breadcrumb */
+.breadcrumb {{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px;
+  font-size: 13px;
+  color: #64748b;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}}
+.crumb {{
+  cursor: pointer;
+  color: #3b82f6;
+  transition: color 0.15s;
+}}
+.crumb:hover {{ color: #2563eb; }}
+.crumb.current {{
+  color: #1e293b;
+  cursor: default;
+  font-weight: 600;
+}}
+.crumb-sep {{ color: #94a3b8; font-size: 11px; }}
+
+/* Image container */
+.image-container {{
+  position: relative;
+  line-height: 0;
+  overflow: hidden;
+}}
+.comic-image {{
+  width: 100%;
+  display: block;
+  border-radius: 16px 16px 0 0;
+  cursor: pointer;
+}}
+
+/* Panel hover regions */
+.panel-regions {{
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 0;
+}}
+.panel-region {{
+  cursor: zoom-in;
+  transition: box-shadow 0.2s, background 0.2s;
+  border-radius: 2px;
+}}
+@media (hover: hover) {{
+  .panel-region:hover {{
+    box-shadow: inset 0 0 0 2px rgba(59, 130, 246, 0.4);
+    background: rgba(59, 130, 246, 0.05);
+  }}
+}}
+
+/* Comic-view bbox overlay (glass style, non-interactive) */
+.comic-bbox-overlay {{
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+}}
+.comic-bbox {{
+  position: absolute;
+  border: 1px solid rgba(255,255,255,0.35);
+  border-top-color: rgba(255,255,255,0.55);
+  border-left-color: rgba(255,255,255,0.45);
+  border-radius: 4px;
+  backdrop-filter: blur(2px);
+  background: rgba(255,255,255,0.04);
+  box-shadow:
+    /* inner bloom — soft white glow along inside edges */
+    inset 0 0 8px rgba(255,255,255,0.15),
+    inset 0 1px 0 rgba(255,255,255,0.25),
+    inset 1px 0 0 rgba(255,255,255,0.15),
+    /* outer glow — dark shadow for contrast + white bloom */
+    0 0 4px rgba(0,0,0,0.25),
+    0 0 10px rgba(255,255,255,0.08);
+  overflow: hidden;
+  pointer-events: none;
+  /* Wider clear zone (25-75%) so border/shadow stays visible at small sizes */
+  -webkit-mask-image:
+    linear-gradient(to right,  black, black 10%, rgba(0,0,0,0.6) 25%, transparent 40%, transparent 60%, rgba(0,0,0,0.6) 75%, black 90%, black),
+    linear-gradient(to bottom, black, black 10%, rgba(0,0,0,0.6) 25%, transparent 40%, transparent 60%, rgba(0,0,0,0.6) 75%, black 90%, black);
+  -webkit-mask-composite: source-in;
+  mask-image:
+    linear-gradient(to right,  black, black 10%, rgba(0,0,0,0.6) 25%, transparent 40%, transparent 60%, rgba(0,0,0,0.6) 75%, black 90%, black),
+    linear-gradient(to bottom, black, black 10%, rgba(0,0,0,0.6) 25%, transparent 40%, transparent 60%, rgba(0,0,0,0.6) 75%, black 90%, black);
+  mask-composite: intersect;
+}}
+.comic-bbox .comic-shine {{
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255,255,255,0.45) 0%, transparent 70%);
+  animation: comic-shine-travel 4s linear infinite;
+  pointer-events: none;
+}}
+.comic-bbox .comic-shine-b {{
+  animation-delay: -2s;
+}}
+@keyframes comic-shine-travel {{
+  from {{ offset-distance: 0%; }}
+  to {{ offset-distance: 100%; }}
+}}
+
+/* === Carousel === */
+.carousel-container {{
+  position: relative;
+}}
+.panel-carousel {{
+  display: flex;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}}
+.panel-carousel::-webkit-scrollbar {{ display: none; }}
+
+.panel-slide {{
+  position: relative;
+  flex: 0 0 100%;
+  scroll-snap-align: center;
+  scroll-snap-stop: always;
+  min-height: 200px;
+  background: #f8fafc;
+  overflow: hidden;
+}}
+.zoom-wrapper {{
+  position: relative;
+  transform-origin: 0 0;
+  transition: transform 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+  will-change: transform;
+}}
+.panel-slide canvas {{
+  width: 100%;
+  height: auto;
+  display: block;
+}}
+.panel-slide:first-child canvas {{
+  border-radius: 16px 16px 0 0;
+}}
+
+/* Nav arrows */
+.nav-btn {{
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,0.3);
+  background: rgba(255,255,255,0.2);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: #fff;
+  font-size: 16px;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 0.2s;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}}
+.nav-btn:hover {{ opacity: 1; }}
+.nav-btn.prev {{ left: 8px; }}
+.nav-btn.next {{ right: 8px; }}
+.nav-btn:disabled {{ opacity: 0.2; cursor: default; }}
+
+/* Dots */
+.panel-dots {{
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 0;
+  background: rgba(255,255,255,0.92);
+}}
+.panel-dot {{
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.15);
+  border: none;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.2s;
+}}
+.panel-dot.active {{
+  background: #3b82f6;
+  transform: scale(1.4);
+}}
+
+/* HD button */
+.hd-btn {{
+  position: absolute;
+  bottom: 12px; right: 12px;
+  padding: 4px 12px;
+  font-size: 11px; font-weight: 700;
+  letter-spacing: 0.5px;
+  background: rgba(0,0,0,0.25);
+  color: rgba(255,255,255,0.4);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 6px;
+  cursor: pointer;
+  z-index: 5;
+  transition: background 0.2s, color 0.2s, border-color 0.2s;
+  user-select: none;
+  -webkit-user-select: none;
+}}
+.hd-btn:hover {{ background: rgba(0,0,0,0.35); color: rgba(255,255,255,0.6); }}
+.hd-btn.loading {{ opacity: 0.5; pointer-events: none; }}
+.hd-btn.done {{
+  background: rgba(59,130,246,0.5);
+  color: #fff;
+  border-color: rgba(59,130,246,0.3);
+}}
+.hd-btn.done:hover {{ background: rgba(59,130,246,0.35); }}
+
+/* HD progress */
+.hd-progress {{
+  position: absolute;
+  bottom: 0; left: 0;
+  height: 2px;
+  background: #3b82f6;
+  transition: width 0.15s;
+  z-index: 5;
+}}
+
+/* Upscale badge */
+.upscale-badge {{
+  position: absolute;
+  top: 10px; right: 12px;
+  font-size: 10px;
+  padding: 2px 8px;
+  background: rgba(0,0,0,0.4);
+  backdrop-filter: blur(4px);
+  color: rgba(255,255,255,0.7);
+  border-radius: 4px;
+  z-index: 5;
+  pointer-events: none;
+}}
+
+/* Info section */
+.info {{
+  padding: 12px 16px;
+  border-top: 1px solid rgba(0,0,0,0.06);
+}}
+.caption {{
+  font-size: 14px;
+  color: #334155;
+  margin-bottom: 8px;
+  line-height: 1.4;
+}}
+.meta {{
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 13px;
+}}
+.pill {{
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+}}
+.pill.pet {{ background: #dbeafe; color: #1e40af; }}
+.pill.valid {{ background: #dcfce7; color: #166534; }}
+.pill.time {{ color: #64748b; }}
+.pill.dl {{
+  background: rgba(59,130,246,0.08);
+  color: #3b82f6;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.15s, color 0.15s;
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}}
+.pill.dl:hover {{ background: rgba(59,130,246,0.15); color: #2563eb; }}
+
+/* Detection list */
+.detections {{
+  padding: 8px 16px 16px;
+  border-top: 1px solid rgba(0,0,0,0.06);
+}}
+.detections-title {{
+  font-size: 13px;
+  font-weight: 600;
+  color: #475569;
+  margin-bottom: 6px;
+}}
+.det-list {{ list-style: none; }}
+.det-item {{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 13px;
+  transition: background 0.15s, border-left 0.15s, padding-left 0.15s;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+}}
+.det-item:hover {{ background: rgba(0,0,0,0.04); }}
+.det-color {{
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}}
+.det-class {{ font-weight: 500; color: #1e293b; }}
+.det-pet {{ color: #3b82f6; }}
+.det-conf-bar {{
+  display: inline-block;
+  flex: 1;
+  min-width: 32px;
+  max-width: 56px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(0,0,0,0.06);
+  margin-left: auto;
+  overflow: hidden;
+  vertical-align: middle;
+}}
+.det-conf-fill {{
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  opacity: 0.6;
+}}
+.det-conf {{ color: #94a3b8; font-size: 11px; min-width: 28px; text-align: right; }}
+
+/* Bbox overlay on panel slides */
+.bbox-overlay {{
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none;
+  z-index: 3;
+}}
+.bbox-overlay .bbox {{
+  position: absolute;
+  border: 1.5px solid rgba(255,255,255,0.45);
+  border-top-color: rgba(255,255,255,0.6);
+  border-left-color: rgba(255,255,255,0.5);
+  border-radius: 3px;
+  background: rgba(255,255,255,0.04);
+  box-shadow: 0 0 6px rgba(255,255,255,0.12), inset 0 1px 0 rgba(255,255,255,0.15);
+  pointer-events: auto;
+  cursor: pointer;
+  transition: box-shadow 0.2s, border-color 0.2s, background 0.2s, opacity 0.2s;
+}}
+.bbox-overlay .bbox.highlighted {{
+  border-color: rgba(255,255,255,0.85);
+  box-shadow: 0 0 14px rgba(255,255,255,0.4);
+  background: rgba(255,255,255,0.1);
+  z-index: 10;
+}}
+.bbox-overlay .bbox.dimmed {{
+  opacity: 0.18;
+}}
+.bbox-overlay .bbox.zoom-target {{
+  border-color: rgba(255,255,255,0.9);
+  box-shadow: 0 0 16px rgba(255,255,255,0.5);
+  background: rgba(255,255,255,0.1);
+  z-index: 20;
+}}
+.bbox .bbox-label {{
+  position: absolute;
+  top: -1px; left: -1px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 3px 0 3px 0;
+  color: #fff;
+  white-space: nowrap;
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.4);
+}}
+
+.det-item.highlighted {{
+  background: rgba(59,130,246,0.12);
+  border-left: 2px solid #3b82f6;
+  padding-left: 6px;
+}}
+
+/* Photo selector */
+.controls {{
+  position: fixed;
+  bottom: 16px; left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  background: rgba(30,41,59,0.9);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  padding: 8px 16px;
+  border-radius: 12px;
+  z-index: 200;
+  font-size: 13px;
+  color: #e2e8f0;
+}}
+.controls select {{
+  background: rgba(255,255,255,0.1);
+  color: #e2e8f0;
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+}}
+
+/* Status bar */
+.status-bar {{
+  position: fixed;
+  top: 12px; right: 12px;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(30,41,59,0.85);
+  color: #94a3b8;
+  z-index: 200;
+}}
+.status-bar.ok {{ color: #4ade80; }}
+.status-bar.loading {{ color: #fbbf24; }}
+.status-bar.err {{ color: #f87171; }}
+</style>
+</head>
+<body>
+
+<div id="statusBar" class="status-bar loading">Loading...</div>
+
+<div class="backdrop">
+  <div class="modal">
+    <!-- Breadcrumb -->
+    <nav class="breadcrumb" id="breadcrumb">
+      <span class="crumb current">All panels</span>
+      <a class="pill dl" id="dlBtn" download>JPEG</a>
+    </nav>
+
+    <!-- Comic view (default) -->
+    <div id="comicView" class="image-container">
+      <img id="comicImg" class="comic-image" crossorigin="anonymous" alt="Comic">
+      <div class="comic-bbox-overlay" id="comicBboxOverlay"></div>
+      <div class="panel-regions" id="panelRegions">
+        <div class="panel-region" data-panel="0"></div>
+        <div class="panel-region" data-panel="1"></div>
+        <div class="panel-region" data-panel="2"></div>
+        <div class="panel-region" data-panel="3"></div>
+      </div>
+    </div>
+
+    <!-- Carousel view (hidden initially) -->
+    <div id="carouselView" class="carousel-container" style="display:none">
+      <div class="panel-carousel" id="carousel">
+        <div class="panel-slide" data-panel="0"><div class="zoom-wrapper"><canvas id="pc0"></canvas></div></div>
+        <div class="panel-slide" data-panel="1"><div class="zoom-wrapper"><canvas id="pc1"></canvas></div></div>
+        <div class="panel-slide" data-panel="2"><div class="zoom-wrapper"><canvas id="pc2"></canvas></div></div>
+        <div class="panel-slide" data-panel="3"><div class="zoom-wrapper"><canvas id="pc3"></canvas></div></div>
+      </div>
+      <button class="nav-btn prev" id="prevBtn">&#8249;</button>
+      <button class="nav-btn next" id="nextBtn">&#8250;</button>
+      <button class="hd-btn" id="hdBtn">HD</button>
+      <div class="hd-progress" id="hdProgress" style="width:0"></div>
+      <div class="upscale-badge" id="upscaleBadge" style="display:none"></div>
+      <div class="panel-dots" id="dots">
+        <button class="panel-dot active" data-panel="0"></button>
+        <button class="panel-dot" data-panel="1"></button>
+        <button class="panel-dot" data-panel="2"></button>
+        <button class="panel-dot" data-panel="3"></button>
+      </div>
+    </div>
+
+    <!-- Info -->
+    <div class="info">
+      <p class="caption" id="caption">Loading...</p>
+      <div class="meta">
+        <span class="pill pet" id="petPill">-</span>
+        <span class="pill valid" id="statusPill">-</span>
+        <span class="pill time" id="timePill">-</span>
+      </div>
+    </div>
+
+    <!-- Detections -->
+    <div class="detections">
+      <div class="detections-title" id="detTitle">Detections</div>
+      <ul class="det-list" id="detList"></ul>
+    </div>
+  </div>
+</div>
+
+<!-- Photo selector -->
+<div class="controls">
+  <label>Photo: <select id="photoSelect"></select></label>
+</div>
+
+<script type="module" src="/test/carousel.js"></script>
+</body>
+</html>

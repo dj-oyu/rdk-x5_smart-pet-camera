@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useRef } from "preact/hooks";
+import { useSignal, useSignalEffect } from "@preact/signals";
 import { fetchBackfillStatus, startBackfill } from "../lib/api";
 
 export function BackfillButton() {
-  const [running, setRunning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [open, setOpen] = useState(false);
-  const [confirm, setConfirm] = useState(false);
+  const running = useSignal(false);
+  const error = useSignal<string | null>(null);
+  const open = useSignal(false);
+  const confirm = useSignal(false);
   const intervalRef = useRef<number | null>(null);
 
   function startPolling() {
@@ -13,71 +14,44 @@ export function BackfillButton() {
     intervalRef.current = window.setInterval(async () => {
       const { running: r } = await fetchBackfillStatus();
       if (!r) {
-        setRunning(false);
-        if (intervalRef.current) {
-          clearInterval(intervalRef.current);
-          intervalRef.current = null;
-        }
+        running.value = false;
+        if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
       }
     }, 5000);
   }
 
-  useEffect(() => {
+  useSignalEffect(() => {
     fetchBackfillStatus().then(({ running: r }) => {
-      setRunning(r);
-      if (r) {
-        setOpen(true);
-        startPolling();
-      }
+      running.value = r;
+      if (r) { open.value = true; startPolling(); }
     });
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, []);
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+  });
 
   async function handleClick() {
-    if (!confirm) {
-      setConfirm(true);
-      return;
-    }
-    setError(null);
-    setConfirm(false);
+    if (!confirm.value) { confirm.value = true; return; }
+    error.value = null;
+    confirm.value = false;
     const result = await startBackfill();
     if (result.ok || result.error === "already running") {
-      setRunning(true);
+      running.value = true;
       startPolling();
     } else {
-      setError(result.error ?? "failed");
+      error.value = result.error ?? "failed";
     }
   }
 
   return (
-    <details class="backfill-section" open={open || running} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
+    <details class="backfill-section" open={open.value || running.value} onToggle={e => { open.value = (e.target as HTMLDetailsElement).open; }}>
       <summary class="backfill-summary">Batch Operations</summary>
       <div class="backfill-content">
-        <button
-          type="button"
-          class={`backfill-btn backfill-btn-danger ${running ? "running" : ""}`}
-          disabled={running}
-          onClick={handleClick}
-        >
-          {running ? (
-            <>
-              <span class="backfill-spinner" />
-              Running...
-            </>
-          ) : confirm ? (
-            "Confirm Run Backfill?"
-          ) : (
-            "Run Backfill"
-          )}
+        <button type="button" class={`backfill-btn backfill-btn-danger ${running.value ? "running" : ""}`} disabled={running.value} onClick={handleClick}>
+          {running.value ? (<><span class="backfill-spinner" />Running...</>) : confirm.value ? "Confirm Run Backfill?" : "Run Backfill"}
         </button>
-        {confirm && !running && (
-          <button type="button" class="backfill-cancel" onClick={() => setConfirm(false)}>
-            Cancel
-          </button>
+        {confirm.value && !running.value && (
+          <button type="button" class="backfill-cancel" onClick={() => { confirm.value = false; }}>Cancel</button>
         )}
-        {error && <p class="backfill-error">{error}</p>}
+        {error.value && <p class="backfill-error">{error.value}</p>}
       </div>
     </details>
   );
