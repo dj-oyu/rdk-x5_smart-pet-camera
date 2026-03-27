@@ -10,6 +10,7 @@
  * 5. Computed signals
  * 6. action() batching
  */
+import "preact/debug"; // Must be first — enables Preact DevTools + warnings
 import { render } from "preact";
 import { useState } from "preact/hooks";
 import "@preact/signals"; // side-effect: install options hooks
