@@ -1,7 +1,8 @@
 use crate::application::{EventQueries, ObservationCommands, PetEvent, SharedEventRepository};
 use crate::vlm::VlmConfig;
 use std::path::{Path, PathBuf};
-use tokio::sync::broadcast;
+use std::sync::Arc;
+use tokio::sync::{Semaphore, broadcast};
 
 #[derive(Clone)]
 pub struct AppContext {
@@ -11,6 +12,7 @@ pub struct AppContext {
     base_url: Option<String>,
     is_tls: bool,
     vlm_config: VlmConfig,
+    vlm_semaphore: Arc<Semaphore>,
 }
 
 impl AppContext {
@@ -29,6 +31,7 @@ impl AppContext {
             base_url,
             is_tls,
             vlm_config,
+            vlm_semaphore: Arc::new(Semaphore::new(1)),
         }
     }
 
@@ -62,6 +65,10 @@ impl AppContext {
 
     pub fn vlm_config(&self) -> VlmConfig {
         self.vlm_config.clone()
+    }
+
+    pub fn vlm_semaphore(&self) -> &Arc<Semaphore> {
+        &self.vlm_semaphore
     }
 
     /// Notify listeners that detections were added for a photo.

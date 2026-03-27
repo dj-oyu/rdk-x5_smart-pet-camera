@@ -934,6 +934,7 @@ async fn handle_daily_summary(
 
     let vlm_config = state.context.vlm_config();
     let vlm_client = crate::vlm::VlmClient::new(vlm_config);
+    let _permit = state.context.vlm_semaphore().acquire().await.unwrap();
     match vlm_client
         .summarize_day(&captions, random_photo.as_deref())
         .await

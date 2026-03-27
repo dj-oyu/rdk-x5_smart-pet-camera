@@ -369,7 +369,6 @@ mod tests {
     #[tokio::test]
     async fn client_with_mock_server() {
         use axum::{Json, Router, routing::post};
-        use std::io::Write;
 
         // Create a valid 1x1 JPEG using image crate
         let tmp = tempfile::Builder::new().suffix(".jpg").tempfile().unwrap();
