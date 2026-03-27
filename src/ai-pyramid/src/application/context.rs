@@ -2,7 +2,7 @@ use crate::application::{EventQueries, ObservationCommands, PetEvent, SharedEven
 use crate::vlm::VlmConfig;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{broadcast, Semaphore};
+use tokio::sync::{Semaphore, broadcast};
 
 #[derive(Clone)]
 pub struct AppContext {
