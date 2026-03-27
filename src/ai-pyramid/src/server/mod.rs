@@ -128,6 +128,8 @@ pub fn router(state: AppState) -> Router {
         .route("/test/esrgan", get(handle_esrgan_test))
         .route("/test/carousel", get(handle_carousel_demo))
         .route("/test/carousel.js", get(handle_carousel_js))
+        .route("/test/signals", get(handle_signals_test))
+        .route("/test/signals-test.js", get(handle_signals_test_js))
         .route("/test/models/{*path}", get(handle_test_model))
         .route("/api/models/{*path}", get(handle_test_model))
         .with_state(state)
@@ -1071,6 +1073,27 @@ async fn handle_carousel_js() -> impl IntoResponse {
             "application/javascript; charset=utf-8",
         )],
         include_str!("../../static/carousel.js"),
+    )
+}
+
+async fn handle_signals_test() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        include_str!("../../static/signals-test.html"),
+    )
+}
+
+async fn handle_signals_test_js() -> impl IntoResponse {
+    // Served from dist-signals-test/ built by build-signals-test.ts
+    // Falls back to placeholder if not yet built
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        include_str!("../../ui/dist-signals-test/signals-test.js"),
     )
 }
 
