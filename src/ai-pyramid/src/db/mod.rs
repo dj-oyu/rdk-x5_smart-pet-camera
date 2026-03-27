@@ -341,6 +341,13 @@ impl PhotoStore {
             }
         }
 
+        // Remove existing detections at same or higher level to prevent duplicates
+        let max_new_level = detections.iter().map(|d| d.det_level).max().unwrap_or(1);
+        self.conn.execute(
+            "DELETE FROM detections WHERE photo_id = ?1 AND det_level >= ?2",
+            params![photo_id, max_new_level],
+        )?;
+
         // Insert detections
         let mut stmt = self.conn.prepare_cached(
             "INSERT INTO detections (photo_id, panel_index, bbox_x, bbox_y, bbox_w, bbox_h, yolo_class, pet_class, confidence, detected_at, color_metrics, det_level, model)
@@ -1084,7 +1091,7 @@ mod tests {
 
         // Override first cat detection to mike
         store.update_detection_override(1, "mike").unwrap();
-        let photo = store.get_by_filename("test.jpg").unwrap().unwrap();
+        let _photo = store.get_by_filename("test.jpg").unwrap().unwrap();
         // 1 mike + 1 chatora → tie, first wins (mike by query order)
         // but both have count=1, so ORDER BY COUNT(*) DESC LIMIT 1 picks one
 
@@ -1199,7 +1206,7 @@ mod tests {
         assert_eq!(photos[0].filename, "cat_only.jpg");
 
         // Filter by cat + dog
-        let (photos, total) = store
+        let (_photos, total) = store
             .list(&PhotoFilter {
                 yolo_classes: vec!["cat".into(), "dog".into()],
                 ..Default::default()
