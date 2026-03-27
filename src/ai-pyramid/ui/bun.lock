@@ -11,6 +11,7 @@
         "preact": "^10.27.2",
       },
       "devDependencies": {
+        "@preact/signals-debug": "^1.4.2",
         "bun-types": "latest",
         "typescript": "^5.9.3",
       },
@@ -20,6 +21,8 @@
     "@preact/signals": ["@preact/signals@2.8.2", "", { "dependencies": { "@preact/signals-core": "^1.14.0" }, "peerDependencies": { "preact": ">= 10.25.0 || >=11.0.0-0" } }, "sha512-gym5yoa64c+0w2kL7zRAAjY548qzWXbbuOfjsK9F1nWrEqooDwyWnih5SNdonjhQSp27zUqYh7UrxIRnkCyFCA=="],
 
     "@preact/signals-core": ["@preact/signals-core@1.14.0", "", {}, "sha512-AowtCcCU/33lFlh1zRFf/u+12rfrhtNakj7UpaGEsmMwUKpKWMVvcktOGcwBBNiB4lWrZWc01LhiyyzVklJyaQ=="],
+
+    "@preact/signals-debug": ["@preact/signals-debug@1.4.2", "", { "peerDependencies": { "@preact/signals": ">=2.6.0", "@preact/signals-core": ">=1.12.2", "@preact/signals-react": ">=3.6.2" }, "optionalPeers": ["@preact/signals", "@preact/signals-react"] }, "sha512-qof6mB6vHnt2CPvrhbAEGismdlPdikdmYkj8/o4pP2Jh63ZeQ3kBqQx+GsaE/byzkqVHSL5a8UYg1q+E6dbe+A=="],
 
     "@protobufjs/aspromise": ["@protobufjs/aspromise@1.1.2", "", {}, "sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ=="],
 

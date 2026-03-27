@@ -12,6 +12,7 @@
     "preact": "^10.27.2"
   },
   "devDependencies": {
+    "@preact/signals-debug": "^1.4.2",
     "bun-types": "latest",
     "typescript": "^5.9.3"
   }

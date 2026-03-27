@@ -1,5 +1,5 @@
 import { useState } from "preact/hooks";
-import { useSignalEffect } from "@preact/signals";
+import { useModel, useSignalEffect } from "@preact/signals";
 import { BackfillButton } from "./components/backfill-button";
 import { DailySummary } from "./components/daily-summary";
 import { EventDetail } from "./components/event-detail";
@@ -8,68 +8,52 @@ import { FilterBar } from "./components/filter-bar";
 import { Pagination } from "./components/pagination";
 import { SearchBar } from "./components/search-bar";
 import { StatsStrip } from "./components/stats-strip";
-import {
-  embed,
-  query,
-  events,
-  total,
-  stats,
-  loading,
-  error,
-  selectedEvent,
-  initialPanel,
-  petNames,
-  behaviors,
-  subtitle,
-  updateQuery,
-  toggleYoloClass,
-  openModal,
-  closeModal,
-  refresh,
-} from "./lib/store";
+import { AppStore, embed } from "./lib/store";
 
 export function App() {
-  // Bridge: signal changes → component re-render
-  // @preact/signals auto-subscribe may not work with Bun's bundler
-  const [, rerender] = useState(0);
-  useSignalEffect(() => {
-    // Read all signals that affect this component's output
-    query.value; events.value; total.value; stats.value;
-    loading.value; error.value; selectedEvent.value;
-    initialPanel.value; petNames.value; behaviors.value;
-    rerender(c => c + 1);
-  });
+  const store = useModel(AppStore);
+
+  // Signal → useState bridge for re-render triggers
+  const [selectedEvent, setSelectedEvent] = useState(store.selectedEvent.value);
+  const [eventList, setEventList] = useState(store.events.peek());
+  const [isLoading, setIsLoading] = useState(store.loading.peek());
+  const [errMsg, setErrMsg] = useState(store.error.peek());
+  useSignalEffect(() => { setSelectedEvent(store.selectedEvent.value); });
+  useSignalEffect(() => { setEventList(store.events.value); });
+  useSignalEffect(() => { setIsLoading(store.loading.value); });
+  useSignalEffect(() => { setErrMsg(store.error.value); });
+
   if (embed.embedded) {
     return (
       <main class="app-shell compact-shell" data-embed={embed.host ?? undefined}>
         <div class="compact-bar">
           <strong>Recent Events</strong>
-          <span>{subtitle}</span>
+          <span>{store.subtitle.value}</span>
         </div>
         <EventGrid
-          events={events.value}
-          loading={loading.value}
-          error={error.value}
-          petNames={petNames.value}
-          onOpenEvent={openModal}
+          events={eventList}
+          loading={isLoading}
+          error={errMsg}
+          petNames={store.petNames.value}
+          onOpenEvent={store.openModal}
         />
-        {selectedEvent.value && (
+        {selectedEvent && (
           <EventDetail
-            event={selectedEvent.value}
-            petNames={petNames.value}
-            onClose={closeModal}
-            onUpdated={refresh}
-            initialPanel={initialPanel.value}
+            event={selectedEvent}
+            petNames={store.petNames.value}
+            onClose={store.closeModal}
+            onUpdated={store.loadData}
+            initialPanel={store.initialPanel.value}
           />
         )}
         <section class="secondary-stack">
           <FilterBar
-            query={query.value}
-            petNames={petNames.value}
-            onStatusChange={(status) => updateQuery({ status })}
-            onPetChange={(petId) => updateQuery({ petId })}
+            query={store.query.value}
+            petNames={store.petNames.value}
+            onStatusChange={(status) => store.updateQuery({ status })}
+            onPetChange={(petId) => store.updateQuery({ petId })}
           />
-          <StatsStrip stats={stats.value} />
+          <StatsStrip stats={store.stats.value} />
         </section>
       </main>
     );
@@ -80,48 +64,48 @@ export function App() {
       <header class="standalone-header">
         <h1 class="standalone-title">Pet Album</h1>
         <SearchBar
-          value={query.value.search}
-          onChange={(search) => updateQuery({ search })}
+          value={store.query.value.search}
+          onChange={(search) => store.updateQuery({ search })}
         />
       </header>
       <div class="standalone-body">
         <aside class="standalone-sidebar">
           <FilterBar
-            query={query.value}
-            petNames={petNames.value}
-            behaviors={behaviors.value}
-            onStatusChange={(status) => updateQuery({ status })}
-            onPetChange={(petId) => updateQuery({ petId })}
-            onBehaviorChange={(behavior) => updateQuery({ behavior })}
-            onYoloClassToggle={toggleYoloClass}
+            query={store.query.value}
+            petNames={store.petNames.value}
+            behaviors={store.behaviors.value}
+            onStatusChange={(status) => store.updateQuery({ status })}
+            onPetChange={(petId) => store.updateQuery({ petId })}
+            onBehaviorChange={(behavior) => store.updateQuery({ behavior })}
+            onYoloClassToggle={store.toggleYoloClass}
           />
           <DailySummary />
           <BackfillButton />
         </aside>
         <div class="standalone-main">
-          <StatsStrip stats={stats.value} />
+          <StatsStrip stats={store.stats.value} />
           <EventGrid
-            events={events.value}
-            loading={loading.value}
-            error={error.value}
-            petNames={petNames.value}
-            onOpenEvent={openModal}
+            events={eventList}
+            loading={isLoading}
+            error={errMsg}
+            petNames={store.petNames.value}
+            onOpenEvent={store.openModal}
           />
           <Pagination
-            total={total.value}
-            limit={query.value.limit}
-            offset={query.value.offset}
-            onPageChange={(offset) => updateQuery({ offset })}
+            total={store.total.value}
+            limit={store.query.value.limit}
+            offset={store.query.value.offset}
+            onPageChange={(offset) => store.updateQuery({ offset })}
           />
         </div>
       </div>
-      {selectedEvent.value && (
+      {selectedEvent && (
         <EventDetail
-          event={selectedEvent.value}
-          petNames={petNames.value}
-          onClose={closeModal}
-          onUpdated={refresh}
-          initialPanel={initialPanel.value}
+          event={selectedEvent}
+          petNames={store.petNames.value}
+          onClose={store.closeModal}
+          onUpdated={store.loadData}
+          initialPanel={store.initialPanel.value}
         />
       )}
     </main>
