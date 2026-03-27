@@ -109,6 +109,7 @@ pub fn router(state: AppState) -> Router {
             get(handle_photo_panel),
         )
         .route("/api/photos/ingest", post(handle_ingest))
+        .route("/api/event/{id}", get(handle_event_by_id))
         .route(
             "/api/detections/{id}",
             get(handle_detections_get).patch(handle_detection_update),
@@ -123,6 +124,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pet-names", get(handle_pet_names))
         .route("/api/events", get(handle_sse))
         .route("/health", get(handle_health))
+        .route("/test/websr", get(handle_websr_test))
+        .route("/test/esrgan", get(handle_esrgan_test))
+        .route("/test/carousel", get(handle_carousel_demo))
+        .route("/test/carousel.js", get(handle_carousel_js))
+        .route("/test/models/{*path}", get(handle_test_model))
+        .route("/api/models/{*path}", get(handle_test_model))
         .with_state(state)
         .merge(mcp_router)
 }
@@ -188,6 +195,26 @@ async fn handle_photos_list(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/event/{id} — single event by DB primary key (for deep links)
+async fn handle_event_by_id(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match state.queries().get_event_by_id(id).await {
+        Ok(Some(ev)) => Json(serde_json::json!(ev)).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "not found"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{e}")})),
         )
             .into_response(),
     }
@@ -969,6 +996,92 @@ fn sanitize_filename(name: &str) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default()
+}
+
+async fn latest_filename(state: &AppState) -> String {
+    state
+        .queries()
+        .list_events(crate::application::EventQuery {
+            limit: Some(1),
+            ..Default::default()
+        })
+        .await
+        .ok()
+        .and_then(|(events, _)| events.into_iter().next())
+        .map(|e| e.source_filename)
+        .unwrap_or_default()
+}
+
+async fn handle_websr_test(State(state): State<AppState>) -> impl IntoResponse {
+    let latest = latest_filename(&state).await;
+    let html = include_str!("../../static/websr.html").replace("__LATEST__", &latest);
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
+}
+
+async fn handle_test_model(Path(path): Path<String>) -> impl IntoResponse {
+    let safe_path = path.trim_start_matches('/').replace("..", "");
+    let file_path = std::path::Path::new("/tmp/esrgan-models").join(&safe_path);
+    match tokio::fs::read(&file_path).await {
+        Ok(data) => {
+            let mime = if safe_path.ends_with(".json") {
+                "application/json"
+            } else {
+                "application/octet-stream"
+            };
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, mime.to_string()),
+                    (
+                        header::CACHE_CONTROL,
+                        "public, max-age=31536000, immutable".to_string(),
+                    ),
+                ],
+                data,
+            )
+                .into_response()
+        }
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            format!("model not found: {safe_path}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn handle_carousel_demo(State(state): State<AppState>) -> impl IntoResponse {
+    let latest = latest_filename(&state).await;
+    let html = include_str!("../../static/carousel.html").replace("__LATEST__", &latest);
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
+}
+
+async fn handle_carousel_js() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        include_str!("../../static/carousel.js"),
+    )
+}
+
+async fn handle_esrgan_test(State(state): State<AppState>) -> impl IntoResponse {
+    let latest = latest_filename(&state).await;
+    let html = include_str!("../../static/esrgan.html").replace("__LATEST__", &latest);
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useSignal, useSignalEffect } from "@preact/signals";
 import { isEmbedded, type BboxSummary, type EventSummary, type PetNames } from "../lib/api";
 import { photoUrl } from "../lib/api";
 
@@ -36,15 +36,16 @@ function notifyParentLightbox(event: EventSummary): void {
 }
 
 function FeaturedOverlay({ event, petNames }: { event: EventSummary; petNames: PetNames }) {
-  const [faded, setFaded] = useState(false);
+  const faded = useSignal(false);
 
-  useEffect(() => {
-    const timer = setTimeout(() => setFaded(true), 3000);
+  useSignalEffect(() => {
+    faded.value = false;
+    const timer = setTimeout(() => { faded.value = true; }, 3000);
     return () => clearTimeout(timer);
-  }, [event.id]);
+  });
 
   return (
-    <div class={`event-image-overlay ${faded ? "overlay-faded" : ""}`}>
+    <div class={`event-image-overlay ${faded.value ? "overlay-faded" : ""}`}>
       <span class="event-kicker">Latest</span>
       <span class="event-overlay-time">{formatObservedAt(event.observed_at)}</span>
       <div class="event-meta-row overlay-meta-row featured-meta-overlay">
@@ -61,22 +62,24 @@ function petDisplay(petId: string | null, petNames: PetNames): string {
 }
 
 function SparkleOverlay({ bboxes }: { bboxes: BboxSummary[] }) {
-  // Generate 2 particles per bbox, deterministic offsets from bbox position
-  const particles: { left: string; top: string; delay: string; size: number }[] = [];
+  // Generate 2 particles per bbox, deterministic but varied offsets
+  const particles: { left: string; top: string; delay: string; duration: string; size: number }[] = [];
   for (const b of bboxes) {
     const cx = b.bbox_x + b.bbox_w / 2;
     const cy = b.bbox_y + b.bbox_h / 2;
-    // Spread particles around bbox center, radius ~60% of bbox size
-    const seed = b.bbox_x * 7 + b.bbox_y * 13;
+    // Use bbox geometry as seed — mix more aggressively to avoid collisions
+    const seed = (b.bbox_x * 31 + b.bbox_y * 17 + b.bbox_w * 7) | 0;
     const spread = 0.6;
     for (let i = 0; i < 2; i++) {
-      const ox = ((seed + i * 37) % 61 - 30) / 50 * b.bbox_w * spread;
-      const oy = ((seed + i * 53) % 51 - 25) / 50 * b.bbox_h * spread;
+      const h = seed + i * 97;
+      const ox = ((h * 37) % 61 - 30) / 50 * b.bbox_w * spread;
+      const oy = ((h * 53) % 51 - 25) / 50 * b.bbox_h * spread;
       particles.push({
         left: `${((cx + ox) / COMIC_W) * 100}%`,
         top: `${((cy + oy) / COMIC_H) * 100}%`,
-        delay: `${(particles.length * 0.7) % 3}s`,
-        size: 3 + (seed + i) % 3,
+        delay: `${((h * 43) % 3000) / 1000}s`,
+        duration: `${2.5 + ((h * 67) % 1500) / 1000}s`,
+        size: 3 + (h * 11) % 3,
       });
     }
   }
@@ -93,6 +96,7 @@ function SparkleOverlay({ bboxes }: { bboxes: BboxSummary[] }) {
             width: `${p.size}px`,
             height: `${p.size}px`,
             animationDelay: p.delay,
+            animationDuration: p.duration,
           }}
         />
       ))}

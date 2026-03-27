@@ -77,17 +77,17 @@ function buildParams(query: EventQuery): URLSearchParams {
   return params;
 }
 
-export async function fetchEvents(query: EventQuery): Promise<EventListResponse> {
+export async function fetchEvents(query: EventQuery, signal?: AbortSignal): Promise<EventListResponse> {
   const params = buildParams(query);
-  const response = await fetch(`/api/photos?${params.toString()}`);
+  const response = await fetch(`/api/photos?${params.toString()}`, { signal });
   if (!response.ok) {
     throw new Error(`failed to load events: ${response.status}`);
   }
   return response.json();
 }
 
-export async function fetchStats(): Promise<ActivityStats> {
-  const response = await fetch("/api/stats");
+export async function fetchStats(signal?: AbortSignal): Promise<ActivityStats> {
+  const response = await fetch("/api/stats", { signal });
   if (!response.ok) {
     throw new Error(`failed to load stats: ${response.status}`);
   }
@@ -96,6 +96,27 @@ export async function fetchStats(): Promise<ActivityStats> {
 
 export function photoUrl(sourceFilename: string): string {
   return `/api/photos/${encodeURIComponent(sourceFilename)}`;
+}
+
+export async function fetchEventById(id: number, signal?: AbortSignal): Promise<EventSummary | null> {
+  const response = await fetch(`/api/event/${id}`, { signal });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`failed to fetch event: ${response.status}`);
+  return response.json();
+}
+
+export type DeepLink = {
+  photoId: number | null;
+  panelIndex: number | null;
+};
+
+export function parseDeepLink(pathname: string): DeepLink {
+  const m = pathname.match(/^\/app\/photo\/(\d+)(?:\/panel\/([0-3]))?$/);
+  if (!m) return { photoId: null, panelIndex: null };
+  return {
+    photoId: parseInt(m[1], 10),
+    panelIndex: m[2] != null ? parseInt(m[2], 10) : null,
+  };
 }
 
 export type Detection = {
@@ -141,8 +162,8 @@ export async function detectNow(filename: string): Promise<{ ok: boolean; detect
   return response.json();
 }
 
-export async function fetchDetections(photoId: number): Promise<Detection[]> {
-  const response = await fetch(`/api/detections/${photoId}`);
+export async function fetchDetections(photoId: number, signal?: AbortSignal): Promise<Detection[]> {
+  const response = await fetch(`/api/detections/${photoId}`, { signal });
   if (!response.ok) {
     throw new Error(`failed to load detections: ${response.status}`);
   }
@@ -269,6 +290,10 @@ export function writeQueryToLocation(query: EventQuery): void {
     params.set("embed", embed);
   }
   const search = params.toString();
-  const url = search ? `/app?${search}` : "/app";
+  // Preserve deep link path (e.g. /app/photo/42/panel/1) — only rewrite if on /app
+  const basePath = window.location.pathname.startsWith("/app/photo/")
+    ? window.location.pathname
+    : "/app";
+  const url = search ? `${basePath}?${search}` : basePath;
   window.history.replaceState({}, "", url);
 }
