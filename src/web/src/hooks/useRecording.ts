@@ -1,4 +1,5 @@
-import { useState, useRef, useCallback, useEffect } from 'preact/hooks';
+import { useRef, useCallback, useEffect } from 'preact/hooks';
+import type { Signal } from '@preact/signals';
 
 export interface RecordingState {
   isRecording: boolean;
@@ -7,14 +8,7 @@ export interface RecordingState {
   statusText: string;
 }
 
-export function useRecording() {
-  const [state, setState] = useState<RecordingState>({
-    isRecording: false,
-    isConverting: false,
-    isStopping: false,
-    statusText: '',
-  });
-
+export function useRecording(recordingState: Signal<RecordingState>) {
   const startTimeRef = useRef<number>(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -40,7 +34,7 @@ export function useRecording() {
       if (!res.ok) {
         isRecordingRef.current = false;
         clearIntervals();
-        setState({ isRecording: false, isConverting: false, isStopping: false, statusText: 'Auto-stopped' });
+        recordingState.value = { isRecording: false, isConverting: false, isStopping: false, statusText: 'Auto-stopped' };
       }
     } catch { /* ignore */ }
   }, [clearIntervals]);
@@ -67,7 +61,7 @@ export function useRecording() {
 
           if (status.converting) {
             const pct = typeof status.convert_progress === 'number' ? status.convert_progress : 0;
-            setState((s) => ({ ...s, statusText: `Converting... ${Math.round(pct * 100)}%` }));
+            recordingState.value = { ...recordingState.peek(), statusText: `Converting... ${Math.round(pct * 100)}%` };
           }
 
           if (!status.converting) {
@@ -93,7 +87,7 @@ export function useRecording() {
   }, []);
 
   const start = useCallback(async () => {
-    setState((s) => ({ ...s, statusText: 'Starting...' }));
+    recordingState.value = { ...recordingState.peek(), statusText: 'Starting...' };
     try {
       const res = await fetch('/api/recording/start', { method: 'POST' });
       const data = await res.json();
@@ -104,18 +98,18 @@ export function useRecording() {
 
       timerRef.current = setInterval(() => {
         if (!isRecordingRef.current) return;
-        setState((s) => ({
-          ...s,
+        recordingState.value = {
+          ...recordingState.peek(),
           statusText: formatElapsed(Date.now() - startTimeRef.current),
-        }));
+        };
       }, 1000);
       heartbeatRef.current = setInterval(sendHeartbeat, 1000);
 
-      setState({ isRecording: true, isConverting: false, isStopping: false, statusText: formatElapsed(0) });
+      recordingState.value = { isRecording: true, isConverting: false, isStopping: false, statusText: formatElapsed(0) };
       return data.file as string;
     } catch (error) {
       alert('Recording start failed: ' + (error as Error).message);
-      setState({ isRecording: false, isConverting: false, isStopping: false, statusText: '' });
+      recordingState.value = { isRecording: false, isConverting: false, isStopping: false, statusText: '' };
       return null;
     }
   }, [sendHeartbeat]);
@@ -127,21 +121,21 @@ export function useRecording() {
     // Stop timer/heartbeat immediately — don't wait for API response
     clearIntervals();
     isRecordingRef.current = false;
-    setState({ isRecording: false, isConverting: false, isStopping: true, statusText: 'Stopping...' });
+    recordingState.value = { isRecording: false, isConverting: false, isStopping: true, statusText: 'Stopping...' };
 
     try {
       const res = await fetch('/api/recording/stop', { method: 'POST' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to stop recording');
 
-      setState({ isRecording: false, isConverting: true, isStopping: false, statusText: 'Converting...' });
+      recordingState.value = { isRecording: false, isConverting: true, isStopping: false, statusText: 'Converting...' };
 
       await waitForConversion(data.file);
     } catch (error) {
       alert('Recording stop failed: ' + (error as Error).message);
     } finally {
       isStoppingRef.current = false;
-      setState({ isRecording: false, isConverting: false, isStopping: false, statusText: '' });
+      recordingState.value = { isRecording: false, isConverting: false, isStopping: false, statusText: '' };
     }
   }, [clearIntervals, waitForConversion]);
 
@@ -158,5 +152,5 @@ export function useRecording() {
     return () => clearIntervals();
   }, [clearIntervals]);
 
-  return { state, toggle };
+  return { toggle };
 }

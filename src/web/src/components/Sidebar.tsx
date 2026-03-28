@@ -1,4 +1,5 @@
-import { useRef, useEffect, useState, useCallback } from 'preact/hooks';
+import { useRef, useEffect, useCallback } from 'preact/hooks';
+import { useSignal } from '@preact/signals';
 import type { DetectionResult } from '../lib/protobuf';
 import { classRgb } from '../lib/detection-classes';
 
@@ -90,8 +91,8 @@ export function useSidebar() {
   const heatmapRef = useRef<{ grid: number[][]; baseValid: boolean; scoreThreshold?: number }>({ grid: [], baseValid: false });
   const confHistoryRef = useRef<{ ts: number; bboxes: { trackId: number; conf: number; cls: string }[]; th: number }[]>([]);
   const tracksRef = useRef<Track[]>([]);
-  const [legendEntries, setLegendEntries] = useState<[string, number][]>([]);
-  const [ganttClasses, setGanttClasses] = useState<string[]>([]);
+  const legendEntries = useSignal<[string, number][]>([]);
+  const ganttClasses = useSignal<string[]>([]);
 
   // SSE-based heatmap updates (replaces polling)
   useEffect(() => {
@@ -439,18 +440,18 @@ export function useSidebar() {
         ganttRef.current.shift();
       }
 
-      // Update known classes for Gantt y-axis
+      // Update known classes for Gantt y-axis (object comparison を避けてノイズを抑制)
       const classSet = new Set<string>();
       ganttRef.current.forEach((r) => r.classes.forEach((c) => classSet.add(c)));
       const sorted = [...classSet].sort();
-      setGanttClasses((prev) => {
-        if (prev.length === sorted.length && prev.every((c, i) => c === sorted[i])) return prev;
-        return sorted;
-      });
+      const prev = ganttClasses.value;
+      if (prev.length !== sorted.length || !prev.every((c, i) => c === sorted[i])) {
+        ganttClasses.value = sorted;
+      }
 
       const counts: Record<string, number> = {};
       pointsRef.current.forEach((p) => { counts[p.className] = (counts[p.className] || 0) + 1; });
-      setLegendEntries(Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 5));
+      legendEntries.value = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 5);
 
       drawTrajectory();
       drawGantt();
@@ -467,7 +468,7 @@ export function useSidebar() {
           ganttRef.current = records;
           const classSet = new Set<string>();
           records.forEach((r) => r.classes.forEach((c: string) => classSet.add(c)));
-          setGanttClasses([...classSet].sort());
+          ganttClasses.value = [...classSet].sort();
           drawGantt();
         }
       })
@@ -483,9 +484,9 @@ export function useSidebar() {
   return { canvasRef, ganttCanvasRef, legendEntries, ganttClasses, updateTrajectory };
 }
 
-export type MobileTab = 'live' | 'tracking' | 'album';
+export type { MobileTab } from '../lib/store';
 
-export function TrackingView(props: Pick<ReturnType<typeof useSidebar>, 'canvasRef' | 'ganttCanvasRef' | 'legendEntries'>) {
+export function TrackingView(props: Pick<ReturnType<typeof useSidebar>, 'canvasRef' | 'ganttCanvasRef'> & { legendEntries: [string, number][] }) {
   return (
     <div class="tracking-section">
       <div class="trajectory-card">
@@ -513,83 +514,3 @@ export function TrackingView(props: Pick<ReturnType<typeof useSidebar>, 'canvasR
   );
 }
 
-export function AlbumView() {
-  const [albumSrc, setAlbumSrc] = useState('');
-  const [albumOffline, setAlbumOffline] = useState(false);
-  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
-  const [lightboxMeta, setLightboxMeta] = useState<{ date?: string; pet?: string; behavior?: string; caption?: string }>({});
-
-  useEffect(() => {
-    fetch('/api/config')
-      .then(r => r.json())
-      .then(c => {
-        if (c.album_url) {
-          setAlbumSrc(`${c.album_url.replace(/\/$/, '')}/app?embed=petcamera`);
-        } else {
-          setAlbumOffline(true);
-        }
-      })
-      .catch(() => setAlbumOffline(true));
-  }, []);
-
-  useEffect(() => {
-    const handler = (e: MessageEvent) => {
-      if (e.data?.type === 'album-lightbox' && typeof e.data.src === 'string') {
-        setLightboxSrc(e.data.src);
-        setLightboxMeta(e.data.meta || {});
-      }
-    };
-    window.addEventListener('message', handler);
-    return () => window.removeEventListener('message', handler);
-  }, []);
-
-  useEffect(() => {
-    if (lightboxSrc) {
-      document.body.classList.add('lightbox-active');
-    } else {
-      document.body.classList.remove('lightbox-active');
-    }
-    if (!lightboxSrc) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setLightboxSrc(null);
-    };
-    window.addEventListener('keydown', handler);
-    return () => {
-      window.removeEventListener('keydown', handler);
-      document.body.classList.remove('lightbox-active');
-    };
-  }, [lightboxSrc]);
-
-  return (
-    <>
-      <div class="panel album-panel">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h2>アルバム</h2>
-          {albumSrc && <a href={albumSrc.split('?')[0]} target="_blank" class="album-link" title="別タブで開く">↗</a>}
-        </div>
-        {albumOffline ? (
-          <div class="album-offline">アルバムサービスに接続できません</div>
-        ) : (
-          <iframe
-            src={albumSrc}
-            class="album-iframe"
-            scrolling="auto"
-            onError={() => setAlbumOffline(true)}
-          />
-        )}
-      </div>
-
-      {lightboxSrc && (
-        <div class="album-lightbox" onClick={() => setLightboxSrc(null)}>
-          <img src={lightboxSrc} alt="Full size" />
-          <div class="album-lightbox-meta" onClick={(e) => e.stopPropagation()}>
-            {lightboxMeta.date && <span class="album-lightbox-date">{lightboxMeta.date}</span>}
-            {lightboxMeta.pet && <span class={`album-lightbox-pet ${lightboxMeta.pet}`}>{lightboxMeta.pet}</span>}
-            {lightboxMeta.behavior && <span class="album-lightbox-behavior">{lightboxMeta.behavior}</span>}
-            {lightboxMeta.caption && <p class="album-lightbox-caption">{lightboxMeta.caption}</p>}
-          </div>
-        </div>
-      )}
-    </>
-  );
-}

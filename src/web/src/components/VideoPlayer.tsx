@@ -1,4 +1,5 @@
-import { useState, useRef, useCallback, useEffect } from 'preact/hooks';
+import { useRef, useCallback, useEffect } from 'preact/hooks';
+import { useSignal } from '@preact/signals';
 import { useWebRTC } from '../hooks/useWebRTC';
 import { useBBoxOverlay } from './BBoxOverlay';
 import type { DetectionEvent, StatusEvent } from '../lib/protobuf';
@@ -9,10 +10,9 @@ interface UseVideoPlayerOptions {
 }
 
 export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
-  const [mode, setMode] = useState<'webrtc' | 'mjpeg'>('webrtc');
+  const mode = useSignal<'webrtc' | 'mjpeg'>('webrtc');
   const videoRef = useRef<HTMLVideoElement>(null);
   const mjpegRef = useRef<HTMLImageElement>(null);
-  const modeRef = useRef<'webrtc' | 'mjpeg'>('webrtc');
   const fallbackAttempted = useRef(false);
 
   const { canvasRef, handleDetection, handleStatus } = useBBoxOverlay(videoRef);
@@ -46,9 +46,9 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
     if (!fallbackAttempted.current) {
       fallbackAttempted.current = true;
       setTimeout(() => {
-        if (modeRef.current === 'webrtc') {
-          modeRef.current = 'mjpeg';
-          setMode('mjpeg');
+        // peek() で signal を読んでも subscription を作らない
+        if (mode.peek() === 'webrtc') {
+          mode.value = 'mjpeg';
           startMJPEG();
         }
       }, 2000);
@@ -58,17 +58,15 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
   const webrtc = useWebRTC(videoRef, onWebRTCError);
 
   const switchToMJPEG = useCallback(() => {
-    if (modeRef.current === 'mjpeg') return;
-    modeRef.current = 'mjpeg';
-    setMode('mjpeg');
+    if (mode.peek() === 'mjpeg') return;
+    mode.value = 'mjpeg';
     webrtc.stop();
     startMJPEG();
   }, [webrtc, startMJPEG]);
 
   const switchToWebRTC = useCallback(async () => {
-    if (modeRef.current === 'webrtc') return;
-    modeRef.current = 'webrtc';
-    setMode('webrtc');
+    if (mode.peek() === 'webrtc') return;
+    mode.value = 'webrtc';
     stopMJPEG();
     fallbackAttempted.current = false;
     if (!webrtc.isConnected()) {
