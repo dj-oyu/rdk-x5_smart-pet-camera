@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'preact/hooks';
+import { useEffect, useCallback } from 'preact/hooks';
+import { useSignal } from '@preact/signals';
 
 interface Recording {
   name: string;
@@ -31,14 +32,14 @@ function formatDate(date: Date | null): string {
 }
 
 export function RecordingsModal({ open, onClose, onOpenThumbnail }: Props) {
-  const [recordings, setRecordings] = useState<Recording[]>([]);
+  const recordings = useSignal<Recording[]>([]);
 
   const fetchRecordings = useCallback(async () => {
     try {
       const res = await fetch('/api/recordings');
       if (!res.ok) return;
       const data = await res.json();
-      setRecordings(data.recordings || []);
+      recordings.value = data.recordings || [];
     } catch { /* ignore */ }
   }, []);
 
@@ -48,7 +49,8 @@ export function RecordingsModal({ open, onClose, onOpenThumbnail }: Props) {
 
   if (!open) return null;
 
-  const totalBytes = recordings.reduce((sum, r) => sum + r.size_bytes, 0);
+  const recs = recordings.value;
+  const totalBytes = recs.reduce((sum, r) => sum + r.size_bytes, 0);
 
   const downloadRecording = (name: string) => {
     const a = document.createElement('a');
@@ -80,17 +82,17 @@ export function RecordingsModal({ open, onClose, onOpenThumbnail }: Props) {
         </div>
         <div class="modal-body">
           <div class="recordings-list">
-            {recordings.length === 0 ? (
+            {recs.length === 0 ? (
               <div class="recordings-empty">
                 <p class="muted">No recordings</p>
               </div>
             ) : (
               <>
                 <div class="recordings-header">
-                  <span class="recordings-summary">{recordings.length} files / {formatFileSize(totalBytes)}</span>
+                  <span class="recordings-summary">{recs.length} files / {formatFileSize(totalBytes)}</span>
                   <button class="recordings-refresh" onClick={fetchRecordings}>Refresh</button>
                 </div>
-                {recordings.map((rec) => {
+                {recs.map((rec) => {
                   const date = parseRecordingDate(rec.name);
                   const thumbUrl = rec.thumbnail ? `/api/recordings/${encodeURIComponent(rec.thumbnail)}` : null;
                   const isH264 = rec.name.endsWith('.h264');

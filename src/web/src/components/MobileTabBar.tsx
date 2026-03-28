@@ -1,4 +1,4 @@
-import type { MobileTab } from './Sidebar';
+import type { MobileTab } from '../lib/store';
 
 interface Props {
   activeTab: MobileTab;

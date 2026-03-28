@@ -1,11 +1,11 @@
-import { useState, useCallback, useRef, useEffect } from 'preact/hooks';
-import type { RecordingState } from '../hooks/useRecording';
+import { useCallback, useRef } from 'preact/hooks';
+import { useSignal, useSignalEffect, useModel } from '@preact/signals';
+import { AppStore } from '../lib/store';
 
 interface Props {
   mode: 'webrtc' | 'mjpeg';
   onSwitchWebRTC: () => void;
   onSwitchMJPEG: () => void;
-  recording: RecordingState;
   onToggleRecording: () => void;
   onOpenRecordings: () => void;
   viewerCount: string;
@@ -17,53 +17,54 @@ export function VideoControls({
   mode,
   onSwitchWebRTC,
   onSwitchMJPEG,
-  recording,
   onToggleRecording,
   onOpenRecordings,
   viewerCount,
 }: Props) {
-  const [captureState, setCaptureState] = useState<CaptureState>('idle');
-  const [captionText, setCaptionText] = useState('');
+  const { recording: recordingSignal } = useModel(AppStore);
+  const recording = recordingSignal.value;
+  const captureState = useSignal<CaptureState>('idle');
+  const captionText = useSignal('');
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Focus input when bubble opens
-  useEffect(() => {
-    if (captureState === 'input' && inputRef.current) {
+  useSignalEffect(() => {
+    if (captureState.value === 'input' && inputRef.current) {
       inputRef.current.focus();
     }
-  }, [captureState]);
+  });
 
   const doCapture = useCallback(async () => {
-    setCaptureState('capturing');
+    captureState.value = 'capturing';
     try {
       const res = await fetch('/api/comic-capture', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: captionText }),
+        body: JSON.stringify({ message: captionText.value }),
       });
       if (res.ok) {
         const data = await res.json();
-        setCaptureState('ok');
+        captureState.value = 'ok';
         console.log('[Comic] Saved:', data.filename);
       } else {
-        setCaptureState('error');
+        captureState.value = 'error';
       }
     } catch {
-      setCaptureState('error');
+      captureState.value = 'error';
     }
-    setCaptionText('');
-    setTimeout(() => setCaptureState('idle'), 3000);
-  }, [captionText]);
+    captionText.value = '';
+    setTimeout(() => { captureState.value = 'idle'; }, 3000);
+  }, []);
 
   const handleCaptureClick = useCallback(() => {
-    if (captureState === 'capturing') return;
-    if (captureState === 'idle') {
-      setCaptureState('input');
-    } else if (captureState === 'input') {
+    if (captureState.value === 'capturing') return;
+    if (captureState.value === 'idle') {
+      captureState.value = 'input';
+    } else if (captureState.value === 'input') {
       // Second click: capture immediately (Escape to cancel)
       doCapture();
     }
-  }, [captureState, doCapture]);
+  }, [doCapture]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -71,8 +72,8 @@ export function VideoControls({
         e.preventDefault();
         doCapture();
       } else if (e.key === 'Escape') {
-        setCaptureState('idle');
-        setCaptionText('');
+        captureState.value = 'idle';
+        captionText.value = '';
       }
     },
     [doCapture],
@@ -97,10 +98,11 @@ export function VideoControls({
 
   const showStatus = recording.isRecording || recording.isConverting;
 
+  const cs = captureState.value;
   const captureBtnClass = [
     'btn-capture',
-    captureState !== 'idle' && captureState !== 'input' ? `capture-${captureState}` : '',
-    captureState === 'input' ? 'capture-active' : '',
+    cs !== 'idle' && cs !== 'input' ? `capture-${cs}` : '',
+    cs === 'input' ? 'capture-active' : '',
   ]
     .filter(Boolean)
     .join(' ');
@@ -128,13 +130,13 @@ export function VideoControls({
         <div class="capture-wrapper">
           <button
             class={captureBtnClass}
-            title={captureState === 'input' ? 'Capture now' : '4-panel comic capture'}
+            title={cs === 'input' ? 'Capture now' : '4-panel comic capture'}
             onClick={handleCaptureClick}
-            disabled={captureState === 'capturing'}
+            disabled={cs === 'capturing'}
           >
             <span class="capture-icon" />
           </button>
-          {captureState === 'input' && (
+          {cs === 'input' && (
             <div class="capture-bubble">
               <div class="capture-bubble-arrow" />
               <input
@@ -142,8 +144,8 @@ export function VideoControls({
                 type="text"
                 class="capture-input"
                 placeholder="キャプション (Enter で撮影)"
-                value={captionText}
-                onInput={(e) => setCaptionText((e.target as HTMLInputElement).value)}
+                value={captionText.value}
+                onInput={(e) => { captionText.value = (e.target as HTMLInputElement).value; }}
                 onKeyDown={handleKeyDown}
                 maxLength={50}
               />
