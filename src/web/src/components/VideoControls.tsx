@@ -1,11 +1,12 @@
 import { useCallback, useRef } from 'preact/hooks';
-import { useSignal, useSignalEffect, useModel } from '@preact/signals';
-import { AppStore } from '../lib/store';
+import { useSignal, useSignalEffect } from '@preact/signals';
+import type { RecordingState } from '../hooks/useRecording';
 
 interface Props {
   mode: 'webrtc' | 'mjpeg';
   onSwitchWebRTC: () => void;
   onSwitchMJPEG: () => void;
+  recording: RecordingState;
   onToggleRecording: () => void;
   onOpenRecordings: () => void;
   viewerCount: string;
@@ -17,12 +18,11 @@ export function VideoControls({
   mode,
   onSwitchWebRTC,
   onSwitchMJPEG,
+  recording,
   onToggleRecording,
   onOpenRecordings,
   viewerCount,
 }: Props) {
-  const { recording: recordingSignal } = useModel(AppStore);
-  const recording = recordingSignal.value;
   const captureState = useSignal<CaptureState>('idle');
   const captionText = useSignal('');
   const inputRef = useRef<HTMLInputElement>(null);

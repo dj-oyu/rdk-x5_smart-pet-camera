@@ -8,7 +8,6 @@ interface Recording {
 }
 
 interface Props {
-  open: boolean;
   onClose: () => void;
   onOpenThumbnail: (url: string, name: string) => void;
 }
@@ -31,7 +30,7 @@ function formatDate(date: Date | null): string {
   return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
-export function RecordingsModal({ open, onClose, onOpenThumbnail }: Props) {
+export function RecordingsModal({ onClose, onOpenThumbnail }: Props) {
   const recordings = useSignal<Recording[]>([]);
 
   const fetchRecordings = useCallback(async () => {
@@ -43,11 +42,10 @@ export function RecordingsModal({ open, onClose, onOpenThumbnail }: Props) {
     } catch { /* ignore */ }
   }, []);
 
+  // マウント時に一度フェッチ
   useEffect(() => {
-    if (open) fetchRecordings();
-  }, [open, fetchRecordings]);
-
-  if (!open) return null;
+    fetchRecordings();
+  }, []);
 
   const recs = recordings.value;
   const totalBytes = recs.reduce((sum, r) => sum + r.size_bytes, 0);

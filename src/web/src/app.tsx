@@ -1,5 +1,6 @@
 import { useEffect, useCallback } from 'preact/hooks';
 import { useModel } from '@preact/signals';
+import { Show } from '@preact/signals/utils';
 import { useVideoPlayer } from './components/VideoPlayer';
 import { VideoControls } from './components/VideoControls';
 import { RecordingsModal } from './components/RecordingsModal';
@@ -111,6 +112,7 @@ export function App() {
               mode={videoPlayer.mode.value}
               onSwitchWebRTC={videoPlayer.switchToWebRTC}
               onSwitchMJPEG={videoPlayer.switchToMJPEG}
+              recording={store.recording.value}
               onToggleRecording={toggleRecording}
               onOpenRecordings={store.openRecordings}
               viewerCount={store.viewerCount.value}
@@ -129,11 +131,14 @@ export function App() {
           <AlbumView />
         </div>
 
-        <RecordingsModal
-          open={store.recordingsOpen.value}
-          onClose={store.closeRecordings}
-          onOpenThumbnail={store.openThumbnail}
-        />
+        <Show when={store.recordingsOpen}>
+          {() => (
+            <RecordingsModal
+              onClose={store.closeRecordings}
+              onOpenThumbnail={store.openThumbnail}
+            />
+          )}
+        </Show>
 
         {thumbnailPreview && (
           <div
