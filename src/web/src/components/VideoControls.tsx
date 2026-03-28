@@ -81,6 +81,7 @@ export function VideoControls({
   const recBtnClass = [
     'record-btn',
     recording.isRecording ? 'recording' : '',
+    recording.isStopping ? 'stopping' : '',
     recording.isConverting ? 'converting' : '',
   ]
     .filter(Boolean)
@@ -156,7 +157,7 @@ export function VideoControls({
           class={recBtnClass}
           title="REC"
           onClick={onToggleRecording}
-          disabled={recording.isConverting}
+          disabled={recording.isConverting || recording.isStopping}
         >
           <span class="record-icon" />
         </button>

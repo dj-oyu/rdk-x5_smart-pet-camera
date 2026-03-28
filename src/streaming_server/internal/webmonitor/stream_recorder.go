@@ -1,10 +1,13 @@
 package webmonitor
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,7 +37,8 @@ type Recorder struct {
 	shmReader            *shm.Reader
 	h264Processor        *codec.Processor
 	recording            bool
-	converting           bool // true while MP4 conversion is in progress
+	converting           bool    // true while MP4 conversion is in progress
+	convertProgress      float64 // 0.0–1.0 during conversion, reset to 0 on start
 	file                 *os.File
 	filename             string
 	startTime            time.Time
@@ -142,11 +146,8 @@ func (r *Recorder) Stop() (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Close file
+	// Close file (no Sync — ffmpeg reads from OS buffer, Sync is unnecessary overhead)
 	if r.file != nil {
-		if err := r.file.Sync(); err != nil {
-			logger.Warn("Recorder", "Failed to sync file: %v", err)
-		}
 		if err := r.file.Close(); err != nil {
 			logger.Warn("Recorder", "Failed to close file: %v", err)
 		}
@@ -305,18 +306,54 @@ func (r *Recorder) convertToMP4(h264Filename string, detectionOffset float64) {
 
 	logger.Info("Recorder", "Starting MP4 conversion: %s -> %s", h264Filename, mp4Filename)
 
-	// Run ffmpeg with low priority (nice -n 19)
+	r.mu.Lock()
+	r.convertProgress = 0
+	totalUs := r.lastDuration.Microseconds()
+	r.mu.Unlock()
+
+	// Run ffmpeg with progress reporting to stdout
 	cmd := exec.Command("nice", "-n", "19",
 		"ffmpeg", "-y",
 		"-f", "hevc",
 		"-i", h264Path,
 		"-c", "copy",
+		"-progress", "pipe:1",
+		"-nostats",
 		mp4Path,
 	)
+	cmd.Stderr = io.Discard
 
-	output, err := cmd.CombinedOutput()
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		logger.Warn("Recorder", "MP4 conversion failed: %v\n%s", err, string(output))
+		logger.Warn("Recorder", "Failed to create stdout pipe: %v", err)
+		return
+	}
+
+	if err := cmd.Start(); err != nil {
+		logger.Warn("Recorder", "Failed to start ffmpeg: %v", err)
+		return
+	}
+
+	// Parse ffmpeg progress lines (out_time_us=<microseconds>)
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "out_time_us=") {
+			usStr := strings.TrimPrefix(line, "out_time_us=")
+			if us, err := strconv.ParseInt(usStr, 10, 64); err == nil && totalUs > 0 {
+				progress := float64(us) / float64(totalUs)
+				if progress > 1.0 {
+					progress = 1.0
+				}
+				r.mu.Lock()
+				r.convertProgress = progress
+				r.mu.Unlock()
+			}
+		}
+	}
+
+	if err := cmd.Wait(); err != nil {
+		logger.Warn("Recorder", "MP4 conversion failed: %v", err)
 		return
 	}
 
@@ -504,19 +541,15 @@ func (r *Recorder) Status() map[string]any {
 		duration = r.lastDuration
 	}
 
-	var filename any
-	if r.filename != "" {
-		filename = r.filename
-	}
-
 	return map[string]any{
-		"recording":     r.recording,
-		"converting":    r.converting,
-		"filename":      filename,
-		"frame_count":   r.frameCount,
-		"bytes_written": r.bytesWritten,
-		"duration_ms":   duration.Milliseconds(),
-		"stop_reason":   r.stopReason,
+		"recording":        r.recording,
+		"converting":       r.converting,
+		"convert_progress": r.convertProgress,
+		"filename":         r.filename,
+		"frame_count":      r.frameCount,
+		"bytes_written":    r.bytesWritten,
+		"duration_ms":      duration.Milliseconds(),
+		"stop_reason":      r.stopReason,
 	}
 }
 
