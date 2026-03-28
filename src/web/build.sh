@@ -7,14 +7,14 @@ OUT_DIR="${SCRIPT_DIR}/../../build/web"
 mkdir -p "$OUT_DIR"
 
 # Clean old hashed JS files
-rm -f "$OUT_DIR"/app-*.js
+rm -f "$OUT_DIR"/main-*.js
 
 # Build JS with content hash in filename
-OUTPUT=$(bun build "$SCRIPT_DIR/src/app.tsx" --outdir "$OUT_DIR" --minify --entry-naming '[name]-[hash].[ext]' 2>&1)
+OUTPUT=$(bun build "$SCRIPT_DIR/src/main.tsx" --outdir "$OUT_DIR" --minify --entry-naming '[name]-[hash].[ext]' 2>&1)
 echo "$OUTPUT"
 
 # Extract generated filename (e.g. app-2hfzt605.js)
-APP_JS=$(echo "$OUTPUT" | grep -oP 'app-[a-z0-9]+\.js')
+APP_JS=$(echo "$OUTPUT" | grep -oP 'main-[a-z0-9]+\.js')
 if [[ -z "$APP_JS" ]]; then
   echo "ERROR: Could not determine output JS filename" >&2
   exit 1
