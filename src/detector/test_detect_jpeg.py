@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# pyright: reportPrivateUsage=false
 """Multi-pattern YOLO detection test.
 
 Tests the same image through different code paths to isolate
@@ -7,13 +8,14 @@ why daemon HTTP /detect returns empty while standalone works.
 Usage (on RDK X5, camera daemon stopped):
     PYTHONPATH=src/common/src python3 src/detector/test_detect_jpeg.py URL
 """
+
 import ssl
 import sys
-import time
 import numpy as np
 from urllib.request import urlopen, Request
 from detection.image_utils import jpeg_to_yolo_nv12
 from detection.yolo_detector import YoloDetector
+from common.types import Detection
 
 MODEL = "/tmp/yolo_models/yolov13n_detect_bayese_640x640_nv12.bin"
 THRESHOLD = 0.01
@@ -24,7 +26,9 @@ url = sys.argv[1]
 ctx = ssl.create_default_context()
 ctx.check_hostname = False
 ctx.verify_mode = ssl.CERT_NONE
-with urlopen(Request(url, headers={"Accept": "image/jpeg"}), timeout=10, context=ctx) as r:
+with urlopen(
+    Request(url, headers={"Accept": "image/jpeg"}), timeout=10, context=ctx
+) as r:
     jpeg_bytes = r.read()
 print(f"Downloaded: {len(jpeg_bytes)} bytes\n")
 
@@ -37,10 +41,12 @@ detector = YoloDetector(model_path=MODEL, score_threshold=THRESHOLD)
 print(f"Model loaded: {detector.input_h}x{detector.input_w}, th={THRESHOLD}\n")
 
 
-def show(dets: list) -> None:
+def show(dets: list[Detection]) -> None:
     print(f"  → {len(dets)} detections")
     for d in dets:
-        print(f"    {d.class_name.label}: {d.confidence:.3f} @ ({d.bbox.x},{d.bbox.y},{d.bbox.w},{d.bbox.h})")
+        print(
+            f"    {d.class_name.label}: {d.confidence:.3f} @ ({d.bbox.x},{d.bbox.y},{d.bbox.w},{d.bbox.h})"
+        )
     print()
 
 
@@ -72,7 +78,7 @@ show(dets)
 print("=== P5: detect_nv12 called 3x in sequence ===")
 for i in range(3):
     dets = detector.detect_nv12(nv12, 640, 640)
-    print(f"  call {i+1}: {len(dets)} dets", end="")
+    print(f"  call {i + 1}: {len(dets)} dets", end="")
     if dets:
         print(f" (top: {dets[0].class_name.label} {dets[0].confidence:.3f})")
     else:
@@ -101,5 +107,7 @@ nv12_array = np.frombuffer(nv12, dtype=np.uint8)
 outputs = detector._forward(nv12_array)
 print(f"  outputs: {len(outputs)} tensors")
 for i, o in enumerate(outputs):
-    print(f"    [{i}] shape={o.shape} min={o.min():.4f} max={o.max():.4f} mean={o.mean():.4f}")
+    print(
+        f"    [{i}] shape={o.shape} min={o.min():.4f} max={o.max():.4f} mean={o.mean():.4f}"
+    )
 print(f"  conf_thres_raw={detector.conf_thres_raw:.4f} (th={detector.score_threshold})")
