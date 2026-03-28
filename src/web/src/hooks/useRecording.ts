@@ -3,6 +3,7 @@ import { useState, useRef, useCallback, useEffect } from 'preact/hooks';
 export interface RecordingState {
   isRecording: boolean;
   isConverting: boolean;
+  isStopping: boolean;
   statusText: string;
 }
 
@@ -10,6 +11,7 @@ export function useRecording() {
   const [state, setState] = useState<RecordingState>({
     isRecording: false,
     isConverting: false,
+    isStopping: false,
     statusText: '',
   });
 
@@ -17,6 +19,7 @@ export function useRecording() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isRecordingRef = useRef(false);
+  const isStoppingRef = useRef(false);
 
   const clearIntervals = useCallback(() => {
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
@@ -37,7 +40,7 @@ export function useRecording() {
       if (!res.ok) {
         isRecordingRef.current = false;
         clearIntervals();
-        setState({ isRecording: false, isConverting: false, statusText: 'Auto-stopped' });
+        setState({ isRecording: false, isConverting: false, isStopping: false, statusText: 'Auto-stopped' });
       }
     } catch { /* ignore */ }
   }, [clearIntervals]);
@@ -61,6 +64,12 @@ export function useRecording() {
         const statusRes = await fetch('/api/recording/status');
         if (statusRes.ok) {
           const status = await statusRes.json();
+
+          if (status.converting) {
+            const pct = typeof status.convert_progress === 'number' ? status.convert_progress : 0;
+            setState((s) => ({ ...s, statusText: `Converting... ${Math.round(pct * 100)}%` }));
+          }
+
           if (!status.converting) {
             const listRes = await fetch('/api/recordings');
             if (listRes.ok) {
@@ -75,7 +84,7 @@ export function useRecording() {
           }
         }
       } catch { /* ignore */ }
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 200));
     }
 
     if (confirm('MP4 conversion timed out. Download H.264 file?')) {
@@ -102,37 +111,42 @@ export function useRecording() {
       }, 1000);
       heartbeatRef.current = setInterval(sendHeartbeat, 1000);
 
-      setState({ isRecording: true, isConverting: false, statusText: formatElapsed(0) });
+      setState({ isRecording: true, isConverting: false, isStopping: false, statusText: formatElapsed(0) });
       return data.file as string;
     } catch (error) {
       alert('Recording start failed: ' + (error as Error).message);
-      setState({ isRecording: false, isConverting: false, statusText: '' });
+      setState({ isRecording: false, isConverting: false, isStopping: false, statusText: '' });
       return null;
     }
   }, [sendHeartbeat]);
 
   const stop = useCallback(async () => {
-    if (!isRecordingRef.current) return;
+    if (!isRecordingRef.current || isStoppingRef.current) return;
+    isStoppingRef.current = true;
 
-    setState((s) => ({ ...s, statusText: 'Stopping...' }));
+    // Stop timer/heartbeat immediately — don't wait for API response
+    clearIntervals();
+    isRecordingRef.current = false;
+    setState({ isRecording: false, isConverting: false, isStopping: true, statusText: 'Stopping...' });
+
     try {
       const res = await fetch('/api/recording/stop', { method: 'POST' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to stop recording');
 
-      clearIntervals();
-      isRecordingRef.current = false;
-      setState({ isRecording: false, isConverting: true, statusText: 'Converting...' });
+      setState({ isRecording: false, isConverting: true, isStopping: false, statusText: 'Converting...' });
 
       await waitForConversion(data.file);
     } catch (error) {
       alert('Recording stop failed: ' + (error as Error).message);
     } finally {
-      setState({ isRecording: false, isConverting: false, statusText: '' });
+      isStoppingRef.current = false;
+      setState({ isRecording: false, isConverting: false, isStopping: false, statusText: '' });
     }
   }, [clearIntervals, waitForConversion]);
 
   const toggle = useCallback(async () => {
+    if (isStoppingRef.current) return;
     if (isRecordingRef.current) {
       await stop();
     } else {
