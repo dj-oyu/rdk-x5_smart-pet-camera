@@ -296,6 +296,12 @@ class YoloDetectorDaemon:
         self.SNAPSHOT_BLEND_ALPHA: float = 0.05  # how fast base absorbs stable changes
         self._snapshot_timer: int = 0  # frames since last snapshot
 
+        # Idle throttle (night mode only)
+        self.IDLE_TIER1_FRAMES: int = 30  # ~1s quiet → ~10fps
+        self.IDLE_TIER2_FRAMES: int = 150  # ~5s quiet → ~5fps
+        self.IDLE_TIER1_SLEEP: float = 0.067  # skip 2/3 frames
+        self.IDLE_TIER2_SLEEP: float = 0.167  # skip 5/6 frames
+
         # Focus crop state
         self._focus_crop_enabled: bool = True
         self._motion_roi_idx: int = -1  # which ROI had motion (-1=none/both)
@@ -1139,36 +1145,39 @@ class YoloDetectorDaemon:
                                 grid_arr.astype(np.float32) / 255.0, 3
                             ).tolist()
                             self._roi_grids[rkey] = grid
-                            try:
-                                import json as _json
+                            if fp % 10 == 0:  # ~3fps instead of 30fps
+                                try:
+                                    import json as _json
 
-                                grid_size = 16
-                                g0 = self._roi_grids.get(
-                                    "roi0", [[0.0] * grid_size] * grid_size
-                                )
-                                g1 = self._roi_grids.get(
-                                    "roi1", [[0.0] * grid_size] * grid_size
-                                )
-                                combined = [g0[r] + g1[r] for r in range(grid_size)]
-                                _json_str = _json.dumps(
-                                    {
-                                        "grid": combined,
-                                        "rows": grid_size,
-                                        "cols": grid_size * 2,
-                                        "base_valid": True,
-                                        "quiet_frames": self._quiet_frames,
-                                        "score_threshold": round(
-                                            self.detector.score_threshold, 3
-                                        ),
-                                    }
-                                )
-                                with open("/tmp/base_diff_grid.json.tmp", "w") as _f:
-                                    _f.write(_json_str)
-                                Path("/tmp/base_diff_grid.json.tmp").replace(
-                                    "/tmp/base_diff_grid.json"
-                                )
-                            except Exception:
-                                pass
+                                    grid_size = 16
+                                    g0 = self._roi_grids.get(
+                                        "roi0", [[0.0] * grid_size] * grid_size
+                                    )
+                                    g1 = self._roi_grids.get(
+                                        "roi1", [[0.0] * grid_size] * grid_size
+                                    )
+                                    combined = [g0[r] + g1[r] for r in range(grid_size)]
+                                    _json_str = _json.dumps(
+                                        {
+                                            "grid": combined,
+                                            "rows": grid_size,
+                                            "cols": grid_size * 2,
+                                            "base_valid": True,
+                                            "quiet_frames": self._quiet_frames,
+                                            "score_threshold": round(
+                                                self.detector.score_threshold, 3
+                                            ),
+                                        }
+                                    )
+                                    with open(
+                                        "/tmp/base_diff_grid.json.tmp", "w"
+                                    ) as _f:
+                                        _f.write(_json_str)
+                                    Path("/tmp/base_diff_grid.json.tmp").replace(
+                                        "/tmp/base_diff_grid.json"
+                                    )
+                                except Exception:
+                                    pass
 
                         self._prev_roi_small[rkey] = small_denoised
                         m_hb_buf.release()
@@ -1459,7 +1468,8 @@ class YoloDetectorDaemon:
                 f"cam={self.active_camera} "
                 f"bright={zc_frame.brightness_avg:.1f} "  # type: ignore[attr-defined]
                 f"yolo_skipped={self.stats['yolo_skipped_frames']} "
-                f"quiet={self._quiet_frames} "
+                f"quiet={self._quiet_frames}"
+                f"{'(T2)' if self._quiet_frames >= self.IDLE_TIER2_FRAMES else '(T1)' if self._quiet_frames >= self.IDLE_TIER1_FRAMES else ''} "
                 f"base={'|'.join(k for k, v in self._base_valid.items() if v) or 'none'}"
             )
 
@@ -1572,6 +1582,13 @@ class YoloDetectorDaemon:
         import numpy as np
 
         while self.running:
+            # Idle throttle — night mode only, no hb_mem held during sleep
+            if self.night_roi_mode and self._quiet_frames >= self.IDLE_TIER1_FRAMES:
+                if self._quiet_frames >= self.IDLE_TIER2_FRAMES:
+                    time.sleep(self.IDLE_TIER2_SLEEP)
+                else:
+                    time.sleep(self.IDLE_TIER1_SLEEP)
+
             hb_mem_buffer = None
 
             active_zc = self._get_active_zerocopy()
