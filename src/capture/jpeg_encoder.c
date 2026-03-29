@@ -10,11 +10,11 @@
 #include <string.h>
 #include "logger.h"
 
-int jpeg_encoder_create(jpeg_encoder_context_t *ctx,
-                        int width, int height, int quality) {
+int jpeg_encoder_create(jpeg_encoder_context_t* ctx, int width, int height, int quality) {
     int ret = 0;
 
-    if (!ctx) return -1;
+    if (!ctx)
+        return -1;
 
     memset(ctx, 0, sizeof(jpeg_encoder_context_t));
 
@@ -22,11 +22,11 @@ int jpeg_encoder_create(jpeg_encoder_context_t *ctx,
     ctx->height = height;
     ctx->quality = quality;
 
-    media_codec_context_t *encoder = &ctx->codec_ctx;
+    media_codec_context_t* encoder = &ctx->codec_ctx;
 
     encoder->encoder = 1;
     encoder->codec_id = MEDIA_CODEC_ID_JPEG;
-    encoder->instance_index = 0;  // Use instance 0 for JPEG
+    encoder->instance_index = 0; // Use instance 0 for JPEG
 
     // Video encoder parameters for JPEG
     encoder->video_enc_params.width = width;
@@ -44,8 +44,8 @@ int jpeg_encoder_create(jpeg_encoder_context_t *ctx,
     encoder->video_enc_params.gop_params.decoding_refresh_type = 0;
 
     // Misc settings
-    encoder->video_enc_params.rot_degree = 0;  // MC_CCW_0
-    encoder->video_enc_params.mir_direction = 0;  // MC_DIRECTION_NONE
+    encoder->video_enc_params.rot_degree = 0;    // MC_CCW_0
+    encoder->video_enc_params.mir_direction = 0; // MC_DIRECTION_NONE
     encoder->video_enc_params.frame_cropping_flag = 0;
     encoder->video_enc_params.enable_user_pts = 0;
 
@@ -82,9 +82,8 @@ int jpeg_encoder_create(jpeg_encoder_context_t *ctx,
     return 0;
 }
 
-int jpeg_encoder_encode_frame(jpeg_encoder_context_t *ctx,
-                              const uint8_t *nv12_y, const uint8_t *nv12_uv,
-                              uint8_t *jpeg_out, size_t *jpeg_size,
+int jpeg_encoder_encode_frame(jpeg_encoder_context_t* ctx, const uint8_t* nv12_y,
+                              const uint8_t* nv12_uv, uint8_t* jpeg_out, size_t* jpeg_size,
                               size_t max_size, int timeout_ms) {
     int ret = 0;
 
@@ -162,14 +161,16 @@ int jpeg_encoder_encode_frame(jpeg_encoder_context_t *ctx,
     if (release_ret != 0) {
         LOG_ERROR("JPEGEncoder", "hb_mm_mc_queue_output_buffer failed: %d", release_ret);
         // Don't override previous error if there was one
-        if (ret == 0) ret = release_ret;
+        if (ret == 0)
+            ret = release_ret;
     }
 
     return ret;
 }
 
-void jpeg_encoder_destroy(jpeg_encoder_context_t *ctx) {
-    if (!ctx) return;
+void jpeg_encoder_destroy(jpeg_encoder_context_t* ctx) {
+    if (!ctx)
+        return;
 
     if (ctx->initialized) {
         hb_mm_mc_stop(&ctx->codec_ctx);

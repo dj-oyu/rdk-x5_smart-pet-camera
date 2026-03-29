@@ -59,7 +59,7 @@ void shm_roi_zc_destroy(ZeroCopyFrameBuffer* shm, const char* shm_name);
 // Used by: h265_zc
 // ============================================================================
 
-#define HB_MEM_COM_BUF_SIZE 48  // sizeof(hb_mem_common_buf_t)
+#define HB_MEM_COM_BUF_SIZE 48 // sizeof(hb_mem_common_buf_t)
 
 typedef struct {
     uint64_t frame_number;
@@ -73,7 +73,7 @@ typedef struct {
 
 typedef struct {
     sem_t new_frame_sem;
-    sem_t consumed_sem;     // Initially 0: encoder skips until Go posts first consumed
+    sem_t consumed_sem; // Initially 0: encoder skips until Go posts first consumed
     H265ZeroCopyFrame frame;
 } H265ZeroCopyBuffer;
 
@@ -112,10 +112,9 @@ LatestDetectionResult* shm_detection_create(void);
 LatestDetectionResult* shm_detection_open(void);
 void shm_detection_close(LatestDetectionResult* shm);
 void shm_detection_destroy(LatestDetectionResult* shm);
-int shm_detection_write(LatestDetectionResult* shm,
-                        const DetectionEntry* detections, int count,
+int shm_detection_write(LatestDetectionResult* shm, const DetectionEntry* detections, int count,
                         uint64_t frame_number, double timestamp);
-uint32_t shm_detection_read(LatestDetectionResult* shm,
-                             DetectionEntry* out_detections, int* out_count);
+uint32_t shm_detection_read(LatestDetectionResult* shm, DetectionEntry* out_detections,
+                            int* out_count);
 
 #endif // SHARED_MEMORY_H

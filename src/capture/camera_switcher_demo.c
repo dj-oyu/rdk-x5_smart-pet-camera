@@ -28,10 +28,8 @@
 
 static int publish_stub(const Frame* frame, void* user_data) {
     (void)user_data;
-    printf("[publish] camera_id=%d frame_number=%llu size=%zu\n",
-           frame->camera_id,
-           (unsigned long long)frame->frame_number,
-           frame->data_size);
+    printf("[publish] camera_id=%d frame_number=%llu size=%zu\n", frame->camera_id,
+           (unsigned long long)frame->frame_number, frame->data_size);
     return 0;
 }
 
@@ -42,14 +40,12 @@ static void print_status(const CameraSwitchController* ctrl) {
     char reason[64];
     camera_switcher_get_status(ctrl, &mode, &active, stats, reason, sizeof(reason));
 
-    printf("[status] mode=%s active=%s reason=%s\n",
-           mode == SWITCH_MODE_AUTO ? "auto" : "manual",
-           active == CAMERA_MODE_DAY ? "day" : "night",
-           reason);
-    printf("         day: latest=%.1f avg=%.1f samples=%d\n",
-           stats[0].latest_value, stats[0].avg, stats[0].samples);
-    printf("         night: latest=%.1f avg=%.1f samples=%d\n",
-           stats[1].latest_value, stats[1].avg, stats[1].samples);
+    printf("[status] mode=%s active=%s reason=%s\n", mode == SWITCH_MODE_AUTO ? "auto" : "manual",
+           active == CAMERA_MODE_DAY ? "day" : "night", reason);
+    printf("         day: latest=%.1f avg=%.1f samples=%d\n", stats[0].latest_value, stats[0].avg,
+           stats[0].samples);
+    printf("         night: latest=%.1f avg=%.1f samples=%d\n", stats[1].latest_value, stats[1].avg,
+           stats[1].samples);
 }
 
 int main(void) {
@@ -114,22 +110,18 @@ int main(void) {
             frame->frame_number = ++frame_num;
             frame->width = 320;
             frame->height = 240;
-            frame->format = 1;  // NV12
+            frame->format = 1; // NV12
             frame->data_size = (size_t)frame->width * (size_t)frame->height * 3 / 2;
             if (frame->data_size > sizeof(frame->data)) {
                 frame->data_size = sizeof(frame->data);
             }
-            memset(frame->data, (uint8_t)value, (size_t)frame->width * (size_t)frame->height);  // Y plane
+            memset(frame->data, (uint8_t)value,
+                   (size_t)frame->width * (size_t)frame->height); // Y plane
             memset(frame->data + (size_t)frame->width * (size_t)frame->height, 128,
-                   frame->data_size - (size_t)frame->width * (size_t)frame->height);  // UV
+                   frame->data_size - (size_t)frame->width * (size_t)frame->height); // UV
 
-            CameraSwitchDecision decision =
-                camera_switcher_handle_frame(&ctrl,
-                                             frame,
-                                             cam_id,
-                                             cam_id == ctrl.active_camera,
-                                             publish_stub,
-                                             NULL);
+            CameraSwitchDecision decision = camera_switcher_handle_frame(
+                &ctrl, frame, cam_id, cam_id == ctrl.active_camera, publish_stub, NULL);
 
             if (decision == CAMERA_SWITCH_DECISION_TO_DAY) {
                 printf("[decision] switch to DAY\n");

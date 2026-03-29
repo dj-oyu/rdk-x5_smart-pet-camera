@@ -1,0 +1,16 @@
+---
+Checks: >
+  -*,
+  readability-const-return-type,
+  readability-non-const-parameter,
+  bugprone-sizeof-expression,
+  bugprone-suspicious-memset-usage,
+  bugprone-macro-parentheses,
+  bugprone-integer-division,
+  clang-analyzer-core.*,
+  clang-analyzer-unix.*,
+  clang-analyzer-deadcode.*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+WarningsAsErrors: ''
+HeaderFilterRegex: '.*\.h$'
+FormatStyle: file
