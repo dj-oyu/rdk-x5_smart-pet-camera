@@ -1,0 +1,16 @@
+{
+  "configurations": [
+    {
+      "name": "Dev (stub headers)",
+      "includePath": [
+        "${workspaceFolder}/src/capture",
+        "${workspaceFolder}/stubs/drobotics-sdk"
+      ],
+      "defines": ["_GNU_SOURCE"],
+      "compilerPath": "/usr/bin/gcc",
+      "cStandard": "c11",
+      "intelliSenseMode": "linux-gcc-x64"
+    }
+  ],
+  "version": 4
+}
