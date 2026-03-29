@@ -43,6 +43,28 @@ function registerCustomLayers() {
     getConfig() { return { ...super.getConfig(), beta: this.beta }; }
   }
   tf.serialization.registerClass(MultiplyBeta);
+
+  class PixelShuffle4x extends tf.layers.Layer {
+    private scale: number;
+    constructor(config: any) {
+      super(config);
+      this.scale = config.scale ?? 4;
+    }
+    call(inputs: any) {
+      return tf.tidy(() => {
+        const x = Array.isArray(inputs) ? inputs[0] : inputs;
+        // depth_to_space: [B, H, W, C*r*r] → [B, H*r, W*r, C]
+        return tf.depthToSpace(x, this.scale, "NHWC");
+      });
+    }
+    computeOutputShape(inputShape: number[]) {
+      const [b, h, w, c] = inputShape;
+      return [b, h * this.scale, w * this.scale, c / (this.scale * this.scale)];
+    }
+    static get className() { return "PixelShuffle4x"; }
+    getConfig() { return { ...super.getConfig(), scale: this.scale }; }
+  }
+  tf.serialization.registerClass(PixelShuffle4x);
 }
 
 export async function loadModel(name: string): Promise<any> {
