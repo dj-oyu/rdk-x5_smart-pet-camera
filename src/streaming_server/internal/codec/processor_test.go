@@ -19,7 +19,7 @@ func buildFrame(nals ...struct {
 	var buf []byte
 	for _, n := range nals {
 		buf = append(buf, 0x00, 0x00, 0x00, 0x01) // 4-byte start code
-		buf = append(buf, nalHeader(n.t), 0x01)    // 2-byte NAL header
+		buf = append(buf, nalHeader(n.t), 0x01)   // 2-byte NAL header
 		for i := 0; i < n.len; i++ {
 			// payload: avoid creating accidental start codes (no 0x00 0x00 sequences)
 			buf = append(buf, byte(0x80+(i%64)))
@@ -60,7 +60,10 @@ func TestProcessEmpty(t *testing.T) {
 func TestProcessTrail(t *testing.T) {
 	p := NewProcessor()
 	data := buildFrame(
-		struct{ t uint8; len int }{types.NALTypeH265TrailR, 100},
+		struct {
+			t   uint8
+			len int
+		}{types.NALTypeH265TrailR, 100},
 	)
 	frame := &types.VideoFrame{Data: data}
 	if err := p.Process(frame); err != nil {
@@ -79,9 +82,18 @@ func TestProcessIDR(t *testing.T) {
 
 	// First feed VPS+SPS+PPS to warm the cache.
 	headers := buildFrame(
-		struct{ t uint8; len int }{types.NALTypeH265VPS, 10},
-		struct{ t uint8; len int }{types.NALTypeH265SPS, 20},
-		struct{ t uint8; len int }{types.NALTypeH265PPS, 8},
+		struct {
+			t   uint8
+			len int
+		}{types.NALTypeH265VPS, 10},
+		struct {
+			t   uint8
+			len int
+		}{types.NALTypeH265SPS, 20},
+		struct {
+			t   uint8
+			len int
+		}{types.NALTypeH265PPS, 8},
 	)
 	frameH := &types.VideoFrame{Data: headers}
 	if err := p.Process(frameH); err != nil {
@@ -93,7 +105,10 @@ func TestProcessIDR(t *testing.T) {
 
 	// Now process an IDR frame.
 	idrData := buildFrame(
-		struct{ t uint8; len int }{types.NALTypeH265IDRWRADL, 200},
+		struct {
+			t   uint8
+			len int
+		}{types.NALTypeH265IDRWRADL, 200},
 	)
 	frameIDR := &types.VideoFrame{Data: idrData}
 	if err := p.Process(frameIDR); err != nil {
@@ -107,7 +122,10 @@ func TestProcessIDR(t *testing.T) {
 func TestProcessIDRNLP(t *testing.T) {
 	p := NewProcessor()
 	data := buildFrame(
-		struct{ t uint8; len int }{types.NALTypeH265IDRNLP, 50},
+		struct {
+			t   uint8
+			len int
+		}{types.NALTypeH265IDRNLP, 50},
 	)
 	frame := &types.VideoFrame{Data: data}
 	if err := p.Process(frame); err != nil {
@@ -121,7 +139,10 @@ func TestProcessIDRNLP(t *testing.T) {
 func TestProcess3ByteStartCode(t *testing.T) {
 	p := NewProcessor()
 	data := buildFrame3(
-		struct{ t uint8; len int }{types.NALTypeH265TrailR, 50},
+		struct {
+			t   uint8
+			len int
+		}{types.NALTypeH265TrailR, 50},
 	)
 	frame := &types.VideoFrame{Data: data}
 	if err := p.Process(frame); err != nil {
@@ -197,9 +218,18 @@ func TestPrependHeaders(t *testing.T) {
 
 	// Populate cache.
 	headers := buildFrame(
-		struct{ t uint8; len int }{types.NALTypeH265VPS, 4},
-		struct{ t uint8; len int }{types.NALTypeH265SPS, 4},
-		struct{ t uint8; len int }{types.NALTypeH265PPS, 4},
+		struct {
+			t   uint8
+			len int
+		}{types.NALTypeH265VPS, 4},
+		struct {
+			t   uint8
+			len int
+		}{types.NALTypeH265SPS, 4},
+		struct {
+			t   uint8
+			len int
+		}{types.NALTypeH265PPS, 4},
 	)
 	p.Process(&types.VideoFrame{Data: headers})
 	if !p.HasHeaders() {
@@ -207,14 +237,20 @@ func TestPrependHeaders(t *testing.T) {
 	}
 
 	// Trail frame: returned as-is (no IDR).
-	trail := buildFrame(struct{ t uint8; len int }{types.NALTypeH265TrailR, 20})
+	trail := buildFrame(struct {
+		t   uint8
+		len int
+	}{types.NALTypeH265TrailR, 20})
 	got, err = p.PrependHeaders(trail)
 	if err != nil || !bytes.Equal(got, trail) {
 		t.Fatalf("PrependHeaders on trail: expected passthrough, got len=%d err=%v", len(got), err)
 	}
 
 	// IDR frame: headers prepended.
-	idr := buildFrame(struct{ t uint8; len int }{types.NALTypeH265IDRWRADL, 20})
+	idr := buildFrame(struct {
+		t   uint8
+		len int
+	}{types.NALTypeH265IDRWRADL, 20})
 	got, err = p.PrependHeaders(idr)
 	if err != nil {
 		t.Fatalf("PrependHeaders IDR error: %v", err)
@@ -237,17 +273,32 @@ func TestPrependHeaders(t *testing.T) {
 // makeLargeTrailFrame builds a realistic trail frame with no VPS/SPS/PPS.
 // Payload is 0x80+ bytes to avoid accidental start codes.
 func makeLargeTrailFrame(size int) []byte {
-	data := buildFrame(struct{ t uint8; len int }{types.NALTypeH265TrailR, size})
+	data := buildFrame(struct {
+		t   uint8
+		len int
+	}{types.NALTypeH265TrailR, size})
 	return data
 }
 
 // makeIDRFrameWithHeaders builds a frame containing VPS+SPS+PPS+IDR NALs.
 func makeIDRFrameWithHeaders() []byte {
 	return buildFrame(
-		struct{ t uint8; len int }{types.NALTypeH265VPS, 16},
-		struct{ t uint8; len int }{types.NALTypeH265SPS, 64},
-		struct{ t uint8; len int }{types.NALTypeH265PPS, 16},
-		struct{ t uint8; len int }{types.NALTypeH265IDRWRADL, 400},
+		struct {
+			t   uint8
+			len int
+		}{types.NALTypeH265VPS, 16},
+		struct {
+			t   uint8
+			len int
+		}{types.NALTypeH265SPS, 64},
+		struct {
+			t   uint8
+			len int
+		}{types.NALTypeH265PPS, 16},
+		struct {
+			t   uint8
+			len int
+		}{types.NALTypeH265IDRWRADL, 400},
 	)
 }
 
@@ -302,7 +353,10 @@ func BenchmarkPrependHeaders(b *testing.B) {
 	// Warm the cache.
 	p.Process(&types.VideoFrame{Data: makeIDRFrameWithHeaders()})
 
-	idr := buildFrame(struct{ t uint8; len int }{types.NALTypeH265IDRWRADL, 200_000})
+	idr := buildFrame(struct {
+		t   uint8
+		len int
+	}{types.NALTypeH265IDRWRADL, 200_000})
 	b.SetBytes(int64(len(idr)))
 	b.ReportAllocs()
 	b.ResetTimer()
