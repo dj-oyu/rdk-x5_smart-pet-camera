@@ -9,6 +9,7 @@
 
 #include "encoder_lowlevel.h"
 #include "shared_memory.h"
+#include "tcp_relay.h"
 #include "vio_lowlevel.h"
 #include <hbn_api.h>
 #include <pthread.h>
@@ -66,6 +67,9 @@ typedef struct {
     // Statistics
     volatile uint64_t frames_encoded;
     volatile uint64_t frames_dropped;
+
+    // Night-assist TCP relay (NULL if disabled)
+    TcpRelay* tcp_relay;
 } encoder_thread_t;
 
 /**
