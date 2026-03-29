@@ -26,7 +26,7 @@ export async function ensureTF(): Promise<string> {
 
 export async function loadModel(name: string): Promise<any> {
   if (models[name]) return models[name];
-  const model = await tf.loadGraphModel(`/api/models/tfjs/${name}/model.json`);
+  const model = await tf.loadLayersModel(`/api/models/tfjs/${name}/model.json`);
   models[name] = model;
   return model;
 }
