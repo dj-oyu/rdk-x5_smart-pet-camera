@@ -299,3 +299,81 @@ if !p.containsIDR(data) { return data, nil }
 ### 影響範囲
 
 ホットパス `Process()` は毎フレーム（~30fps）、`PrependHeaders` は IDR フレームのみ（~2fps、録画時）。`findNextStartCode` の 13x 改善がストリーミング全体のレイテンシを低減。
+
+---
+
+## 6. Go コンパイラ最適化 — webmonitor・shm・server 拡張（2026-03-29）
+
+PR #170 で `codec/processor.go` に実施した同種の最適化を、残りの Go ホットパスへ横展開（PR #171）。
+
+### 対象ファイルと変更内容
+
+#### `internal/webmonitor/pet_color.go`
+
+`classifyPetColor()` は検出フレームごと（最大 30fps）に呼ばれる色分類ホットパス。
+
+| 問題 | 修正 | 効果 |
+|------|------|------|
+| `var samples []uvSample`（ゼロ容量） | `make([]uvSample, 0, ((y1-y0)/2+1)*((x1-x0)/2+1))` で bbox から容量推定 | ヒープ再アロック削減 |
+| `nv12[idx]` + `nv12[idx+1]` — 2 IsInBounds | `nv12[idx:idx+2:idx+2]` スライスパターン — 1 IsSliceInBounds | BCE -1 hit |
+| `filtered := samples[:0:0]` — バッキング配列破棄 | `filtered = samples[:0]` — 容量を再利用 | フィルタパスの alloc 0 |
+
+Escape Analysis: `make([]uvSample, 0, maxSamples) does not escape` — スライスがスタック割り当てになることをコンパイラが確認。
+
+#### `internal/webmonitor/text_renderer.go`
+
+`RenderTextBGRA()` の BGRA スワップループ（FreeType レンダリング後の変換）。
+
+```go
+// Before: per-element IsInBounds (7 hits in BGRA loop)
+img.Pix[j+0] = src[i+2]
+img.Pix[j+1] = src[i+1]
+...
+
+// After: 行単位スライスで BCE 証明範囲を確定 (4 hits total)
+srcRow := src[y*w*4 : (y+1)*w*4 : (y+1)*w*4]   // 1 IsSliceInBounds/行
+dstRow := img.Pix[y*img.Stride : y*img.Stride+w*4 : y*img.Stride+w*4]
+s4 := srcRow[si : si+4 : si+4]   // 1 IsSliceInBounds/ピクセル
+d4[0] = s4[2]  // BCEプルーフ済み（0-3 は BCE）
+```
+
+#### `internal/shm/reader.go` + `cmd/server/main.go`
+
+`ReadLatestCopy()` は毎フレーム `make([]byte, dataSize)`（100–500 KB）をアロケートしていた。
+
+```go
+// 追加: 呼び元バッファ受け取りメソッド
+func (r *Reader) ReadLatestCopyBuf(dst []byte) (*types.VideoFrame, error) {
+    buf := dst
+    if cap(buf) < dataSize { buf = make([]byte, dataSize) }
+    ...
+}
+```
+
+`Server` に `shmBufPool sync.Pool`（512 KB プリアロック）を追加。Stage 2 送信ゴルーチンが `SendFrame` 完了後に `frame.Data` をプールへ返却。
+
+```
+Before: 30fps × make([]byte, ~200KB) = ~6 MB/s のヒープアロック
+After:  shmBufPool で再利用 — alloc/frame ≈ 0
+```
+
+### BCE 計測結果
+
+```bash
+cd src/streaming_server
+go build -gcflags='-d=ssa/check_bce/debug=1' ./internal/webmonitor/ 2>&1 | grep -c "Found"
+```
+
+| ファイル | Before | After | 差分 |
+|---------|--------|-------|------|
+| `webmonitor/pet_color.go` | 7 | 6 | -1 |
+| `webmonitor/text_renderer.go` | 12 | 9 | -3 |
+| **webmonitor 合計** | **19** | **15** | **-4** |
+
+残存 BCE hits の内訳:
+- `pet_color.go:79` — Y プレーン `nv12[py*w+px]`（乗算アドレスの代数証明が困難、許容）
+- `pet_color.go:126,145` — `hist[bu][bv]` 2D 配列（bins 定数の境界は動的判定、許容）
+- `text_renderer.go:107,108` — 行スライス生成（ループ外、1回/行、許容）
+- `text_renderer.go:112,113` — `si:si+4` 内部スライス（`w` が C 由来のため正符号証明なし、許容）
+- `text_renderer.go:136,137` — `blendRGBAOnNV12` NV12 プレーン分割（許容）
+- `text_renderer.go:155,163,164` — オーバーレイ合成ループ（`nx`/`ny` の非負証明なし、許容）
