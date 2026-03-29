@@ -7,7 +7,11 @@ export const AppStore = createModel(() => {
   const viewerCount = signal("-");
   const mobileTab = signal<MobileTab>("live");
   const recordingsOpen = signal(false);
-  const thumbnailPreview = signal<{ url: string; name: string } | null>(null);
+  const thumbnailPreview = signal<
+    | { type: 'image'; url: string; name: string }
+    | { type: 'video'; url: string; name: string }
+    | null
+  >(null);
   const recording = signal<RecordingState>({
     isRecording: false,
     isConverting: false,
@@ -28,7 +32,11 @@ export const AppStore = createModel(() => {
   });
 
   const openThumbnail = action((url: string, name: string) => {
-    thumbnailPreview.value = { url, name };
+    thumbnailPreview.value = { type: 'image', url, name };
+  });
+
+  const openVideoPlayer = action((url: string, name: string) => {
+    thumbnailPreview.value = { type: 'video', url, name };
   });
 
   const closeThumbnail = action(() => {
@@ -54,6 +62,7 @@ export const AppStore = createModel(() => {
     openRecordings,
     closeRecordings,
     openThumbnail,
+    openVideoPlayer,
     closeThumbnail,
     dismissTopModal,
   };

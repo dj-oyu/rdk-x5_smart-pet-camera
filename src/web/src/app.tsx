@@ -1,5 +1,5 @@
 import { useEffect, useCallback } from 'preact/hooks';
-import { useModel } from '@preact/signals';
+import { useSignal, useModel } from '@preact/signals';
 import { Show } from '@preact/signals/utils';
 import { useVideoPlayer } from './components/VideoPlayer';
 import { VideoControls } from './components/VideoControls';
@@ -11,6 +11,53 @@ import { useSSE } from './hooks/useSSE';
 import { useRecording } from './hooks/useRecording';
 import type { StatusEvent } from './lib/protobuf';
 import { AppStore } from './lib/store';
+
+type PreviewState =
+  | { type: 'image'; url: string; name: string }
+  | { type: 'video'; url: string; name: string };
+
+function ThumbnailPreview({
+  preview,
+  onClose,
+  parseDateFromName,
+}: {
+  preview: PreviewState;
+  onClose: () => void;
+  parseDateFromName: (name: string) => string;
+}) {
+  const videoError = useSignal(false);
+
+  return (
+    <div
+      class="modal-overlay thumbnail-preview-modal"
+      style={{ display: 'flex' }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div class="thumbnail-preview-content">
+        <button class="thumbnail-preview-close" onClick={onClose}>&times;</button>
+        {preview.type === 'video' ? (
+          videoError.value ? (
+            <div class="thumbnail-preview-fallback">
+              H.265 の再生に非対応のブラウザです。ダウンロードしてご覧ください。
+            </div>
+          ) : (
+            <video
+              class="thumbnail-preview-video"
+              src={preview.url}
+              controls
+              autoplay
+              playsinline
+              onError={() => { videoError.value = true; }}
+            />
+          )
+        ) : (
+          <img class="thumbnail-preview-img" src={preview.url} alt="Thumbnail" />
+        )}
+        <div class="thumbnail-preview-info">{parseDateFromName(preview.name)}</div>
+      </div>
+    </div>
+  );
+}
 
 export function App() {
   const store = useModel(AppStore);
@@ -136,24 +183,17 @@ export function App() {
             <RecordingsModal
               onClose={store.closeRecordings}
               onOpenThumbnail={store.openThumbnail}
+              onPlayVideo={store.openVideoPlayer}
             />
           )}
         </Show>
 
         {thumbnailPreview && (
-          <div
-            class="modal-overlay thumbnail-preview-modal"
-            style={{ display: 'flex' }}
-            onClick={(e) => {
-              if (e.target === e.currentTarget) store.closeThumbnail();
-            }}
-          >
-            <div class="thumbnail-preview-content">
-              <button class="thumbnail-preview-close" onClick={store.closeThumbnail}>&times;</button>
-              <img class="thumbnail-preview-img" src={thumbnailPreview.url} alt="Thumbnail" />
-              <div class="thumbnail-preview-info">{parseDateFromName(thumbnailPreview.name)}</div>
-            </div>
-          </div>
+          <ThumbnailPreview
+            preview={thumbnailPreview}
+            onClose={store.closeThumbnail}
+            parseDateFromName={parseDateFromName}
+          />
         )}
       </div>
       <MobileTabBar activeTab={mobileTab} onTabChange={(tab) => { store.mobileTab.value = tab; }} />
