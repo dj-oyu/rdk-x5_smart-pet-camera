@@ -22,10 +22,10 @@ struct n2d_letterbox_ctx {
     int initialized;
 };
 
-n2d_letterbox_ctx_t *n2d_letterbox_create(int src_w, int src_h,
-                                           int dst_w, int dst_h) {
-    n2d_letterbox_ctx_t *ctx = calloc(1, sizeof(n2d_letterbox_ctx_t));
-    if (!ctx) return NULL;
+n2d_letterbox_ctx_t* n2d_letterbox_create(int src_w, int src_h, int dst_w, int dst_h) {
+    n2d_letterbox_ctx_t* ctx = calloc(1, sizeof(n2d_letterbox_ctx_t));
+    if (!ctx)
+        return NULL;
 
     ctx->src_w = src_w;
     ctx->src_h = src_h;
@@ -44,9 +44,8 @@ n2d_letterbox_ctx_t *n2d_letterbox_create(int src_w, int src_h,
     n2d_switch_core(N2D_CORE_0);
 
     // Allocate persistent destination buffer (640x640 NV12)
-    err = n2d_util_allocate_buffer(dst_w, dst_h, N2D_NV12,
-                                    N2D_0, N2D_LINEAR, N2D_TSC_DISABLE,
-                                    &ctx->dst_buf);
+    err = n2d_util_allocate_buffer(dst_w, dst_h, N2D_NV12, N2D_0, N2D_LINEAR, N2D_TSC_DISABLE,
+                                   &ctx->dst_buf);
     if (N2D_IS_ERROR(err)) {
         LOG_ERROR("N2D_Letterbox", "Failed to allocate dst buffer: %d", err);
         n2d_close();
@@ -59,21 +58,19 @@ n2d_letterbox_ctx_t *n2d_letterbox_create(int src_w, int src_h,
     n2d_commit();
 
     ctx->initialized = 1;
-    LOG_INFO("N2D_Letterbox", "Created: %dx%d -> %dx%d (pad_top=%d, GPU)",
-             src_w, src_h, dst_w, dst_h, ctx->pad_top);
+    LOG_INFO("N2D_Letterbox", "Created: %dx%d -> %dx%d (pad_top=%d, GPU)", src_w, src_h, dst_w,
+             dst_h, ctx->pad_top);
 
     return ctx;
 }
 
-int n2d_letterbox_process(n2d_letterbox_ctx_t *ctx,
-                          uint64_t src_phys_addr_y,
-                          uint64_t src_phys_addr_uv,
-                          int src_stride,
-                          uint8_t **out_virt_addr,
-                          size_t *out_size) {
-    if (!ctx || !ctx->initialized || !out_virt_addr || !out_size) return -1;
-    (void)src_phys_addr_uv;  // UV is contiguous after Y in NV12
-    (void)src_stride;        // stride computed from alignedw
+int n2d_letterbox_process(n2d_letterbox_ctx_t* ctx, uint64_t src_phys_addr_y,
+                          uint64_t src_phys_addr_uv, int src_stride, uint8_t** out_virt_addr,
+                          size_t* out_size) {
+    if (!ctx || !ctx->initialized || !out_virt_addr || !out_size)
+        return -1;
+    (void)src_phys_addr_uv; // UV is contiguous after Y in NV12
+    (void)src_stride;       // stride computed from alignedw
 
     // Wrap hbmem physical address as nano2D source buffer (zero-copy)
     // Must set alignedw/alignedh/stride like zerocopy_bench.c
@@ -87,7 +84,7 @@ int n2d_letterbox_process(n2d_letterbox_ctx_t *ctx,
     src_buf.cacheMode = N2D_CACHE_128;
     src_buf.alignedw = gcmALIGN(src_buf.width, 64);
     src_buf.alignedh = src_buf.height;
-    float nv12_bpp = gcmALIGN(16, 8) * 1.0f / 8;
+    const float nv12_bpp = gcmALIGN(16, 8) * 1.0f / 8;
     src_buf.stride = gcmALIGN((int)(src_buf.alignedw * nv12_bpp), 64);
 
     n2d_user_memory_desc_t desc = {0};
@@ -132,14 +129,15 @@ int n2d_letterbox_process(n2d_letterbox_ctx_t *ctx,
     n2d_free(&src_buf);
 
     // Return pointer to destination buffer
-    *out_virt_addr = (uint8_t *)ctx->dst_buf.memory;
+    *out_virt_addr = (uint8_t*)ctx->dst_buf.memory;
     *out_size = ctx->dst_w * ctx->dst_h * 3 / 2;
 
     return 0;
 }
 
-void n2d_letterbox_destroy(n2d_letterbox_ctx_t *ctx) {
-    if (!ctx) return;
+void n2d_letterbox_destroy(n2d_letterbox_ctx_t* ctx) {
+    if (!ctx)
+        return;
 
     if (ctx->initialized) {
         n2d_free(&ctx->dst_buf);

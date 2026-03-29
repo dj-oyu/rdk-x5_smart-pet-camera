@@ -16,14 +16,14 @@
 #include "encoder_lowlevel.h"
 #include "encoder_thread.h"
 #include "shared_memory.h"
-#include "isp_brightness.h"  // For isp_lowlight_state_t
+#include "isp_brightness.h" // For isp_lowlight_state_t
 
 /**
  * NV12 sampling configuration
  */
 typedef struct {
-    bool enable_detection;   // Enable detection sampling (27fps)
-    bool enable_brightness;  // Enable brightness sampling (10fps)
+    bool enable_detection;  // Enable detection sampling (27fps)
+    bool enable_brightness; // Enable brightness sampling (10fps)
 } nv12_sampling_config_t;
 
 /**
@@ -37,24 +37,24 @@ typedef struct {
 
     // Shared memory output
     // SHM output (only 2 remain)
-    H265ZeroCopyBuffer *shm_h265_zc;        // H.265 stream zero-copy (Go streaming)
-    ZeroCopyFrameBuffer *shm_yolo_zerocopy; // YOLO zero-copy (Python detector)
+    H265ZeroCopyBuffer* shm_h265_zc;        // H.265 stream zero-copy (Go streaming)
+    ZeroCopyFrameBuffer* shm_yolo_zerocopy; // YOLO zero-copy (Python detector)
 
     // MJPEG NV12 zero-copy (Go web_monitor)
-    ZeroCopyFrameBuffer *shm_mjpeg_zc;
+    ZeroCopyFrameBuffer* shm_mjpeg_zc;
 
     // Night camera ROI SHM (NULL for day camera)
     ZeroCopyFrameBuffer* shm_roi_zc[NUM_ROI_REGIONS];
 
     // Shared state (same process, no SHM needed)
-    volatile int *active_camera;
+    volatile int* active_camera;
 
     // Condition variable for inactive camera blocking
     pthread_mutex_t switch_mutex;
     pthread_cond_t switch_cond;
 
     // Runtime control
-    volatile bool *running_flag;           // External running flag
+    volatile bool* running_flag; // External running flag
 
     // NV12 sampling configuration (deprecated in new design)
     nv12_sampling_config_t nv12_sampling;
@@ -95,11 +95,9 @@ typedef struct {
  *   - Each pipeline maintains its own frame_number counter
  *   - Frames are written conditionally based on active camera index
  */
-int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
-                    int sensor_width, int sensor_height,
-                    int output_width, int output_height,
-                    int fps, int bitrate,
-                    volatile int *active_camera);
+int pipeline_create(camera_pipeline_t* pipeline, int camera_index, int sensor_width,
+                    int sensor_height, int output_width, int output_height, int fps, int bitrate,
+                    volatile int* active_camera);
 
 /**
  * Start camera pipeline
@@ -113,7 +111,7 @@ int pipeline_create(camera_pipeline_t *pipeline, int camera_index,
  * Returns:
  *   0 on success, negative error code on failure
  */
-int pipeline_start(camera_pipeline_t *pipeline);
+int pipeline_start(camera_pipeline_t* pipeline);
 
 /**
  * Run capture loop
@@ -135,7 +133,7 @@ int pipeline_start(camera_pipeline_t *pipeline);
  *   - NV12 written at 30fps to shared memory (optional)
  *   - Prints FPS statistics every 30 frames
  */
-int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag);
+int pipeline_run(camera_pipeline_t* pipeline, volatile bool* running_flag);
 
 /**
  * Stop camera pipeline
@@ -146,7 +144,7 @@ int pipeline_run(camera_pipeline_t *pipeline, volatile bool *running_flag);
  * Args:
  *   pipeline: Pipeline context
  */
-void pipeline_stop(camera_pipeline_t *pipeline);
+void pipeline_stop(camera_pipeline_t* pipeline);
 
 /**
  * Destroy camera pipeline
@@ -157,6 +155,6 @@ void pipeline_stop(camera_pipeline_t *pipeline);
  * Args:
  *   pipeline: Pipeline context
  */
-void pipeline_destroy(camera_pipeline_t *pipeline);
+void pipeline_destroy(camera_pipeline_t* pipeline);
 
 #endif // CAMERA_PIPELINE_H

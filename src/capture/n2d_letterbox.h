@@ -23,8 +23,7 @@ typedef struct n2d_letterbox_ctx n2d_letterbox_ctx_t;
  * Returns:
  *   Context pointer on success, NULL on failure
  */
-n2d_letterbox_ctx_t *n2d_letterbox_create(int src_w, int src_h,
-                                           int dst_w, int dst_h);
+n2d_letterbox_ctx_t* n2d_letterbox_create(int src_w, int src_h, int dst_w, int dst_h);
 
 /**
  * Process a frame: letterbox with zero-copy from hbmem buffer
@@ -43,16 +42,13 @@ n2d_letterbox_ctx_t *n2d_letterbox_create(int src_w, int src_h,
  * Returns:
  *   0 on success, negative error code on failure
  */
-int n2d_letterbox_process(n2d_letterbox_ctx_t *ctx,
-                          uint64_t src_phys_addr_y,
-                          uint64_t src_phys_addr_uv,
-                          int src_stride,
-                          uint8_t **out_virt_addr,
-                          size_t *out_size);
+int n2d_letterbox_process(n2d_letterbox_ctx_t* ctx, uint64_t src_phys_addr_y,
+                          uint64_t src_phys_addr_uv, int src_stride, uint8_t** out_virt_addr,
+                          size_t* out_size);
 
 /**
  * Destroy letterbox context and free GPU resources
  */
-void n2d_letterbox_destroy(n2d_letterbox_ctx_t *ctx);
+void n2d_letterbox_destroy(n2d_letterbox_ctx_t* ctx);
 
 #endif // N2D_LETTERBOX_H

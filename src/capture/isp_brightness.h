@@ -25,11 +25,11 @@ typedef int64_t hbn_vnode_handle_t;
  * Brightness measurement result from ISP
  */
 typedef struct {
-    float brightness_avg;       // Average brightness (0-255) from AE statistics
-    uint32_t brightness_lux;    // Environment illuminance from ISP cur_lux
-    BrightnessZone zone;        // Classified brightness zone
-    uint64_t frame_id;          // Frame ID from ISP statistics
-    bool valid;                 // True if measurement succeeded
+    float brightness_avg;    // Average brightness (0-255) from AE statistics
+    uint32_t brightness_lux; // Environment illuminance from ISP cur_lux
+    BrightnessZone zone;     // Classified brightness zone
+    uint64_t frame_id;       // Frame ID from ISP statistics
+    bool valid;              // True if measurement succeeded
 } isp_brightness_result_t;
 
 /**
@@ -45,7 +45,7 @@ typedef struct {
  * Returns:
  *   0 on success, -1 on error
  */
-int isp_get_brightness(hbn_vnode_handle_t isp_handle, isp_brightness_result_t *result);
+int isp_get_brightness(hbn_vnode_handle_t isp_handle, isp_brightness_result_t* result);
 
 /**
  * Classify brightness into zones
@@ -63,16 +63,16 @@ BrightnessZone isp_classify_brightness_zone(float brightness_avg, uint32_t cur_l
  * Low-light correction state (for hysteresis tracking)
  */
 typedef struct {
-    bool correction_active;         // True if low-light correction is currently applied
-    BrightnessZone current_zone;    // Last applied zone
-    double below_threshold_since;   // Timestamp when brightness dropped below threshold (-1 if not)
-    double above_threshold_since;   // Timestamp when brightness rose above threshold (-1 if not)
+    bool correction_active;       // True if low-light correction is currently applied
+    BrightnessZone current_zone;  // Last applied zone
+    double below_threshold_since; // Timestamp when brightness dropped below threshold (-1 if not)
+    double above_threshold_since; // Timestamp when brightness rose above threshold (-1 if not)
 } isp_lowlight_state_t;
 
 /**
  * Initialize low-light correction state
  */
-void isp_lowlight_state_init(isp_lowlight_state_t *state);
+void isp_lowlight_state_init(isp_lowlight_state_t* state);
 
 /**
  * Apply low-light correction profile based on brightness zone
@@ -103,8 +103,7 @@ int isp_apply_lowlight_profile(hbn_vnode_handle_t isp_handle, BrightnessZone zon
  * Returns:
  *   true if correction is active after update, false otherwise
  */
-bool isp_update_lowlight_correction(hbn_vnode_handle_t isp_handle,
-                                    isp_lowlight_state_t *state,
-                                    const isp_brightness_result_t *brightness_result);
+bool isp_update_lowlight_correction(hbn_vnode_handle_t isp_handle, isp_lowlight_state_t* state,
+                                    const isp_brightness_result_t* brightness_result);
 
 #endif // ISP_BRIGHTNESS_H

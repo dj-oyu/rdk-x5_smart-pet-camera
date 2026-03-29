@@ -25,12 +25,12 @@ typedef struct {
     hbn_vflow_handle_t vflow_fd;
 
     // Configuration
-    int camera_index;      // 0 or 1
-    int sensor_width;      // Sensor native resolution
+    int camera_index; // 0 or 1
+    int sensor_width; // Sensor native resolution
     int sensor_height;
-    int output_width;      // VSE output resolution
+    int output_width; // VSE output resolution
     int output_height;
-    int fps;               // Target frame rate
+    int fps; // Target frame rate
 
     // Internal state
     camera_config_t camera_config;
@@ -60,10 +60,8 @@ typedef struct {
  *   - Camera 1 uses MIPI Host 2
  *   - bus_select is always 0 for both cameras
  */
-int vio_create(vio_context_t *ctx, int camera_index,
-               int sensor_width, int sensor_height,
-               int output_width, int output_height,
-               int fps);
+int vio_create(vio_context_t* ctx, int camera_index, int sensor_width, int sensor_height,
+               int output_width, int output_height, int fps);
 
 /**
  * Start VIO pipeline
@@ -77,7 +75,7 @@ int vio_create(vio_context_t *ctx, int camera_index,
  * Returns:
  *   0 on success, negative error code on failure
  */
-int vio_start(vio_context_t *ctx);
+int vio_start(const vio_context_t* ctx);
 
 /**
  * Get a frame from VIO pipeline (Channel 0 - main output)
@@ -97,7 +95,7 @@ int vio_start(vio_context_t *ctx);
  *   - Must call vio_release_frame() after processing
  *   - Frame data is in NV12 format (Y plane + UV interleaved)
  */
-int vio_get_frame(vio_context_t *ctx, hbn_vnode_image_t *frame, int timeout_ms);
+int vio_get_frame(const vio_context_t* ctx, hbn_vnode_image_t* frame, int timeout_ms);
 
 /**
  * Get a frame from VIO pipeline Channel 1 (YOLO input)
@@ -116,7 +114,7 @@ int vio_get_frame(vio_context_t *ctx, hbn_vnode_image_t *frame, int timeout_ms);
  * Note:
  *   - Must call vio_release_frame_ch1() after processing
  */
-int vio_get_frame_ch1(vio_context_t *ctx, hbn_vnode_image_t *frame, int timeout_ms);
+int vio_get_frame_ch1(const vio_context_t* ctx, hbn_vnode_image_t* frame, int timeout_ms);
 
 /**
  * Release a frame back to VIO pipeline (Channel 0)
@@ -131,7 +129,7 @@ int vio_get_frame_ch1(vio_context_t *ctx, hbn_vnode_image_t *frame, int timeout_
  * Returns:
  *   0 on success, negative error code on failure
  */
-int vio_release_frame(vio_context_t *ctx, hbn_vnode_image_t *frame);
+int vio_release_frame(const vio_context_t* ctx, hbn_vnode_image_t* frame);
 
 /**
  * Release a frame back to VIO pipeline (Channel 1)
@@ -146,7 +144,7 @@ int vio_release_frame(vio_context_t *ctx, hbn_vnode_image_t *frame);
  * Returns:
  *   0 on success, negative error code on failure
  */
-int vio_release_frame_ch1(vio_context_t *ctx, hbn_vnode_image_t *frame);
+int vio_release_frame_ch1(const vio_context_t* ctx, hbn_vnode_image_t* frame);
 
 /**
  * Get a frame from VIO pipeline Channel 2 (MJPEG/web_monitor input)
@@ -165,7 +163,7 @@ int vio_release_frame_ch1(vio_context_t *ctx, hbn_vnode_image_t *frame);
  * Note:
  *   - Must call vio_release_frame_ch2() after processing
  */
-int vio_get_frame_ch2(vio_context_t *ctx, hbn_vnode_image_t *frame, int timeout_ms);
+int vio_get_frame_ch2(const vio_context_t* ctx, hbn_vnode_image_t* frame, int timeout_ms);
 
 /**
  * Release a frame back to VIO pipeline (Channel 2)
@@ -180,7 +178,7 @@ int vio_get_frame_ch2(vio_context_t *ctx, hbn_vnode_image_t *frame, int timeout_
  * Returns:
  *   0 on success, negative error code on failure
  */
-int vio_release_frame_ch2(vio_context_t *ctx, hbn_vnode_image_t *frame);
+int vio_release_frame_ch2(const vio_context_t* ctx, hbn_vnode_image_t* frame);
 
 /**
  * Get a frame from VIO pipeline Channel 3-5 (Night ROI crops)
@@ -197,14 +195,13 @@ int vio_release_frame_ch2(vio_context_t *ctx, hbn_vnode_image_t *frame);
  * Returns:
  *   0 on success, negative error code on failure/timeout
  */
-int vio_get_frame_roi(vio_context_t *ctx, int roi_index,
-                      hbn_vnode_image_t *frame, int timeout_ms);
+int vio_get_frame_roi(const vio_context_t* ctx, int roi_index, hbn_vnode_image_t* frame,
+                      int timeout_ms);
 
 /**
  * Release a frame back to VIO pipeline (Channel 3-5)
  */
-int vio_release_frame_roi(vio_context_t *ctx, int roi_index,
-                          hbn_vnode_image_t *frame);
+int vio_release_frame_roi(const vio_context_t* ctx, int roi_index, hbn_vnode_image_t* frame);
 
 /**
  * Stop VIO pipeline
@@ -215,7 +212,7 @@ int vio_release_frame_roi(vio_context_t *ctx, int roi_index,
  * Args:
  *   ctx: VIO context
  */
-void vio_stop(vio_context_t *ctx);
+void vio_stop(const vio_context_t* ctx);
 
 /**
  * Destroy VIO context and cleanup hardware resources
@@ -226,6 +223,6 @@ void vio_stop(vio_context_t *ctx);
  * Args:
  *   ctx: VIO context
  */
-void vio_destroy(vio_context_t *ctx);
+void vio_destroy(vio_context_t* ctx);
 
 #endif // VIO_LOWLEVEL_H

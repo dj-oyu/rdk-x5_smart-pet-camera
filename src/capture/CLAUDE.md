@@ -28,5 +28,40 @@ cd src/capture && make
 
 定義元: `shm_constants.h`
 
+## Coding Conventions
+
+### const ポリシー
+`const` は **read-only view (不変参照)** の意味で使う。immutable (オブジェクト自体の不変性) ではない。
+
+**関数引数:**
+- ポインタ引数はその関数内で struct を書き換えない場合 `const T *` にする
+- HW 副作用がある関数 (`vio_stop`, `vio_release_frame*`) も ctx struct を書き換えないなら `const` — `FILE *` との違いは `FILE` 内部状態を書き換えるから non-const なのであって、副作用の有無ではない
+- ベンダー API がハンドルを値渡しで受け取る場合は問題なし
+
+現在 const 化済み:
+- `vio_start/stop`, `vio_get_frame*`, `vio_release_frame*` → `const vio_context_t *ctx`
+- `encoder_thread_push_frame` → `const hbn_vnode_image_t *vse_frame`
+- `shm_detection_read` → `const LatestDetectionResult *shm`
+
+**ローカル変数:**
+- 代入後に変更しない変数はすべて `const` にする (`const int ch = 3 + roi_index;` 等)
+- `T *const ptr` (ポインタ自体が不変): `encoder = &ctx->codec_ctx` のようにポインタを再代入しない場合
+
+### その他のルール
+- 不要なコピー・ヒープ利用・値渡しは禁止
+- 大きな struct は常にポインタ渡し
+
+### フォーマット / Lint
+```bash
+make format        # clang-format-13 で全 .c/.h を整形
+make check-format  # フォーマット検査 (CI で使用)
+make lint          # clang-tidy 静的解析 (デバイス上のみ、ベンダーヘッダ必要)
+```
+
+設定ファイル: `.clang-format`, `.clang-tidy`
+
+> **注意**: C ヘッダ変更後は Go の `web_monitor` も再ビルドが必要。
+> CGo はヘッダを compile-time に embed するため、`make format` 後は `./scripts/build.sh capture monitor` を実行すること。
+
 ## Docs
 → `docs/camera-and-isp.md`, `docs/shared-memory.md`

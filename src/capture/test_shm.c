@@ -18,7 +18,11 @@
 #include "logger.h"
 
 #define TEST_PASSED() printf("[PASS] %s\n", __func__)
-#define TEST_FAILED() do { printf("[FAIL] %s:%d\n", __func__, __LINE__); exit(1); } while(0)
+#define TEST_FAILED()                                 \
+    do {                                              \
+        printf("[FAIL] %s:%d\n", __func__, __LINE__); \
+        exit(1);                                      \
+    } while (0)
 
 // Test 1: Create and destroy shared memory
 void test_shm_create_destroy(void) {
@@ -43,7 +47,7 @@ void test_shm_write_read_single(void) {
     write_frame.camera_id = 0;
     write_frame.width = 640;
     write_frame.height = 480;
-    write_frame.format = 0;  // JPEG
+    write_frame.format = 0; // JPEG
     write_frame.data_size = 100;
     clock_gettime(CLOCK_MONOTONIC, &write_frame.timestamp);
 
@@ -59,7 +63,7 @@ void test_shm_write_read_single(void) {
     // Read frame
     Frame read_frame = {0};
     ret = shm_frame_buffer_read_latest(shm, &read_frame);
-    assert(ret == 0);  // Should return index 0
+    assert(ret == 0); // Should return index 0
 
     // Verify data
     assert(read_frame.frame_number == 42);
@@ -137,7 +141,7 @@ void test_detection_write_read(void) {
     int num_detections = 0;
     uint32_t version = shm_detection_read(shm, read_detections, &num_detections);
 
-    assert(version == 1);  // First write
+    assert(version == 1); // First write
     assert(num_detections == 3);
     assert(shm->frame_number == 123);
 
@@ -175,7 +179,7 @@ void test_detection_version_increment(void) {
     int num_detections = 0;
     uint32_t version = shm_detection_read(shm, read_detections, &num_detections);
 
-    assert(version == 5);  // Should have incremented 5 times
+    assert(version == 5); // Should have incremented 5 times
 
     shm_detection_destroy(shm);
     TEST_PASSED();
@@ -327,9 +331,9 @@ void test_zerocopy_frame_layout(void) {
 
 // Test 11: ZeroCopyFrameBuffer with hb_mem_buf_data via shared memory
 void test_zerocopy_shm_roundtrip(void) {
-    const char *test_name = "/pet_camera_test_zc";
+    const char* test_name = "/pet_camera_test_zc";
 
-    ZeroCopyFrameBuffer *producer = shm_zerocopy_create(test_name);
+    ZeroCopyFrameBuffer* producer = shm_zerocopy_create(test_name);
     assert(producer != NULL);
 
     // Write a frame with hb_mem_buf_data
@@ -357,19 +361,19 @@ void test_zerocopy_shm_roundtrip(void) {
     }
 
     // Verify version increments correctly across multiple writes
-    assert(producer->frame.version == 1);  // First write → version 1
+    assert(producer->frame.version == 1); // First write → version 1
 
     shm_zerocopy_mark_consumed(producer);
     frame.frame_number = 1000;
     ret = shm_zerocopy_write(producer, &frame);
     assert(ret == 0);
-    assert(producer->frame.version == 2);  // Second write → version 2
+    assert(producer->frame.version == 2); // Second write → version 2
 
     shm_zerocopy_mark_consumed(producer);
     frame.frame_number = 1001;
     ret = shm_zerocopy_write(producer, &frame);
     assert(ret == 0);
-    assert(producer->frame.version == 3);  // Third write → version 3
+    assert(producer->frame.version == 3); // Third write → version 3
 
     printf("  version after 3 writes: %u (expected 3)\n", producer->frame.version);
 

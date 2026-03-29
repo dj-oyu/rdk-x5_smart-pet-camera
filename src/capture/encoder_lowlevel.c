@@ -8,11 +8,12 @@
 #include <hb_mem_mgr.h>
 #include "logger.h"
 
-int encoder_create(encoder_context_t *ctx, int camera_index,
-                   int width, int height, int fps, int bitrate) {
+int encoder_create(encoder_context_t* ctx, int camera_index, int width, int height, int fps,
+                   int bitrate) {
     int ret = 0;
 
-    if (!ctx) return -1;
+    if (!ctx)
+        return -1;
 
     memset(ctx, 0, sizeof(encoder_context_t));
 
@@ -22,7 +23,7 @@ int encoder_create(encoder_context_t *ctx, int camera_index,
     ctx->fps = fps;
     ctx->bitrate = bitrate;
 
-    media_codec_context_t *encoder = &ctx->codec_ctx;
+    media_codec_context_t* const encoder = &ctx->codec_ctx;
 
     encoder->encoder = 1;
     encoder->codec_id = MEDIA_CODEC_ID_H265;
@@ -43,8 +44,8 @@ int encoder_create(encoder_context_t *ctx, int camera_index,
     encoder->video_enc_params.gop_params.decoding_refresh_type = 2;
 
     // Misc settings
-    encoder->video_enc_params.rot_degree = 0;  // MC_CCW_0
-    encoder->video_enc_params.mir_direction = 0;  // MC_DIRECTION_NONE
+    encoder->video_enc_params.rot_degree = 0;    // MC_CCW_0
+    encoder->video_enc_params.mir_direction = 0; // MC_DIRECTION_NONE
     encoder->video_enc_params.frame_cropping_flag = 0;
     encoder->video_enc_params.enable_user_pts = 1;
 
@@ -89,17 +90,15 @@ int encoder_create(encoder_context_t *ctx, int camera_index,
         return ret;
     }
 
-    LOG_INFO("Encoder", "Created (H.265 CBR %dx%d @ %dfps, %dkbps)",
-             width, height, fps, bitrate / 1000);
+    LOG_INFO("Encoder", "Created (H.265 CBR %dx%d @ %dfps, %dkbps)", width, height, fps,
+             bitrate / 1000);
 
     return 0;
 }
 
-int encoder_encode_frame_zerocopy(encoder_context_t *ctx,
-                                  const uint8_t *nv12_y, const uint8_t *nv12_uv,
-                                  size_t y_size, size_t uv_size,
-                                  int timeout_ms,
-                                  encoder_output_t *out) {
+int encoder_encode_frame_zerocopy(encoder_context_t* ctx, const uint8_t* nv12_y,
+                                  const uint8_t* nv12_uv, size_t y_size, size_t uv_size,
+                                  int timeout_ms, encoder_output_t* out) {
     int ret = 0;
 
     if (!ctx || !nv12_y || !nv12_uv || !out) {
@@ -147,8 +146,8 @@ int encoder_encode_frame_zerocopy(encoder_context_t *ctx,
     }
 
     // Dequeue encoder output buffer (DO NOT release — caller owns it)
-    ret = hb_mm_mc_dequeue_output_buffer(&ctx->codec_ctx, &out->output_buffer,
-                                          &output_info, timeout_ms);
+    ret = hb_mm_mc_dequeue_output_buffer(&ctx->codec_ctx, &out->output_buffer, &output_info,
+                                         timeout_ms);
     if (ret != 0) {
         LOG_ERROR("Encoder", "hb_mm_mc_dequeue_output_buffer failed: %d", ret);
         return ret;
@@ -175,15 +174,15 @@ int encoder_encode_frame_zerocopy(encoder_context_t *ctx,
     return 0;
 }
 
-int encoder_release_output(encoder_context_t *ctx,
-                           encoder_output_t *out,
-                           int timeout_ms) {
-    if (!ctx || !out) return -1;
+int encoder_release_output(encoder_context_t* ctx, encoder_output_t* out, int timeout_ms) {
+    if (!ctx || !out)
+        return -1;
     return hb_mm_mc_queue_output_buffer(&ctx->codec_ctx, &out->output_buffer, timeout_ms);
 }
 
-void encoder_stop(encoder_context_t *ctx) {
-    if (!ctx) return;
+void encoder_stop(encoder_context_t* ctx) {
+    if (!ctx)
+        return;
 
     if (ctx->codec_ctx.encoder) {
         hb_mm_mc_stop(&ctx->codec_ctx);
@@ -191,8 +190,9 @@ void encoder_stop(encoder_context_t *ctx) {
     }
 }
 
-void encoder_destroy(encoder_context_t *ctx) {
-    if (!ctx) return;
+void encoder_destroy(encoder_context_t* ctx) {
+    if (!ctx)
+        return;
 
     if (ctx->codec_ctx.encoder) {
         hb_mm_mc_stop(&ctx->codec_ctx);
