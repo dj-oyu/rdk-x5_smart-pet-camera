@@ -1885,7 +1885,7 @@ def main() -> int:
     pet_album_host = os.environ.get("PET_ALBUM_HOST", "")
     if pet_album_host:
         pet_album_port = os.environ.get("PET_ALBUM_PORT", "8082")
-        ai_pyramid_url = f"http://{pet_album_host}:{pet_album_port}"
+        ai_pyramid_url = f"https://{pet_album_host}:{pet_album_port}"
         daemon.night_assist_merger = NightAssistMerger(ai_pyramid_url)
         logger.info(f"Night-assist merger enabled: {ai_pyramid_url}")
 
