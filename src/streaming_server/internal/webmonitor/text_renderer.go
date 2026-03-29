@@ -103,13 +103,18 @@ func RenderTextBGRA(text string, sizePt int, fg, bg color.Color) *image.RGBA {
 
 	src := unsafe.Slice((*byte)(unsafe.Pointer(outPixels)), w*h*4)
 	for y := 0; y < h; y++ {
+		// Reslice per row: fixed-length slices let BCE prove all 4-element accesses.
+		srcRow := src[y*w*4 : (y+1)*w*4 : (y+1)*w*4]
+		dstRow := img.Pix[y*img.Stride : y*img.Stride+w*4 : y*img.Stride+w*4]
 		for x := 0; x < w; x++ {
-			i := (y*w + x) * 4
-			j := y*img.Stride + x*4
-			img.Pix[j+0] = src[i+2] // R ← B
-			img.Pix[j+1] = src[i+1] // G
-			img.Pix[j+2] = src[i+0] // B ← R
-			img.Pix[j+3] = src[i+3] // A
+			// 1 IsSliceInBounds each (si+4 ≤ w*4 since x < w).
+			si := x * 4
+			s4 := srcRow[si : si+4 : si+4]
+			d4 := dstRow[si : si+4 : si+4]
+			d4[0] = s4[2] // R ← B
+			d4[1] = s4[1] // G
+			d4[2] = s4[0] // B ← R
+			d4[3] = s4[3] // A
 		}
 	}
 	return img
