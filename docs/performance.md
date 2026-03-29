@@ -211,3 +211,91 @@ ps aux | grep -E 'streaming|python3|cam'
 sudo journalctl -u pet-camera-detector -n 5
 # quiet=NNN(T1) または (T2) でスロットル動作を確認
 ```
+
+---
+
+## 5. H.265 NAL パーサー Go コンパイラ最適化（2026-03-29）
+
+`src/streaming_server/internal/codec/processor.go` に対して BCE・NCE・Escape Analysis の3カテゴリでコンパイラ最適化を実施（PR #169）。
+
+### 計測方法
+
+```bash
+cd src/streaming_server
+
+# BCE: 境界チェック残存数
+go build -gcflags='-d=ssa/check_bce/debug=1' ./internal/codec/ 2>&1 | grep -c "Found"
+
+# NCE: nil check / inlining 確認
+go build -gcflags='-m=2' ./internal/codec/ 2>&1 | grep processor
+
+# Escape: ヒープエスケープ箇所
+go build -gcflags='-m' ./internal/codec/ 2>&1 | grep "escapes to heap"
+
+# ベンチマーク
+go test -bench=. -benchmem -count=5 ./internal/codec/
+```
+
+### 変更内容と根拠
+
+#### BCE（境界チェック削減）: 16 → 11 hits
+
+`Process()` の start code 検出を per-byte `&&` チェーンから `bytes.Equal` に変更。
+
+```go
+// Before: &&チェーンは各 && が別基本ブロックになりBCEが伝播しない (7 IsInBounds)
+if offset+4 <= len(data) && data[offset] == 0 && data[offset+1] == 0 && ...
+
+// After: bytes.Equal + スライスガードでスライス生成1回のみ (2 IsSliceInBounds)
+if offset+4 <= len(data) && bytes.Equal(data[offset:offset+4], startCode4) {
+```
+
+`ExtractNALType` の `data[0:k]`（固定始点）は len ガードで BCE 済みのため変更不要。
+
+#### NCE（nil チェック）: 変更なし・確認のみ
+
+`-m=2` でコンパイラが `findNextStartCode` をすでに `Process()` へインライン展開済みであることを確認（`p does not escape`）。追加対応不要。
+
+#### Escape Analysis + SIMD（主要改善）
+
+**`findNextStartCode` — per-byte ループを `bytes.Index` SIMD スキャンへ置換**
+
+```go
+// Before: per-byte ループ (~210 MB/s)
+for i := offset; i < len(data)-2; i++ {
+    if data[i] == 0x00 && data[i+1] == 0x00 { ... }
+}
+
+// After: bytes.Index は ARM64 NEON を使用 (~2,740 MB/s)
+i := bytes.Index(sub, startCode3)  // [0x00, 0x00, 0x01] を SIMD 検索
+if i > 0 && sub[i-1] == 0x00 { return offset + i - 1 }  // 4-byte 形式の検出
+return offset + i
+```
+
+アルゴリズム: `[0x00, 0x00, 0x01]`（3-byte / 4-byte 共通サフィックス）を `bytes.Index` で検索し、直前バイトが `0x00` なら1つ前から始まる 4-byte 形式と判定。
+
+**`containsIDR()` — PrependHeaders の O(NAL数) alloc を排除**
+
+`PrependHeaders` は IDR 検出のためだけに `parseNALUnits` を呼んでいたが、これは各 NAL の `make([]byte, ...)` を NAL 数分アロケートしていた。ゼロアロックの `containsIDR()` スキャン関数に置換。
+
+```go
+// Before: parseNALUnits → make([]NALUnit, 0, 8) + make([]byte, ...) × NAL数
+// After:  containsIDR() → allocなし (NALデータをコピーせずスキャンのみ)
+if !p.containsIDR(data) { return data, nil }
+```
+
+### ベンチマーク結果（ARM64 実機、RDK X5）
+
+| ベンチマーク | Before | After | 改善 |
+|---|---|---|---|
+| `ProcessTrail` (50 KB trail frame) | 137,000 ns / 365 MB/s | **18,100 ns / 2,764 MB/s** | **7.5x** |
+| `FindNextStartCode` (100 KB scan) | 474,000 ns / 211 MB/s | **36,500 ns / 2,737 MB/s** | **13x** |
+| `PrependHeaders` (200 KB IDR) | 834,000 ns / **3 allocs** | **126,000 ns / 1 alloc** | **6.6x / -2 allocs** |
+| `ProcessIDR` (小サイズ IDR) | 2,415 ns | **1,704 ns** | 1.4x |
+| `ExtractNALType` | 10 ns | 10 ns | 変化なし |
+
+`ProcessTrail` の 7.5x 改善は `findNextStartCode` の SIMD 化が支配的（trail frame は 1 NAL unit = `findNextStartCode` 1回のフルスキャン）。
+
+### 影響範囲
+
+ホットパス `Process()` は毎フレーム（~30fps）、`PrependHeaders` は IDR フレームのみ（~2fps、録画時）。`findNextStartCode` の 13x 改善がストリーミング全体のレイテンシを低減。
