@@ -1,6 +1,9 @@
 /**
  * Real-ESRGAN TF.js upscaler — global singleton.
  * Accepts AbortSignal for cancellation. No DOM refs, no signals.
+ *
+ * Models: xororz/web-realesrgan GraphModel format (PyTorch → ONNX → TF → TF.js)
+ * Served from /api/models/tfjs/{name}/model.json
  */
 
 const TILE = 128;
@@ -20,56 +23,13 @@ export async function ensureTF(): Promise<string> {
     await tf.setBackend("webgpu");
     await tf.ready();
   } catch { /* webgl fallback */ }
-  registerCustomLayers();
   backend = tf.getBackend();
   return backend;
 }
 
-/** Register custom Keras layers used by ESRGAN models */
-function registerCustomLayers() {
-  class MultiplyBeta extends tf.layers.Layer {
-    private beta: number;
-    constructor(config: any) {
-      super(config);
-      this.beta = config.beta ?? 0.2;
-    }
-    call(inputs: any) {
-      return tf.tidy(() => {
-        const x = Array.isArray(inputs) ? inputs[0] : inputs;
-        return x.mul(this.beta);
-      });
-    }
-    static get className() { return "MultiplyBeta"; }
-    getConfig() { return { ...super.getConfig(), beta: this.beta }; }
-  }
-  tf.serialization.registerClass(MultiplyBeta);
-
-  class PixelShuffle4x extends tf.layers.Layer {
-    private scale: number;
-    constructor(config: any) {
-      super(config);
-      this.scale = config.scale ?? 4;
-    }
-    call(inputs: any) {
-      return tf.tidy(() => {
-        const x = Array.isArray(inputs) ? inputs[0] : inputs;
-        // depth_to_space: [B, H, W, C*r*r] → [B, H*r, W*r, C]
-        return tf.depthToSpace(x, this.scale, "NHWC");
-      });
-    }
-    computeOutputShape(inputShape: number[]) {
-      const [b, h, w, c] = inputShape;
-      return [b, h * this.scale, w * this.scale, c / (this.scale * this.scale)];
-    }
-    static get className() { return "PixelShuffle4x"; }
-    getConfig() { return { ...super.getConfig(), scale: this.scale }; }
-  }
-  tf.serialization.registerClass(PixelShuffle4x);
-}
-
 export async function loadModel(name: string): Promise<any> {
   if (models[name]) return models[name];
-  const model = await tf.loadLayersModel(`/api/models/tfjs/${name}/model.json`);
+  const model = await tf.loadGraphModel(`/api/models/tfjs/${name}/model.json`);
   models[name] = model;
   return model;
 }

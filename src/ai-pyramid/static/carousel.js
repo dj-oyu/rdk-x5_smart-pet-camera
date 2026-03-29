@@ -119,7 +119,7 @@ async function loadModel(name) {
   if (modelCache[name]) { currentModel = modelCache[name]; return; }
   statusBar.textContent = "Loading " + name + "...";
   statusBar.className = "status-bar loading";
-  const model = await tf.loadLayersModel("/api/models/tfjs/" + name + "/model.json");
+  const model = await tf.loadGraphModel("/api/models/tfjs/" + name + "/model.json");
   modelCache[name] = model;
   currentModel = model;
 }

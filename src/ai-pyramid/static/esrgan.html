@@ -135,7 +135,7 @@ async function loadModel(name) {{
   statusBox.className = "status loading";
   const url = `/test/models/tfjs/${{name}}/model.json`;
   log("Loading model: " + url);
-  const model = await tf.loadLayersModel(url);
+  const model = await tf.loadGraphModel(url);
   modelCache[name] = model;
   currentModel = model;
   log("Model loaded: " + name);
