@@ -18,6 +18,7 @@
 #include "camera_switcher.h"
 #include "logger.h"
 #include "isp_brightness.h"
+#include "tcp_relay.h"
 #include <getopt.h>
 #include <pthread.h>
 #include <signal.h>
@@ -194,6 +195,17 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // TCP relay for night-assist: stream NIGHT camera H.265 to ai-pyramid (port 9265)
+    // Only when NIGHT camera (index 1) pipeline is active
+    TcpRelay *relay = NULL;
+    if (single_camera < 0 || single_camera == 1) {
+        relay = tcp_relay_create(9265);
+        if (relay) {
+            g_pipelines[1].encoder_thread.tcp_relay = relay;
+            LOG_INFO("Main", "TCP relay enabled on port 9265");
+        }
+    }
+
     // Start switcher thread (only in dual camera mode)
     pthread_t switcher_tid = 0;
     switcher_thread_ctx_t switcher_ctx = {0};
@@ -248,6 +260,11 @@ int main(int argc, char *argv[]) {
     if (switcher_tid) {
         pthread_join(switcher_tid, NULL);
         camera_switcher_destroy(&switcher_ctx.switcher);
+    }
+
+    if (relay) {
+        tcp_relay_destroy(relay);
+        g_pipelines[1].encoder_thread.tcp_relay = NULL;
     }
 
     for (int i = 0; i < num_cameras; i++) {
