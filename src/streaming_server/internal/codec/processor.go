@@ -38,17 +38,18 @@ func extractNALType(headerByte byte) uint8 {
 // Optimized: only copies data for VPS/SPS/PPS (rare), avoids allocation for trail frames
 func (p *Processor) Process(frame *types.VideoFrame) error {
 	data := frame.Data
-	if len(data) == 0 {
+	dataLen := len(data)
+	if dataLen == 0 {
 		return nil
 	}
 
 	offset := 0
-	for offset < len(data) {
+	for offset < dataLen {
 		// Find start code
 		startCodeLen := 0
-		if offset+4 <= len(data) && data[offset] == 0 && data[offset+1] == 0 && data[offset+2] == 0 && data[offset+3] == 1 {
+		if offset+4 <= dataLen && data[offset] == 0 && data[offset+1] == 0 && data[offset+2] == 0 && data[offset+3] == 1 {
 			startCodeLen = 4
-		} else if offset+3 <= len(data) && data[offset] == 0 && data[offset+1] == 0 && data[offset+2] == 1 {
+		} else if offset+3 <= dataLen && data[offset] == 0 && data[offset+1] == 0 && data[offset+2] == 1 {
 			startCodeLen = 3
 		} else {
 			offset++
@@ -57,7 +58,7 @@ func (p *Processor) Process(frame *types.VideoFrame) error {
 
 		nalStart := offset
 		nalHeaderOffset := offset + startCodeLen
-		if nalHeaderOffset >= len(data) {
+		if nalHeaderOffset >= dataLen {
 			break
 		}
 
@@ -67,7 +68,7 @@ func (p *Processor) Process(frame *types.VideoFrame) error {
 		nextStart := p.findNextStartCode(data, nalHeaderOffset+1)
 		nalEnd := nextStart
 		if nalEnd == -1 {
-			nalEnd = len(data)
+			nalEnd = dataLen
 		}
 
 		// Only copy for VPS/SPS/PPS (rare - typically once per GOP)
@@ -149,19 +150,20 @@ func (p *Processor) GetPPS() []byte {
 
 // parseNALUnits parses raw H.265 data into NAL units
 func (p *Processor) parseNALUnits(data []byte) ([]types.NALUnit, error) {
-	if len(data) == 0 {
+	dataLen := len(data)
+	if dataLen == 0 {
 		return nil, fmt.Errorf("empty data")
 	}
 
 	nalUnits := make([]types.NALUnit, 0, 8)
 	offset := 0
 
-	for offset < len(data) {
+	for offset < dataLen {
 		// Find next start code
 		startCodeLen := 0
-		if offset+3 <= len(data) && bytes.Equal(data[offset:offset+3], startCode3) {
+		if offset+3 <= dataLen && bytes.Equal(data[offset:offset+3], startCode3) {
 			startCodeLen = 3
-		} else if offset+4 <= len(data) && bytes.Equal(data[offset:offset+4], startCode4) {
+		} else if offset+4 <= dataLen && bytes.Equal(data[offset:offset+4], startCode4) {
 			startCodeLen = 4
 		} else {
 			offset++
@@ -172,7 +174,7 @@ func (p *Processor) parseNALUnits(data []byte) ([]types.NALUnit, error) {
 		nalStart := offset
 		offset += startCodeLen
 
-		if offset >= len(data) {
+		if offset >= dataLen {
 			break
 		}
 
@@ -182,7 +184,7 @@ func (p *Processor) parseNALUnits(data []byte) ([]types.NALUnit, error) {
 		nextStart := p.findNextStartCode(data, offset+1)
 		nalEnd := nextStart
 		if nalEnd == -1 {
-			nalEnd = len(data)
+			nalEnd = dataLen
 		}
 
 		// Extract NAL unit (including start code)
@@ -202,12 +204,14 @@ func (p *Processor) parseNALUnits(data []byte) ([]types.NALUnit, error) {
 
 // findNextStartCode finds the next start code position
 func (p *Processor) findNextStartCode(data []byte, offset int) int {
-	for i := offset; i < len(data)-2; i++ {
+	limit := len(data)
+	for i := offset; i+2 < limit; i++ {
 		if data[i] == 0x00 && data[i+1] == 0x00 {
-			if i+2 < len(data) && data[i+2] == 0x01 {
+			b2 := data[i+2]
+			if b2 == 0x01 {
 				return i // Found 0x000001
 			}
-			if i+3 < len(data) && data[i+2] == 0x00 && data[i+3] == 0x01 {
+			if i+3 < limit && b2 == 0x00 && data[i+3] == 0x01 {
 				return i // Found 0x00000001
 			}
 		}
@@ -217,11 +221,12 @@ func (p *Processor) findNextStartCode(data []byte, offset int) int {
 
 // ExtractNALType extracts the H.265 NAL unit type from raw data
 func ExtractNALType(data []byte) uint8 {
+	dataLen := len(data)
 	// Find first NAL header byte after start code
-	if len(data) >= 5 && bytes.Equal(data[0:4], startCode4) {
+	if dataLen >= 5 && bytes.Equal(data[0:4], startCode4) {
 		return extractNALType(data[4])
 	}
-	if len(data) >= 4 && bytes.Equal(data[0:3], startCode3) {
+	if dataLen >= 4 && bytes.Equal(data[0:3], startCode3) {
 		return extractNALType(data[3])
 	}
 	return 0
