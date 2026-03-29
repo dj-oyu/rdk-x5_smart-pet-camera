@@ -1025,7 +1025,7 @@ async fn handle_websr_test(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn handle_test_model(Path(path): Path<String>) -> impl IntoResponse {
     let safe_path = path.trim_start_matches('/').replace("..", "");
-    let file_path = std::path::Path::new("/tmp/esrgan-models").join(&safe_path);
+    let file_path = std::path::Path::new("/data/esrgan-models").join(&safe_path);
     match tokio::fs::read(&file_path).await {
         Ok(data) => {
             let mime = if safe_path.ends_with(".json") {

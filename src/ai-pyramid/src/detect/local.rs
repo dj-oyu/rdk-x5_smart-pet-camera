@@ -118,9 +118,7 @@ const COCO_NAMES: &[&str] = &[
 #[derive(Debug, Clone)]
 pub struct LocalDetectorConfig {
     pub wrapper_path: PathBuf,
-    pub yolo11s_binary: String,
     pub yolo26l_binary: String,
-    pub yolo11s_model: PathBuf,
     pub yolo26l_model: PathBuf,
 }
 
@@ -128,9 +126,7 @@ impl Default for LocalDetectorConfig {
     fn default() -> Self {
         Self {
             wrapper_path: PathBuf::from("/usr/local/bin/ax_yolo_run"),
-            yolo11s_binary: "ax_yolo11".into(),
             yolo26l_binary: "ax_yolo26".into(),
-            yolo11s_model: PathBuf::from("/home/admin-user/models/yolo11/ax650/yolo11s.axmodel"),
             yolo26l_model: PathBuf::from("/home/admin-user/models/yolo26/ax650/yolo26l.axmodel"),
         }
     }
@@ -147,35 +143,23 @@ impl LocalDetector {
 
     /// Check if binaries and models exist.
     pub fn is_available(&self) -> bool {
-        self.config.wrapper_path.exists()
-            && self.config.yolo11s_model.exists()
-            && self.config.yolo26l_model.exists()
+        self.config.wrapper_path.exists() && self.config.yolo26l_model.exists()
     }
 
-    /// Run dual-model detection on a single JPEG image.
-    /// Returns merged detections (highest confidence per bbox region).
+    /// Run YOLO26l detection on a single JPEG image.
     pub async fn detect_image(&self, jpeg_path: &Path) -> Result<Vec<RawLocalDetection>, String> {
-        let (r1, r2) = tokio::join!(
-            self.run_model(
-                &self.config.yolo11s_binary,
-                &self.config.yolo11s_model,
-                jpeg_path
-            ),
-            self.run_model(
-                &self.config.yolo26l_binary,
-                &self.config.yolo26l_model,
-                jpeg_path
-            ),
-        );
-
-        let mut dets = r1.unwrap_or_default();
-        dets.extend(r2.unwrap_or_default());
-
-        // Merge: deduplicate by IoU, keep higher confidence
-        Ok(merge_detections(dets))
+        self.run_model(
+            &self.config.yolo26l_binary,
+            &self.config.yolo26l_model,
+            jpeg_path,
+        )
+        .await
     }
 
-    /// Run detection on all 4 comic panels, mapping coordinates back to comic space.
+    /// Detect pets in a comic image using raw-first strategy:
+    /// 1. Run YOLO on the full 848×496 comic (1 inference)
+    /// 2. Map each bbox to its panel_index
+    /// 3. If zero pet detections, fallback to per-panel detection (4 inferences)
     pub async fn detect_comic(
         &self,
         photos_dir: &Path,
@@ -190,72 +174,29 @@ impl LocalDetector {
             .map(|m| m.captured_at.format("%Y-%m-%dT%H:%M:%S").to_string())
             .unwrap_or_else(|_| chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
 
-        // Crop panels to temp files, detect, map coords
-        const MARGIN: i32 = 12;
-        const BORDER: i32 = 2;
-        const GAP: i32 = 8;
-        const PANEL_W: i32 = 404;
-        const PANEL_H: i32 = 228;
-        const CELL_W: i32 = PANEL_W + 2 * BORDER;
-        const CELL_H: i32 = PANEL_H + 2 * BORDER;
+        // Pass 1: detect on the full comic image
+        let raw_dets = self.detect_image(&jpeg_path).await?;
+        let inputs = raw_dets_to_inputs(&raw_dets, &detected_at, "yolo26l-ax650-raw");
 
-        // ax_yolo26/ax_yolo11 does its own letterbox, so we save raw panels
+        // If we found at least one pet, return raw results
+        if inputs.iter().any(|d| is_pet_class(d.yolo_class.as_deref())) {
+            return Ok(inputs);
+        }
+
+        // Pass 2: fallback to per-panel detection
+        tracing::debug!("Raw-comic found no pets for {filename}, falling back to panel split");
         let img =
             image::open(&jpeg_path).map_err(|e| format!("open {}: {e}", jpeg_path.display()))?;
-
-        let mut all_inputs = Vec::new();
-
-        for panel in 0..4u32 {
-            let col = panel as i32 % 2;
-            let row = panel as i32 / 2;
-            let x = MARGIN + BORDER + col * (CELL_W + GAP);
-            let y = MARGIN + BORDER + row * (CELL_H + GAP);
-
-            let panel_img = img.crop_imm(x as u32, y as u32, PANEL_W as u32, PANEL_H as u32);
-            let tmp_path = std::env::temp_dir().join(format!("panel_{panel}.jpg"));
-            panel_img
-                .save(&tmp_path)
-                .map_err(|e| format!("save panel: {e}"))?;
-
-            let dets = self.detect_image(&tmp_path).await?;
-            let _ = std::fs::remove_file(&tmp_path);
-
-            let origin_x = x;
-            let origin_y = y;
-
-            for d in dets {
-                if !KEEP_CLASSES.contains(&d.class_id) {
-                    continue;
-                }
-                // Unify cat/dog as the detected class name
-                let class_name = if d.class_id == 16 {
-                    "cat".to_string() // dog -> cat (家に犬はいない)
-                } else {
-                    d.class_name
-                };
-
-                all_inputs.push(DetectionInput {
-                    panel_index: Some(panel as i32),
-                    bbox_x: origin_x + d.bbox_x.max(0),
-                    bbox_y: origin_y + d.bbox_y.max(0),
-                    bbox_w: d.bbox_w.min(PANEL_W - d.bbox_x.max(0)),
-                    bbox_h: d.bbox_h.min(PANEL_H - d.bbox_y.max(0)),
-                    yolo_class: Some(class_name),
-                    pet_class: None,
-                    confidence: Some(d.confidence),
-                    detected_at: detected_at.clone(),
-                    color_metrics: None,
-                    det_level: 2,
-                    model: Some("yolo11s+yolo26l-ax650".into()),
-                });
-            }
-        }
+        let mut all_inputs = inputs; // keep non-pet detections from raw pass
+        all_inputs.extend(
+            self.detect_panels(&img, &detected_at, "yolo26l-ax650-panel")
+                .await?,
+        );
 
         Ok(all_inputs)
     }
 
-    /// Streaming variant: sends each detection via `tx` as soon as it's found,
-    /// then returns the final merged list for DB storage.
+    /// Streaming variant: sends each detection via `tx` as soon as it's found.
     pub async fn detect_comic_stream(
         &self,
         photos_dir: &Path,
@@ -271,24 +212,44 @@ impl LocalDetector {
             .map(|m| m.captured_at.format("%Y-%m-%dT%H:%M:%S").to_string())
             .unwrap_or_else(|_| chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
 
-        const MARGIN: i32 = 12;
-        const BORDER: i32 = 2;
-        const GAP: i32 = 8;
-        const PANEL_W: i32 = 404;
-        const PANEL_H: i32 = 228;
-        const CELL_W: i32 = PANEL_W + 2 * BORDER;
-        const CELL_H: i32 = PANEL_H + 2 * BORDER;
+        // Pass 1: raw comic
+        let raw_dets = self.detect_image(&jpeg_path).await?;
+        let inputs = raw_dets_to_inputs(&raw_dets, &detected_at, "yolo26l-ax650-raw");
+        for input in &inputs {
+            let _ = tx.send(input.clone()).await;
+        }
 
+        if inputs.iter().any(|d| is_pet_class(d.yolo_class.as_deref())) {
+            return Ok(inputs);
+        }
+
+        // Pass 2: panel fallback
+        tracing::debug!("Raw-comic found no pets for {filename}, falling back to panel split");
         let img =
             image::open(&jpeg_path).map_err(|e| format!("open {}: {e}", jpeg_path.display()))?;
+        let panel_inputs = self
+            .detect_panels(&img, &detected_at, "yolo26l-ax650-panel")
+            .await?;
+        for input in &panel_inputs {
+            let _ = tx.send(input.clone()).await;
+        }
 
+        let mut all = inputs;
+        all.extend(panel_inputs);
+        Ok(all)
+    }
+
+    /// Detect on each of the 4 comic panels individually.
+    async fn detect_panels(
+        &self,
+        img: &image::DynamicImage,
+        detected_at: &str,
+        model_tag: &str,
+    ) -> Result<Vec<DetectionInput>, String> {
         let mut all_inputs = Vec::new();
 
         for panel in 0..4u32 {
-            let col = panel as i32 % 2;
-            let row = panel as i32 / 2;
-            let x = MARGIN + BORDER + col * (CELL_W + GAP);
-            let y = MARGIN + BORDER + row * (CELL_H + GAP);
+            let (x, y) = panel_origin(panel);
 
             let panel_img = img.crop_imm(x as u32, y as u32, PANEL_W as u32, PANEL_H as u32);
             let tmp_path = std::env::temp_dir().join(format!("panel_{panel}.jpg"));
@@ -303,13 +264,9 @@ impl LocalDetector {
                 if !KEEP_CLASSES.contains(&d.class_id) {
                     continue;
                 }
-                let class_name = if d.class_id == 16 {
-                    "cat".to_string()
-                } else {
-                    d.class_name
-                };
+                let class_name = normalize_class(d.class_id, d.class_name);
 
-                let input = DetectionInput {
+                all_inputs.push(DetectionInput {
                     panel_index: Some(panel as i32),
                     bbox_x: x + d.bbox_x.max(0),
                     bbox_y: y + d.bbox_y.max(0),
@@ -318,15 +275,11 @@ impl LocalDetector {
                     yolo_class: Some(class_name),
                     pet_class: None,
                     confidence: Some(d.confidence),
-                    detected_at: detected_at.clone(),
+                    detected_at: detected_at.to_string(),
                     color_metrics: None,
                     det_level: 2,
-                    model: Some("yolo11s+yolo26l-ax650".into()),
-                };
-
-                // Stream each detection immediately
-                let _ = tx.send(input.clone()).await;
-                all_inputs.push(input);
+                    model: Some(model_tag.into()),
+                });
             }
         }
 
@@ -435,57 +388,118 @@ fn parse_ax_output(stdout: &str) -> Result<Vec<RawLocalDetection>, String> {
     Ok(dets)
 }
 
-/// Merge detections from dual models: deduplicate overlapping bboxes by IoU.
-/// When both models agree (IoU > 0.5, same class), boost confidence:
-///   boosted = 1 - (1 - conf_a) * (1 - conf_b)
-/// Two-pass merge:
-/// 1. Same-class IoU > 0.5 → boost confidence (dual-model agreement)
-/// 2. Cross-class IoU > 0.3 → same object, keep higher confidence
-fn merge_detections(mut dets: Vec<RawLocalDetection>) -> Vec<RawLocalDetection> {
-    dets.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+// Comic layout constants (must match server::crop_panel)
+const MARGIN: i32 = 12;
+const BORDER: i32 = 2;
+const GAP: i32 = 8;
+const PANEL_W: i32 = 404;
+const PANEL_H: i32 = 228;
+const CELL_W: i32 = PANEL_W + 2 * BORDER;
+const CELL_H: i32 = PANEL_H + 2 * BORDER;
 
-    // Pass 1: same-class merge with confidence boost
-    let mut pass1: Vec<RawLocalDetection> = Vec::new();
-    for det in dets {
-        if let Some(existing) = pass1
-            .iter_mut()
-            .find(|m| m.class_id == det.class_id && iou(m, &det) > 0.5)
-        {
-            let boosted = 1.0 - (1.0 - existing.confidence) * (1.0 - det.confidence);
-            existing.confidence = boosted;
-        } else {
-            pass1.push(det);
-        }
-    }
-
-    // Pass 2: cross-class proximity merge (same object, different label)
-    // Keep highest confidence detection, discard overlapping lower-conf ones
-    pass1.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
-    let mut pass2: Vec<RawLocalDetection> = Vec::new();
-    for det in pass1 {
-        let dominated = pass2.iter().any(|m| iou(m, &det) > 0.3);
-        if !dominated {
-            pass2.push(det);
-        }
-    }
-    pass2
+/// Get the top-left origin (x, y) of a panel in comic coordinates.
+fn panel_origin(panel: u32) -> (i32, i32) {
+    let col = panel as i32 % 2;
+    let row = panel as i32 / 2;
+    let x = MARGIN + BORDER + col * (CELL_W + GAP);
+    let y = MARGIN + BORDER + row * (CELL_H + GAP);
+    (x, y)
 }
 
-fn iou(a: &RawLocalDetection, b: &RawLocalDetection) -> f64 {
-    let x1 = a.bbox_x.max(b.bbox_x);
-    let y1 = a.bbox_y.max(b.bbox_y);
-    let x2 = (a.bbox_x + a.bbox_w).min(b.bbox_x + b.bbox_w);
-    let y2 = (a.bbox_y + a.bbox_h).min(b.bbox_y + b.bbox_h);
-    let inter = (x2 - x1).max(0) as f64 * (y2 - y1).max(0) as f64;
-    let area_a = a.bbox_w as f64 * a.bbox_h as f64;
-    let area_b = b.bbox_w as f64 * b.bbox_h as f64;
-    let union = area_a + area_b - inter;
-    if union <= 0.0 { 0.0 } else { inter / union }
+/// Determine which panel a bbox center falls in (0-3), or None if in border/gap.
+fn bbox_to_panel(bbox_x: i32, bbox_y: i32, bbox_w: i32, bbox_h: i32) -> Option<i32> {
+    let cx = bbox_x + bbox_w / 2;
+    let cy = bbox_y + bbox_h / 2;
+    for panel in 0..4u32 {
+        let (px, py) = panel_origin(panel);
+        if cx >= px && cx < px + PANEL_W && cy >= py && cy < py + PANEL_H {
+            return Some(panel as i32);
+        }
+    }
+    None
+}
+
+fn is_pet_class(class: Option<&str>) -> bool {
+    matches!(class, Some("cat" | "dog"))
+}
+
+fn normalize_class(class_id: i32, class_name: String) -> String {
+    if class_id == 16 {
+        "cat".to_string() // dog -> cat (家に犬はいない)
+    } else {
+        class_name
+    }
+}
+
+/// Convert raw detections to DetectionInputs, mapping bbox to panel_index.
+fn raw_dets_to_inputs(
+    dets: &[RawLocalDetection],
+    detected_at: &str,
+    model_tag: &str,
+) -> Vec<DetectionInput> {
+    dets.iter()
+        .filter(|d| KEEP_CLASSES.contains(&d.class_id))
+        .map(|d| {
+            let panel_index = bbox_to_panel(d.bbox_x, d.bbox_y, d.bbox_w, d.bbox_h);
+            let class_name = normalize_class(d.class_id, d.class_name.clone());
+            DetectionInput {
+                panel_index,
+                bbox_x: d.bbox_x,
+                bbox_y: d.bbox_y,
+                bbox_w: d.bbox_w,
+                bbox_h: d.bbox_h,
+                yolo_class: Some(class_name),
+                pet_class: None,
+                confidence: Some(d.confidence),
+                detected_at: detected_at.to_string(),
+                color_metrics: None,
+                det_level: 2,
+                model: Some(model_tag.into()),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn merge_detections(mut dets: Vec<RawLocalDetection>) -> Vec<RawLocalDetection> {
+        dets.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+        let mut pass1: Vec<RawLocalDetection> = Vec::new();
+        for det in dets {
+            if let Some(existing) = pass1
+                .iter_mut()
+                .find(|m| m.class_id == det.class_id && iou(m, &det) > 0.5)
+            {
+                let boosted = 1.0 - (1.0 - existing.confidence) * (1.0 - det.confidence);
+                existing.confidence = boosted;
+            } else {
+                pass1.push(det);
+            }
+        }
+        pass1.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+        let mut pass2: Vec<RawLocalDetection> = Vec::new();
+        for det in pass1 {
+            let dominated = pass2.iter().any(|m| iou(m, &det) > 0.3);
+            if !dominated {
+                pass2.push(det);
+            }
+        }
+        pass2
+    }
+
+    fn iou(a: &RawLocalDetection, b: &RawLocalDetection) -> f64 {
+        let x1 = a.bbox_x.max(b.bbox_x);
+        let y1 = a.bbox_y.max(b.bbox_y);
+        let x2 = (a.bbox_x + a.bbox_w).min(b.bbox_x + b.bbox_w);
+        let y2 = (a.bbox_y + a.bbox_h).min(b.bbox_y + b.bbox_h);
+        let inter = (x2 - x1).max(0) as f64 * (y2 - y1).max(0) as f64;
+        let area_a = a.bbox_w as f64 * a.bbox_h as f64;
+        let area_b = b.bbox_w as f64 * b.bbox_h as f64;
+        let union = area_a + area_b - inter;
+        if union <= 0.0 { 0.0 } else { inter / union }
+    }
 
     #[test]
     fn parse_ax_yolo_output() {
@@ -573,5 +587,82 @@ detection num: 3
         ];
         let merged = merge_detections(dets);
         assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn bbox_to_panel_mapping() {
+        // Panel origins: (14,14), (430,14), (14,254), (430,254)
+        // Panel 0: center around (216, 128)
+        assert_eq!(bbox_to_panel(100, 50, 100, 80), Some(0));
+        // Panel 1: top-right
+        assert_eq!(bbox_to_panel(500, 50, 100, 80), Some(1));
+        // Panel 2: bottom-left
+        assert_eq!(bbox_to_panel(100, 300, 100, 80), Some(2));
+        // Panel 3: bottom-right
+        assert_eq!(bbox_to_panel(500, 300, 100, 80), Some(3));
+        // In gap between panels
+        assert_eq!(bbox_to_panel(416, 50, 8, 80), None);
+    }
+
+    #[test]
+    fn raw_dets_to_inputs_maps_panels() {
+        let dets = vec![
+            // Cat in panel 0 area
+            RawLocalDetection {
+                class_id: 15,
+                class_name: "cat".into(),
+                confidence: 0.90,
+                bbox_x: 100,
+                bbox_y: 50,
+                bbox_w: 100,
+                bbox_h: 80,
+            },
+            // Dog in panel 3 area → should become "cat"
+            RawLocalDetection {
+                class_id: 16,
+                class_name: "dog".into(),
+                confidence: 0.42,
+                bbox_x: 500,
+                bbox_y: 300,
+                bbox_w: 100,
+                bbox_h: 80,
+            },
+            // Chair (class 56) — kept but not a pet
+            RawLocalDetection {
+                class_id: 56,
+                class_name: "chair".into(),
+                confidence: 0.30,
+                bbox_x: 500,
+                bbox_y: 50,
+                bbox_w: 50,
+                bbox_h: 50,
+            },
+            // Bicycle (class 1) — not in KEEP_CLASSES, filtered out
+            RawLocalDetection {
+                class_id: 1,
+                class_name: "bicycle".into(),
+                confidence: 0.80,
+                bbox_x: 100,
+                bbox_y: 300,
+                bbox_w: 50,
+                bbox_h: 50,
+            },
+        ];
+        let inputs = raw_dets_to_inputs(&dets, "2026-03-30T01:00:00", "yolo26l-ax650-raw");
+        assert_eq!(inputs.len(), 3); // bicycle filtered
+        assert_eq!(inputs[0].panel_index, Some(0));
+        assert_eq!(inputs[0].yolo_class.as_deref(), Some("cat"));
+        assert_eq!(inputs[1].panel_index, Some(3));
+        assert_eq!(inputs[1].yolo_class.as_deref(), Some("cat")); // dog→cat
+        assert_eq!(inputs[2].panel_index, Some(1));
+        assert_eq!(inputs[2].yolo_class.as_deref(), Some("chair"));
+    }
+
+    #[test]
+    fn is_pet_class_checks() {
+        assert!(is_pet_class(Some("cat")));
+        assert!(is_pet_class(Some("dog")));
+        assert!(!is_pet_class(Some("chair")));
+        assert!(!is_pet_class(None));
     }
 }
