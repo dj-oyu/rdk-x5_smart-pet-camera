@@ -206,7 +206,7 @@ int main(int argc, char* argv[]) {
 
     // TCP relay for night-assist: stream NIGHT camera H.265 to ai-pyramid (port 9265)
     // Only when NIGHT camera (index 1) pipeline is active
-    TcpRelay *relay = NULL;
+    TcpRelay* relay = NULL;
     if (single_camera < 0 || single_camera == 1) {
         relay = tcp_relay_create(9265);
         if (relay) {

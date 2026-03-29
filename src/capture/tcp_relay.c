@@ -1,18 +1,20 @@
 #include "tcp_relay.h"
 #include "logger.h"
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 TcpRelay* tcp_relay_create(int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return NULL;
+    if (fd < 0) {
+        return NULL;
+    }
 
     int opt = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -23,8 +25,7 @@ TcpRelay* tcp_relay_create(int port) {
         .sin_addr.s_addr = INADDR_ANY,
     };
 
-    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0 ||
-        listen(fd, 1) < 0) {
+    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0 || listen(fd, 1) < 0) {
         close(fd);
         return NULL;
     }
@@ -43,16 +44,24 @@ TcpRelay* tcp_relay_create(int port) {
 }
 
 void tcp_relay_destroy(TcpRelay* r) {
-    if (!r) return;
+    if (!r) {
+        return;
+    }
     r->active = false;
-    if (r->client_fd >= 0) close(r->client_fd);
-    if (r->listen_fd >= 0) close(r->listen_fd);
+    if (r->client_fd >= 0) {
+        close(r->client_fd);
+    }
+    if (r->listen_fd >= 0) {
+        close(r->listen_fd);
+    }
     pthread_mutex_destroy(&r->mu);
     free(r);
 }
 
 void tcp_relay_send(TcpRelay* r, const void* data, uint32_t size) {
-    if (!r || !r->active || !data || size == 0) return;
+    if (!r || !r->active || !data || size == 0) {
+        return;
+    }
 
     pthread_mutex_lock(&r->mu);
 
