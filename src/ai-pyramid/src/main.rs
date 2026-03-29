@@ -44,9 +44,9 @@ struct Args {
     #[arg(long, default_value_t = 128)]
     vlm_max_tokens: u32,
 
-    /// rdk-x5 host for night assist H.265 relay (enables night assist when set)
+    /// Disable night assist (supplementary YOLO for rdk-x5 night camera)
     #[arg(long)]
-    rdk_x5_host: Option<String>,
+    no_night_assist: bool,
 }
 
 fn find_tls_certs() -> Option<(PathBuf, PathBuf)> {
@@ -200,29 +200,32 @@ async fn main() {
     };
 
     // Night assist: supplementary YOLO detection for rdk-x5 night camera
-    let rdk_x5_host = args
-        .rdk_x5_host
-        .or_else(|| std::env::var("RDK_X5_HOST").ok());
-    let night_assist_tx = if let (Some(rdk_host), Some(detector)) = (&rdk_x5_host, &local_detector)
-    {
-        let (na_tx, _) =
-            tokio::sync::broadcast::channel::<pet_album::night_assist::DetectionEvent>(64);
-        let config = pet_album::night_assist::NightAssistConfig::new(rdk_host.clone());
-        let worker = pet_album::night_assist::NightAssistWorker::new(
-            config,
-            detector.clone(),
-            app_context.npu_semaphore().clone(),
-            na_tx.clone(),
-        );
-        info!("Night assist enabled: rdk-x5 at {rdk_host}");
-        tokio::spawn(async move { worker.run().await });
-        Some(na_tx)
-    } else {
-        if rdk_x5_host.is_some() {
-            warn!("Night assist disabled: local detector unavailable");
-        }
+    // Uses PET_CAMERA_HOST (same host as detection client)
+    let night_assist_host = if args.no_night_assist {
         None
+    } else {
+        std::env::var("PET_CAMERA_HOST").ok()
     };
+    let night_assist_tx =
+        if let (Some(rdk_host), Some(detector)) = (&night_assist_host, &local_detector) {
+            let (na_tx, _) =
+                tokio::sync::broadcast::channel::<pet_album::night_assist::DetectionEvent>(64);
+            let config = pet_album::night_assist::NightAssistConfig::new(rdk_host.clone());
+            let worker = pet_album::night_assist::NightAssistWorker::new(
+                config,
+                detector.clone(),
+                app_context.npu_semaphore().clone(),
+                na_tx.clone(),
+            );
+            info!("Night assist enabled: rdk-x5 at {rdk_host}");
+            tokio::spawn(async move { worker.run().await });
+            Some(na_tx)
+        } else {
+            if night_assist_host.is_some() {
+                warn!("Night assist disabled: local detector unavailable");
+            }
+            None
+        };
 
     let app_state = server::AppState {
         context: app_context,
