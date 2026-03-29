@@ -193,4 +193,122 @@ CLAHE (clipLimit=3.0, 8x8, medianBlur k=3)
 3. **パネル分割のメリットは限定的** — naive分割でrawより高confになるケースもあるが (235100_other p0: 86% vs raw 42%)、trimmed以降で消える不安定さ
 4. **upscaleの効果なし** — 404×228 → 640×329 / 1280×659 に拡大してもconfidenceは変わらず。ax_yolo内部で640×640にletterboxされるため、入力解像度を上げる意味がない
 5. **タイムスタンプ余白除去は微減** — 有意な情報が削られるリスクがある (235100_otherで検出消失)
-6. **暗い画像にはCLAHE前処理が必要** — 実験2で示したCLAHE効果はcomic画像にも適用すべき
+6. ~~暗い画像にはCLAHE前処理が必要~~ → 実験5で否定
+
+---
+
+## 実験5: L1検出あり・L2検出なし画像の分析
+
+### 背景
+
+RDK X5 (L1) でpetを検出してcomic画像を生成しているのに、ai-pyramid (L2) の
+パネル分割検出でpetが見つからないケースが多発。
+
+```
+L1 pet検出あり: 305 photos (763 cat/dog detections)
+L2 pet検出あり:  36 photos (89 cat/dog detections)
+L2 全detections: 681件 (36 photos, model=yolo11s+yolo26l-ax650)
+```
+
+### テスト: raw comic vs パネル分割 (L1あり・L2なしの10枚)
+
+ランダム抽出した10枚をyolo26lで検出:
+
+| comic | pet_id | L1 conf | Raw comic | Panel split |
+|-------|--------|---------|-----------|-------------|
+| 233911 | chatora | 0.50,0.64 | cat90%+dog14% | — |
+| 151231 | chatora | 0.46-0.74 | cat86%+cat71% | 3/4 (18-84%) |
+| 232906 | chatora | 0.84 | 4件 | — |
+| 172227 | chatora | 0.65,0.56 | 4件 | — |
+| 231026 | chatora | 0.36-0.67 | 3件 | — |
+| 190926 | mike | 0.62-0.64 | cat56% | 2/4 (82-84%) |
+| 230423 | other | 0.22 | 5件 | 3/4 (dog, 10-35%) |
+| 182015 | other | 0.23 | cat23%+cat14% | — |
+| 230405 | other | 0.28-0.49 | dog62% | — |
+| 194648 | chatora | 0.24-0.74 | 4件 | — |
+
+**Raw comic: 10/10 (100%) pet検出成功**
+
+### テスト: CLAHE前処理のcomic画像への効果
+
+| comic | pet_id | mean_Y | Raw (無加工) | Raw + CLAHE |
+|-------|--------|--------|-------------|-------------|
+| 233911 | chatora | 95.6 | cat90% | cat56% (↓) |
+| 151231 | chatora | 89.1 | cat86%+cat71% | cat89%+cat77%+cat35% (↑) |
+| 190926 | mike | 125.5 | cat56% | cat72% (↑) |
+| 230423 | other | 88.6 | 5件検出 | **0件 (全消失!)** |
+| 182015 | other | 112.3 | 2件検出 | **0件 (全消失!)** |
+| 230405 | other | 90.9 | dog62% | **0件 (全消失!)** |
+
+**CLAHEはcomic画像に逆効果** — ISP処理済み画像にCLAHEを適用すると、
+特に低コントラストのpet (other) で検出が完全に消失する。
+
+### 結論
+
+1. **L2未検出の原因はパネル分割** — コンテキスト喪失が検出力を著しく低下
+2. **Raw comic (848×496丸ごと) で10/10検出成功** — パネル分割をやめてrawを第一パスに
+3. **CLAHEはcomic画像には適用しない** — 生IR映像にのみ有効、comic画像には逆効果
+4. **Panel splitは補助用途のみ** — rawで検出したbboxのpanel_index算出に使用
+
+---
+
+## 最適化実装プラン
+
+### 変更概要
+
+| 変更 | 根拠 |
+|------|------|
+| yolo11s廃止、yolo26l単独 | yolo11sは夜間cat検出0% |
+| raw comic第一パス | 分割より検出率高い、1回推論 |
+| CLAHEはcomic画像には不適用 | ISP処理済み画像には逆効果 |
+| パネル分割はフォールバック | rawで未検出時のみ |
+
+### 既存L2データのマイグレーション
+
+現在のDB状態:
+- L2 detections: 681件 (36 photos)
+- model: `yolo11s+yolo26l-ax650` (旧パネル分割方式)
+
+マイグレーション: 1回限りのsqliteコマンドで実行済み (2026-03-30):
+
+```sql
+BEGIN;
+UPDATE photos SET detected_at = NULL
+  WHERE id IN (SELECT DISTINCT photo_id FROM detections WHERE det_level = 2);
+DELETE FROM detections WHERE det_level = 2;
+COMMIT;
+-- Result: L2 681件削除, undetected 14→50 (旧L2の36枚がbackfill対象に復帰)
+```
+
+### 実装ステップ
+
+#### Step 1: `LocalDetectorConfig` からyolo11s削除
+- `yolo11s_binary`, `yolo11s_model` フィールド削除
+- `is_available()` をyolo26lのみチェックに
+- model tag: `"yolo26l-ax650"`
+
+#### Step 2: `detect_image` を単一モデルに簡素化
+- `tokio::join!` の2モデル並列廃止
+- `merge_detections` はraw+panelフォールバックマージ用に残す
+
+#### Step 3: `detect_comic` をraw-first戦略に書き換え
+```
+1. image::open(comic)
+2. そのまま全体 848×496 でyolo26l推論 (1回)
+3. bbox中心からpanel_index算出
+4. pet (cat/dog) 検出ゼロなら → パネル分割フォールバック (4回推論)
+```
+
+#### Step 4: `detect_comic_stream` も同様に変更
+
+#### Step 5: `main.rs` 設定・ログ更新
+
+#### Step 6: テスト更新
+
+### 性能見込み
+
+| 指標 | Before | After |
+|------|--------|-------|
+| NPU推論/comic | 8回 (~90ms) | 1回 (~11ms), fallback: 5回 |
+| プロセス spawn | 8 | 1 (fallback: 5) |
+| 夜間pet検出率 | ~45% (パネル) | ~100% (raw, 実験5より) |
