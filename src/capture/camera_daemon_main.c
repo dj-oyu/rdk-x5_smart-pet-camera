@@ -27,14 +27,14 @@
 #include <unistd.h>
 #include <sys/mman.h>
 
-#define DEFAULT_FPS 30
-#define DEFAULT_BITRATE 600000
-#define DEFAULT_OUTPUT_WIDTH 1280
+#define DEFAULT_FPS           30
+#define DEFAULT_BITRATE       600000
+#define DEFAULT_OUTPUT_WIDTH  1280
 #define DEFAULT_OUTPUT_HEIGHT 720
 
 // Shared state (no SHM needed — same process)
 static volatile bool g_running = true;
-static volatile int g_active_camera = 0;  // 0=DAY, 1=NIGHT
+static volatile int g_active_camera = 0; // 0=DAY, 1=NIGHT
 
 // Pipelines
 static camera_pipeline_t g_pipelines[2];
@@ -45,9 +45,12 @@ static void signal_handler(int signum) {
 }
 
 // Pipeline thread wrapper
-typedef struct { camera_pipeline_t *pipeline; volatile bool *running; } pipeline_run_arg_t;
-static void *pipeline_thread_fn(void *arg) {
-    pipeline_run_arg_t *a = (pipeline_run_arg_t *)arg;
+typedef struct {
+    camera_pipeline_t* pipeline;
+    volatile bool* running;
+} pipeline_run_arg_t;
+static void* pipeline_thread_fn(void* arg) {
+    pipeline_run_arg_t* a = (pipeline_run_arg_t*)arg;
     pipeline_run(a->pipeline, a->running);
     return NULL;
 }
@@ -59,8 +62,8 @@ typedef struct {
     int poll_interval_night_ms;
 } switcher_thread_ctx_t;
 
-static void *switcher_thread(void *arg) {
-    switcher_thread_ctx_t *ctx = (switcher_thread_ctx_t *)arg;
+static void* switcher_thread(void* arg) {
+    switcher_thread_ctx_t* ctx = (switcher_thread_ctx_t*)arg;
 
     LOG_INFO("Switcher", "Thread started");
 
@@ -79,8 +82,8 @@ static void *switcher_thread(void *arg) {
                 int prev = g_active_camera;
                 g_active_camera = 1;
                 if (prev != 1) {
-                    camera_switcher_notify_active_camera(&ctx->switcher,
-                        CAMERA_MODE_NIGHT, "auto-night");
+                    camera_switcher_notify_active_camera(&ctx->switcher, CAMERA_MODE_NIGHT,
+                                                         "auto-night");
                     LOG_INFO("Switcher", "Switch: DAY -> NIGHT (brightness=%.1f)",
                              brightness.brightness_avg);
                     // Wake inactive pipeline threads immediately
@@ -91,8 +94,8 @@ static void *switcher_thread(void *arg) {
                 int prev = g_active_camera;
                 g_active_camera = 0;
                 if (prev != 0) {
-                    camera_switcher_notify_active_camera(&ctx->switcher,
-                        CAMERA_MODE_DAY, "auto-day");
+                    camera_switcher_notify_active_camera(&ctx->switcher, CAMERA_MODE_DAY,
+                                                         "auto-day");
                     LOG_INFO("Switcher", "Switch: NIGHT -> DAY (brightness=%.1f)",
                              brightness.brightness_avg);
                     // Wake inactive pipeline threads immediately
@@ -102,9 +105,8 @@ static void *switcher_thread(void *arg) {
             }
         }
 
-        int interval_ms = (g_active_camera == 0)
-            ? ctx->poll_interval_day_ms
-            : ctx->poll_interval_night_ms;
+        const int interval_ms =
+            (g_active_camera == 0) ? ctx->poll_interval_day_ms : ctx->poll_interval_night_ms;
         usleep(interval_ms * 1000);
     }
 
@@ -112,7 +114,7 @@ static void *switcher_thread(void *arg) {
     return NULL;
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
     int output_width = DEFAULT_OUTPUT_WIDTH;
     int output_height = DEFAULT_OUTPUT_HEIGHT;
     int fps = DEFAULT_FPS;
@@ -120,30 +122,40 @@ int main(int argc, char *argv[]) {
     log_level_t log_level = LOG_LEVEL_INFO;
     int single_camera = -1; // -1 = dual, 0 = day only, 1 = night only
 
-    static struct option long_options[] = {
-        {"width", required_argument, 0, 'W'},
-        {"height", required_argument, 0, 'H'},
-        {"fps", required_argument, 0, 'f'},
-        {"bitrate", required_argument, 0, 'b'},
-        {"camera", required_argument, 0, 'C'},
-        {"verbose", no_argument, 0, 'v'},
-        {"help", no_argument, 0, 'h'},
-        {0, 0, 0, 0}};
+    static const struct option long_options[] = {
+        {"width", required_argument, 0, 'W'},  {"height", required_argument, 0, 'H'},
+        {"fps", required_argument, 0, 'f'},    {"bitrate", required_argument, 0, 'b'},
+        {"camera", required_argument, 0, 'C'}, {"verbose", no_argument, 0, 'v'},
+        {"help", no_argument, 0, 'h'},         {0, 0, 0, 0}};
 
     int opt;
     while ((opt = getopt_long(argc, argv, "W:H:f:b:C:vh", long_options, NULL)) != -1) {
         switch (opt) {
-        case 'W': output_width = atoi(optarg); break;
-        case 'H': output_height = atoi(optarg); break;
-        case 'f': fps = atoi(optarg); break;
-        case 'b': bitrate = atoi(optarg); break;
-        case 'C': single_camera = atoi(optarg); break;
-        case 'v': log_level = LOG_LEVEL_DEBUG; break;
+        case 'W':
+            output_width = atoi(optarg);
+            break;
+        case 'H':
+            output_height = atoi(optarg);
+            break;
+        case 'f':
+            fps = atoi(optarg);
+            break;
+        case 'b':
+            bitrate = atoi(optarg);
+            break;
+        case 'C':
+            single_camera = atoi(optarg);
+            break;
+        case 'v':
+            log_level = LOG_LEVEL_DEBUG;
+            break;
         case 'h':
-            printf("Usage: %s [-W width] [-H height] [-f fps] [-b bitrate] [-C camera] [-v]\n", argv[0]);
+            printf("Usage: %s [-W width] [-H height] [-f fps] [-b bitrate] [-C camera] [-v]\n",
+                   argv[0]);
             printf("  -C N   Single camera mode (0=day, 1=night). Default: dual mode\n");
             return 0;
-        default: return 1;
+        default:
+            return 1;
         }
     }
 
@@ -157,14 +169,14 @@ int main(int argc, char *argv[]) {
 
     // Create detection SHM (needed by detector)
     shm_unlink(SHM_NAME_DETECTIONS);
-    LatestDetectionResult *detection_shm = shm_detection_create();
+    LatestDetectionResult* detection_shm = shm_detection_create();
     if (!detection_shm) {
         LOG_ERROR("Main", "Failed to create detection SHM");
         return 1;
     }
 
     // Create pipelines
-    int num_cameras = (single_camera >= 0) ? 1 : 2;
+    const int num_cameras = (single_camera >= 0) ? 1 : 2;
     int camera_indices[2] = {0, 1};
     if (single_camera >= 0) {
         camera_indices[0] = single_camera;
@@ -172,14 +184,11 @@ int main(int argc, char *argv[]) {
 
     for (int i = 0; i < num_cameras; i++) {
         int cam = camera_indices[i];
-        LOG_INFO("Main", "Creating pipeline for camera %d (%dx%d@%dfps)",
-                 cam, output_width, output_height, fps);
+        LOG_INFO("Main", "Creating pipeline for camera %d (%dx%d@%dfps)", cam, output_width,
+                 output_height, fps);
 
-        int ret = pipeline_create(&g_pipelines[cam], cam,
-                                  1920, 1080, // sensor
-                                  output_width, output_height,
-                                  fps, bitrate,
-                                  &g_active_camera);
+        int ret = pipeline_create(&g_pipelines[cam], cam, 1920, 1080, // sensor
+                                  output_width, output_height, fps, bitrate, &g_active_camera);
         if (ret != 0) {
             LOG_ERROR("Main", "Failed to create pipeline for camera %d: %d", cam, ret);
             // Continue with remaining cameras
@@ -211,8 +220,7 @@ int main(int argc, char *argv[]) {
 
         // Initial state: DAY active
         g_active_camera = 0;
-        camera_switcher_notify_active_camera(&switcher_ctx.switcher,
-            CAMERA_MODE_DAY, "init");
+        camera_switcher_notify_active_camera(&switcher_ctx.switcher, CAMERA_MODE_DAY, "init");
 
         pthread_create(&switcher_tid, NULL, switcher_thread, &switcher_ctx);
         LOG_INFO("Main", "Switcher thread started (dual camera mode)");

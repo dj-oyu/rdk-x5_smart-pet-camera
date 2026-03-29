@@ -32,18 +32,16 @@ void signal_handler(int signum) {
 }
 
 // Calculate time difference in milliseconds
-double timespec_diff_ms(struct timespec *start, struct timespec *end) {
-    return (end->tv_sec - start->tv_sec) * 1000.0 +
-           (end->tv_nsec - start->tv_nsec) / 1000000.0;
+double timespec_diff_ms(struct timespec* start, struct timespec* end) {
+    return (end->tv_sec - start->tv_sec) * 1000.0 + (end->tv_nsec - start->tv_nsec) / 1000000.0;
 }
 
 // Save frame to JPEG file
-int save_frame_to_file(const Frame *frame, const char *output_dir) {
+int save_frame_to_file(const Frame* frame, const char* output_dir) {
     char filename[256];
-    snprintf(filename, sizeof(filename), "%s/frame_%06lu.jpg",
-             output_dir, frame->frame_number);
+    snprintf(filename, sizeof(filename), "%s/frame_%06lu.jpg", output_dir, frame->frame_number);
 
-    FILE *fp = fopen(filename, "wb");
+    FILE* fp = fopen(filename, "wb");
     if (!fp) {
         fprintf(stderr, "[Error] Cannot create file: %s\n", filename);
         return -1;
@@ -60,7 +58,7 @@ int save_frame_to_file(const Frame *frame, const char *output_dir) {
     return 0;
 }
 
-void print_usage(const char *prog_name) {
+void print_usage(const char* prog_name) {
     printf("Usage: %s [OPTIONS]\n", prog_name);
     printf("\nOptions:\n");
     printf("  -n NUM    Number of frames to read (default: 100, 0 = infinite)\n");
@@ -74,7 +72,7 @@ void print_usage(const char *prog_name) {
     printf("  %s -n 0 -v        # Continuous read with verbose output\n", prog_name);
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
     int num_frames = 100;
     int save_frames = 0;
     int verbose = 0;
@@ -83,21 +81,21 @@ int main(int argc, char *argv[]) {
     int opt;
     while ((opt = getopt(argc, argv, "n:svh")) != -1) {
         switch (opt) {
-            case 'n':
-                num_frames = atoi(optarg);
-                break;
-            case 's':
-                save_frames = 1;
-                break;
-            case 'v':
-                verbose = 1;
-                break;
-            case 'h':
-                print_usage(argv[0]);
-                return 0;
-            default:
-                print_usage(argv[0]);
-                return 1;
+        case 'n':
+            num_frames = atoi(optarg);
+            break;
+        case 's':
+            save_frames = 1;
+            break;
+        case 'v':
+            verbose = 1;
+            break;
+        case 'h':
+            print_usage(argv[0]);
+            return 0;
+        default:
+            print_usage(argv[0]);
+            return 1;
         }
     }
 
@@ -123,7 +121,7 @@ int main(int argc, char *argv[]) {
 
     // Open shared memory (read-only)
     printf("[Info] Opening shared memory...\n");
-    SharedFrameBuffer *shm = shm_frame_buffer_open();
+    SharedFrameBuffer* shm = shm_frame_buffer_open();
     if (!shm) {
         fprintf(stderr, "[Error] Failed to open shared memory\n");
         fprintf(stderr, "[Error] Make sure camera daemon is running:\n");
@@ -152,7 +150,7 @@ int main(int argc, char *argv[]) {
             if (frames_read == 0 && verbose) {
                 printf("[Info] Waiting for first frame...\n");
             }
-            usleep(10000);  // Sleep 10ms
+            usleep(10000); // Sleep 10ms
             continue;
         }
 
@@ -161,8 +159,8 @@ int main(int argc, char *argv[]) {
             int dropped = frame.frame_number - last_frame_number - 1;
             dropped_frames += dropped;
             if (verbose) {
-                printf("[Warning] Dropped %d frames (jump from %lu to %lu)\n",
-                       dropped, last_frame_number, frame.frame_number);
+                printf("[Warning] Dropped %d frames (jump from %lu to %lu)\n", dropped,
+                       last_frame_number, frame.frame_number);
             }
         }
 
@@ -172,15 +170,15 @@ int main(int argc, char *argv[]) {
         // Print frame info
         if (verbose) {
             printf("[Frame %06lu] Camera %d, %dx%d, %zu bytes, buffer_index=%d\n",
-                   frame.frame_number, frame.camera_id,
-                   frame.width, frame.height, frame.data_size, ret);
+                   frame.frame_number, frame.camera_id, frame.width, frame.height, frame.data_size,
+                   ret);
         } else if (frames_read % 30 == 0) {
             // Print progress every 30 frames
             clock_gettime(CLOCK_MONOTONIC, &current_time);
             double elapsed = timespec_diff_ms(&start_time, &current_time);
             double fps = (frames_read * 1000.0) / elapsed;
-            printf("[Progress] Read %d frames (%.1f fps, %d dropped)\n",
-                   frames_read, fps, dropped_frames);
+            printf("[Progress] Read %d frames (%.1f fps, %d dropped)\n", frames_read, fps,
+                   dropped_frames);
         }
 
         // Save frame if requested
@@ -194,7 +192,7 @@ int main(int argc, char *argv[]) {
         }
 
         // Sleep to avoid busy-waiting
-        usleep(1000);  // 1ms
+        usleep(1000); // 1ms
     }
 
     // Calculate statistics

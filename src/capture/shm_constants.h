@@ -22,24 +22,24 @@
 #define SHM_CONSTANTS_H
 
 // Shared memory segment names
-#define SHM_NAME_H265_ZC "/pet_camera_h265_zc"            // H.265 stream zero-copy
-#define SHM_NAME_YOLO_ZC "/pet_camera_yolo_zc"            // YOLO input zero-copy (unified, replaces zc_0/zc_1)
-#define SHM_NAME_DETECTIONS "/pet_camera_detections"      // YOLO detection results
-#define SHM_NAME_MJPEG_ZC "/pet_camera_mjpeg_zc"          // MJPEG NV12 zero-copy (camera → Go web_monitor)
+#define SHM_NAME_H265_ZC    "/pet_camera_h265_zc" // H.265 stream zero-copy
+#define SHM_NAME_YOLO_ZC    "/pet_camera_yolo_zc" // YOLO input zero-copy (unified, replaces zc_0/zc_1)
+#define SHM_NAME_DETECTIONS "/pet_camera_detections" // YOLO detection results
+#define SHM_NAME_MJPEG_ZC   "/pet_camera_mjpeg_zc" // MJPEG NV12 zero-copy (camera → Go web_monitor)
 
 // Buffer sizes
-#define RING_BUFFER_SIZE 6                                // 200ms buffer at 30fps (MJPEG only)
-#define MAX_DETECTIONS 10                                 // Maximum detections per frame
-#define NUM_CAMERAS 2                                     // DAY=0, NIGHT=1
+#define RING_BUFFER_SIZE 6  // 200ms buffer at 30fps (MJPEG only)
+#define MAX_DETECTIONS   10 // Maximum detections per frame
+#define NUM_CAMERAS      2  // DAY=0, NIGHT=1
 
 // ROI zero-copy SHM names (night camera pre-cropped 640x640 regions)
 // RDK X5 VSE supports max 5 output channels (Ch0-4). Ch3-4 used for ROI.
-#define SHM_NAME_ROI_ZC_0  "/pet_camera_roi_zc_0"
-#define SHM_NAME_ROI_ZC_1  "/pet_camera_roi_zc_1"
-#define NUM_ROI_REGIONS     2
+#define SHM_NAME_ROI_ZC_0 "/pet_camera_roi_zc_0"
+#define SHM_NAME_ROI_ZC_1 "/pet_camera_roi_zc_1"
+#define NUM_ROI_REGIONS   2
 
 // Zero-copy constants
-#define ZEROCOPY_MAX_PLANES 2                             // NV12: Y + UV
-#define HB_MEM_GRAPHIC_BUF_SIZE 160                       // sizeof(hb_mem_graphic_buf_t)
+#define ZEROCOPY_MAX_PLANES     2   // NV12: Y + UV
+#define HB_MEM_GRAPHIC_BUF_SIZE 160 // sizeof(hb_mem_graphic_buf_t)
 
 #endif // SHM_CONSTANTS_H
