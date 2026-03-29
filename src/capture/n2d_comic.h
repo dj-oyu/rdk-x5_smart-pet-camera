@@ -14,8 +14,8 @@
  * Crop region for a comic panel
  */
 typedef struct {
-    int src_x, src_y;    // Crop origin in source frame
-    int src_w, src_h;    // Crop size in source frame
+    int src_x, src_y; // Crop origin in source frame
+    int src_w, src_h; // Crop size in source frame
 } comic_crop_t;
 
 /**
@@ -42,15 +42,9 @@ typedef struct {
  * Returns:
  *   0 on success, negative error code on failure
  */
-int n2d_comic_compose(
-    const uint8_t *nv12_frames[],
-    const int frame_widths[],
-    const int frame_heights[],
-    const comic_crop_t crops[],
-    int num_panels,
-    int panel_w, int panel_h,
-    int margin, int gap,
-    uint8_t *out_nv12,
-    int out_w, int out_h);
+int n2d_comic_compose(const uint8_t* nv12_frames[], const int frame_widths[],
+                      const int frame_heights[], const comic_crop_t crops[], int num_panels,
+                      int panel_w, int panel_h, int margin, int gap, uint8_t* out_nv12, int out_w,
+                      int out_h);
 
 #endif // N2D_COMIC_H

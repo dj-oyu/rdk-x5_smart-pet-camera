@@ -27,7 +27,7 @@
 
 #define TAG "TestImport"
 
-static void dump_graphic_buf(const hb_mem_graphic_buf_t *gb) {
+static void dump_graphic_buf(const hb_mem_graphic_buf_t* gb) {
     printf("=== hb_mem_graphic_buf_t DUMP (sizeof=%zu) ===\n", sizeof(*gb));
     printf("  fd[3]          = {%d, %d, %d}\n", gb->fd[0], gb->fd[1], gb->fd[2]);
     printf("  plane_cnt      = %d\n", gb->plane_cnt);
@@ -37,29 +37,20 @@ static void dump_graphic_buf(const hb_mem_graphic_buf_t *gb) {
     printf("  stride         = %d\n", gb->stride);
     printf("  vstride        = %d\n", gb->vstride);
     printf("  is_contig      = %d\n", gb->is_contig);
-    printf("  share_id[3]    = {%d, %d, %d}\n",
-           gb->share_id[0], gb->share_id[1], gb->share_id[2]);
+    printf("  share_id[3]    = {%d, %d, %d}\n", gb->share_id[0], gb->share_id[1], gb->share_id[2]);
     printf("  flags          = %ld\n", (long)gb->flags);
-    printf("  size[3]        = {%lu, %lu, %lu}\n",
-           (unsigned long)gb->size[0],
-           (unsigned long)gb->size[1],
-           (unsigned long)gb->size[2]);
-    printf("  virt_addr[3]   = {0x%lx, 0x%lx, 0x%lx}\n",
-           (unsigned long)gb->virt_addr[0],
-           (unsigned long)gb->virt_addr[1],
-           (unsigned long)gb->virt_addr[2]);
-    printf("  phys_addr[3]   = {0x%lx, 0x%lx, 0x%lx}\n",
-           (unsigned long)gb->phys_addr[0],
-           (unsigned long)gb->phys_addr[1],
-           (unsigned long)gb->phys_addr[2]);
-    printf("  offset[3]      = {%lu, %lu, %lu}\n",
-           (unsigned long)gb->offset[0],
-           (unsigned long)gb->offset[1],
-           (unsigned long)gb->offset[2]);
+    printf("  size[3]        = {%lu, %lu, %lu}\n", (unsigned long)gb->size[0],
+           (unsigned long)gb->size[1], (unsigned long)gb->size[2]);
+    printf("  virt_addr[3]   = {0x%lx, 0x%lx, 0x%lx}\n", (unsigned long)gb->virt_addr[0],
+           (unsigned long)gb->virt_addr[1], (unsigned long)gb->virt_addr[2]);
+    printf("  phys_addr[3]   = {0x%lx, 0x%lx, 0x%lx}\n", (unsigned long)gb->phys_addr[0],
+           (unsigned long)gb->phys_addr[1], (unsigned long)gb->phys_addr[2]);
+    printf("  offset[3]      = {%lu, %lu, %lu}\n", (unsigned long)gb->offset[0],
+           (unsigned long)gb->offset[1], (unsigned long)gb->offset[2]);
     printf("=== END DUMP ===\n\n");
 }
 
-static void dump_raw_hex(const uint8_t *data, size_t len) {
+static void dump_raw_hex(const uint8_t* data, size_t len) {
     printf("Raw hex dump (%zu bytes):\n", len);
     for (size_t i = 0; i < len; i += 16) {
         printf("  [%3zu] ", i);
@@ -71,20 +62,17 @@ static void dump_raw_hex(const uint8_t *data, size_t len) {
     printf("\n");
 }
 
-static void dump_common_buf(const char *label, const hb_mem_common_buf_t *cb) {
+static void dump_common_buf(const char* label, const hb_mem_common_buf_t* cb) {
     printf("  %s: fd=%d, share_id=%d, flags=%ld, size=%lu, "
            "virt_addr=0x%lx, phys_addr=0x%lx, offset=%lu\n",
-           label, cb->fd, cb->share_id, (long)cb->flags,
-           (unsigned long)cb->size,
-           (unsigned long)cb->virt_addr,
-           (unsigned long)cb->phys_addr,
-           (unsigned long)cb->offset);
+           label, cb->fd, cb->share_id, (long)cb->flags, (unsigned long)cb->size,
+           (unsigned long)cb->virt_addr, (unsigned long)cb->phys_addr, (unsigned long)cb->offset);
 }
 
 /**
  * Test A: hb_mem_import_graph_buf with fd/virt_addr cleared to 0
  */
-static int test_import_graph_cleared(const hb_mem_graphic_buf_t *original) {
+static int test_import_graph_cleared(const hb_mem_graphic_buf_t* original) {
     printf("[Test A] hb_mem_import_graph_buf (fd=0, virt_addr=0)\n");
 
     hb_mem_graphic_buf_t in_buf;
@@ -109,13 +97,12 @@ static int test_import_graph_cleared(const hb_mem_graphic_buf_t *original) {
     dump_graphic_buf(&out_buf);
 
     // Verify we got valid data
-    printf("  Output fd[0]=%d, virt_addr[0]=0x%lx, size[0]=%lu\n",
-           out_buf.fd[0], (unsigned long)out_buf.virt_addr[0],
-           (unsigned long)out_buf.size[0]);
+    printf("  Output fd[0]=%d, virt_addr[0]=0x%lx, size[0]=%lu\n", out_buf.fd[0],
+           (unsigned long)out_buf.virt_addr[0], (unsigned long)out_buf.size[0]);
 
     // Read first 16 bytes from Y plane to verify access
     if (out_buf.virt_addr[0] && out_buf.size[0] > 0) {
-        uint8_t *data = (uint8_t *)out_buf.virt_addr[0];
+        uint8_t* data = (uint8_t*)out_buf.virt_addr[0];
         printf("  Y plane first 16 bytes: ");
         for (int i = 0; i < 16 && (size_t)i < out_buf.size[0]; i++) {
             printf("%02x ", data[i]);
@@ -137,7 +124,7 @@ static int test_import_graph_cleared(const hb_mem_graphic_buf_t *original) {
 /**
  * Test B: hb_mem_import_graph_buf with ALL original fields (no clearing)
  */
-static int test_import_graph_original(const hb_mem_graphic_buf_t *original) {
+static int test_import_graph_original(const hb_mem_graphic_buf_t* original) {
     printf("[Test B] hb_mem_import_graph_buf (original fields, no clearing)\n");
 
     hb_mem_graphic_buf_t in_buf;
@@ -168,7 +155,7 @@ static int test_import_graph_original(const hb_mem_graphic_buf_t *original) {
 /**
  * Test C: hb_mem_import_com_buf with share_id[0] only
  */
-static int test_import_com_share_id_only(const hb_mem_graphic_buf_t *original) {
+static int test_import_com_share_id_only(const hb_mem_graphic_buf_t* original) {
     printf("[Test C] hb_mem_import_com_buf (share_id=%d, other fields zeroed)\n",
            original->share_id[0]);
 
@@ -198,7 +185,7 @@ static int test_import_com_share_id_only(const hb_mem_graphic_buf_t *original) {
 
     // Verify data access
     if (out_buf.virt_addr && out_buf.size > 0) {
-        uint8_t *data = (uint8_t *)out_buf.virt_addr;
+        uint8_t* data = (uint8_t*)out_buf.virt_addr;
         printf("  First 16 bytes: ");
         for (int i = 0; i < 16 && (size_t)i < out_buf.size; i++) {
             printf("%02x ", data[i]);
@@ -218,10 +205,9 @@ static int test_import_com_share_id_only(const hb_mem_graphic_buf_t *original) {
 /**
  * Test D: hb_mem_import_com_buf with share_id + phys_addr + size
  */
-static int test_import_com_with_phys(const hb_mem_graphic_buf_t *original) {
+static int test_import_com_with_phys(const hb_mem_graphic_buf_t* original) {
     printf("[Test D] hb_mem_import_com_buf (share_id=%d, phys_addr=0x%lx, size=%lu)\n",
-           original->share_id[0],
-           (unsigned long)original->phys_addr[0],
+           original->share_id[0], (unsigned long)original->phys_addr[0],
            (unsigned long)(original->size[0] + original->size[1]));
 
     hb_mem_common_buf_t in_buf;
@@ -252,13 +238,12 @@ static int test_import_com_with_phys(const hb_mem_graphic_buf_t *original) {
 /**
  * Test E: hb_mem_import_com_buf per-plane (separate Y and UV)
  */
-static int test_import_com_per_plane(const hb_mem_graphic_buf_t *original) {
+static int test_import_com_per_plane(const hb_mem_graphic_buf_t* original) {
     printf("[Test E] hb_mem_import_com_buf per-plane\n");
 
     for (int plane = 0; plane < original->plane_cnt && plane < 2; plane++) {
-        printf("  Plane %d: share_id=%d, phys_addr=0x%lx, size=%lu\n",
-               plane, original->share_id[plane],
-               (unsigned long)original->phys_addr[plane],
+        printf("  Plane %d: share_id=%d, phys_addr=0x%lx, size=%lu\n", plane,
+               original->share_id[plane], (unsigned long)original->phys_addr[plane],
                (unsigned long)original->size[plane]);
 
         if (original->share_id[plane] == 0 && plane > 0) {
@@ -302,7 +287,7 @@ static int test_import_com_per_plane(const hb_mem_graphic_buf_t *original) {
 /**
  * Test F: hb_mem_import_graph_buf with fd set to -1 (invalid fd sentinel)
  */
-static int test_import_graph_fd_minus1(const hb_mem_graphic_buf_t *original) {
+static int test_import_graph_fd_minus1(const hb_mem_graphic_buf_t* original) {
     printf("[Test F] hb_mem_import_graph_buf (fd=-1, virt_addr=0)\n");
 
     hb_mem_graphic_buf_t in_buf;
@@ -337,7 +322,7 @@ static int test_import_graph_fd_minus1(const hb_mem_graphic_buf_t *original) {
 /**
  * Test G: hb_mem_import_graph_buf minimal (only share_id + plane_cnt + size)
  */
-static int test_import_graph_minimal(const hb_mem_graphic_buf_t *original) {
+static int test_import_graph_minimal(const hb_mem_graphic_buf_t* original) {
     printf("[Test G] hb_mem_import_graph_buf (minimal: share_id + plane_cnt + size only)\n");
 
     hb_mem_graphic_buf_t in_buf;
@@ -348,7 +333,7 @@ static int test_import_graph_minimal(const hb_mem_graphic_buf_t *original) {
     for (int i = 0; i < 3; i++) {
         in_buf.share_id[i] = original->share_id[i];
         in_buf.size[i] = original->size[i];
-        in_buf.fd[i] = -1;  // Invalid fd sentinel
+        in_buf.fd[i] = -1; // Invalid fd sentinel
     }
 
     hb_mem_graphic_buf_t out_buf;
@@ -375,7 +360,7 @@ static int test_import_graph_minimal(const hb_mem_graphic_buf_t *original) {
 /**
  * Test H: hb_mem_import_graph_buf with phys_addr also cleared
  */
-static int test_import_graph_clear_all_local(const hb_mem_graphic_buf_t *original) {
+static int test_import_graph_clear_all_local(const hb_mem_graphic_buf_t* original) {
     printf("[Test H] hb_mem_import_graph_buf (fd=0, virt_addr=0, phys_addr=0, offset=0)\n");
 
     hb_mem_graphic_buf_t in_buf;
@@ -409,7 +394,7 @@ static int test_import_graph_clear_all_local(const hb_mem_graphic_buf_t *origina
     return 0;
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
     log_init(LOG_LEVEL_DEBUG, stdout, 0);
 
     int use_night = 0;
@@ -419,7 +404,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    const char *shm_name = use_night ? SHM_NAME_ZEROCOPY_NIGHT : SHM_NAME_ZEROCOPY_DAY;
+    const char* shm_name = use_night ? SHM_NAME_ZEROCOPY_NIGHT : SHM_NAME_ZEROCOPY_DAY;
     printf("=== hb_mem Import API Test ===\n");
     printf("Using ZeroCopy SHM: %s\n\n", shm_name);
 
@@ -432,7 +417,7 @@ int main(int argc, char *argv[]) {
     printf("hb_mem module initialized\n\n");
 
     // Open ZeroCopy shared memory
-    ZeroCopyFrameBuffer *zc_shm = shm_zerocopy_open(shm_name);
+    ZeroCopyFrameBuffer* zc_shm = shm_zerocopy_open(shm_name);
     if (!zc_shm) {
         printf("FATAL: Failed to open ZeroCopy SHM: %s\n", shm_name);
         printf("Make sure camera daemon is running.\n");
@@ -456,7 +441,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Read frame metadata
-    ZeroCopyFrame *frame = &zc_shm->frame;
+    ZeroCopyFrame* frame = &zc_shm->frame;
     printf("\nFrame received:\n");
     printf("  frame_number   = %lu\n", (unsigned long)frame->frame_number);
     printf("  camera_id      = %d\n", frame->camera_id);
@@ -465,16 +450,14 @@ int main(int argc, char *argv[]) {
     printf("  format         = %d\n", frame->format);
     printf("  plane_cnt      = %d\n", frame->plane_cnt);
     printf("  share_id       = {%d, %d}\n", frame->share_id[0], frame->share_id[1]);
-    printf("  plane_size     = {%lu, %lu}\n",
-           (unsigned long)frame->plane_size[0],
+    printf("  plane_size     = {%lu, %lu}\n", (unsigned long)frame->plane_size[0],
            (unsigned long)frame->plane_size[1]);
     printf("  version        = %u\n", frame->version);
     printf("  consumed       = %u\n", frame->consumed);
     printf("\n");
 
     // Extract hb_mem_graphic_buf_t from raw bytes
-    _Static_assert(sizeof(hb_mem_graphic_buf_t) == HB_MEM_GRAPHIC_BUF_SIZE,
-        "Size mismatch");
+    _Static_assert(sizeof(hb_mem_graphic_buf_t) == HB_MEM_GRAPHIC_BUF_SIZE, "Size mismatch");
 
     hb_mem_graphic_buf_t original_buf;
     memcpy(&original_buf, frame->hb_mem_buf_data, sizeof(original_buf));
@@ -515,7 +498,7 @@ int main(int argc, char *argv[]) {
     printf("========================================\n");
     printf("SUMMARY\n");
     printf("========================================\n");
-    const char *test_names[] = {
+    const char* test_names[] = {
         "A: import_graph_buf (fd=0, vaddr=0)",
         "B: import_graph_buf (original, no clearing)",
         "C: import_com_buf (share_id only)",
@@ -528,7 +511,8 @@ int main(int argc, char *argv[]) {
     int pass_count = 0;
     for (int i = 0; i < num_tests; i++) {
         printf("  [%s] %s\n", results[i] == 0 ? "PASS" : "FAIL", test_names[i]);
-        if (results[i] == 0) pass_count++;
+        if (results[i] == 0)
+            pass_count++;
     }
     printf("\n%d/%d tests passed\n", pass_count, num_tests);
 

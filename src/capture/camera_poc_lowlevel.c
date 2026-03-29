@@ -34,14 +34,14 @@
 // Shared memory for IPC
 #include "shared_memory.h"
 
-#define RAW10 0x2B
-#define SENSOR_WIDTH_DEFAULT 1920
+#define RAW10                 0x2B
+#define SENSOR_WIDTH_DEFAULT  1920
 #define SENSOR_HEIGHT_DEFAULT 1080
-#define SENSOR_FPS_DEFAULT 30
-#define ENCODER_BITRATE 8000  // 8Mbps
+#define SENSOR_FPS_DEFAULT    30
+#define ENCODER_BITRATE       8000 // 8Mbps
 
 static volatile bool g_running = true;
-static SharedFrameBuffer *g_shm_h264 = NULL;
+static SharedFrameBuffer* g_shm_h264 = NULL;
 
 typedef struct {
     // VIO handles
@@ -72,30 +72,29 @@ static void signal_handler(int signo) {
     g_running = false;
 }
 
-static int init_camera_config(poc_context_t *ctx) {
+static int init_camera_config(poc_context_t* ctx) {
     // MIPI configuration for IMX219
-    ctx->mipi_config = (mipi_config_t){
-        .rx_enable = 1,
-        .rx_attr = {
-            .phy = 0,  // D-PHY
-            .lane = 2,
-            .datatype = RAW10,
-            .fps = ctx->fps,
-            .mclk = 24,
-            .mipiclk = 1728,
-            .width = ctx->sensor_width,
-            .height = ctx->sensor_height,
-            .linelenth = 3448,
-            .framelenth = 1166,
-            .settle = 30,
-            .channel_num = 1,
-            .channel_sel = {0},
-        },
-        .rx_ex_mask = 0x40,
-        .rx_attr_ex = {
-            .stop_check_instart = 1,
-        }
-    };
+    ctx->mipi_config = (mipi_config_t){.rx_enable = 1,
+                                       .rx_attr =
+                                           {
+                                               .phy = 0, // D-PHY
+                                               .lane = 2,
+                                               .datatype = RAW10,
+                                               .fps = ctx->fps,
+                                               .mclk = 24,
+                                               .mipiclk = 1728,
+                                               .width = ctx->sensor_width,
+                                               .height = ctx->sensor_height,
+                                               .linelenth = 3448,
+                                               .framelenth = 1166,
+                                               .settle = 30,
+                                               .channel_num = 1,
+                                               .channel_sel = {0},
+                                           },
+                                       .rx_ex_mask = 0x40,
+                                       .rx_attr_ex = {
+                                           .stop_check_instart = 1,
+                                       }};
 
     // Camera configuration for IMX219
     ctx->camera_config = (camera_config_t){
@@ -108,7 +107,7 @@ static int init_camera_config(poc_context_t *ctx) {
         .sensor_clk = 0,
         .gpio_enable_bit = 0x01,
         .gpio_level_bit = 0x00,
-        .bus_select = 0,  // Both cameras use bus_select=0
+        .bus_select = 0, // Both cameras use bus_select=0
         .bus_timeout = 0,
         .fps = ctx->fps,
         .width = ctx->sensor_width,
@@ -135,7 +134,7 @@ static int init_camera_config(poc_context_t *ctx) {
     return 0;
 }
 
-static int create_vio_pipeline(poc_context_t *ctx) {
+static int create_vio_pipeline(poc_context_t* ctx) {
     int ret = 0;
     uint32_t mipi_host = (ctx->camera_index == 1) ? 2 : 0;
     uint32_t hw_id = mipi_host;
@@ -150,18 +149,20 @@ static int create_vio_pipeline(poc_context_t *ctx) {
 
     // Create VIN node
     vin_node_attr_t vin_attr = {
-        .cim_attr = {
-            .mipi_rx = mipi_host,
-            .vc_index = 0,
-            .ipi_channel = 1,
-            .cim_isp_flyby = 1,
-            .func = {
-                .enable_frame_id = 1,
-                .set_init_frame_id = 0,
-                .hdr_mode = NOT_HDR,
-                .time_stamp_en = 0,
+        .cim_attr =
+            {
+                .mipi_rx = mipi_host,
+                .vc_index = 0,
+                .ipi_channel = 1,
+                .cim_isp_flyby = 1,
+                .func =
+                    {
+                        .enable_frame_id = 1,
+                        .set_init_frame_id = 0,
+                        .hdr_mode = NOT_HDR,
+                        .time_stamp_en = 0,
+                    },
             },
-        },
     };
 
     vin_ichn_attr_t vin_ichn_attr = {
@@ -173,10 +174,11 @@ static int create_vio_pipeline(poc_context_t *ctx) {
     vin_ochn_attr_t vin_ochn_attr = {
         .ddr_en = 1,
         .ochn_attr_type = VIN_BASIC_ATTR,
-        .vin_basic_attr = {
-            .format = RAW10,
-            .wstride = ctx->sensor_width * 2,
-        },
+        .vin_basic_attr =
+            {
+                .format = RAW10,
+                .wstride = ctx->sensor_width * 2,
+            },
     };
 
     ret = hbn_vnode_open(HB_VIN, hw_id, AUTO_ALLOC_ID, &ctx->vin_node_handle);
@@ -186,13 +188,16 @@ static int create_vio_pipeline(poc_context_t *ctx) {
     }
 
     ret = hbn_vnode_set_attr(ctx->vin_node_handle, &vin_attr);
-    if (ret != 0) return ret;
+    if (ret != 0)
+        return ret;
 
     ret = hbn_vnode_set_ichn_attr(ctx->vin_node_handle, 0, &vin_ichn_attr);
-    if (ret != 0) return ret;
+    if (ret != 0)
+        return ret;
 
     ret = hbn_vnode_set_ochn_attr(ctx->vin_node_handle, 0, &vin_ochn_attr);
-    if (ret != 0) return ret;
+    if (ret != 0)
+        return ret;
 
     hbn_buf_alloc_attr_t alloc_attr = {
         .buffers_num = 3,
@@ -200,20 +205,22 @@ static int create_vio_pipeline(poc_context_t *ctx) {
         .flags = HB_MEM_USAGE_CPU_READ_OFTEN | HB_MEM_USAGE_CPU_WRITE_OFTEN | HB_MEM_USAGE_CACHED,
     };
     ret = hbn_vnode_set_ochn_buf_attr(ctx->vin_node_handle, 0, &alloc_attr);
-    if (ret != 0) return ret;
+    if (ret != 0)
+        return ret;
 
     printf("[PoC] VIN node created (HW ID: %d)\n", hw_id);
 
     // Create ISP node
     isp_attr_t isp_attr = {
-        .input_mode = 1,  // mcm
+        .input_mode = 1, // mcm
         .sensor_mode = ISP_NORMAL_M,
-        .crop = {
-            .x = 0,
-            .y = 0,
-            .w = ctx->sensor_width,
-            .h = ctx->sensor_height,
-        },
+        .crop =
+            {
+                .x = 0,
+                .y = 0,
+                .w = ctx->sensor_width,
+                .h = ctx->sensor_height,
+            },
     };
 
     isp_ichn_attr_t isp_ichn_attr = {
@@ -230,19 +237,24 @@ static int create_vio_pipeline(poc_context_t *ctx) {
     };
 
     ret = hbn_vnode_open(HB_ISP, 0, AUTO_ALLOC_ID, &ctx->isp_node_handle);
-    if (ret != 0) return ret;
+    if (ret != 0)
+        return ret;
 
     ret = hbn_vnode_set_attr(ctx->isp_node_handle, &isp_attr);
-    if (ret != 0) return ret;
+    if (ret != 0)
+        return ret;
 
     ret = hbn_vnode_set_ichn_attr(ctx->isp_node_handle, 0, &isp_ichn_attr);
-    if (ret != 0) return ret;
+    if (ret != 0)
+        return ret;
 
     ret = hbn_vnode_set_ochn_attr(ctx->isp_node_handle, 0, &isp_ochn_attr);
-    if (ret != 0) return ret;
+    if (ret != 0)
+        return ret;
 
     ret = hbn_vnode_set_ochn_buf_attr(ctx->isp_node_handle, 0, &alloc_attr);
-    if (ret != 0) return ret;
+    if (ret != 0)
+        return ret;
 
     printf("[PoC] ISP node created\n");
 
@@ -258,12 +270,13 @@ static int create_vio_pipeline(poc_context_t *ctx) {
 
     vse_ochn_attr_t vse_ochn_attr = {
         .chn_en = CAM_TRUE,
-        .roi = {
-            .x = 0,
-            .y = 0,
-            .w = ctx->sensor_width,
-            .h = ctx->sensor_height,
-        },
+        .roi =
+            {
+                .x = 0,
+                .y = 0,
+                .w = ctx->sensor_width,
+                .h = ctx->sensor_height,
+            },
         .target_w = ctx->out_width,
         .target_h = ctx->out_height,
         .fmt = FRM_FMT_NV12,
@@ -271,44 +284,53 @@ static int create_vio_pipeline(poc_context_t *ctx) {
     };
 
     ret = hbn_vnode_open(HB_VSE, 0, AUTO_ALLOC_ID, &ctx->vse_node_handle);
-    if (ret != 0) return ret;
+    if (ret != 0)
+        return ret;
 
     ret = hbn_vnode_set_attr(ctx->vse_node_handle, &vse_attr);
-    if (ret != 0) return ret;
+    if (ret != 0)
+        return ret;
 
     ret = hbn_vnode_set_ichn_attr(ctx->vse_node_handle, 0, &vse_ichn_attr);
-    if (ret != 0) return ret;
+    if (ret != 0)
+        return ret;
 
     ret = hbn_vnode_set_ochn_attr(ctx->vse_node_handle, 0, &vse_ochn_attr);
-    if (ret != 0) return ret;
+    if (ret != 0)
+        return ret;
 
     ret = hbn_vnode_set_ochn_buf_attr(ctx->vse_node_handle, 0, &alloc_attr);
-    if (ret != 0) return ret;
+    if (ret != 0)
+        return ret;
 
-    printf("[PoC] VSE node created (scale %dx%d -> %dx%d)\n",
-           ctx->sensor_width, ctx->sensor_height, ctx->out_width, ctx->out_height);
+    printf("[PoC] VSE node created (scale %dx%d -> %dx%d)\n", ctx->sensor_width, ctx->sensor_height,
+           ctx->out_width, ctx->out_height);
 
     // Create and bind vflow
     ret = hbn_vflow_create(&ctx->vflow_fd);
-    if (ret != 0) return ret;
+    if (ret != 0)
+        return ret;
 
     ret = hbn_vflow_add_vnode(ctx->vflow_fd, ctx->vin_node_handle);
-    if (ret != 0) return ret;
+    if (ret != 0)
+        return ret;
 
     ret = hbn_vflow_add_vnode(ctx->vflow_fd, ctx->isp_node_handle);
-    if (ret != 0) return ret;
+    if (ret != 0)
+        return ret;
 
     ret = hbn_vflow_add_vnode(ctx->vflow_fd, ctx->vse_node_handle);
-    if (ret != 0) return ret;
+    if (ret != 0)
+        return ret;
 
     // Bind: VIN -> ISP -> VSE
-    ret = hbn_vflow_bind_vnode(ctx->vflow_fd, ctx->vin_node_handle, 1,
-                                ctx->isp_node_handle, 0);
-    if (ret != 0) return ret;
+    ret = hbn_vflow_bind_vnode(ctx->vflow_fd, ctx->vin_node_handle, 1, ctx->isp_node_handle, 0);
+    if (ret != 0)
+        return ret;
 
-    ret = hbn_vflow_bind_vnode(ctx->vflow_fd, ctx->isp_node_handle, 0,
-                                ctx->vse_node_handle, 0);
-    if (ret != 0) return ret;
+    ret = hbn_vflow_bind_vnode(ctx->vflow_fd, ctx->isp_node_handle, 0, ctx->vse_node_handle, 0);
+    if (ret != 0)
+        return ret;
 
     // Attach camera to VIN
     ret = hbn_camera_attach_to_vin(ctx->cam_fd, ctx->vin_node_handle);
@@ -328,9 +350,9 @@ static int create_vio_pipeline(poc_context_t *ctx) {
     return 0;
 }
 
-static int init_encoder(poc_context_t *ctx) {
+static int init_encoder(poc_context_t* ctx) {
     int ret = 0;
-    media_codec_context_t *encoder = &ctx->encoder_ctx;
+    media_codec_context_t* encoder = &ctx->encoder_ctx;
 
     memset(encoder, 0, sizeof(media_codec_context_t));
 
@@ -344,7 +366,8 @@ static int init_encoder(poc_context_t *ctx) {
     encoder->video_enc_params.pix_fmt = MC_PIXEL_FORMAT_NV12;
 
     // Buffer configuration (CRITICAL for encoder to work!)
-    encoder->video_enc_params.bitstream_buf_size = (ctx->out_width * ctx->out_height * 3 / 2 + 0x3ff) & ~0x3ff;
+    encoder->video_enc_params.bitstream_buf_size =
+        (ctx->out_width * ctx->out_height * 3 / 2 + 0x3ff) & ~0x3ff;
     encoder->video_enc_params.frame_buf_count = 3;
     encoder->video_enc_params.bitstream_buf_count = 3;
 
@@ -353,8 +376,8 @@ static int init_encoder(poc_context_t *ctx) {
     encoder->video_enc_params.gop_params.decoding_refresh_type = 2;
 
     // Misc settings
-    encoder->video_enc_params.rot_degree = 0;  // MC_CCW_0
-    encoder->video_enc_params.mir_direction = 0;  // MC_DIRECTION_NONE
+    encoder->video_enc_params.rot_degree = 0;    // MC_CCW_0
+    encoder->video_enc_params.mir_direction = 0; // MC_DIRECTION_NONE
     encoder->video_enc_params.frame_cropping_flag = 0;
     encoder->video_enc_params.enable_user_pts = 1;
 
@@ -398,13 +421,13 @@ static int init_encoder(poc_context_t *ctx) {
         return ret;
     }
 
-    printf("[PoC] Encoder initialized (H.264 CBR %dx%d @ %dfps, %dkbps)\n",
-           ctx->out_width, ctx->out_height, ctx->fps, ctx->bitrate);
+    printf("[PoC] Encoder initialized (H.264 CBR %dx%d @ %dfps, %dkbps)\n", ctx->out_width,
+           ctx->out_height, ctx->fps, ctx->bitrate);
 
     return 0;
 }
 
-static void cleanup(poc_context_t *ctx) {
+static void cleanup(poc_context_t* ctx) {
     printf("[PoC] Cleaning up...\n");
 
     // Stop encoder
@@ -418,15 +441,20 @@ static void cleanup(poc_context_t *ctx) {
         hbn_vflow_stop(ctx->vflow_fd);
         hbn_vflow_destroy(ctx->vflow_fd);
     }
-    if (ctx->vse_node_handle > 0) hbn_vnode_close(ctx->vse_node_handle);
-    if (ctx->isp_node_handle > 0) hbn_vnode_close(ctx->isp_node_handle);
-    if (ctx->vin_node_handle > 0) hbn_vnode_close(ctx->vin_node_handle);
-    if (ctx->cam_fd > 0) hbn_camera_destroy(ctx->cam_fd);
+    if (ctx->vse_node_handle > 0)
+        hbn_vnode_close(ctx->vse_node_handle);
+    if (ctx->isp_node_handle > 0)
+        hbn_vnode_close(ctx->isp_node_handle);
+    if (ctx->vin_node_handle > 0)
+        hbn_vnode_close(ctx->vin_node_handle);
+    if (ctx->cam_fd > 0)
+        hbn_camera_destroy(ctx->cam_fd);
 
     // Close shared memory
     if (g_shm_h264) {
-        const char *shm_name = getenv("SHM_NAME_H264");
-        if (!shm_name) shm_name = "/pet_camera_stream";
+        const char* shm_name = getenv("SHM_NAME_H264");
+        if (!shm_name)
+            shm_name = "/pet_camera_stream";
         shm_frame_buffer_destroy_named(g_shm_h264, shm_name);
         g_shm_h264 = NULL;
     }
@@ -434,7 +462,7 @@ static void cleanup(poc_context_t *ctx) {
     hb_mem_module_close();
 }
 
-static int run_encode_loop(poc_context_t *ctx) {
+static int run_encode_loop(poc_context_t* ctx) {
     int ret = 0;
     int frame_count = 0;
     hbn_vnode_image_t vio_frame = {0};
@@ -482,15 +510,13 @@ static int run_encode_loop(poc_context_t *ctx) {
 
         // Copy Y plane
         if (input_buffer.vframe_buf.vir_ptr[0] && vio_frame.buffer.virt_addr[0]) {
-            memcpy(input_buffer.vframe_buf.vir_ptr[0],
-                   vio_frame.buffer.virt_addr[0],
+            memcpy(input_buffer.vframe_buf.vir_ptr[0], vio_frame.buffer.virt_addr[0],
                    ctx->out_width * ctx->out_height);
         }
 
         // Copy UV plane
         if (input_buffer.vframe_buf.vir_ptr[1] && vio_frame.buffer.virt_addr[1]) {
-            memcpy(input_buffer.vframe_buf.vir_ptr[1],
-                   vio_frame.buffer.virt_addr[1],
+            memcpy(input_buffer.vframe_buf.vir_ptr[1], vio_frame.buffer.virt_addr[1],
                    ctx->out_width * ctx->out_height / 2);
         }
 
@@ -516,14 +542,15 @@ static int run_encode_loop(poc_context_t *ctx) {
             Frame shm_frame = {0};
             shm_frame.width = ctx->out_width;
             shm_frame.height = ctx->out_height;
-            shm_frame.format = 4;  // H.265
+            shm_frame.format = 4; // H.265
             shm_frame.data_size = output_buffer.vstream_buf.size;
             shm_frame.frame_number = frame_count;
             shm_frame.camera_id = ctx->camera_index;
             clock_gettime(CLOCK_MONOTONIC, &shm_frame.timestamp);
 
             if (output_buffer.vstream_buf.size <= sizeof(shm_frame.data)) {
-                memcpy(shm_frame.data, output_buffer.vstream_buf.vir_ptr, output_buffer.vstream_buf.size);
+                memcpy(shm_frame.data, output_buffer.vstream_buf.vir_ptr,
+                       output_buffer.vstream_buf.size);
                 shm_frame_buffer_write(g_shm_h264, &shm_frame);
             }
         }
@@ -539,24 +566,24 @@ static int run_encode_loop(poc_context_t *ctx) {
         if (frame_count % 30 == 0) {
             clock_gettime(CLOCK_MONOTONIC, &current_time);
             double elapsed = (current_time.tv_sec - start_time.tv_sec) +
-                            (current_time.tv_nsec - start_time.tv_nsec) / 1e9;
+                             (current_time.tv_nsec - start_time.tv_nsec) / 1e9;
             double fps = frame_count / elapsed;
-            printf("[PoC] Frame %d, FPS: %.2f, H.264 size: %u bytes\n",
-                   frame_count, fps, output_buffer.vstream_buf.size);
+            printf("[PoC] Frame %d, FPS: %.2f, H.264 size: %u bytes\n", frame_count, fps,
+                   output_buffer.vstream_buf.size);
         }
     }
 
     clock_gettime(CLOCK_MONOTONIC, &current_time);
     double total_elapsed = (current_time.tv_sec - start_time.tv_sec) +
-                          (current_time.tv_nsec - start_time.tv_nsec) / 1e9;
+                           (current_time.tv_nsec - start_time.tv_nsec) / 1e9;
     double avg_fps = frame_count / total_elapsed;
-    printf("[PoC] Completed: %d frames in %.2f seconds (avg FPS: %.2f)\n",
-           frame_count, total_elapsed, avg_fps);
+    printf("[PoC] Completed: %d frames in %.2f seconds (avg FPS: %.2f)\n", frame_count,
+           total_elapsed, avg_fps);
 
     return 0;
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
     int ret = 0;
     poc_context_t ctx = {0};
 
@@ -577,8 +604,8 @@ int main(int argc, char *argv[]) {
     }
 
     printf("=== Low-level API PoC ===\n");
-    printf("Camera: %d, Resolution: %dx%d @ %dfps\n",
-           ctx.camera_index, ctx.out_width, ctx.out_height, ctx.fps);
+    printf("Camera: %d, Resolution: %dx%d @ %dfps\n", ctx.camera_index, ctx.out_width,
+           ctx.out_height, ctx.fps);
 
     // Signal handling
     signal(SIGINT, signal_handler);
@@ -592,8 +619,9 @@ int main(int argc, char *argv[]) {
     }
 
     // Initialize shared memory for H.264 output
-    const char *shm_name = getenv("SHM_NAME_H264");
-    if (!shm_name) shm_name = "/pet_camera_stream";
+    const char* shm_name = getenv("SHM_NAME_H264");
+    if (!shm_name)
+        shm_name = "/pet_camera_stream";
 
     g_shm_h264 = shm_frame_buffer_create_named(shm_name);
     if (!g_shm_h264) {

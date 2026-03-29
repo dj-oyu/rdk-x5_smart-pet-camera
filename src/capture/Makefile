@@ -68,7 +68,7 @@ LDLIBS_HB_MEM_IMPORT := $(LDLIBS_COMMON) -lpthread -lhbmem
 
 DAEMON_ARGS ?= -C 0 -P 1
 
-.PHONY: all clean test switcher-demo switcher-daemon switcher-daemon-build run run-daemon cleanup kill-processes help poc-lowlevel poc-vse-dual isp-lowlight awb-tuning test-hb-mem-import test-hb-mem-dma jpeg-encoder-lib
+.PHONY: all clean test switcher-demo switcher-daemon switcher-daemon-build run run-daemon cleanup kill-processes help poc-lowlevel poc-vse-dual isp-lowlight awb-tuning test-hb-mem-import test-hb-mem-dma jpeg-encoder-lib format check-format lint
 
 all: $(DAEMON_BINARY) $(JPEG_ENCODER_LIB) $(N2D_COMIC_LIB) $(RGN_OVERLAY_LIB) $(N2D_LETTERBOX_SO)
 
@@ -221,3 +221,26 @@ help:
 	@echo "  make isp-lowlight    Build ISP low-light enhancement test tool"
 	@echo "  make awb-tuning      Build interactive AWB tuning tool"
 	@echo "  make test-hb-mem-import  Build hb_mem import API test (run with camera daemon active)"
+	@echo "  make format          Format all C sources with clang-format"
+	@echo "  make check-format    Check formatting without modifying files (for CI)"
+	@echo "  make lint            Run clang-tidy static analysis (device only, needs vendor headers)"
+
+FORMAT_SOURCES := $(wildcard *.c *.h)
+
+format:
+	@echo "[Format] clang-format -i ..."
+	@clang-format -i $(FORMAT_SOURCES)
+	@echo "[Format] Done"
+
+check-format:
+	@echo "[Format] Checking formatting..."
+	@clang-format --dry-run --Werror $(FORMAT_SOURCES) && echo "[Format] OK" || (echo "[Format] FAIL: run 'make format'" && exit 1)
+
+lint:
+	@echo "[Lint] clang-tidy ..."
+	@which clang-tidy > /dev/null 2>&1 || (echo "[Lint] clang-tidy not found, skipping" && exit 0)
+	@for src in $(filter %.c,$(FORMAT_SOURCES)); do \
+		echo "  $$src"; \
+		clang-tidy $$src -- $(CFLAGS) $(CPPFLAGS) 2>&1 | grep -v "warnings generated" || true; \
+	done
+	@echo "[Lint] Done"

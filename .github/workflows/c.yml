@@ -1,0 +1,33 @@
+name: "C"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/capture/**'
+      - '.github/workflows/c.yml'
+  workflow_dispatch:
+
+jobs:
+  format:
+    name: clang-format
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install clang-format-13
+        run: sudo apt-get update && sudo apt-get install -y clang-format-13
+
+      - name: Check formatting
+        working-directory: src/capture
+        run: |
+          unformatted=$(clang-format-13 --dry-run --Werror *.c *.h 2>&1 || true)
+          if [ -n "$unformatted" ]; then
+            echo "::error::Unformatted C files detected. Run 'make format' in src/capture/"
+            clang-format-13 --dry-run --Werror *.c *.h
+            exit 1
+          fi
+          echo "All C files formatted correctly"
