@@ -15,10 +15,10 @@
  */
 typedef enum {
     LOG_LEVEL_DEBUG = 0,
-    LOG_LEVEL_INFO  = 1,
-    LOG_LEVEL_WARN  = 2,
+    LOG_LEVEL_INFO = 1,
+    LOG_LEVEL_WARN = 2,
     LOG_LEVEL_ERROR = 3,
-    LOG_LEVEL_NONE  = 4   // Disable all logging
+    LOG_LEVEL_NONE = 4 // Disable all logging
 } log_level_t;
 
 /**
@@ -31,7 +31,7 @@ typedef enum {
  *   output: Output stream (stdout, stderr, or file)
  *   enable_timestamp: Enable timestamp in log messages
  */
-void log_init(log_level_t level, FILE *output, int enable_timestamp);
+void log_init(log_level_t level, FILE* output, int enable_timestamp);
 
 /**
  * Set log level
@@ -54,7 +54,7 @@ void log_set_level(log_level_t level);
  *   fmt: Printf-style format string
  *   ...: Format arguments
  */
-void log_message(log_level_t level, const char *module, const char *fmt, ...);
+void log_message(log_level_t level, const char* module, const char* fmt, ...);
 
 /**
  * Logging macros

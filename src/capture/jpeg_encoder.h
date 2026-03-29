@@ -20,10 +20,10 @@ typedef struct {
     media_codec_context_t codec_ctx;
 
     // Configuration
-    int width;             // Frame width
-    int height;            // Frame height
-    int quality;           // JPEG quality (1-100)
-    int initialized;       // 1 if encoder is initialized and ready
+    int width;       // Frame width
+    int height;      // Frame height
+    int quality;     // JPEG quality (1-100)
+    int initialized; // 1 if encoder is initialized and ready
 } jpeg_encoder_context_t;
 
 /**
@@ -49,8 +49,7 @@ typedef struct {
  *   - Thread-safe: Each thread should have its own context
  *   - Call jpeg_encoder_destroy() when done
  */
-int jpeg_encoder_create(jpeg_encoder_context_t *ctx,
-                        int width, int height, int quality);
+int jpeg_encoder_create(jpeg_encoder_context_t* ctx, int width, int height, int quality);
 
 /**
  * Encode one NV12 frame to JPEG
@@ -76,9 +75,8 @@ int jpeg_encoder_create(jpeg_encoder_context_t *ctx,
  *   - Typical encoding time: 3-8ms on RDK-X5 hardware
  *   - This function handles all buffer management internally
  */
-int jpeg_encoder_encode_frame(jpeg_encoder_context_t *ctx,
-                              const uint8_t *nv12_y, const uint8_t *nv12_uv,
-                              uint8_t *jpeg_out, size_t *jpeg_size,
+int jpeg_encoder_encode_frame(jpeg_encoder_context_t* ctx, const uint8_t* nv12_y,
+                              const uint8_t* nv12_uv, uint8_t* jpeg_out, size_t* jpeg_size,
                               size_t max_size, int timeout_ms);
 
 /**
@@ -90,6 +88,6 @@ int jpeg_encoder_encode_frame(jpeg_encoder_context_t *ctx,
  * Args:
  *   ctx: Encoder context
  */
-void jpeg_encoder_destroy(jpeg_encoder_context_t *ctx);
+void jpeg_encoder_destroy(jpeg_encoder_context_t* ctx);
 
 #endif // JPEG_ENCODER_H

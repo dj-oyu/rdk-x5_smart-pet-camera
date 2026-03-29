@@ -22,54 +22,54 @@
  * Frame data for encoder queue
  */
 typedef struct {
-  // VSE frame held until encoding completes (eliminates pool buffer memcpy)
-  hbn_vnode_image_t vse_frame; // VSE output frame (virt_addr used for encoding)
+    // VSE frame held until encoding completes (eliminates pool buffer memcpy)
+    hbn_vnode_image_t vse_frame; // VSE output frame (virt_addr used for encoding)
 
-  // Metadata
-  uint64_t frame_number;     // Frame number
-  int camera_id;             // Camera ID
-  struct timespec timestamp; // Frame timestamp
+    // Metadata
+    uint64_t frame_number;     // Frame number
+    int camera_id;             // Camera ID
+    struct timespec timestamp; // Frame timestamp
 } encoder_frame_t;
 
 /**
  * Encoder thread context
  */
 typedef struct {
-  // Thread control
-  pthread_t thread;
-  volatile bool running;
+    // Thread control
+    pthread_t thread;
+    volatile bool running;
 
-  // Encoder
-  encoder_context_t *encoder;
+    // Encoder
+    encoder_context_t* encoder;
 
-  // Output (zero-copy: share_id via SHM, no bitstream memcpy)
-  H265ZeroCopyBuffer *shm_h265_zc;
+    // Output (zero-copy: share_id via SHM, no bitstream memcpy)
+    H265ZeroCopyBuffer* shm_h265_zc;
 
-  // Configuration
-  int output_width;
-  int output_height;
+    // Configuration
+    int output_width;
+    int output_height;
 
-  // Queue (lock-free ring buffer)
-  encoder_frame_t queue[ENCODER_QUEUE_SIZE];
-  volatile uint32_t write_index; // Producer writes here
-  volatile uint32_t read_index;  // Consumer reads here
+    // Queue (lock-free ring buffer)
+    encoder_frame_t queue[ENCODER_QUEUE_SIZE];
+    volatile uint32_t write_index; // Producer writes here
+    volatile uint32_t read_index;  // Consumer reads here
 
-  // VSE handle (for releasing frames after encoding)
-  hbn_vnode_handle_t vse_handle;
+    // VSE handle (for releasing frames after encoding)
+    hbn_vnode_handle_t vse_handle;
 
-  // Previous VPU output (held for Go to import, released on next frame)
-  encoder_output_t prev_enc_out;
+    // Previous VPU output (held for Go to import, released on next frame)
+    encoder_output_t prev_enc_out;
 
-  // Condition variable for event-driven wakeup (replaces usleep polling)
-  pthread_mutex_t queue_mutex;
-  pthread_cond_t queue_cond;
+    // Condition variable for event-driven wakeup (replaces usleep polling)
+    pthread_mutex_t queue_mutex;
+    pthread_cond_t queue_cond;
 
-  // Statistics
-  volatile uint64_t frames_encoded;
-  volatile uint64_t frames_dropped;
+    // Statistics
+    volatile uint64_t frames_encoded;
+    volatile uint64_t frames_dropped;
 
-  // Night-assist TCP relay (NULL if disabled)
-  TcpRelay *tcp_relay;
+    // Night-assist TCP relay (NULL if disabled)
+    TcpRelay* tcp_relay;
 } encoder_thread_t;
 
 /**
@@ -87,9 +87,8 @@ typedef struct {
  * Returns:
  *   0 on success, negative error code on failure
  */
-int encoder_thread_create(encoder_thread_t *ctx, encoder_context_t *encoder,
-                          H265ZeroCopyBuffer *shm_h265_zc,
-                          int output_width, int output_height,
+int encoder_thread_create(encoder_thread_t* ctx, encoder_context_t* encoder,
+                          H265ZeroCopyBuffer* shm_h265_zc, int output_width, int output_height,
                           hbn_vnode_handle_t vse_handle);
 
 /**
@@ -101,7 +100,7 @@ int encoder_thread_create(encoder_thread_t *ctx, encoder_context_t *encoder,
  * Returns:
  *   0 on success, negative error code on failure
  */
-int encoder_thread_start(encoder_thread_t *ctx);
+int encoder_thread_start(encoder_thread_t* ctx);
 
 /**
  * Push VSE frame to encoder queue (zero-copy, non-blocking)
@@ -121,11 +120,8 @@ int encoder_thread_start(encoder_thread_t *ctx);
  *   - Caller must NOT release vse_frame on success (encoder thread will release)
  *   - Caller MUST release vse_frame on failure (-1 return)
  */
-int encoder_thread_push_frame(encoder_thread_t *ctx,
-                              hbn_vnode_image_t *vse_frame,
-                              uint64_t frame_number,
-                              int camera_id,
-                              struct timespec timestamp);
+int encoder_thread_push_frame(encoder_thread_t* ctx, const hbn_vnode_image_t* vse_frame,
+                              uint64_t frame_number, int camera_id, struct timespec timestamp);
 
 /**
  * Stop encoder thread
@@ -133,7 +129,7 @@ int encoder_thread_push_frame(encoder_thread_t *ctx,
  * Args:
  *   ctx: Encoder thread context
  */
-void encoder_thread_stop(encoder_thread_t *ctx);
+void encoder_thread_stop(encoder_thread_t* ctx);
 
 /**
  * Destroy encoder thread context
@@ -141,6 +137,6 @@ void encoder_thread_stop(encoder_thread_t *ctx);
  * Args:
  *   ctx: Encoder thread context
  */
-void encoder_thread_destroy(encoder_thread_t *ctx);
+void encoder_thread_destroy(encoder_thread_t* ctx);
 
 #endif // ENCODER_THREAD_H
