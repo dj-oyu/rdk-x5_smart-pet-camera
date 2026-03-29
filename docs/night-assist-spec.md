@@ -45,7 +45,7 @@ graph TB
 | 選択 | 理由 |
 |------|------|
 | H.265 TCP (not MJPEG) | MJPEGはオーバーレイ焼込済でYOLO不適。H.265は600kbps (MJPEG比1/25) |
-| C実装TCP relay (not Go) | encoder_thread内でVPUバッファ直接write。追加memcpyゼロ |
+| C実装TCP relay (not Go) | encoder_thread内でVPUバッファ直接write。追加memcpyゼロ。VPS/SPS/PPSキャッシュ不要(シンプル) |
 | SSE (not HTTP POST) | 持続接続。検出頻度変更に透過的に対応 |
 | カメラモード通知なし | TCP relay が camera_id==1 のみ送出。フレーム到着=night, 停止=day |
 | 全キーフレームYOLO | 1fps x 11ms = NPU 1.1%。シンプルで確実 |
@@ -234,14 +234,17 @@ H.265ストリームをffmpegでデコードし、キーフレームごとにYOL
 ### ffmpeg コマンド
 
 ```bash
-ffmpeg -c:v hevc_axdec -f hevc -i tcp://<rdk-x5-host>:9265 \
-  -vf "select=eq(pict_type\,I)" -vsync 0 \
+ffmpeg -analyzeduration 10000000 -probesize 10000000 \
+  -f hevc -i tcp://<rdk-x5-host>:9265 \
+  -vf "select=eq(pict_type\,I)" -fps_mode passthrough \
   -f image2pipe -vcodec mjpeg -q:v 2 pipe:1
 ```
 
-- `hevc_axdec`: AXERA HW decoder (VPU)
+- SW decoder (probesize大): TCP relay は VPS/SPS/PPS prepend しないため mid-stream join に対応
+- `hevc_axdec` (HW) はストリーム途中参加で SEGV するため不使用
 - `select=eq(pict_type,I)`: キーフレームのみ (1fps @ GOP=30)
 - `image2pipe` + `mjpeg`: stdout に JPEG ストリーム出力
+- 1fps SW decode の CPU コストは無視できるレベル
 
 ### 検出ループ
 
