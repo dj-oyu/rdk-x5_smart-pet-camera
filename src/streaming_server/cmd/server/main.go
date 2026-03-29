@@ -54,6 +54,8 @@ type Server struct {
 
 	// Pool for recorder frame buffers — avoids per-frame heap allocation
 	recorderBufPool sync.Pool
+	// Pool for SHM read buffers — avoids per-frame allocation in ReadLatestCopy
+	shmBufPool sync.Pool
 }
 
 func main() {
@@ -148,6 +150,13 @@ func NewServer() (*Server, error) {
 				return &buf
 			},
 		},
+		shmBufPool: sync.Pool{
+			New: func() interface{} {
+				// Pre-allocate 512KB — typical H.265 frame size
+				buf := make([]byte, 0, 512*1024)
+				return &buf
+			},
+		},
 	}
 
 	// Setup HTTP routes
@@ -223,6 +232,9 @@ func (s *Server) readFrames() {
 		for frame := range sendCh {
 			s.webrtc.SendFrame(frame)
 			s.metrics.WebRTCFramesSent.Add(1)
+			// Return the SHM read buffer to pool now that the sender is done with it.
+			buf := frame.Data
+			s.shmBufPool.Put(&buf)
 		}
 	}()
 
@@ -272,15 +284,19 @@ func (s *Server) readFrames() {
 		lastVer = ver
 		missCount = 0
 
-		// Read latest frame as an independent copy (import + memcpy + VPU free).
+		// Read latest frame into a pooled buffer (import + memcpy + VPU free).
 		// frame.Data is a plain Go []byte; no VPU lifetime dependency.
-		frame, err := s.shmReader.ReadLatestCopy()
+		// The Stage 2 sender goroutine returns frame.Data to shmBufPool after SendFrame.
+		shmBufPtr := s.shmBufPool.Get().(*[]byte)
+		frame, err := s.shmReader.ReadLatestCopyBuf(*shmBufPtr)
 		if err != nil {
+			s.shmBufPool.Put(shmBufPtr)
 			s.metrics.ReadErrors.Add(1)
 			logger.Warn("Reader", "Read error: %v", err)
 			continue
 		}
 		if frame == nil {
+			s.shmBufPool.Put(shmBufPtr)
 			continue
 		}
 
@@ -290,6 +306,8 @@ func (s *Server) readFrames() {
 		// Process (NAL parsing, header extraction) — safe on our owned copy.
 		if err := s.processor.Process(frame); err != nil {
 			s.metrics.ProcessErrors.Add(1)
+			buf := frame.Data
+			s.shmBufPool.Put(&buf)
 			continue
 		}
 		if s.processor.HasHeaders() {
@@ -328,6 +346,9 @@ func (s *Server) readFrames() {
 		case sendCh <- frame:
 		default:
 			// Sender busy; drop WebRTC frame for this tick (recorder already saved it).
+			// Return the SHM buffer immediately since Stage 2 won't see this frame.
+			buf := frame.Data
+			s.shmBufPool.Put(&buf)
 			logger.Debug("Reader", "WebRTC sender busy, dropping frame %d", frame.FrameNumber)
 		}
 	}

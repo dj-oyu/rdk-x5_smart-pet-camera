@@ -289,6 +289,13 @@ func (r *Reader) ReadLatest() (*types.VideoFrame, error) {
 // ReadLatestCopy reads the latest H.265 frame with import+copy+free in one call.
 // Safe for async consumers (recorder). No VPU buffer lifetime dependency.
 func (r *Reader) ReadLatestCopy() (*types.VideoFrame, error) {
+	return r.ReadLatestCopyBuf(nil)
+}
+
+// ReadLatestCopyBuf is like ReadLatestCopy but reuses dst when capacity is
+// sufficient. The caller must not use dst after calling this — frame.Data owns it.
+// Pass nil to force a fresh allocation (equivalent to ReadLatestCopy).
+func (r *Reader) ReadLatestCopyBuf(dst []byte) (*types.VideoFrame, error) {
 	if r.shm == nil {
 		return nil, fmt.Errorf("shared memory not open")
 	}
@@ -302,7 +309,12 @@ func (r *Reader) ReadLatestCopy() (*types.VideoFrame, error) {
 	}
 
 	dataSize := int(cFrame.data_size)
-	buf := make([]byte, dataSize)
+	buf := dst
+	if cap(buf) < dataSize {
+		buf = make([]byte, dataSize)
+	} else {
+		buf = buf[:dataSize]
+	}
 
 	ret := C.import_h265_copy(
 		(*C.uint8_t)(unsafe.Pointer(&cFrame.hb_mem_buf_data[0])),
