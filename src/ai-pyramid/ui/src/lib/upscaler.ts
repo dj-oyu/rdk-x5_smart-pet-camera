@@ -20,8 +20,29 @@ export async function ensureTF(): Promise<string> {
     await tf.setBackend("webgpu");
     await tf.ready();
   } catch { /* webgl fallback */ }
+  registerCustomLayers();
   backend = tf.getBackend();
   return backend;
+}
+
+/** Register custom Keras layers used by ESRGAN models */
+function registerCustomLayers() {
+  class MultiplyBeta extends tf.layers.Layer {
+    private beta: number;
+    constructor(config: any) {
+      super(config);
+      this.beta = config.beta ?? 0.2;
+    }
+    call(inputs: any) {
+      return tf.tidy(() => {
+        const x = Array.isArray(inputs) ? inputs[0] : inputs;
+        return x.mul(this.beta);
+      });
+    }
+    static get className() { return "MultiplyBeta"; }
+    getConfig() { return { ...super.getConfig(), beta: this.beta }; }
+  }
+  tf.serialization.registerClass(MultiplyBeta);
 }
 
 export async function loadModel(name: string): Promise<any> {
