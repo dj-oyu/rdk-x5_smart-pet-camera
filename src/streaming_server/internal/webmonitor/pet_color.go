@@ -88,7 +88,9 @@ func classifyPetColor(nv12 []byte, w, h int, bbox BoundingBox) PetColorResult {
 	// Phase 1b: Sample UV values from bbox (2px stride, aligned to UV grid)
 	uvBase := w * h
 	type uvSample struct{ u, v int }
-	var samples []uvSample
+	// Pre-allocate with bbox-based capacity estimate to avoid reallocs.
+	maxSamples := ((y1-y0)/2 + 1) * ((x1-x0)/2 + 1)
+	samples := make([]uvSample, 0, maxSamples)
 
 	for py := y0; py < y1; py += 2 {
 		for px := x0; px < x1; px += 2 {
@@ -98,9 +100,9 @@ func classifyPetColor(nv12 []byte, w, h int, bbox BoundingBox) PetColorResult {
 			if idx+1 >= len(nv12) {
 				continue
 			}
-			u := int(nv12[idx])
-			v := int(nv12[idx+1])
-			samples = append(samples, uvSample{u, v})
+			// 1 IsSliceInBounds instead of 2 IsInBounds for pair[0]/pair[1].
+			pair := nv12[idx : idx+2 : idx+2]
+			samples = append(samples, uvSample{int(pair[0]), int(pair[1])})
 		}
 	}
 
@@ -129,7 +131,8 @@ func classifyPetColor(nv12 []byte, w, h int, bbox BoundingBox) PetColorResult {
 		minCount = 1
 	}
 
-	filtered := samples[:0:0]
+	// Keep backing array: reuses samples' allocation, avoids a separate alloc.
+	filtered := samples[:0]
 	for _, s := range samples {
 		bu := s.u >> quantShift
 		bv := s.v >> quantShift
