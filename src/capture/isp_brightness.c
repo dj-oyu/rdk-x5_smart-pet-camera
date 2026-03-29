@@ -199,7 +199,7 @@ int isp_apply_lowlight_profile(hbn_vnode_handle_t isp_handle, BrightnessZone zon
         return -1;
     }
 
-    isp_lowlight_profile_t profile = isp_get_profile_for_zone(zone);
+    const isp_lowlight_profile_t profile = isp_get_profile_for_zone(zone);
     int ret;
 
     // Apply 3DNR (Temporal Noise Reduction) only
@@ -227,10 +227,10 @@ bool isp_update_lowlight_correction(hbn_vnode_handle_t isp_handle, isp_lowlight_
         return state ? state->correction_active : false;
     }
 
-    isp_lowlight_hysteresis_t hyst = DEFAULT_HYSTERESIS;
-    double now = get_time_seconds();
-    float brightness = brightness_result->brightness_avg;
-    BrightnessZone zone = brightness_result->zone;
+    const isp_lowlight_hysteresis_t hyst = DEFAULT_HYSTERESIS;
+    const double now = get_time_seconds();
+    const float brightness = brightness_result->brightness_avg;
+    const BrightnessZone zone = brightness_result->zone;
 
     // Log brightness periodically for debugging (every ~1 second based on frame rate)
     static int log_counter = 0;

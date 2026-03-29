@@ -22,7 +22,7 @@ int jpeg_encoder_create(jpeg_encoder_context_t* ctx, int width, int height, int 
     ctx->height = height;
     ctx->quality = quality;
 
-    media_codec_context_t* encoder = &ctx->codec_ctx;
+    media_codec_context_t* const encoder = &ctx->codec_ctx;
 
     encoder->encoder = 1;
     encoder->codec_id = MEDIA_CODEC_ID_JPEG;
@@ -110,8 +110,8 @@ int jpeg_encoder_encode_frame(jpeg_encoder_context_t* ctx, const uint8_t* nv12_y
     input_buffer.vframe_buf.size = ctx->width * ctx->height * 3 / 2;
 
     // Copy NV12 data to input buffer
-    size_t y_size = ctx->width * ctx->height;
-    size_t uv_size = ctx->width * ctx->height / 2;
+    const size_t y_size = ctx->width * ctx->height;
+    const size_t uv_size = ctx->width * ctx->height / 2;
 
     if (input_buffer.vframe_buf.vir_ptr[0]) {
         memcpy(input_buffer.vframe_buf.vir_ptr[0], nv12_y, y_size);

@@ -135,10 +135,10 @@ static void draw_rect(uint8_t* nv12, int w, int h, const overlay_rect_t* r) {
 
 static void draw_text(uint8_t* nv12, int w, int h, const overlay_text_t* t) {
     uint8_t* y_plane = nv12;
-    int len = (int)strlen(t->text);
-    int tw = len * 6 * t->scale;
-    int th = 7 * t->scale;
-    int pad = 4;
+    const int len = (int)strlen(t->text);
+    const int tw = len * 6 * t->scale;
+    const int th = 7 * t->scale;
+    const int pad = 4;
 
     // Background
     for (int py = t->y - pad; py < t->y + th + pad && py < h; py++) {

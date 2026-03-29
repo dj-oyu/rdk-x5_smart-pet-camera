@@ -116,7 +116,7 @@ int encoder_thread_start(encoder_thread_t* ctx);
  *   - Caller must NOT release vse_frame on success (encoder thread will release)
  *   - Caller MUST release vse_frame on failure (-1 return)
  */
-int encoder_thread_push_frame(encoder_thread_t* ctx, hbn_vnode_image_t* vse_frame,
+int encoder_thread_push_frame(encoder_thread_t* ctx, const hbn_vnode_image_t* vse_frame,
                               uint64_t frame_number, int camera_id, struct timespec timestamp);
 
 /**

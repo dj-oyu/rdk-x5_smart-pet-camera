@@ -22,7 +22,7 @@
 // ============================================================================
 
 static void* shm_create_or_open_ex(const char* name, size_t size, bool create, bool* created_new) {
-    int flags = create ? (O_CREAT | O_RDWR) : O_RDWR;
+    const int flags = create ? (O_CREAT | O_RDWR) : O_RDWR;
     int fd = shm_open(name, flags, 0666);
     if (fd == -1) {
         if (create)
@@ -97,11 +97,11 @@ int shm_detection_write(LatestDetectionResult* shm, const DetectionEntry* detect
     return 0;
 }
 
-uint32_t shm_detection_read(LatestDetectionResult* shm, DetectionEntry* out_detections,
+uint32_t shm_detection_read(const LatestDetectionResult* shm, DetectionEntry* out_detections,
                             int* out_count) {
     if (!shm || !out_detections || !out_count)
         return 0;
-    uint32_t version = __atomic_load_n(&shm->version, __ATOMIC_ACQUIRE);
+    const uint32_t version = __atomic_load_n(&shm->version, __ATOMIC_ACQUIRE);
     int count = shm->num_detections;
     if (count > MAX_DETECTIONS)
         count = MAX_DETECTIONS;
@@ -151,7 +151,7 @@ void shm_zerocopy_destroy(ZeroCopyFrameBuffer* shm, const char* name) {
 int shm_zerocopy_write(ZeroCopyFrameBuffer* shm, const ZeroCopyFrame* frame) {
     if (!shm || !frame)
         return -1;
-    uint32_t ver = __atomic_load_n(&shm->frame.version, __ATOMIC_ACQUIRE);
+    const uint32_t ver = __atomic_load_n(&shm->frame.version, __ATOMIC_ACQUIRE);
     memcpy(&shm->frame, frame, sizeof(ZeroCopyFrame));
     __atomic_store_n(&shm->frame.version, ver + 1, __ATOMIC_RELEASE);
     sem_post(&shm->new_frame_sem);
@@ -195,7 +195,7 @@ void shm_roi_zc_destroy(ZeroCopyFrameBuffer* shm, const char* shm_name) {
 int shm_roi_zc_write(ZeroCopyFrameBuffer* shm, const ZeroCopyFrame* frame) {
     if (!shm || !frame)
         return -1;
-    uint32_t ver = __atomic_load_n(&shm->frame.version, __ATOMIC_ACQUIRE);
+    const uint32_t ver = __atomic_load_n(&shm->frame.version, __ATOMIC_ACQUIRE);
     memcpy(&shm->frame, frame, sizeof(ZeroCopyFrame));
     __atomic_store_n(&shm->frame.version, ver + 1, __ATOMIC_RELEASE);
     sem_post(&shm->new_frame_sem);
@@ -241,7 +241,7 @@ void shm_h265_zc_destroy(H265ZeroCopyBuffer* shm, const char* name) {
 int shm_h265_zc_write(H265ZeroCopyBuffer* shm, const H265ZeroCopyFrame* frame) {
     if (!shm || !frame)
         return -1;
-    uint32_t ver = __atomic_load_n(&shm->frame.version, __ATOMIC_ACQUIRE);
+    const uint32_t ver = __atomic_load_n(&shm->frame.version, __ATOMIC_ACQUIRE);
     memcpy(&shm->frame, frame, sizeof(H265ZeroCopyFrame));
     __atomic_store_n(&shm->frame.version, ver + 1, __ATOMIC_RELEASE);
     sem_post(&shm->new_frame_sem);

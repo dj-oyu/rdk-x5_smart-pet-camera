@@ -67,7 +67,7 @@ void log_message(log_level_t level, const char* module, const char* fmt, ...) {
     }
 
     // Check if output is a terminal (for color support)
-    int use_color = isatty(fileno(out));
+    const int use_color = isatty(fileno(out));
 
     // Print log level with optional color
     if (use_color) {

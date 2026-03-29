@@ -84,7 +84,7 @@ int n2d_letterbox_process(n2d_letterbox_ctx_t* ctx, uint64_t src_phys_addr_y,
     src_buf.cacheMode = N2D_CACHE_128;
     src_buf.alignedw = gcmALIGN(src_buf.width, 64);
     src_buf.alignedh = src_buf.height;
-    float nv12_bpp = gcmALIGN(16, 8) * 1.0f / 8;
+    const float nv12_bpp = gcmALIGN(16, 8) * 1.0f / 8;
     src_buf.stride = gcmALIGN((int)(src_buf.alignedw * nv12_bpp), 64);
 
     n2d_user_memory_desc_t desc = {0};

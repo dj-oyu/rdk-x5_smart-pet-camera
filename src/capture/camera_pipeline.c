@@ -105,7 +105,7 @@ int pipeline_create(camera_pipeline_t* pipeline, int camera_index, int sensor_wi
 
     // Night camera ROI SHM: 2 pre-cropped 640x640 regions for YOLO (VSE Ch3-4)
     if (pipeline->camera_index == 1) {
-        const char* roi_names[] = {SHM_NAME_ROI_ZC_0, SHM_NAME_ROI_ZC_1};
+        const char* const roi_names[] = {SHM_NAME_ROI_ZC_0, SHM_NAME_ROI_ZC_1};
         for (int i = 0; i < NUM_ROI_REGIONS; i++) {
             pipeline->shm_roi_zc[i] = shm_roi_zc_create(roi_names[i]);
             if (!pipeline->shm_roi_zc[i]) {
@@ -263,7 +263,7 @@ int pipeline_run(camera_pipeline_t* pipeline, volatile bool* running_flag) {
 
         // Detect camera switch: when this camera becomes active, reset brightness cache
         // and immediately fetch fresh brightness from ISP
-        bool camera_just_activated = write_active && !prev_active;
+        const bool camera_just_activated = write_active && !prev_active;
         if (camera_just_activated) {
             cached_brightness.valid = false;
             LOG_INFO(Pipeline_log_header, "Camera activated, resetting brightness cache");
@@ -272,7 +272,7 @@ int pipeline_run(camera_pipeline_t* pipeline, volatile bool* running_flag) {
 
         // Determine brightness check interval based on camera type and state
         // Use bitwise AND for fast modulo with power-of-2 intervals
-        bool is_day_camera = (pipeline->camera_index == 0);
+        const bool is_day_camera = (pipeline->camera_index == 0);
         int brightness_mask;
         if (is_day_camera) {
             brightness_mask =
@@ -280,7 +280,7 @@ int pipeline_run(camera_pipeline_t* pipeline, volatile bool* running_flag) {
         } else {
             brightness_mask = ISP_BRIGHTNESS_MASK_NIGHT; // NIGHT camera: ~4.3 sec interval
         }
-        bool is_brightness_frame = (frame_number & brightness_mask) == 0;
+        const bool is_brightness_frame = (frame_number & brightness_mask) == 0;
 
         // Both DAY and NIGHT cameras retrieve brightness
         // - DAY: used for camera switching decisions
@@ -337,8 +337,8 @@ int pipeline_run(camera_pipeline_t* pipeline, volatile bool* running_flag) {
                 // VSE Ch1 resolution depends on camera:
                 // - Day camera (index 0): 640x360
                 // - Night camera (index 1): 1280x720 (for ROI-based detection)
-                int yolo_width = (pipeline->camera_index == 1) ? 1280 : 640;
-                int yolo_height = (pipeline->camera_index == 1) ? 720 : 360;
+                const int yolo_width = (pipeline->camera_index == 1) ? 1280 : 640;
+                const int yolo_height = (pipeline->camera_index == 1) ? 720 : 360;
                 ZeroCopyFrame zc_frame = {0};
                 zc_frame.frame_number = frame_number;
                 zc_frame.timestamp = frame_timestamp;

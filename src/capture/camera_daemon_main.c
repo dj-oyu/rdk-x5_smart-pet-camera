@@ -105,7 +105,7 @@ static void* switcher_thread(void* arg) {
             }
         }
 
-        int interval_ms =
+        const int interval_ms =
             (g_active_camera == 0) ? ctx->poll_interval_day_ms : ctx->poll_interval_night_ms;
         usleep(interval_ms * 1000);
     }
@@ -122,7 +122,7 @@ int main(int argc, char* argv[]) {
     log_level_t log_level = LOG_LEVEL_INFO;
     int single_camera = -1; // -1 = dual, 0 = day only, 1 = night only
 
-    static struct option long_options[] = {
+    static const struct option long_options[] = {
         {"width", required_argument, 0, 'W'},  {"height", required_argument, 0, 'H'},
         {"fps", required_argument, 0, 'f'},    {"bitrate", required_argument, 0, 'b'},
         {"camera", required_argument, 0, 'C'}, {"verbose", no_argument, 0, 'v'},
@@ -176,7 +176,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Create pipelines
-    int num_cameras = (single_camera >= 0) ? 1 : 2;
+    const int num_cameras = (single_camera >= 0) ? 1 : 2;
     int camera_indices[2] = {0, 1};
     if (single_camera >= 0) {
         camera_indices[0] = single_camera;

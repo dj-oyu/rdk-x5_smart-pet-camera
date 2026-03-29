@@ -23,7 +23,7 @@ int encoder_create(encoder_context_t* ctx, int camera_index, int width, int heig
     ctx->fps = fps;
     ctx->bitrate = bitrate;
 
-    media_codec_context_t* encoder = &ctx->codec_ctx;
+    media_codec_context_t* const encoder = &ctx->codec_ctx;
 
     encoder->encoder = 1;
     encoder->codec_id = MEDIA_CODEC_ID_H265;

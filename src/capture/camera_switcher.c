@@ -70,7 +70,7 @@ void camera_switcher_resume_auto(CameraSwitchController* ctrl) {
 }
 
 static void update_brightness_stat(BrightnessStat* stat, double value) {
-    double ts = now_seconds();
+    const double ts = now_seconds();
     struct timespec tval;
     tval.tv_sec = (time_t)ts;
     tval.tv_nsec = (long)((ts - tval.tv_sec) * 1e9);
@@ -96,7 +96,7 @@ CameraSwitchDecision camera_switcher_record_brightness(CameraSwitchController* c
         return CAMERA_SWITCH_DECISION_NONE;
     }
 
-    double now = now_seconds();
+    const double now = now_seconds();
     CameraSwitchDecision decision = CAMERA_SWITCH_DECISION_NONE;
 
     if (ctrl->active_camera == CAMERA_MODE_DAY) {

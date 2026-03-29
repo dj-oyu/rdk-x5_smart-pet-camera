@@ -70,9 +70,9 @@ static void* encoder_thread_worker(void* arg) {
                 encoder_release_output(ctx->encoder, &ctx->prev_enc_out, 2000);
             }
             ctx->prev_enc_out = enc_out;
-            uint64_t encoded = __atomic_add_fetch(&ctx->frames_encoded, 1, __ATOMIC_RELAXED);
+            const uint64_t encoded = __atomic_add_fetch(&ctx->frames_encoded, 1, __ATOMIC_RELAXED);
             if (encoded % 300 == 0) {
-                uint64_t dropped = __atomic_load_n(&ctx->frames_dropped, __ATOMIC_RELAXED);
+                const uint64_t dropped = __atomic_load_n(&ctx->frames_dropped, __ATOMIC_RELAXED);
                 LOG_INFO("EncoderThread", "Encoder stats: encoded=%lu, dropped=%lu (%.1f%%)",
                          encoded, dropped, (float)dropped / (encoded + dropped) * 100.0f);
             }
@@ -129,20 +129,20 @@ int encoder_thread_start(encoder_thread_t* ctx) {
     return 0;
 }
 
-int encoder_thread_push_frame(encoder_thread_t* ctx, hbn_vnode_image_t* vse_frame,
+int encoder_thread_push_frame(encoder_thread_t* ctx, const hbn_vnode_image_t* vse_frame,
                               uint64_t frame_number, int camera_id, struct timespec timestamp) {
     if (!ctx || !vse_frame)
         return -1;
 
-    uint32_t write_idx = __atomic_load_n(&ctx->write_index, __ATOMIC_ACQUIRE);
-    uint32_t read_idx = __atomic_load_n(&ctx->read_index, __ATOMIC_ACQUIRE);
+    const uint32_t write_idx = __atomic_load_n(&ctx->write_index, __ATOMIC_ACQUIRE);
+    const uint32_t read_idx = __atomic_load_n(&ctx->read_index, __ATOMIC_ACQUIRE);
 
     if (write_idx - read_idx >= ENCODER_QUEUE_SIZE) {
         __atomic_fetch_add(&ctx->frames_dropped, 1, __ATOMIC_RELAXED);
         return -1;
     }
 
-    uint32_t slot = write_idx % ENCODER_QUEUE_SIZE;
+    const uint32_t slot = write_idx % ENCODER_QUEUE_SIZE;
     encoder_frame_t* frame = &ctx->queue[slot];
     frame->vse_frame = *vse_frame;
     frame->frame_number = frame_number;

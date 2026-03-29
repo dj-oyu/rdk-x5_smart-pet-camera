@@ -114,7 +114,7 @@ void shm_detection_close(LatestDetectionResult* shm);
 void shm_detection_destroy(LatestDetectionResult* shm);
 int shm_detection_write(LatestDetectionResult* shm, const DetectionEntry* detections, int count,
                         uint64_t frame_number, double timestamp);
-uint32_t shm_detection_read(LatestDetectionResult* shm, DetectionEntry* out_detections,
+uint32_t shm_detection_read(const LatestDetectionResult* shm, DetectionEntry* out_detections,
                             int* out_count);
 
 #endif // SHARED_MEMORY_H
