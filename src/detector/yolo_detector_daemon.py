@@ -446,7 +446,7 @@ class YoloDetectorDaemon:
         self.night_collect_max: int = 500  # Max frames to collect per session
         self.night_collect_interval: int = 150  # Collect every N frames during motion
 
-        # Night-assist merger (set via --ai-pyramid-url, None if disabled)
+        # Night-assist merger (auto-enabled via PET_ALBUM_HOST env var, None if disabled)
         self.night_assist_merger: NightAssistMerger | None = None
 
     def _select_zone(self, bbox: "DetBbox") -> int:
@@ -1857,13 +1857,6 @@ def main() -> int:
         action="store_true",
         help="Disable ROI mode (process full frame with resize)",
     )
-    parser.add_argument(
-        "--ai-pyramid-url",
-        type=str,
-        default=None,
-        help="ai-pyramid base URL for night-assist SSE (e.g. http://192.168.8.100:8082). Enables NightAssistMerger.",
-    )
-
     args = parser.parse_args()
 
     log_levels = {
@@ -1888,9 +1881,13 @@ def main() -> int:
         daemon.roi_enabled = False
         logger.info("ROI mode disabled via --no-roi flag")
 
-    if args.ai_pyramid_url:
-        daemon.night_assist_merger = NightAssistMerger(args.ai_pyramid_url)
-        logger.info(f"Night-assist merger enabled: {args.ai_pyramid_url}")
+    # Night-assist merger: auto-enable from PET_ALBUM_HOST / PET_ALBUM_PORT env vars
+    pet_album_host = os.environ.get("PET_ALBUM_HOST", "")
+    if pet_album_host:
+        pet_album_port = os.environ.get("PET_ALBUM_PORT", "8082")
+        ai_pyramid_url = f"http://{pet_album_host}:{pet_album_port}"
+        daemon.night_assist_merger = NightAssistMerger(ai_pyramid_url)
+        logger.info(f"Night-assist merger enabled: {ai_pyramid_url}")
 
     try:
         daemon.setup()
