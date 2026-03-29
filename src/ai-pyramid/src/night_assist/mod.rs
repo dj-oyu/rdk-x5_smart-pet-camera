@@ -297,22 +297,28 @@ fn normalize_class_name(class_id: i32, name: &str) -> String {
 }
 
 /// Spawn ffmpeg for H.265 keyframe decode to JPEG pipe.
+///
+/// Uses SW decoder with increased probesize to handle mid-stream TCP joins
+/// (hevc_axdec crashes on streams without leading VPS/SPS/PPS).
+/// At 1fps keyframe-only, SW decode CPU cost is negligible.
 fn spawn_ffmpeg(tcp_url: &str) -> Result<Child, std::io::Error> {
     Command::new("ffmpeg")
         .args([
             "-hide_banner",
             "-loglevel",
             "warning",
-            "-c:v",
-            "hevc_axdec",
+            "-analyzeduration",
+            "10000000",
+            "-probesize",
+            "10000000",
             "-f",
             "hevc",
             "-i",
             tcp_url,
             "-vf",
             "select=eq(pict_type\\,I)",
-            "-vsync",
-            "0",
+            "-fps_mode",
+            "passthrough",
             "-f",
             "image2pipe",
             "-vcodec",
