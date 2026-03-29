@@ -56,6 +56,8 @@ pub struct AppState {
     pub detect_client: Option<Arc<DetectClient>>,
     pub local_detector: Option<Arc<crate::detect::local::LocalDetector>>,
     pub backfill_running: Arc<AtomicBool>,
+    pub night_assist_tx:
+        Option<tokio::sync::broadcast::Sender<crate::night_assist::DetectionEvent>>,
 }
 
 /// Load pet display names from environment variables.
@@ -123,6 +125,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/daily-summary", post(handle_daily_summary))
         .route("/api/pet-names", get(handle_pet_names))
         .route("/api/events", get(handle_sse))
+        .route(
+            "/api/night-assist/detections/stream",
+            get(handle_night_assist_sse),
+        )
         .route("/health", get(handle_health))
         .route("/test/websr", get(handle_websr_test))
         .route("/test/esrgan", get(handle_esrgan_test))
@@ -833,6 +839,34 @@ async fn handle_sse(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+async fn handle_night_assist_sse(State(state): State<AppState>) -> impl IntoResponse {
+    let Some(ref tx) = state.night_assist_tx else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "night assist not configured",
+        )
+            .into_response();
+    };
+    let rx = tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
+        Ok(event) => {
+            let event_name = if event.detections.is_empty() {
+                "heartbeat"
+            } else {
+                "detection"
+            };
+            let json = serde_json::to_string(&event).unwrap_or_default();
+            Some(Ok::<_, std::convert::Infallible>(
+                Event::default().event(event_name).data(json),
+            ))
+        }
+        Err(_) => None,
+    });
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
 async fn handle_pet_names(State(state): State<AppState>) -> impl IntoResponse {
     match state.queries().distinct_pet_ids().await {
         Ok(ids) => {
@@ -934,7 +968,7 @@ async fn handle_daily_summary(
 
     let vlm_config = state.context.vlm_config();
     let vlm_client = crate::vlm::VlmClient::new(vlm_config);
-    let _permit = state.context.vlm_semaphore().acquire().await.unwrap();
+    let _permit = state.context.npu_semaphore().acquire().await.unwrap();
     match vlm_client
         .summarize_day(&captions, random_photo.as_deref())
         .await
@@ -1130,6 +1164,7 @@ mod tests {
             detect_client: None,
             local_detector: None,
             backfill_running: Arc::new(AtomicBool::new(false)),
+            night_assist_tx: None,
         }
     }
 
