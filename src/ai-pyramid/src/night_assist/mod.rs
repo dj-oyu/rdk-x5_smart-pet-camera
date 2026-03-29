@@ -1,7 +1,10 @@
 //! Night Assist — supplementary YOLO detection for rdk-x5 night camera.
 //!
-//! Connects to rdk-x5 H.265 TCP relay via ffmpeg, decodes keyframes,
-//! runs YOLO26l on NPU, and broadcasts detections over SSE.
+//! Connects to rdk-x5 H.265 TCP relay via ffmpeg, decodes keyframes to raw RGB,
+//! applies CLAHE for IR contrast enhancement, runs YOLO26l on NPU, and broadcasts
+//! detections over SSE.
+
+mod clahe;
 
 use crate::detect::local::{LocalDetector, RawLocalDetection};
 use serde::Serialize;
@@ -23,6 +26,11 @@ const NIGHT_ASSIST_CLASSES: &[i32] = &[
     56, // chair
 ];
 
+/// Frame dimensions (must match encoder config on rdk-x5).
+const FRAME_WIDTH: usize = 1280;
+const FRAME_HEIGHT: usize = 720;
+const FRAME_SIZE: usize = FRAME_WIDTH * FRAME_HEIGHT * 3 / 2; // NV12
+
 /// Configuration for the night assist worker.
 #[derive(Debug, Clone)]
 pub struct NightAssistConfig {
@@ -30,7 +38,7 @@ pub struct NightAssistConfig {
     pub rdk_x5_host: String,
     /// TCP relay port (default 9265)
     pub relay_port: u16,
-    /// Temp file for JPEG frames
+    /// Temp file for JPEG frames (after CLAHE)
     pub frame_path: PathBuf,
 }
 
@@ -69,14 +77,7 @@ pub struct DetectionEvent {
     pub timestamp: f64,
 }
 
-/// Heartbeat event payload.
-#[derive(Debug, Clone, Serialize)]
-pub struct HeartbeatEvent {
-    pub status: String,
-    pub fps: f64,
-}
-
-/// Night assist worker: ffmpeg decode + YOLO loop + broadcast.
+/// Night assist worker: ffmpeg decode + CLAHE + YOLO loop + broadcast.
 pub struct NightAssistWorker {
     config: NightAssistConfig,
     detector: Arc<LocalDetector>,
@@ -126,14 +127,13 @@ impl NightAssistWorker {
         }
     }
 
-    /// Run a single ffmpeg session: decode + YOLO loop.
+    /// Run a single ffmpeg session: raw decode + CLAHE + YOLO loop.
     async fn run_session(&self) -> Result<(), String> {
         let tcp_url = format!(
             "tcp://{}:{}",
             self.config.rdk_x5_host, self.config.relay_port
         );
 
-        // Spawn ffmpeg: H.265 HW decode → keyframe-only → JPEG pipe
         let mut child = spawn_ffmpeg(&tcp_url).map_err(|e| format!("spawn ffmpeg: {e}"))?;
 
         let stdout = child
@@ -155,23 +155,23 @@ impl NightAssistWorker {
             });
         }
 
-        // Frame watch channel: producer writes JPEG bytes, consumer reads latest
+        // Frame watch channel: raw RGB24 frames
         let (frame_tx, mut frame_rx) = watch::channel::<Option<Vec<u8>>>(None);
 
-        // JPEG reader task: parse JPEG stream from ffmpeg stdout
+        // Raw frame reader: read exactly FRAME_SIZE bytes per frame
         let reader_handle = tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
-            let mut buf = Vec::with_capacity(256 * 1024);
+            let mut buf = vec![0u8; FRAME_SIZE];
 
             loop {
-                match read_jpeg_frame(&mut reader, &mut buf).await {
-                    Ok(true) => {
+                match reader.read_exact(&mut buf).await {
+                    Ok(_) => {
                         let _ = frame_tx.send(Some(buf.clone()));
-                        buf.clear();
                     }
-                    Ok(false) => break, // EOF
                     Err(e) => {
-                        warn!("JPEG read error: {e}");
+                        if e.kind() != std::io::ErrorKind::UnexpectedEof {
+                            warn!("Raw frame read error: {e}");
+                        }
                         break;
                     }
                 }
@@ -185,61 +185,63 @@ impl NightAssistWorker {
         let heartbeat_interval = Duration::from_secs(10);
 
         loop {
-            // Wait for new frame or timeout
             let got_frame = tokio::time::timeout(idle_timeout, frame_rx.changed()).await;
 
             match got_frame {
                 Ok(Ok(())) => {
-                    // New frame available
-                    let jpeg_data = frame_rx.borrow_and_update().clone();
-                    if let Some(data) = jpeg_data {
+                    let rgb_data = frame_rx.borrow_and_update().clone();
+                    if let Some(data) = rgb_data {
                         self.process_frame(&data, &mut frames_processed).await;
                     }
                 }
-                Ok(Err(_)) => {
-                    // Channel closed (ffmpeg exited)
-                    break;
-                }
-                Err(_) => {
-                    // Timeout — no frames for 3s, likely day mode
-                    // Just keep waiting (don't break — TCP reconnect is expensive)
-                }
+                Ok(Err(_)) => break, // Channel closed
+                Err(_) => {}         // Timeout — idle, keep waiting
             }
 
             // Periodic heartbeat
             if last_heartbeat.elapsed() >= heartbeat_interval {
-                let fps =
-                    frames_processed as f64 / last_heartbeat.elapsed().as_secs_f64().max(0.001);
                 let _ = self.detection_tx.send(DetectionEvent {
                     detections: vec![],
                     source_width: 0,
                     source_height: 0,
                     timestamp: now_timestamp(),
                 });
-                // Reset for next interval
                 frames_processed = 0;
                 last_heartbeat = tokio::time::Instant::now();
-                let _ = fps; // used for logging only
             }
         }
 
-        // Cleanup
         let _ = child.kill().await;
         reader_handle.abort();
         Ok(())
     }
 
-    /// Process a single keyframe: write to disk, run YOLO, broadcast.
-    async fn process_frame(&self, jpeg_data: &[u8], frames_processed: &mut u64) {
+    /// Process a single raw RGB frame: CLAHE → JPEG → YOLO → broadcast.
+    async fn process_frame(&self, nv12_data: &[u8], frames_processed: &mut u64) {
         // Try to acquire NPU — skip if VLM is running
-        let permit = self.npu_semaphore.clone().try_acquire_owned();
-        let permit = match permit {
+        let permit = match self.npu_semaphore.clone().try_acquire_owned() {
             Ok(p) => p,
-            Err(_) => return, // NPU busy (VLM running)
+            Err(_) => return,
         };
 
-        // Write JPEG to temp file
-        if let Err(e) = tokio::fs::write(&self.config.frame_path, jpeg_data).await {
+        // CLAHE + JPEG encode (blocking CPU work, run in spawn_blocking)
+        let nv12 = nv12_data.to_vec();
+        let jpeg_data = tokio::task::spawn_blocking(move || {
+            clahe::apply_clahe_nv12_to_jpeg(&nv12, FRAME_WIDTH, FRAME_HEIGHT, 90)
+        })
+        .await;
+
+        let jpeg_data = match jpeg_data {
+            Ok(data) => data,
+            Err(e) => {
+                warn!("CLAHE/JPEG encode failed: {e}");
+                drop(permit);
+                return;
+            }
+        };
+
+        // Write JPEG to temp file for YOLO
+        if let Err(e) = tokio::fs::write(&self.config.frame_path, &jpeg_data).await {
             warn!("Failed to write frame: {e}");
             drop(permit);
             return;
@@ -247,7 +249,7 @@ impl NightAssistWorker {
 
         // Run YOLO26l
         let result = self.detector.detect_image(&self.config.frame_path).await;
-        drop(permit); // release NPU ASAP
+        drop(permit);
 
         match result {
             Ok(dets) => {
@@ -255,8 +257,8 @@ impl NightAssistWorker {
                 if !filtered.is_empty() {
                     let event = DetectionEvent {
                         detections: filtered,
-                        source_width: 1280,
-                        source_height: 720,
+                        source_width: FRAME_WIDTH as i32,
+                        source_height: FRAME_HEIGHT as i32,
                         timestamp: now_timestamp(),
                     };
                     let _ = self.detection_tx.send(event);
@@ -296,14 +298,11 @@ fn normalize_class_name(class_id: i32, name: &str) -> String {
     }
 }
 
-/// Spawn ffmpeg for H.265 keyframe decode to JPEG pipe.
+/// Spawn ffmpeg for H.265 keyframe decode to raw NV12 pipe.
 ///
-/// Uses SW decoder with `-skip_frame nokey` for decoder-level keyframe-only
-/// processing. This skips non-IDR frames before decoding (CPU ~0%), unlike
-/// the `select` filter which decodes all frames then discards (~400% CPU).
-///
-/// SW decoder used because hevc_axdec (HW) crashes on mid-stream TCP joins
-/// without leading VPS/SPS/PPS.
+/// NV12 output: FRAME_SIZE (W×H×1.5) bytes per frame, no marker parsing needed.
+/// CLAHE operates directly on Y plane — no RGB↔YCrCb conversion in ffmpeg.
+/// SW decoder with `-skip_frame nokey` skips non-IDR at decoder level (CPU ~0%).
 fn spawn_ffmpeg(tcp_url: &str) -> Result<Child, std::io::Error> {
     Command::new("ffmpeg")
         .args([
@@ -323,59 +322,15 @@ fn spawn_ffmpeg(tcp_url: &str) -> Result<Child, std::io::Error> {
             "-fps_mode",
             "passthrough",
             "-f",
-            "image2pipe",
-            "-vcodec",
-            "mjpeg",
-            "-q:v",
-            "2",
+            "rawvideo",
+            "-pix_fmt",
+            "nv12",
             "pipe:1",
         ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-}
-
-/// Read one JPEG frame from an image2pipe stream.
-/// JPEG starts with FF D8 and ends with FF D9.
-async fn read_jpeg_frame<R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut BufReader<R>,
-    buf: &mut Vec<u8>,
-) -> Result<bool, String> {
-    // Find JPEG SOI marker (FF D8)
-    loop {
-        let byte = reader.read_u8().await.map_err(|e| {
-            if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                return "EOF".to_string();
-            }
-            format!("read: {e}")
-        })?;
-
-        if byte == 0xFF {
-            let next = reader.read_u8().await.map_err(|_| "EOF".to_string())?;
-            if next == 0xD8 {
-                buf.clear();
-                buf.push(0xFF);
-                buf.push(0xD8);
-                break;
-            }
-        }
-    }
-
-    // Read until EOI marker (FF D9)
-    loop {
-        let byte = reader.read_u8().await.map_err(|_| "EOF".to_string())?;
-        buf.push(byte);
-
-        if buf.len() >= 4 && buf[buf.len() - 2] == 0xFF && buf[buf.len() - 1] == 0xD9 {
-            return Ok(true);
-        }
-
-        // Safety: reject if frame > 2MB (corrupt stream)
-        if buf.len() > 2 * 1024 * 1024 {
-            return Err("JPEG frame too large (>2MB)".to_string());
-        }
-    }
 }
 
 fn now_timestamp() -> f64 {
