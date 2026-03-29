@@ -12,7 +12,7 @@ pub struct AppContext {
     base_url: Option<String>,
     is_tls: bool,
     vlm_config: VlmConfig,
-    vlm_semaphore: Arc<Semaphore>,
+    npu_semaphore: Arc<Semaphore>,
 }
 
 impl AppContext {
@@ -31,7 +31,7 @@ impl AppContext {
             base_url,
             is_tls,
             vlm_config,
-            vlm_semaphore: Arc::new(Semaphore::new(1)),
+            npu_semaphore: Arc::new(Semaphore::new(1)),
         }
     }
 
@@ -67,8 +67,8 @@ impl AppContext {
         self.vlm_config.clone()
     }
 
-    pub fn vlm_semaphore(&self) -> &Arc<Semaphore> {
-        &self.vlm_semaphore
+    pub fn npu_semaphore(&self) -> &Arc<Semaphore> {
+        &self.npu_semaphore
     }
 
     /// Notify listeners that detections were added for a photo.

@@ -8,6 +8,7 @@ YOLO detection results to detection shared memory.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import signal
@@ -16,7 +17,8 @@ import logging
 import queue
 import threading
 import types
-from typing import Iterator, NamedTuple
+import urllib.request
+from typing import Any, Iterator, NamedTuple
 from pathlib import Path
 
 import cv2
@@ -183,6 +185,116 @@ def apply_cross_roi_nms(
     return result
 
 
+def _iou(a: DetBbox, b_x: int, b_y: int, b_w: int, b_h: int) -> float:
+    """Standard IoU between a DetBbox and a plain bbox (x,y,w,h)."""
+    x1 = max(a.x, b_x)
+    y1 = max(a.y, b_y)
+    x2 = min(a.x + a.w, b_x + b_w)
+    y2 = min(a.y + a.h, b_y + b_h)
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    if inter == 0:
+        return 0.0
+    area_a = a.w * a.h
+    area_b = b_w * b_h
+    return inter / (area_a + area_b - inter)
+
+
+# ai-pyramid class_name strings → DetectionClass enum
+_AI_CLASS_MAP: dict[str, DetectionClass] = {
+    "cat": DetectionClass.CAT,
+    "person": DetectionClass.PERSON,
+    "cup": DetectionClass.CUP,
+    "food_bowl": DetectionClass.FOOD_BOWL,
+    "chair": DetectionClass.CHAIR,
+}
+
+
+class NightAssistMerger:
+    """ai-pyramid SSE検出 + local motion をマージ。
+
+    ai-pyramidのYOLO26l (AX650 NPU) は夜間IRで高精度検出可能。
+    SSEストリームを購読し、ローカルYOLO/motionとマージしてDetectionSHMに書き込む。
+    """
+
+    AI_MAX_AGE = 45   # 1.5秒 @30fps
+    IOU_THRESH = 0.15  # 緩い空間一致閾値
+
+    def __init__(self, ai_pyramid_url: str) -> None:
+        self.url = ai_pyramid_url.rstrip("/")
+        self.last_ai_detections: list[dict[str, Any]] = []  # thread-safe via GIL
+        self.ai_detection_age = 0
+        self._thread = threading.Thread(target=self._sse_loop, daemon=True)
+        self._thread.start()
+
+    def _sse_loop(self) -> None:
+        """別スレッドで SSE 購読。urllib のみ使用 (依存追加なし)"""
+        while True:
+            try:
+                req = urllib.request.Request(
+                    f"{self.url}/api/night-assist/detections/stream",
+                    headers={"Accept": "text/event-stream"},
+                )
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    for raw in resp:
+                        line = raw.decode().strip()
+                        if line.startswith("data:"):
+                            data = json.loads(line[5:])
+                            if "detections" in data:
+                                self.last_ai_detections = data["detections"]
+                                self.ai_detection_age = 0
+            except Exception:
+                time.sleep(5)  # reconnect backoff
+
+    def merge(
+        self,
+        motion_bboxes: list[DetDict],
+        local_yolo_results: list[DetDict],
+    ) -> list[DetDict]:
+        """毎フレーム呼び出し。マージ検出を返す。"""
+        self.ai_detection_age += 1
+
+        # 1. ローカルYOLOがpet検出 → そのまま (従来通り)
+        if any(
+            d.class_name in (DetectionClass.CAT, DetectionClass.DOG, DetectionClass.PERSON)
+            for d in local_yolo_results
+        ):
+            return local_yolo_results
+
+        # 2. ai-pyramid検出 + motion bbox 空間一致 → 合成
+        if self.ai_detection_age < self.AI_MAX_AGE and motion_bboxes:
+            for ai_det in self.last_ai_detections:
+                cls = _AI_CLASS_MAP.get(ai_det.get("class_name", ""))
+                if cls is None:
+                    continue
+                ai_b = ai_det["bbox"]
+                for m in motion_bboxes:
+                    if _iou(m.bbox, ai_b["x"], ai_b["y"], ai_b["w"], ai_b["h"]) > self.IOU_THRESH:
+                        return [DetDict(
+                            class_name=cls,
+                            confidence=ai_det["confidence"] * 0.9,
+                            bbox=m.bbox,  # motion の方が位置が新鮮
+                        )]
+
+        # 3. ai-pyramid検出のみ (0.5秒以内) → そのまま通す
+        if self.ai_detection_age < 15:
+            result = []
+            for ai_det in self.last_ai_detections:
+                cls = _AI_CLASS_MAP.get(ai_det.get("class_name", ""))
+                if cls is None:
+                    continue
+                b = ai_det["bbox"]
+                result.append(DetDict(
+                    class_name=cls,
+                    confidence=ai_det["confidence"],
+                    bbox=DetBbox(x=b["x"], y=b["y"], w=b["w"], h=b["h"]),
+                ))
+            if result:
+                return result
+
+        # 4. 検出なし
+        return []
+
+
 class YoloDetectorDaemon:
     """YOLO検出デーモン (zero-copy mode)"""
 
@@ -333,6 +445,9 @@ class YoloDetectorDaemon:
         self.night_collect_count: int = 0
         self.night_collect_max: int = 500  # Max frames to collect per session
         self.night_collect_interval: int = 150  # Collect every N frames during motion
+
+        # Night-assist merger (auto-enabled via PET_ALBUM_HOST env var, None if disabled)
+        self.night_assist_merger: NightAssistMerger | None = None
 
     def _select_zone(self, bbox: "DetBbox") -> int:
         """Select the motion zone whose center is nearest to bbox center (Voronoi, O(1))."""
@@ -1424,6 +1539,14 @@ class YoloDetectorDaemon:
                 for d in all_dicts
             ]
 
+            if self.night_assist_merger:
+                # Separate motion and YOLO detections for the merger
+                motion_dicts = [d for d in scaled_dicts if d.class_name is DetectionClass.MOTION]
+                yolo_dicts = [d for d in scaled_dicts if d.class_name is not DetectionClass.MOTION]
+                merged = self.night_assist_merger.merge(motion_dicts, yolo_dicts)
+                if merged:
+                    scaled_dicts = merged
+
             if scaled_dicts:
                 self.detection_writer.write_detection_result(
                     frame_number=self.cache_frame_number,
@@ -1433,7 +1556,21 @@ class YoloDetectorDaemon:
 
             detection_dicts = scaled_dicts
         else:
-            detection_dicts = []
+            # Non-YOLO frame: ai-pyramid detections alone can still trigger SHM write
+            if self.night_assist_merger:
+                merged = self.night_assist_merger.merge(self._motion_bboxes, [])
+                self._motion_bboxes = []
+                if merged:
+                    self.detection_writer.write_detection_result(
+                        frame_number=self.cache_frame_number,
+                        timestamp_sec=self.cache_timestamp,
+                        detections=[_det_to_dict(d) for d in merged],
+                    )
+                    detection_dicts = merged
+                else:
+                    detection_dicts = []
+            else:
+                detection_dicts = []
 
         # Adaptive threshold
         if run_yolo:
@@ -1720,7 +1857,6 @@ def main() -> int:
         action="store_true",
         help="Disable ROI mode (process full frame with resize)",
     )
-
     args = parser.parse_args()
 
     log_levels = {
@@ -1744,6 +1880,14 @@ def main() -> int:
     if args.no_roi:
         daemon.roi_enabled = False
         logger.info("ROI mode disabled via --no-roi flag")
+
+    # Night-assist merger: auto-enable from PET_ALBUM_HOST / PET_ALBUM_PORT env vars
+    pet_album_host = os.environ.get("PET_ALBUM_HOST", "")
+    if pet_album_host:
+        pet_album_port = os.environ.get("PET_ALBUM_PORT", "8082")
+        ai_pyramid_url = f"https://{pet_album_host}:{pet_album_port}"
+        daemon.night_assist_merger = NightAssistMerger(ai_pyramid_url)
+        logger.info(f"Night-assist merger enabled: {ai_pyramid_url}")
 
     try:
         daemon.setup()

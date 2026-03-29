@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Parser)]
 #[command(name = "pet-album", about = "AI Pyramid Pro album service")]
@@ -43,6 +43,10 @@ struct Args {
 
     #[arg(long, default_value_t = 128)]
     vlm_max_tokens: u32,
+
+    /// Disable night assist (supplementary YOLO for rdk-x5 night camera)
+    #[arg(long)]
+    no_night_assist: bool,
 }
 
 fn find_tls_certs() -> Option<(PathBuf, PathBuf)> {
@@ -195,6 +199,34 @@ async fn main() {
         }
     };
 
+    // Night assist: supplementary YOLO detection for rdk-x5 night camera
+    // Uses PET_CAMERA_HOST (same host as detection client)
+    let night_assist_host = if args.no_night_assist {
+        None
+    } else {
+        std::env::var("PET_CAMERA_HOST").ok()
+    };
+    let night_assist_tx =
+        if let (Some(rdk_host), Some(detector)) = (&night_assist_host, &local_detector) {
+            let (na_tx, _) =
+                tokio::sync::broadcast::channel::<pet_album::night_assist::DetectionEvent>(64);
+            let config = pet_album::night_assist::NightAssistConfig::new(rdk_host.clone());
+            let worker = pet_album::night_assist::NightAssistWorker::new(
+                config,
+                detector.clone(),
+                app_context.npu_semaphore().clone(),
+                na_tx.clone(),
+            );
+            info!("Night assist enabled: rdk-x5 at {rdk_host}");
+            tokio::spawn(async move { worker.run().await });
+            Some(na_tx)
+        } else {
+            if night_assist_host.is_some() {
+                warn!("Night assist disabled: local detector unavailable");
+            }
+            None
+        };
+
     let app_state = server::AppState {
         context: app_context,
         photos_dir: args.photos_dir,
@@ -203,6 +235,7 @@ async fn main() {
         detect_client,
         local_detector,
         backfill_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        night_assist_tx,
     };
     let app = server::router(app_state);
 
