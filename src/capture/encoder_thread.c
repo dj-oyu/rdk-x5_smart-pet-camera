@@ -68,6 +68,11 @@ static void *encoder_thread_worker(void *arg) {
         shm_h265_zc_write(ctx->shm_h265_zc, &zc);
       }
 
+      // TCP relay: stream night camera H.265 to ai-pyramid (zero-copy, non-blocking)
+      if (ctx->tcp_relay && frame->camera_id == 1) {
+        tcp_relay_send(ctx->tcp_relay, enc_out.vir_ptr, enc_out.data_size);
+      }
+
       // NOW release previous VPU buffer (SHM has new share_id, prev is safe to free)
       if (ctx->prev_enc_out.vir_ptr) {
         encoder_release_output(ctx->encoder, &ctx->prev_enc_out, 2000);

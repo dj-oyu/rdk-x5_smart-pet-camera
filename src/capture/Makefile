@@ -7,7 +7,7 @@ BUILD_DIR_ABS := $(abspath $(BUILD_DIR))
 
 LDFLAGS := -L/usr/hobot/lib
 
-DAEMON_SOURCES := camera_daemon_main.c camera_pipeline.c camera_switcher.c vio_lowlevel.c encoder_lowlevel.c encoder_thread.c shared_memory.c isp_brightness.c logger.c
+DAEMON_SOURCES := camera_daemon_main.c camera_pipeline.c camera_switcher.c vio_lowlevel.c encoder_lowlevel.c encoder_thread.c tcp_relay.c shared_memory.c isp_brightness.c logger.c
 SHM_TEST_SOURCES := test_shm.c shared_memory.c logger.c
 FPS_READER_SOURCES := test_fps_reader.c shared_memory.c logger.c
 SWITCHER_DEMO_SOURCES := camera_switcher_demo.c camera_switcher.c shared_memory.c logger.c
