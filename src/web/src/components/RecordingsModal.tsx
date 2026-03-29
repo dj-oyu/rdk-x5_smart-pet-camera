@@ -10,6 +10,7 @@ interface Recording {
 interface Props {
   onClose: () => void;
   onOpenThumbnail: (url: string, name: string) => void;
+  onPlayVideo: (url: string, name: string) => void;
 }
 
 function formatFileSize(bytes: number): string {
@@ -30,8 +31,9 @@ function formatDate(date: Date | null): string {
   return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
-export function RecordingsModal({ onClose, onOpenThumbnail }: Props) {
+export function RecordingsModal({ onClose, onOpenThumbnail, onPlayVideo }: Props) {
   const recordings = useSignal<Recording[]>([]);
+  const lastPlayed = useSignal<string | null>(null);
 
   const fetchRecordings = useCallback(async () => {
     try {
@@ -94,8 +96,10 @@ export function RecordingsModal({ onClose, onOpenThumbnail }: Props) {
                   const date = parseRecordingDate(rec.name);
                   const thumbUrl = rec.thumbnail ? `/api/recordings/${encodeURIComponent(rec.thumbnail)}` : null;
                   const isH264 = rec.name.endsWith('.h264');
+                  const isVideo = rec.name.endsWith('.mp4') || rec.name.endsWith('.hevc');
+                  const isLastPlayed = lastPlayed.value === rec.name;
                   return (
-                    <div class="recording-card" key={rec.name}>
+                    <div class={`recording-card${isLastPlayed ? ' last-played' : ''}`} key={rec.name}>
                       <div
                         class={`recording-thumb-container${thumbUrl ? ' clickable' : ''}`}
                         onClick={() => thumbUrl && onOpenThumbnail(thumbUrl, rec.name)}
@@ -114,6 +118,12 @@ export function RecordingsModal({ onClose, onOpenThumbnail }: Props) {
                         <div class="recording-size">{formatFileSize(rec.size_bytes)}</div>
                       </div>
                       <div class="recording-actions">
+                        {isVideo && (
+                          <button class="btn-play" onClick={() => {
+                            lastPlayed.value = rec.name;
+                            onPlayVideo(`/api/recordings/${encodeURIComponent(rec.name)}`, rec.name);
+                          }} title="Play">▶</button>
+                        )}
                         <button class="btn-download" onClick={() => downloadRecording(rec.name)} title="Download">⬇</button>
                         <button class="btn-delete" onClick={() => deleteRecording(rec.name)} title="Delete">🗑</button>
                       </div>
