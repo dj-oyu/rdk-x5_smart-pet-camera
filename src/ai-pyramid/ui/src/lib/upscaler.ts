@@ -1,6 +1,9 @@
 /**
  * Real-ESRGAN TF.js upscaler — global singleton.
  * Accepts AbortSignal for cancellation. No DOM refs, no signals.
+ *
+ * Models: xororz/web-realesrgan GraphModel format (PyTorch → ONNX → TF → TF.js)
+ * Served from /api/models/tfjs/{name}/model.json
  */
 
 const TILE = 128;
