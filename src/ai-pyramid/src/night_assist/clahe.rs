@@ -1,63 +1,62 @@
 //! CLAHE (Contrast Limited Adaptive Histogram Equalization) for IR night frames.
 //!
-//! Operates on the Y channel of RGB frames. Parameters match rdk-x5's Python
-//! detector: clipLimit=3.0, tileGridSize=(8,8), medianBlur k=3.
+//! Operates directly on NV12 Y plane — no RGB↔YCrCb conversion needed.
+//! Parameters match rdk-x5's Python detector: clipLimit=3.0, tileGridSize=(8,8),
+//! medianBlur k=3.
 
 const TILE_X: usize = 8;
 const TILE_Y: usize = 8;
 const CLIP_LIMIT: f32 = 3.0;
 const HIST_BINS: usize = 256;
 
-/// Apply CLAHE + median blur to an RGB24 frame, then encode to JPEG.
+/// Apply CLAHE + median blur to an NV12 frame, then encode to JPEG.
 ///
-/// Uses proper YCrCb round-trip (matching OpenCV's cv2.cvtColor):
-/// 1. RGB → YCrCb
-/// 2. Median blur (k=3) on Y — IR noise reduction
-/// 3. CLAHE on Y
-/// 4. Replace Y, keep Cr/Cb intact
-/// 5. YCrCb → RGB
-/// 6. Encode to JPEG
-pub fn apply_clahe_to_jpeg(rgb: &[u8], width: usize, height: usize, quality: u8) -> Vec<u8> {
-    let pixel_count = width * height;
-    debug_assert_eq!(rgb.len(), pixel_count * 3);
+/// NV12 layout: [Y: W×H bytes] [UV interleaved: W×H/2 bytes]
+///
+/// 1. Median blur (k=3) on Y plane — IR noise reduction
+/// 2. CLAHE on Y plane
+/// 3. NV12 → RGB conversion
+/// 4. Encode to JPEG
+pub fn apply_clahe_nv12_to_jpeg(nv12: &[u8], width: usize, height: usize, quality: u8) -> Vec<u8> {
+    let y_size = width * height;
+    debug_assert_eq!(nv12.len(), y_size * 3 / 2);
 
-    // RGB → YCrCb (BT.601, same as OpenCV)
-    let mut y_ch = vec![0u8; pixel_count];
-    let mut cr_ch = vec![0u8; pixel_count];
-    let mut cb_ch = vec![0u8; pixel_count];
-    for i in 0..pixel_count {
-        let r = rgb[i * 3] as f32;
-        let g = rgb[i * 3 + 1] as f32;
-        let b = rgb[i * 3 + 2] as f32;
-        y_ch[i] = (0.299 * r + 0.587 * g + 0.114 * b)
-            .round()
-            .clamp(0.0, 255.0) as u8;
-        cr_ch[i] = (0.5 * r - 0.4187 * g - 0.0813 * b + 128.0)
-            .round()
-            .clamp(0.0, 255.0) as u8;
-        cb_ch[i] = (-0.1687 * r - 0.3313 * g + 0.5 * b + 128.0)
-            .round()
-            .clamp(0.0, 255.0) as u8;
-    }
+    let y_plane = &nv12[..y_size];
+    let uv_plane = &nv12[y_size..];
 
     // Median blur (3x3) on Y — IR noise reduction
-    let y_blurred = median_blur_3x3(&y_ch, width, height);
+    let y_blurred = median_blur_3x3(y_plane, width, height);
 
     // CLAHE on Y
     let y_clahe = clahe(&y_blurred, width, height);
 
-    // YCrCb → RGB with CLAHE'd Y, original Cr/Cb
-    let mut out = vec![0u8; pixel_count * 3];
-    for i in 0..pixel_count {
-        let y = y_clahe[i] as f32;
-        let cr = cr_ch[i] as f32 - 128.0;
-        let cb = cb_ch[i] as f32 - 128.0;
-        out[i * 3] = (y + 1.402 * cr).round().clamp(0.0, 255.0) as u8;
-        out[i * 3 + 1] = (y - 0.3441 * cb - 0.7141 * cr).round().clamp(0.0, 255.0) as u8;
-        out[i * 3 + 2] = (y + 1.772 * cb).round().clamp(0.0, 255.0) as u8;
+    // NV12 (CLAHE'd Y + original UV) → RGB
+    let rgb = nv12_to_rgb(&y_clahe, uv_plane, width, height);
+
+    encode_jpeg(&rgb, width, height, quality)
+}
+
+/// NV12 → RGB conversion (BT.601).
+/// Y plane: W×H, UV plane: W×(H/2) interleaved (U0 V0 U1 V1 ...)
+fn nv12_to_rgb(y_plane: &[u8], uv_plane: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let mut rgb = vec![0u8; width * height * 3];
+
+    for row in 0..height {
+        let uv_row = row / 2;
+        for col in 0..width {
+            let y = y_plane[row * width + col] as f32;
+            let uv_idx = uv_row * width + (col & !1); // align to even column
+            let u = uv_plane[uv_idx] as f32 - 128.0;
+            let v = uv_plane[uv_idx + 1] as f32 - 128.0;
+
+            let out_idx = (row * width + col) * 3;
+            rgb[out_idx] = (y + 1.402 * v).clamp(0.0, 255.0) as u8;
+            rgb[out_idx + 1] = (y - 0.3441 * u - 0.7141 * v).clamp(0.0, 255.0) as u8;
+            rgb[out_idx + 2] = (y + 1.772 * u).clamp(0.0, 255.0) as u8;
+        }
     }
 
-    encode_jpeg(&out, width, height, quality)
+    rgb
 }
 
 /// CLAHE: Contrast Limited Adaptive Histogram Equalization.
@@ -121,7 +120,6 @@ fn clahe(y: &[u8], width: usize, height: usize) -> Vec<u8> {
         for col in 0..width {
             let val = y[row * width + col] as usize;
 
-            // Find surrounding tile centers
             let fy = (row as f32 - half_th) / tile_h as f32;
             let fx = (col as f32 - half_tw) / tile_w as f32;
 
@@ -161,7 +159,6 @@ fn median_blur_3x3(src: &[u8], width: usize, height: usize) -> Vec<u8> {
                     k += 1;
                 }
             }
-            // Partial sort to find median (5th element of 9)
             window.sort_unstable();
             out[row * width + col] = window[4];
         }
@@ -188,23 +185,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clahe_smoke_test() {
-        // 16x16 dark gradient image
+    fn clahe_nv12_smoke_test() {
         let w = 16;
         let h = 16;
-        let mut rgb = vec![0u8; w * h * 3];
-        for i in 0..w * h {
-            let v = (i * 255 / (w * h)) as u8;
-            rgb[i * 3] = v;
-            rgb[i * 3 + 1] = v;
-            rgb[i * 3 + 2] = v;
+        let y_size = w * h;
+        // Y: gradient, UV: neutral (128)
+        let mut nv12 = vec![128u8; y_size * 3 / 2];
+        for i in 0..y_size {
+            nv12[i] = (i * 255 / y_size) as u8;
         }
 
-        let jpeg = apply_clahe_to_jpeg(&rgb, w, h, 90);
-        // Should produce valid JPEG (starts with FF D8)
+        let jpeg = apply_clahe_nv12_to_jpeg(&nv12, w, h, 90);
         assert!(jpeg.len() > 100);
         assert_eq!(jpeg[0], 0xFF);
         assert_eq!(jpeg[1], 0xD8);
+    }
+
+    #[test]
+    fn nv12_to_rgb_neutral() {
+        // Y=128, U=128, V=128 → gray (128, 128, 128)
+        let w = 4;
+        let h = 4;
+        let y_plane = vec![128u8; w * h];
+        let uv_plane = vec![128u8; w * h / 2];
+        let rgb = nv12_to_rgb(&y_plane, &uv_plane, w, h);
+        // All channels should be ~128
+        for i in 0..w * h {
+            for c in 0..3 {
+                assert!((rgb[i * 3 + c] as i16 - 128).abs() <= 1, "pixel {i} ch {c}");
+            }
+        }
     }
 
     #[test]
@@ -214,6 +224,6 @@ mod tests {
         let src = vec![128u8; w * h];
         let out = median_blur_3x3(&src, w, h);
         assert_eq!(out.len(), w * h);
-        assert_eq!(out[w + 1], 128); // uniform → median is same
+        assert_eq!(out[w + 1], 128);
     }
 }

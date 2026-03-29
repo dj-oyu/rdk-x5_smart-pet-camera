@@ -29,7 +29,7 @@ const NIGHT_ASSIST_CLASSES: &[i32] = &[
 /// Frame dimensions (must match encoder config on rdk-x5).
 const FRAME_WIDTH: usize = 1280;
 const FRAME_HEIGHT: usize = 720;
-const FRAME_SIZE: usize = FRAME_WIDTH * FRAME_HEIGHT * 3; // RGB24
+const FRAME_SIZE: usize = FRAME_WIDTH * FRAME_HEIGHT * 3 / 2; // NV12
 
 /// Configuration for the night assist worker.
 #[derive(Debug, Clone)]
@@ -217,7 +217,7 @@ impl NightAssistWorker {
     }
 
     /// Process a single raw RGB frame: CLAHE → JPEG → YOLO → broadcast.
-    async fn process_frame(&self, rgb_data: &[u8], frames_processed: &mut u64) {
+    async fn process_frame(&self, nv12_data: &[u8], frames_processed: &mut u64) {
         // Try to acquire NPU — skip if VLM is running
         let permit = match self.npu_semaphore.clone().try_acquire_owned() {
             Ok(p) => p,
@@ -225,9 +225,9 @@ impl NightAssistWorker {
         };
 
         // CLAHE + JPEG encode (blocking CPU work, run in spawn_blocking)
-        let rgb = rgb_data.to_vec();
+        let nv12 = nv12_data.to_vec();
         let jpeg_data = tokio::task::spawn_blocking(move || {
-            clahe::apply_clahe_to_jpeg(&rgb, FRAME_WIDTH, FRAME_HEIGHT, 90)
+            clahe::apply_clahe_nv12_to_jpeg(&nv12, FRAME_WIDTH, FRAME_HEIGHT, 90)
         })
         .await;
 
@@ -298,9 +298,10 @@ fn normalize_class_name(class_id: i32, name: &str) -> String {
     }
 }
 
-/// Spawn ffmpeg for H.265 keyframe decode to raw RGB24 pipe.
+/// Spawn ffmpeg for H.265 keyframe decode to raw NV12 pipe.
 ///
-/// Raw output: fixed FRAME_SIZE bytes per frame, no marker parsing needed.
+/// NV12 output: FRAME_SIZE (W×H×1.5) bytes per frame, no marker parsing needed.
+/// CLAHE operates directly on Y plane — no RGB↔YCrCb conversion in ffmpeg.
 /// SW decoder with `-skip_frame nokey` skips non-IDR at decoder level (CPU ~0%).
 fn spawn_ffmpeg(tcp_url: &str) -> Result<Child, std::io::Error> {
     Command::new("ffmpeg")
@@ -323,7 +324,7 @@ fn spawn_ffmpeg(tcp_url: &str) -> Result<Child, std::io::Error> {
             "-f",
             "rawvideo",
             "-pix_fmt",
-            "rgb24",
+            "nv12",
             "pipe:1",
         ])
         .stdout(std::process::Stdio::piped())
