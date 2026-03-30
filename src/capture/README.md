@@ -1,69 +1,27 @@
-# Camera Capture Daemon - Phase 1 実装
+# Camera Capture Daemon
 
-V4L2カメラキャプチャデーモンと共有メモリインターフェースの実装
+D-Robotics RDK X5 向けカメラキャプチャデーモンと共有メモリインターフェース
 
 ## 概要
 
-このディレクトリには以下のコンポーネントが含まれています:
+1. **カメラデーモン** (`camera_daemon_main.c`) - VIO/ISP/VSE + H.265 VPUエンコード、ゼロコピーSHM出力
+2. **共有メモリ** (`shared_memory.c/h`) - POSIX共有メモリによるプロセス間通信（6リージョン）
+3. **Pythonラッパー** (`real_shared_memory.py`, `hb_mem_bindings.py`) - SHM/hb_memのPythonバインディング
+4. **テスト** (`test_integration.py`, `test_daemon_python.py`) - 動作確認用
 
-1. **共有メモリ実装** (`shared_memory.c/h`) - POSIX共有メモリによるプロセス間通信
-2. **カメラデーモン** (`camera_daemon_drobotics.c`) - V4L2キャプチャとJPEGエンコーディング
-3. **Pythonラッパー** (`real_shared_memory.py`) - C実装された共有メモリのPythonバインディング
-4. **テストプログラム** (`test_shm.c`, `test_integration.py`, `test_daemon_python.py`) - 動作確認用
-
-## アーキテクチャ
-
-```mermaid
-graph TD
-    cam["Camera Daemon (C, V4L2)<br/>- Captures<br/>- JPEG encode<br/>- 30fps"]
-    shm["Shared Memory Segment 1<br/>(/dev/shm/pet_camera_frames)<br/>- Ring Buffer (30 slots)<br/>- JPEG frames<br/>- Metadata"]
-    readers["Python Readers<br/>- Monitor<br/>- Detection<br/>- Recording"]
-
-    cam -->|"Write (atomic)"| shm
-    shm -->|"Read (polling)"| readers
-```
-
-## ビルド方法
-
-### 必要な依存関係
-
-```bash
-# Ubuntu/Debian
-sudo apt-get install -y \
-    build-essential \
-    libjpeg-dev \
-    v4l-utils \
-    libv4l-dev
-
-# カメラデバイスの確認
-v4l2-ctl --list-devices
-```
-
-### コンパイル
+## ビルド
 
 ```bash
 cd src/capture
 
-# camera_daemon_drobotics と共有メモリテストのビルド
+# デーモンとライブラリのビルド
 make
-
-# 共有メモリテストの実行
-make test
 
 # カメラデーモンの起動（前回プロセスと共有メモリをクリーンアップ）
 make run
 
-# バックグラウンド起動（--daemon 付き、停止は make kill-processes）
+# バックグラウンド起動
 make run-daemon
-
-# 昼夜切り替えデモ
-make switcher-demo
-
-# capture デーモンへ組み込むための静的ライブラリ
-make switcher-runtime-lib
-
-# 共有メモリ経由で既存デーモンを切り替えるリファレンス（ビルドして起動）
-make switcher-daemon
 
 # 後片付け
 make clean
@@ -72,73 +30,26 @@ make clean
 ### ビルド成果物
 
 - `../../build/camera_daemon_drobotics` - カメラキャプチャデーモン
-- `../../build/test_shm` - 共有メモリテストプログラム
-- `../../build/camera_switcher_demo` - 昼夜切り替えデモ
-- `../../build/libcamera_switcher_runtime.a` - 昼夜切り替えランタイム静的ライブラリ
-- `../../build/camera_switcher_daemon` - プロセス切り替え型リファレンスデーモン
-
-## 開発用ワンコマンド起動（カメラ切替 + モニター + モック検出）
-
-カメラ切替デーモンのビルドから、モック検出デーモン・Webモニターの起動までを一括で行う開発用スクリプトを用意しています。
-
-```bash
-# 依存: uv が利用可能であること（Python依存関係の解決に使用）
-./scripts/run_camera_switcher_dev.sh
-# ポートを変えたい場合
-MONITOR_PORT=9001 ./scripts/run_camera_switcher_dev.sh
-# すでにビルド済みの場合（再ビルドをスキップ）
-./scripts/run_camera_switcher_dev.sh --skip-build
-```
-
-- `camera_daemon_drobotics` と `camera_switcher_daemon` をビルドし、旧プロセス/共有メモリをクリーンアップしてから `camera_switcher_daemon` を起動します。
-- `src/capture/mock_detector_daemon.py` を `uv run` で起動し、RealSharedMemory にダミー検出結果を書き込みます（現状の detector はモック実装のみ）。
-- Go web_monitor (`src/streaming_server/cmd/web_monitor/`) を起動し、`http://<host>:8080/` でフレームと検出結果を確認できます。
-- `Ctrl+C` で全プロセスを停止し、共有メモリも掃除されます。
+- `../../build/libjpeg_encoder.a` - JPEG エンコーダライブラリ (CGO用)
+- `../../build/libn2d_comic.a` - nano2D コミック合成ライブラリ
+- `../../build/libn2d_letterbox.so` - nano2D レターボックス共有ライブラリ
 
 ## 使用方法
 
-### 1. 共有メモリテストの実行
+### カメラデーモンの起動
 
 ```bash
-# 共有メモリの動作確認
-./build/test_shm
+# プリセット1: 640x480@30fps
+./build/camera_daemon_drobotics -C 0 -P 1
 
-# 期待される出力:
-# === Shared Memory Test Suite ===
-#
-# [PASS] test_shm_create_destroy
-# [PASS] test_shm_write_read_single
-# [PASS] test_shm_ring_buffer_wraparound
-# [PASS] test_detection_write_read
-# [PASS] test_detection_version_increment
-#
-# === All tests passed! ===
+# プリセット2: 1920x1080@30fps
+./build/camera_daemon_drobotics -C 0 -P 2
+
+# デーモンモード
+./build/camera_daemon_drobotics -C 0 -P 1 --daemon
 ```
 
-### 2. カメラデーモンの起動
-
-```bash
-# デフォルト設定 (640x480@30fps)
-./build/camera_daemon_drobotics
-
-# カスタム設定
-./build/camera_daemon_drobotics -d /dev/video0 -w 1280 -h 720 -f 30 -c 0
-
-# オプション:
-#   -d <device>   カメラデバイス (デフォルト: /dev/video0)
-#   -c <id>       カメラID (デフォルト: 0)
-#   -w <width>    フレーム幅 (デフォルト: 640)
-#   -h <height>   フレーム高さ (デフォルト: 480)
-#   -f <fps>      フレームレート (デフォルト: 30)
-#   --help        ヘルプを表示
-
-# Makefile 経由で起動（前回プロセス/共有メモリを掃除してから実行）
-make run
-```
-
-### 3. Python統合テストの実行
-
-別のターミナルで:
+### Python統合テスト
 
 ```bash
 # カメラデーモンが起動していることを確認してから実行
@@ -146,253 +57,32 @@ uv run src/capture/test_integration.py
 
 # FPS統計を表示
 uv run src/capture/test_integration.py --fps-stats
-
-# フレームを保存
-uv run src/capture/test_integration.py --save-frames --output-dir /tmp/frames
-
-# 最大100フレームをキャプチャ
-uv run src/capture/test_integration.py --max-frames 100
 ```
-
-### 4. 既存のWebモニターとの統合
-
-モックから実機への切り替え:
-
-```python
-# ゼロコピーSHM読み取り
-from capture.real_shared_memory import ZeroCopySharedMemory
-shm = ZeroCopySharedMemory()
-shm.open()
-```
-
-## 共有メモリ仕様
-
-### フレームバッファ
-
-- **名前**: `/dev/shm/pet_camera_frames`
-- **サイズ**: 約300MB (1080p想定)
-- **構造**:
-  - `write_index`: uint32_t (atomic)
-  - `frames[30]`: Frame構造体の配列
-
-### Frame構造体
-
-```c
-// ゼロコピー設計: SHMにはメタデータ(share_id等)のみ格納
-// 実データはhb_mem_import経由でVPUメモリに直接アクセス
-// 詳細は shared_memory.h を参照
-```
-
-### 検出結果バッファ
-
-- **名前**: `/dev/shm/pet_camera_detections`
-- **サイズ**: 約5KB
-- **構造**:
-  - 最新の検出結果のみを保持
-  - `version`カウンタで更新を検知
-
-## トラブルシューティング
-
-### カメラが開けない
-
-```bash
-# デバイスの確認
-ls -l /dev/video*
-
-# 権限の確認
-sudo usermod -a -G video $USER
-# ログアウト・ログインして反映
-
-# カメラ情報の確認
-v4l2-ctl -d /dev/video0 --all
-```
-
-### 共有メモリが見つからない
-
-```bash
-# 共有メモリの確認
-ls -l /dev/shm/
-
-# 古い共有メモリの削除
-rm -f /dev/shm/pet_camera_*
-
-# カメラデーモンを再起動
-```
-
-### JPEGエンコードエラー
-
-```bash
-# libjpegのインストール確認
-ldconfig -p | grep jpeg
-
-# 再インストール
-sudo apt-get install --reinstall libjpeg-dev
-```
-
-### パフォーマンス問題
-
-```bash
-# CPU使用率の確認
-top -p $(pgrep camera_daemon_drobotics)
-
-# 解像度を下げる
-./build/camera_daemon_drobotics -w 320 -h 240
-
-# フレームレートを下げる
-./build/camera_daemon_drobotics -f 15
-```
-
-## カメラ切り替えコントローラ（C実装）
-
-明るさに基づく昼夜カメラ切り替えをCで実装したモジュールです。ダブルバッファリングで切り替え直後のフレームを安定化させます。
-
-- コード: `camera_switcher.c`, `camera_switcher.h`
-- 特徴:
-  - 明るさ平均 + ヒステリシス（`day_to_night_threshold`/`night_to_day_threshold` と滞留秒数）
-  - 手動固定（デバッグ）/自動切り替えモード
-  - 切り替え後のウォームアップフレーム破棄
-  - `frame_calculate_mean_luma` で JPEG / NV12 / RGB から輝度平均を算出し、`camera_switcher_handle_frame` でサンプル採取〜公開を一括実行
-  - 共有メモリへの書き込み時にダブルバッファリングでフレーム整合性を維持
-- 代表的な呼び出しフロー:
-  1. `camera_switcher_init` で初期化（閾値・ウォームアップ数を設定）
-  2. プローブした明るさを `camera_switcher_record_brightness` に渡し、戻り値が `TO_DAY/TO_NIGHT` ならハードを切り替える
-  3. 切り替え後に `camera_switcher_notify_active_camera` を呼び、ウォームアップカウンタをリセット
-  4. キャプチャしたフレームは `camera_switcher_publish_frame` に渡して共有メモリへ書き込む（ウォームアップ中は破棄）
-
-### captureデーモン統合用のランタイム
-
-`camera_switcher_runtime.c/.h` は実際の capture デーモンを想定したオーケストレーション層です。以下のコールバックを渡すだけで、アクティブ/プローブ周期の管理と切り替えが行えます。
-
-- `switch_camera(CameraMode, user_data)`: ハード/デーモン側のカメラ切替（例: ISP設定変更、デバイス切替）
-- `capture_frame(CameraMode, Frame*, user_data)`: 指定カメラからフレーム取得（Active/Probeの両方で使用）
-- `publish_frame(const Frame*, user_data)`: 共有メモリなどへの書き込み
-
-ランタイム設定例:
-
-```c
-CameraSwitchConfig cfg = {
-    .day_to_night_threshold = 40.0,
-    .night_to_day_threshold = 70.0,
-    .day_to_night_hold_seconds = 10.0,
-    .night_to_day_hold_seconds = 10.0,
-    .warmup_frames = 3,
-};
-
-CameraSwitchRuntimeConfig rt_cfg = {
-    .probe_interval_sec = 2.0,      // 非アクティブカメラのプローブ周期
-    .active_interval_sec = 1.0/30., // アクティブカメラの目標間隔 (30fps想定)
-};
-
-CameraCaptureOps ops = {
-    .switch_camera = hw_switch_fn,      // 実カメラ切替
-    .capture_frame = daemon_capture_fn, // 共有メモリに書く前の生フレーム取得
-    .publish_frame = shm_publish_fn,    // 共有メモリ書き込み
-    .user_data = ctx,                   // 上記のコンテキスト
-};
-
-CameraSwitchRuntime rt;
-camera_switch_runtime_init(&rt, &cfg, &rt_cfg, &ops, CAMERA_MODE_DAY);
-camera_switch_runtime_start(&rt);
-// ... シグナル等で停止 ...
-camera_switch_runtime_stop(&rt);
-```
-
-ビルド:
-
-```bash
-cd src/capture
-make switcher-runtime-lib  # ../../build/libcamera_switcher_runtime.a を生成
-```
-
-ライブラリをリンクする際は `-lpthread -ljpeg` を追加してください。
-
-### 既存 camera_daemon_drobotics をプロセスごと切り替えるリファレンス
-
-`camera_switcher_daemon.c` は、ビルド済み `camera_daemon_drobotics` バイナリをカメラIDごとに起動/停止しながら、共有メモリ経由で明るさを測り、自動切替を行うリファレンス実装です。
-
-- ビルド＆実行:
-  ```bash
-  cd src/capture
-  make switcher-daemon
-  # ../../build/camera_daemon_drobotics が存在し、shared_memory に書き込むことが前提
-  ./../../build/camera_switcher_daemon  # switcher-daemon はビルド後にそのまま起動します
-  ```
-- 仕組み:
-  - `switch_camera`: 既存デーモンを `--daemon` でフォーク起動し、切替時に既存 PID を SIGTERM/ wait で終了
-  - `capture_frame`: shared_memory から指定 camera_id のフレームをポーリング取得
-  - `publish_frame`: ウォームアップ＆ダブルバッファ後のフレームを書き戻し（例として同じ shared_memory を使用）
-- 注意:
-  - 実機固有の初期化や ISP 設定が必要な場合は `switch_camera` / `capture_frame` 内で適宜拡張してください。
-  - `CAPTURE_BIN` パス（デフォルト `../../build/camera_daemon_drobotics`）を環境に合わせて調整可能です。
-
-### デバッグ: 低依存のインタラクティブデモ
-
-実機なしで切り替えロジックを試す場合は、Cのみで完結するデモを用意しています。
-
-```bash
-cd src/capture
-make switcher-demo
-./../../build/camera_switcher_demo
-```
-
-標準入力コマンド例:
-
-- `day 30` / `night 80`: 明るさサンプルを投入（0-255）
-- `manual day` / `manual night`: 指定カメラに固定
-- `auto`: 自動切り替えに戻す
-- `status`: 現在の状態を表示
-- `quit`: 終了
-
-ダブルバッファリング越しに publish されるフレーム情報が標準出力に表示されるため、切り替え直後のウォームアップ破棄も確認できます。
-
-## 次のステップ
-
-Phase 1完了後の予定:
-
-### Phase 2: 実機統合
-- Webモニターへの統合
-- マルチカメラ対応
-- エラー処理の強化
-
-### Phase 3: 本物の検出モデル統合
-- TensorFlow Lite推論
-- 検出結果の共有メモリへの書き込み
-- パフォーマンスチューニング
-
-## 開発メモ
-
-### 共有メモリの利点
-
-1. **ゼロコピー**: メモリコピー不要で高速
-2. **複数消費者**: 複数プロセスが同時に読み取り可能
-3. **シンプル**: ロック不要のリングバッファ設計
-4. **デバッグ容易**: `/dev/shm`で内容を直接確認可能
-
-### 設計上の注意点
-
-1. **Atomic操作**: `write_index`はatomicに更新
-2. **リングバッファ**: 古いフレームは上書きされる
-3. **ポーリング**: 読み取り側はポーリングで新フレームを検知
-4. **フォーマット**: JPEG圧縮でメモリ使用量を削減
 
 ## ファイル一覧
 
 ```
 src/capture/
-├── README.md                   # このファイル
 ├── Makefile                    # ビルド設定
-├── shared_memory.h             # 共有メモリヘッダ
-├── shared_memory.c             # 共有メモリ実装
-├── camera_switcher.h           # 昼夜切り替えコントローラ（C）
-├── camera_switcher.c           # 昼夜切り替えロジック本体（C）
-├── camera_switcher_demo.c      # デバッグ・動作確認用の対話デモ
-├── camera_daemon.c             # 共通V4L2カメラデーモン（参考実装）
-├── camera_daemon_drobotics.c   # D-Robotics SDK向けカメラデーモン
-├── test_shm.c                  # Cテストプログラム
+├── camera_daemon_main.c        # メインエントリーポイント
+├── camera_pipeline.c/h         # カメラパイプライン（VIO→ISP→VSE→エンコーダ）
+├── vio_lowlevel.c/h            # D-Robotics VIO低レベルAPI
+├── encoder_lowlevel.c/h        # H.265 VPUエンコーダ
+├── encoder_thread.c/h          # エンコーダスレッド
+├── tcp_relay.c/h               # TCP リレー
+├── shared_memory.c/h           # 共有メモリ（ゼロコピー）
+├── shm_constants.h             # SHM定数定義
+├── isp_brightness.c/h          # ISP明るさ制御・低照度補正
+├── isp_lowlight_profile.h      # 低照度ISPプロファイル
+├── camera_switcher.c/h         # 昼夜切り替えコントローラ
+├── jpeg_encoder.c/h            # JPEGエンコーダ（CGOライブラリ）
+├── n2d_comic.c/h               # nano2Dコミック合成
+├── n2d_letterbox.c/h           # nano2Dレターボックス
+├── rgn_overlay.c/h             # RGNオーバーレイ
+├── logger.c/h                  # ログユーティリティ
 ├── real_shared_memory.py       # Pythonラッパー
-└── test_integration.py         # 統合テスト
+├── hb_mem_bindings.py          # hb_memバインディング
+├── test_integration.py         # 統合テスト
+├── test_daemon_python.py       # Pythonデーモンテスト
+└── mock_detector_daemon.py     # モック検出デーモン
 ```
-
-## ライセンス
-
-(プロジェクトのライセンスに従う)
