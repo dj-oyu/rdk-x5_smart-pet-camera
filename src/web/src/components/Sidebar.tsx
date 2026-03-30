@@ -18,7 +18,42 @@ interface GanttRecord {
 
 const GANTT_WINDOW = 24 * 60 * 60; // 24 hours in seconds
 const GANTT_GAP_THRESHOLD = 30; // merge gaps shorter than 30s
+
 const ECG_WINDOW = 5 * 60; // 5 minutes in seconds
+
+// Heat color map: value [0,1] → RGBA
+// HSL sweep: blue (240°) → green (120°) → red (0°) for full 240° hue range
+function heatColor(v: number): [number, number, number, number] {
+  if (v < 0.05) return [0, 0, 0, 0];
+  const t = Math.min(1, (v - 0.05) / 0.95);
+  const hue = (1 - t) * 240; // 240° (blue) down to 0° (red)
+  const alpha = Math.round(Math.min(1, 0.3 + t * 0.7) * 200);
+  // HSL(hue, 100%, 50%) → RGB
+  const h = hue / 360;
+  const q = 0.5 * 2; // l=0.5, s=1: q = l*(1+s) = 1.0, p = 2l-q = 0
+  const hue2rgb = (t: number) => {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return q * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return q * (2 / 3 - t) * 6;
+    return 0;
+  };
+  return [
+    Math.round(hue2rgb(h + 1 / 3) * 255),
+    Math.round(hue2rgb(h) * 255),
+    Math.round(hue2rgb(h - 1 / 3) * 255),
+    alpha,
+  ];
+}
+
+// Avoid blur filter on touch devices (performance)
+const isMobile = typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0;
+
+// Fallback ROI rects in 1280×720 video space (used when server omits roi_rects)
+// ROI0: VSE(160,440,640,640) center-crop 480×480 → video (159,346,320,320)
+// ROI1: VSE(144,120,960,960) full 640×640     → video (96,80,640,640)
+const FALLBACK_ROI_RECTS = [[159, 346, 320, 320], [96, 80, 640, 640]];
 
 // ── Lightweight bbox tracker ──
 const TRACK_MATCH_DIST = 120; // max center-to-center pixels to match (in 1280x720 frame coords)
@@ -88,7 +123,9 @@ export function useSidebar() {
   const pointsRef = useRef<TrajectoryPoint[]>([]);
   const ganttRef = useRef<GanttRecord[]>([]);
   const lastKeyRef = useRef<string>('');
-  const heatmapRef = useRef<{ grid: number[][]; baseValid: boolean; scoreThreshold?: number }>({ grid: [], baseValid: false });
+  const heatmapRef = useRef<{ grid: number[][]; baseValid: boolean; scoreThreshold?: number; roiRects?: number[][] }>({ grid: [], baseValid: false });
+  const oc0Ref = useRef<HTMLCanvasElement | null>(null);
+  const oc1Ref = useRef<HTMLCanvasElement | null>(null);
   const confHistoryRef = useRef<{ ts: number; bboxes: { trackId: number; conf: number; cls: string }[]; th: number }[]>([]);
   const tracksRef = useRef<Track[]>([]);
   const legendEntries = useSignal<[string, number][]>([]);
@@ -107,6 +144,7 @@ export function useSidebar() {
           grid: data.grid ?? [],
           baseValid: data.base_valid ?? false,
           scoreThreshold: data.score_threshold,
+          roiRects: data.roi_rects,
         };
         drawTrajectory();
       })
@@ -149,6 +187,41 @@ export function useSidebar() {
     canvas.height = height * window.devicePixelRatio;
     ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
     ctx.clearRect(0, 0, width, height);
+
+    // ── Heatmap (night camera only, auto on/off via baseValid) ──
+    const { grid, baseValid, roiRects } = heatmapRef.current;
+    const rects = (roiRects?.length === 2) ? roiRects : FALLBACK_ROI_RECTS;
+    if (baseValid && grid.length === 16 && (grid[0]?.length ?? 0) === 32) {
+      const sx = width / 1280;
+      const sy = height / 720;
+      const GRID = 16;
+      const drawROI = (oc: HTMLCanvasElement, colStart: number, rect: number[]) => {
+        const octx = oc.getContext('2d');
+        if (!octx) return;
+        if (oc.width !== GRID || oc.height !== GRID) { oc.width = GRID; oc.height = GRID; }
+        const imgData = octx.createImageData(GRID, GRID);
+        for (let r = 0; r < GRID; r++) {
+          for (let c = 0; c < GRID; c++) {
+            const [R, G, B, A] = heatColor(grid[r][colStart + c] ?? 0);
+            const i = (r * GRID + c) * 4;
+            imgData.data[i] = R; imgData.data[i + 1] = G;
+            imgData.data[i + 2] = B; imgData.data[i + 3] = A;
+          }
+        }
+        octx.putImageData(imgData, 0, 0);
+        ctx.save();
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        if (!isMobile) ctx.filter = 'blur(4px)';
+        ctx.drawImage(oc, rect[0] * sx, rect[1] * sy, rect[2] * sx, rect[3] * sy);
+        ctx.filter = 'none';
+        ctx.restore();
+      };
+      if (!oc0Ref.current) oc0Ref.current = document.createElement('canvas');
+      if (!oc1Ref.current) oc1Ref.current = document.createElement('canvas');
+      drawROI(oc0Ref.current, 0, rects[0]);
+      drawROI(oc1Ref.current, GRID, rects[1]);
+    }
 
     // ── Draw confidence area chart as background (time-based, per-class) ──
     const history = confHistoryRef.current;
@@ -481,7 +554,7 @@ export function useSidebar() {
     return () => window.removeEventListener('resize', handler);
   }, [drawTrajectory, drawGantt]);
 
-  return { canvasRef, ganttCanvasRef, legendEntries, ganttClasses, updateTrajectory };
+  return { canvasRef, ganttCanvasRef, legendEntries, ganttClasses, updateTrajectory, heatmapRef };
 }
 
 export type { MobileTab } from '../lib/store';

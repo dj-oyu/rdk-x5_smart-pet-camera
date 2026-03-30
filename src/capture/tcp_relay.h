@@ -10,6 +10,7 @@ typedef struct {
     int client_fd; // single client (ai-pyramid)
     pthread_mutex_t mu;
     bool active;
+    pthread_t accept_thread;
 } TcpRelay;
 
 // Create relay server (bind + listen, non-blocking accept)
