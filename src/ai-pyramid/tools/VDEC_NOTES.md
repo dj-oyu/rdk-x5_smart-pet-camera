@@ -52,12 +52,44 @@ ax-pipeline の参考実装 (`common_pipeline_vdec.cpp`) と比較して判明:
 
 → 次のセッションで修正
 
+## 2026-03-30 セッション — GetChnFrame BUF_EMPTY の調査
+
+### 手動プール (bSdkAutoFramePool=FALSE)
+- `AX_POOL_CreatePool` + `AX_VDEC_AttachPool` で手動プール作成 → 成功
+- `autoPool=TRUE` + 手動プール → AttachPool が NOT_PERM で拒否
+- `autoPool=FALSE` + 手動プールなし → 以前から BUF_EMPTY
+
+### QueryStatus で判明した事実
+- **デコーダは正常に動作**: `decFrames=864`, `w=1280`, `h=720`
+- **チャネル出力にフレームが入らない**: `leftPics=[0,0,0]` (全3チャネル)
+- エラーなし: `fmt=0, sz=0`
+- つまりデコードは成功するが出力ルーティングが壊れている
+
+### テストバイナリとの比較
+- 同じ初期化 (ENGINE_Init, IVPS_Init, model load, socket listen) のテストバイナリ → **GetChnFrame 成功** (232/300 フレーム)
+- **daemon バイナリの main() にインラインテスト埋め込み → GetChnFrame 成功** (50/100 フレーム)
+- daemon の `handle_stream()` 関数から同じコード → BUF_EMPTY
+
+### daemon inline test vs handle_stream の差
+- inline test: main() 内、VDEC setup 直後に send/get ループ実行
+- handle_stream: accept() 後に呼ばれる別関数内で実行
+- **TCP relay が落ちて最終検証ができなかった**
+
+### AX_VDEC_GetFrame は存在しない
+- `nm -D libax_vdec.so` で確認: `AX_VDEC_GetFrame` / `AX_VDEC_ReleaseFrame` は V3.6.4 にない
+- `AX_VDEC_GetChnFrame` / `AX_VDEC_ReleaseChnFrame` のみ
+- `AX_VDEC_GetPicBufferSize` もない → バッファサイズは手動計算
+
+### AX_VDEC_DebugFifo API
+- V3.6.4 に存在: `DebugFifo_Init`, `GetDebugFifoFrame`, `ReleaseDebugFifoFrame`
+- シグネチャ推定で試したが `Init(0,4,0)` → ILLEGAL_PARAM
+- 正しいパラメータ不明
+
 ## 次のステップ候補
 
-1. **CreateGrp のバイトダンプ比較**: daemon と test で渡す struct バイトが同一か確認
-2. **V3.6.4 ヘッダの入手**: m5stack に問い合わせ or リバースエンジニアリング
-3. **ffmpeg フォールバック**: VDEC を諦めて ffmpeg subprocess で stream mode を実装 (現実的)
-4. **別プロセスで VDEC**: daemon から fork して VDEC 専用子プロセスを起動
+1. **handle_stream の BUF_EMPTY 問題**: TCP relay 復旧後に再検証。inline test で動くことは確認済み
+2. **VDEC setup を handle_stream 内で実行**: CreateGrp〜StartRecvStream を stream 要求時に行う（テストバイナリと同じフロー）
+3. **別プロセスで VDEC**: daemon から fork して VDEC 専用子プロセスを起動
 
 ## 現在の動作状態
 
