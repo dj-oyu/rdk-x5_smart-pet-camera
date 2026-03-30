@@ -7,10 +7,11 @@
 1. **カメラキャプチャデーモン** - C言語、映像取得・H.265エンコード・共有メモリ書き込み [実装済]
 2. **物体検出モジュール** - Python、YOLO推論・検出結果SHM書き込み [実装済]
 3. **ストリーミングサーバー** - Go (pion/webrtc v4)、WebRTC H.265/MJPEG配信 [実装済]
-4. **Web Monitor** - Go、UIホスティング + MJPEG :8080 [実装済]
-5. **行動推定モジュール** - 行動判定ロジック [未実装]
-6. **設定管理モジュール** - YAML構成管理 [未実装]
-7. **システム監視モジュール** - ヘルスチェック [一部実装]
+4. **Web Monitor** - Go、UIホスティング + MJPEG/SSE + 録画/切替API + comic生成 :8080 [実装済]
+5. **AI Pyramid** - Rust、album/VLM/MCP/night-assist :8082 [実装済]
+6. **行動推定モジュール** - 行動判定ロジック [未実装]
+7. **設定管理モジュール** - YAML構成管理 [未実装]
+8. **システム監視モジュール** - SHM/サービス観測 [一部実装]
 
 ---
 
@@ -112,10 +113,12 @@ VSE出力 → 640x360 → レターボックス → 640x640
 
 **夜カメラ（NIGHT）:**
 ```
-1280x720 → 3 ROI (640x640 each)
-  - 50% 水平オーバーラップ
-  - ラウンドロビン推論 ~22fps
+1280x720 → VSE切り出し 2 ROI (640x640 each)
+  - sensor space 1920x1080 の左右 960x960 を Ch3/Ch4 で共有メモリ化
+  - detector 側で ROI 間NMS、motion bbox、focus crop、night-assist を統合
 ```
+
+[補足] 旧設計の「3 ROI ラウンドロビン」は実装に残っていない。現行コードは `src/capture/shm_constants.h` の `NUM_ROI_REGIONS = 2` と、`src/detector/yolo_detector_daemon.py` の `VSE_ROI_REGIONS` に従い、2 ROI 前提で動作する。
 
 ##### 2.3 レターボックス仕様 [実装済]
 
@@ -157,7 +160,8 @@ graph LR
 | コンポーネント | 言語 | ポート | 役割 |
 |-------------|------|--------|------|
 | Go streaming server | Go (pion/webrtc v4) | :8081 | H.265 WebRTC配信 |
-| Go web_monitor | Go | :8080 | MJPEG配信、Preact SPA、REST API |
+| Go web_monitor | Go | :8080 (`-http-only :8082` optional) | MJPEG配信、Preact SPA、REST API、comic生成 |
+| Rust ai-pyramid | Rust (axum) | :8082 | comic ingest、album UI、VLM、MCP、night-assist |
 
 ##### 3.1 WebRTC仕様 [実装済]
 
@@ -168,13 +172,19 @@ graph LR
 | VPS/SPS/PPS | キャッシュ済（途中参加クライアント対応） |
 | カメラ切替後ウォームアップ | 15フレーム（キーフレーム保証） |
 
+[根拠] ウォームアップは `camera_daemon_main.c` / `camera_switcher_daemon.c` の `warmup_frames = 15` に揃えてあり、GOP=30 のH.265ストリームでも切替直後の途中参加デコーダを壊さない構成になっている。
+
 ---
 
 ### 4. コミック自動キャプチャ（アルバム機能） [実装済]
 
 #### 責務
-- YOLO検出トリガーによる4コマ画像自動生成
-- 検出結果に基づく自動撮影
+- `web_monitor` 内の `ComicCapture` による4コマ画像自動生成
+- 5秒連続 pet 検出を起点に、初回即時 + 基本10秒間隔で最大4枚を収集
+- nano2D 合成と HW JPEG エンコードで comic を保存
+- `POST /api/photos/ingest` で ai-pyramid に detection metadata を送信
+
+[根拠] `src/streaming_server/internal/webmonitor/comic_capture.go` では `DetectionThreshold = 5s`, `BaseCaptureInterval = 10s`, `DetectionLost = 5s`, `MaxPanels = 4`, `RateLimitWindow = 5m`, `RateLimitMax = 3` が既定値で、保存後は ingest API に非同期POSTする。
 
 詳細は `pet-album-spec.md` 参照。
 
@@ -314,7 +324,7 @@ graph TD
 | YOLO推論 | 8.9ms (BPU INT8) |
 | H.265エンコード | ハードウェア（hb_mm_mc） |
 | ストリーミング遅延 | WebRTC: 低遅延 |
-| 夜カメラROI推論 | ~22fps（3 ROI ラウンドロビン） |
+| 夜カメラROI推論 | 2 ROI + motion/focus crop 統合（固定fps値は環境依存） |
 | ビットレート | 600kbps default / 700kbps hard limit |
 
 ---

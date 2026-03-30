@@ -34,7 +34,7 @@ graph TD
             rdkx5["D-Robotics RDK X5: ARM Cortex-A55 8コア + BPU + ISP"]
         end
 
-        future["将来: AI Pyramid 未実装<br/>iframe埋め込み、Tailscale経由リモートアクセス"]
+        aip["AI Pyramid (Rust)<br/>axum + SQLite + embedded Preact UI<br/>:8082 / HTTPS対応<br/>- comic ingest API<br/>- VLMフィルタリング<br/>- local YOLO26l / night assist<br/>- MCP server"]
     end
 
     webrtc -->|"SHM読取"| h265zc
@@ -49,6 +49,7 @@ graph TD
     yolo --> detections
     cam0 --> daemon
     cam1 --> daemon
+    webmonitor -->|"POST /api/photos/ingest"| aip
 ```
 
 ---
@@ -57,7 +58,7 @@ graph TD
 
 ### プロセス構成
 
-システムは3つの独立プロセスで構成され、共有メモリ（SHM）で通信する：
+RDK X5 側は4つの常駐サービスで構成され、低レイテンシ経路は共有メモリ（SHM）で接続する。アルバム系は別ホストの `ai-pyramid` が担当する。
 
 ```mermaid
 graph TD
@@ -67,11 +68,13 @@ graph TD
 
     goserver["Go Streaming Server :8081<br/>SHM読取: h265_zc, mjpeg_zc, detections<br/>WebRTC H.265 passthrough<br/>VPS/SPS/PPS cache<br/>録画 (NAL capture)"]
 
-    webmonitor["Go web_monitor :8080<br/>Preact SPA<br/>APIプロキシ → :8081<br/>アルバム機能"]
+    webmonitor["Go web_monitor :8080<br/>Preact SPA + MJPEG/SSE + 録画/切替API<br/>comic生成 + ai-pyramid ingest"]
+    aip["Rust ai-pyramid :8082<br/>album UI + VLM + SQLite + MCP"]
 
     daemon -->|"SHM (6領域)"| detector
     daemon -->|"SHM (6領域)"| goserver
     webmonitor --> goserver
+    webmonitor -->|"HTTPS/JSON"| aip
 ```
 
 ### プロセス間通信（IPC）方式 [実装済]
@@ -140,7 +143,7 @@ graph TD
     yolozc["/pet_camera_yolo_zc<br/>(zero-copy metadata)"]
     detector["YOLO Detector (Python)<br/>BPU INT8, 8.9ms"]
     detshm["/pet_camera_detections"]
-    comic["コミック自動キャプチャ (4コマ画像)"]
+    comic["Go web_monitor ComicCapture<br/>5秒連続検出 + 4コマ生成"]
     encoder["hb_mm_mc H.265 encode<br/>(600kbps, GOP=fps)"]
     h265zc["/pet_camera_h265_zc<br/>(zero-copy)"]
     mjpegzc["/pet_camera_mjpeg_zc"]
@@ -148,6 +151,7 @@ graph TD
     webrtc["WebRTC H.265 passthrough → ブラウザ"]
     mjpeg["MJPEG fallback → ブラウザ"]
     recording["H.265録画<br/>(NAL capture, zero CPU overhead)"]
+    aip["ai-pyramid<br/>/api/photos/ingest → SQLite/VLM"]
 
     camhw --> isp --> vio
     vio --> yolozc --> detector --> detshm --> comic
@@ -159,6 +163,7 @@ graph TD
     goserver --> webrtc
     goserver --> mjpeg
     goserver --> recording
+    comic --> aip
 ```
 
 ### カメラ切り替えフロー
@@ -202,6 +207,11 @@ graph TD
 - **フロントエンド**: Preact SPA
 - **関連ファイル**: `src/streaming_server/internal/webmonitor/`
 
+### AIアルバム/分析レイヤー
+- **サーバー**: Rust `pet-album` / axum (:8082, TLS対応)
+- **責務**: comic ingest、SQLite、VLMフィルタリング、local YOLO26l backfill、night assist SSE、MCP
+- **関連ファイル**: `src/ai-pyramid/`
+
 ### 共通モジュール
 - **Python型定義・共有ロジック**: `src/common/`
 - **モック**: `src/mock/`
@@ -224,7 +234,7 @@ graph TD
 ```
 /app/smart-pet-camera/
 │
-├── docs/                          # ドキュメント（設計の真実の源泉）
+├── docs/                          # ドキュメント（コードで確認した設計・運用ノート）
 │   ├── 01_project_goals.md
 │   ├── 02_requirements.md
 │   ├── 03_functional_design.md
@@ -248,11 +258,11 @@ graph TD
 │   │
 │   ├── streaming_server/          # Go WebRTC + web_monitor
 │   │   ├── Go WebRTCサーバー (:8081)
-│   │   └── Go web_monitor (:8080)
+│   │   └── Go web_monitor (:8080/HTTP 8082 optional)
 │   │
+│   ├── ai-pyramid/                # Rust album/VLM/MCP サービス
 │   ├── common/                    # 共有Python型・ロジック
-│   ├── mock/                      # モジュールモック
-│   └── monitor/                   # システム監視
+│   └── mock/                      # モジュールモック
 │
 ├── scripts/
 │   └── profile_shm.py            # SHMプロファイラ
@@ -268,22 +278,26 @@ graph TD
 
 ```ini
 # カメラキャプチャ
-smart-pet-camera-capture.service
+pet-camera-capture.service
   ExecStart: camera_daemon_drobotics (single process, multi-thread)
 
 # 物体検出
-smart-pet-camera-detection.service
+pet-camera-detector.service
   ExecStart: uv run src/detector/...
-  After: capture.service
+  After: pet-camera-capture.service
 
 # ストリーミング
-smart-pet-camera-streaming.service
+pet-camera-streaming.service
   ExecStart: Go binary (:8081)
-  After: capture.service
+  After: pet-camera-capture.service
 
-# Web UI (Go web_monitor)
-smart-pet-camera-ui.service
-  ExecStart: Go web_monitor binary (:8080)
+# Web UI / MJPEG / comic / control API
+pet-camera-monitor.service
+  ExecStart: Go web_monitor binary (:8080, HTTP-only :8082 optional)
+
+# Album sync
+comic-sync.service
+  ExecStart: scripts/sync-comics.sh
 ```
 
 ---
@@ -384,9 +398,10 @@ if (shm_fd == -1 && errno == EEXIST) {
 
 ## 将来の拡張 [未実装]
 
-### AI Pyramid
-- iframe埋め込みによるAI分析ダッシュボード
-- Tailscale経由のリモートアクセス
+### AI Pyramid / Album
+- `src/ai-pyramid` として実装済み
+- comic ingest API、MCP、embedded UI、night assist SSE を提供
+- Tailscale/証明書の有無に応じて HTTPS または HTTP で起動
 
 ### 行動推定
 - 食事/水飲み行動の自動検出・記録
@@ -399,10 +414,11 @@ if (shm_fd == -1 && errno == EEXIST) {
 
 ## まとめ
 
-このアーキテクチャは以下の原則に基づいて設計・実装されている：
+このアーキテクチャは以下の原則に基づいて運用されている：
 
 1. **ゼロコピーIPC**: 共有メモリによるプロセス間のゼロコピーデータ転送
 2. **ハードウェア活用**: BPU (YOLO), ISP (画像処理), hb_mm_mc (H.265) の専用HW活用
 3. **言語適材適所**: C (キャプチャ/エンコード), Python (AI推論), Go (WebRTC/ストリーミング)
 4. **パススルー設計**: H.265をカメラからブラウザまで再エンコードなしで配信
-5. **信頼性**: セマフォ安全初期化、ヒステリシス付きカメラ切替、ウォームアップフレーム
+5. **責務分離**: RDK X5 は低遅延配信と comic 生成、AI Pyramid は保存・再解析・VLM/MCP を担当
+6. **信頼性**: セマフォ安全初期化、ヒステリシス付きカメラ切替、ウォームアップフレーム

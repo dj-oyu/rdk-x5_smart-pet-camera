@@ -1,20 +1,20 @@
 # ペットアルバム機能 設計書
 
-**Status**: Draft v4
-**Date**: 2026-03-21
+**Status**: 実装追随版
+**Date**: 2026-03-30
 
 ---
 
 ## 1. 概要
 
-YOLO検出ベースで猫のベストショットを4コマcomicとして自動保存し、VLMによるフィルタリング・キャプション付与で品質を高めるシステム。
+RDK X5 側で 4 コマ comic を生成し、ai-pyramid 側で ingest・VLM・再検出・MCP を担うアルバムシステム。設計よりコードが先行しているため、本書は現行実装を要約した運用仕様とする。
 
 ### 1.1 コンポーネント構成
 
 ```mermaid
 graph LR
-  RDK["RDK X5<br/>Camera → YOLO → SHM<br/>Go Streaming Server :8080<br/>Comic生成 4コマ合成 → SD一時保存<br/>inotify+rsync → AI Pyramidへ転送<br/>Preact SPA 映像・検出<br/>└ iframe → AI Pyramid UI"]
-  AIP["M5Stack AI Pyramid Pro<br/>Axera AX8850 / AX650C<br/>HTTPS :8090, Tailscale証明書<br/>VLM推論エンジン NPU 24TOPS<br/>SQLite DB eMMC 32GB<br/>- photos テーブル<br/>- behavior_logs テーブル<br/>画像ストレージ eMMC<br/>アルバムWebアプリ 独立UI"]
+  RDK["RDK X5<br/>camera_daemon → detector → web_monitor<br/>Go web_monitor :8080 (+ optional HTTP-only :8082)<br/>Comic生成 4コマ合成 → recordings/comics/<br/>POST /api/photos/ingest + comic-sync"]
+  AIP["AI Pyramid Pro<br/>Rust pet-album :8082<br/>SQLite DB + embedded UI + MCP<br/>VLM + LocalDetector(YOLO26l) + night-assist SSE"]
   RDK -- "Tailscale<br/>WireGuard暗号化" --> AIP
 ```
 
@@ -22,18 +22,21 @@ graph LR
 
 ```
 [生成フロー]
-YOLO検出(5秒連続) → Go comic生成 → SD一時保存
-  → inotify+rsync → AI Pyramid Pro eMMCに転送 → SD側削除
+YOLO/DetectionSHM で 5 秒連続 pet 検出
+  → Go `ComicCapture` が comic 生成
+  → `/recordings/comics` に保存
+  → `POST /api/photos/ingest` で detection metadata を送信
+  → `comic-sync.service` が JPEG を rsync
 
 [配信フロー]
 Browser
   └─ https://<camera-host>:8080
        ├─ Preact SPA（映像・YOLO検出・軌跡）
-       └─ <iframe src="https://<album-host>:8090/album">
+       └─ <iframe src="https://<album-host>:8082/app">
             └─ AI Pyramid Proが完全にレンダリングしたアルバムUI
                 ├─ 写真一覧（フィルタ・キャプション表示）
-                ├─ 行動履歴タイムライン
-                └─ 統計ダッシュボード
+                ├─ detection / behavior / pet_id 編集
+                └─ 統計・backfill・night assist
 ```
 
 ### 1.3 設計方針
@@ -167,11 +170,11 @@ systemd services (自動起動)
   llm-vlm       → VLM推論
   llm-openai-api → OpenAI互換API (port 8000)
 
-Album/VLMサービス (Go or Python)
+Album/VLMサービス (Rust `pet-album`)
   ├── POST http://localhost:8000/v1/chat/completions
-  │     model: "qwen3-vl-2B-Int4-ax650"
+  │     model: "AXERA-TECH/Qwen3-VL-2B-Instruct-GPTQ-Int4-C256-P3584-CTX4095"
   │     画像: base64エンコードJPEG
-  ├── JSON応答をパースして is_valid / caption / pet_id を抽出
+  ├── JSON応答をパースして is_valid / caption / behavior を抽出
   └── SQLiteに保存
 ```
 
@@ -179,7 +182,7 @@ Album/VLMサービス (Go or Python)
 
 #### テスト条件
 - デバイス: M5Stack AI Pyramid Pro (AX650N_M5stack_8G)
-- モデル: qwen3-vl-2B-Int4-ax650 (GPTQ-Int4, CMM 4.1GiB)
+- モデル: AXERA-TECH/Qwen3-VL-2B-Instruct-GPTQ-Int4-C256-P3584-CTX4095
 - API: llm-openai-api (localhost:8000)
 - max_tokens: 100-128
 

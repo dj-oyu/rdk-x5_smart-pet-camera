@@ -7,8 +7,10 @@ graph TD
     RDK["camera<br/>Go streaming_server"]
     RSYNC["rsync<br/>Tailscale SSH"]
     INGEST_API["POST /api/photos/ingest"]
-    WATCHER["PhotoWatcher<br/>fsnotify"]
-    VLM["VLM Worker<br/>ax-llm / Qwen3-VL"]
+    WATCHER["PhotoWatcher<br/>fsnotify + periodic rescan"]
+    VLM["VLM Worker<br/>OpenAI-compatible / Qwen3-VL"]
+    LOCALDET["LocalDetector<br/>YOLO26l on AX650"]
+    NIGHT["NightAssistWorker<br/>rdk-x5 supplemental stream"]
     DB_THREAD["db_thread<br/>single owner"]
     SQLITE["SQLite<br/>WAL mode"]
     SERVER["axum HTTP Server"]
@@ -24,6 +26,9 @@ graph TD
     WATCHER -->|new file| DB_THREAD
     WATCHER -->|JPEG| VLM
     VLM -->|is_valid, caption, behavior| DB_THREAD
+    SERVER --> LOCALDET
+    LOCALDET -->|det_level=2 detections| DB_THREAD
+    NIGHT -->|SSE events| SERVER
     DB_THREAD --> SQLITE
     SERVER --> DB_THREAD
     MCP --> DB_THREAD
@@ -83,8 +88,10 @@ graph LR
 |--------|------|---------|
 | GET | `/api/photos` | イベント一覧 (`?is_valid=true&pet_id=chatora&limit=50&offset=0`) |
 | GET | `/api/photos/{filename}` | JPEG画像配信 (immutable cache) |
-| PATCH | `/api/photos/{filename}` | photo の is_valid / pet_id 更新 |
+| GET | `/api/photos/{filename}/panel/{panel}` | comic 1コマ切り出し (0-3, 640x640 letterbox) |
+| PATCH | `/api/photos/{filename}` | photo の is_valid / pet_id / behavior 更新 |
 | POST | `/api/photos/ingest` | rdk-x5 からの comic metadata + detections 受信 |
+| GET | `/api/event/{id}` | DB primary key ベースの単一 event 取得 |
 
 ### Detections API
 
@@ -94,14 +101,19 @@ graph LR
 | PATCH | `/api/detections/{id}` | detection の pet_id_override 更新 (→ photo pet_id 多数決更新) |
 | POST | `/api/backfill` | 未検出写真の一括 detection 実行 (排他制御あり, 409 if running) |
 | GET | `/api/backfill/status` | backfill 実行状態 `{ "running": bool }` |
+| POST | `/api/detect-now/{filename}` | 単一 comic の即時 detection 実行 |
 
 ### Metadata / SSE
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/stats` | total / confirmed / rejected / pending カウント |
+| GET | `/api/behaviors` | DB に存在する behavior 一覧 |
+| GET | `/api/edit-history` | ユーザー修正履歴 (`?since=` 対応) |
+| POST | `/api/daily-summary` | 指定日のサマリ生成 |
 | GET | `/api/pet-names` | `PET_NAME_*` 環境変数からの表示名マッピング |
 | GET | `/api/events` | SSE ストリーム (photo 変更時に PhotoEvent を push) |
+| GET | `/api/night-assist/detections/stream` | night assist の検出SSE |
 | GET | `/health` | ヘルスチェック |
 
 ### MCP (Model Context Protocol)
@@ -132,6 +144,7 @@ graph LR
 | vlm_last_error | TEXT | 最後のエラーメッセージ |
 | created_at | TEXT | サーバー登録時刻 |
 | detected_at | TEXT | detection 実行時刻 (NULL=未実行, 非NULL=実行済み) |
+| caption_level | INTEGER | 0=basic VLM, 1=detection-enhanced |
 
 ### detections テーブル
 
@@ -146,6 +159,18 @@ graph LR
 | pet_id_override | TEXT | ユーザー手動修正 |
 | confidence | REAL | YOLO confidence |
 | detected_at | TEXT | 検出時刻 |
+| color_metrics | TEXT | pet-camera 由来の opaque JSON |
+| det_level | INTEGER | 1=RDK X5 realtime, 2=AI Pyramid high-precision |
+| model | TEXT | 検出モデル識別子 |
+
+### edit_history テーブル
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | INTEGER PK | Auto-increment |
+| photo_id | INTEGER FK | → photos(id) |
+| changes | TEXT | JSON diff |
+| created_at | TEXT | 更新時刻 |
 
 ### マイグレーション
 
@@ -168,6 +193,7 @@ graph LR
 | `ingest_with_detections` | photo + detections 一括登録 |
 | `update_detection_override` | detection の pet_id_override 更新 |
 | `update_pet_id` | photo の pet_id 更新 |
+| `update_behavior` | photo の behavior 更新 |
 | `mark_detected` | photo の detected_at をセット (検出ゼロでも) |
 
 ### Queries (EventQueries)
@@ -181,6 +207,8 @@ graph LR
 | `get_observation_attempts` | VLM 試行回数 |
 | `get_detections` | photo に紐づく detections |
 | `list_undetected_photos` | detected_at IS NULL の写真一覧 |
+| `distinct_behaviors` | 既知 behavior 値の列挙 |
+| `get_edit_history` | 編集履歴取得 |
 
 ### Events
 
@@ -211,8 +239,10 @@ App
 | `fetchStats()` | GET /api/stats |
 | `fetchDetections(photoId)` | GET /api/detections/{id} |
 | `updateDetectionOverride(id, petId)` | PATCH /api/detections/{id} |
+| `updatePhoto(filename, patch)` | PATCH /api/photos/{filename} |
 | `startBackfill()` | POST /api/backfill |
 | `fetchBackfillStatus()` | GET /api/backfill/status |
+| `fetchBehaviors()` | GET /api/behaviors |
 | `fetchPetNames()` | GET /api/pet-names |
 
 SSE: `EventSource("/api/events")` でリアルタイム更新。
@@ -227,7 +257,7 @@ SSE: `EventSource("/api/events")` でリアルタイム更新。
 - base64 エンコードした JPEG を image_url で送信
 - レスポンス: `{is_valid, caption, behavior}` (JSON)
 - リトライ: 1回 (NoneType エラー対策)
-- デフォルト: `http://localhost:8000`, model `qwen3-vl-2B-Int4-ax650`, max_tokens 128
+- デフォルト: `http://localhost:8000`, model `AXERA-TECH/Qwen3-VL-2B-Instruct-GPTQ-Int4-C256-P3584-CTX4095`, max_tokens 128
 
 ### PhotoWatcher (ingest/watcher.rs)
 
@@ -236,6 +266,8 @@ SSE: `EventSource("/api/events")` でリアルタイム更新。
 3. ファイル安定性チェック: 500ms × 3回 (書き込み完了待ち)
 4. VLM キュー: mpsc channel → 1 worker (NPU 排他)
 5. 定期リスキャン: 300秒ごとに pending を再キュー (max 5 attempts)
+
+[補足] `main.rs` は `PET_CAMERA_HOST` / `PET_ALBUM_HOST` がある場合に remote detect client を有効化し、ローカル `LocalDetector` が使えるときは backfill と night assist に AX650 側 YOLO26l を併用する。
 
 ### Filename Parser (ingest/filename.rs)
 
@@ -256,37 +288,42 @@ SSE: `EventSource("/api/events")` でリアルタイム更新。
 | `--photos-dir` | `data/photos` | 画像保存ディレクトリ |
 | `--db-path` | `data/pet-album.db` | SQLite DB パス |
 | `--vlm-url` | `http://localhost:8000` | VLM API URL |
-| `--vlm-model` | `qwen3-vl-2B-Int4-ax650` | VLM モデル名 |
+| `--vlm-model` | `AXERA-TECH/Qwen3-VL-2B-Instruct-GPTQ-Int4-C256-P3584-CTX4095` | VLM モデル名 |
 | `--vlm-max-tokens` | `128` | VLM 出力トークン上限 |
+| `--no-night-assist` | `false` | rdk-x5 夜間補助検出を無効化 |
 
 ### Environment Variables
 
 | Variable | Description |
 |----------|-------------|
 | `PUBLIC_URL` | 外部公開 URL (MCP の photo URL 生成に使用) |
+| `PET_ALBUM_TLS_CERT` / `PET_ALBUM_TLS_KEY` | HTTPS 用証明書/秘密鍵 |
+| `PET_CAMERA_HOST` / `PET_CAMERA_PORT` | rdk-x5 側 monitor への接続先 |
+| `PET_CAMERA_DETECT_PORT` | detector HTTP API を直接叩く場合のポート |
+| `PET_ALBUM_PORT` | 自己公開URL生成用ポート |
 | `PET_NAME_MIKE` | mike の表示名 (例: "ミケ") |
 | `PET_NAME_CHATORA` | chatora の表示名 (例: "チャトラ") |
 
 ### TLS Auto-Detection
 
-以下のパスを順に検索:
-1. `/data/tailscale/certs/<album-host>.{crt,key}`
-2. `../../<album-host>.{crt,key}`
+`main.rs` の現行実装はファイル探索ではなく、`PET_ALBUM_TLS_CERT` と `PET_ALBUM_TLS_KEY` の両方が存在し、実ファイルも存在する場合にのみ HTTPS を有効化する。未設定時は HTTP にフォールバックする。
 
 ---
 
 ## Test Coverage
 
-52 テスト (2026-03-23 時点):
+`src/ai-pyramid/src` 配下の `#[test]` / `#[tokio::test]` は現在 66 件ある。
 
-| Module | Tests | Scope |
-|--------|-------|-------|
-| db | 13 | CRUD, filters, pagination, VLM retry, majority vote |
-| application | 3 | event publishing, validity override |
-| ingest/filename | 8 | filename parsing, validation |
-| server | 11 | REST API, ingest, detections, backfill, pet-names, SSE, embedded UI |
-| mcp | 9 | JSON-RPC, tools, photo download, URL resolution |
-| vlm | 6 | JSON parsing, mock server |
+| Module | Focus |
+|--------|-------|
+| db | CRUD, filters, migration-safe reads, det_level優先, edit history |
+| application | event publishing, validity / pet_id / behavior 更新 |
+| ingest/filename | filename parsing, validation |
+| server | REST API, ingest, detections, backfill, pet-names, SSE, embedded UI |
+| mcp | JSON-RPC, tools, photo download, URL resolution |
+| vlm | JSON parsing, mock server, retry behavior |
+
+テスト数は継続的に増減するため、この文書では固定値よりもコマンドを正とする。
 
 ### Build & Test
 
@@ -294,6 +331,6 @@ SSE: `EventSource("/api/events")` でリアルタイム更新。
 cd src/ai-pyramid/ui && bun install && bun run build  # UI ビルド (必須)
 cd src/ai-pyramid
 cargo clippy          # lint
-cargo test            # 52 tests
+cargo test            # current test set
 cargo build --release # opt-level=z, LTO, strip
 ```
