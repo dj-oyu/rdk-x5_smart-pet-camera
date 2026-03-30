@@ -356,13 +356,15 @@ class YoloDetectorDaemon:
         self.roi_readers: list[ZeroCopySharedMemory] = []
 
         # VSE ROI coordinate mapping: regions are defined on 1920x1080 sensor space.
-        # Each VSE output is 640x640, so scale = 960/640 = 1.5.
-        # 2 ROIs cover full 1920px width: left (0-960) + right (960-1920).
+        # Both ROIs focus on the feeding area (bottom-left of frame).
+        # VSE output is always 640x640; scale depends on crop size:
+        #   ROI 0 (480x480 crop → 640x640): 1.33x zoom, scale_640_to_1280 = 480/960 = 0.5
+        #   ROI 1 (960x960 crop → 640x640): 1.0x zoom,  scale_640_to_1280 = 960/960 = 1.0
+        # General formula: scale_640_to_1280 = roi_w / 960.0
         self.VSE_ROI_REGIONS: list[tuple[int, int, int, int]] = [
-            (0, 60, 960, 960),  # ROI 0: left half
-            (960, 60, 960, 960),  # ROI 1: right half
+            (240, 552, 480, 480),  # ROI 0: feeding area tight (motion detection)
+            (144, 120, 960, 960),  # ROI 1: feeding area wide (YOLO + approach)
         ]
-        self.VSE_SCALE: float = 960.0 / 640.0  # 1.5 — 640x640 → 1920x1080 sensor space
 
         # Detection result cache for temporal integration
         self.detection_cache: list[list[DetDict]] = []  # [roi_0_dets, roi_1_dets, ...]
@@ -445,6 +447,19 @@ class YoloDetectorDaemon:
         self.night_collect_count: int = 0
         self.night_collect_max: int = 500  # Max frames to collect per session
         self.night_collect_interval: int = 150  # Collect every N frames during motion
+
+        # Feeding zone motion detection state (ROI 0 = tight 480x480 crop)
+        self.feeding_collect_dir = Path("/tmp/night_collect/feeding")
+        self.feeding_events_path = Path("/tmp/feeding_events.jsonl")
+        self.FEEDING_MOTION_THRESH: float = 0.008  # nz_ratio threshold (validated)
+        self.FEEDING_QUIET_GAP: int = 15  # frames of quiet before event ends
+        self.FEEDING_SAVE_INTERVAL: int = 30  # save full frame every N motion frames
+        self._feeding_base_nz: float = 0.0  # latest ROI 0 base_diff ratio
+        self._feeding_motion: bool = False  # currently in a feeding event
+        self._feeding_event_start: float | None = None  # event start timestamp
+        self._feeding_quiet_count: int = 0  # consecutive quiet frames
+        self._feeding_save_counter: int = 0  # frames since last frame save
+        self._feeding_last_motion_bboxes: list[DetDict] = []  # bboxes at save time
 
         # Night-assist merger (auto-enabled via PET_ALBUM_HOST env var, None if disabled)
         self.night_assist_merger: NightAssistMerger | None = None
@@ -1211,6 +1226,9 @@ class YoloDetectorDaemon:
                                 if bw < 5 or bh < 5:
                                     continue
                                 motion_detected_this_frame = True
+                                # 320x320 → 1280x720: scale = roi_w / 480.0
+                                _, _, roi_w_s, roi_h_s = self.VSE_ROI_REGIONS[motion_roi_idx]
+                                ms = roi_w_s / 480.0
                                 self._motion_bboxes.append(
                                     DetDict(
                                         class_name=DetectionClass.MOTION,
@@ -1218,10 +1236,10 @@ class YoloDetectorDaemon:
                                             1.0, area / (small_pixels * 0.05)
                                         ),
                                         bbox=DetBbox(
-                                            x=bx * 2 + roi_ox,
-                                            y=by * 2 + roi_oy,
-                                            w=bw * 2,
-                                            h=bh * 2,
+                                            x=int(bx * ms) + roi_ox,
+                                            y=int(by * ms) + roi_oy,
+                                            w=int(bw * ms),
+                                            h=int(bh * ms),
                                         ),
                                     )
                                 )
@@ -1248,6 +1266,8 @@ class YoloDetectorDaemon:
                             nz_ratio = cv2.countNonZero(bdiff) / (320 * 320)
                             if nz_ratio > 0.01:
                                 motion_detected_this_frame = True
+                            if motion_roi_idx == 0:
+                                self._feeding_base_nz = nz_ratio
                             if fp % 300 == 0:
                                 logger.info(
                                     f"base_diff {rkey}: nz={nz_ratio:.4f} floor={base_noise_floor}"
@@ -1373,6 +1393,81 @@ class YoloDetectorDaemon:
             logger.info("Base images cleared (brightness change)")
         self._last_brightness = zc_frame.brightness_avg  # type: ignore[attr-defined]
 
+        # ── Feeding zone event tracking (ROI 0) ─────────────────────
+        if vse_active and self._base_valid.get("roi0", False):
+            feeding_active = self._feeding_base_nz > self.FEEDING_MOTION_THRESH
+            now = time.time()
+
+            if feeding_active:
+                self._feeding_quiet_count = 0
+                self._feeding_save_counter += 1
+                if not self._feeding_motion:
+                    self._feeding_motion = True
+                    self._feeding_event_start = now
+                    logger.info(
+                        f"Feeding zone: motion started (nz={self._feeding_base_nz:.4f})"
+                    )
+                # Save full 1280x720 frame at FEEDING_SAVE_INTERVAL
+                if self._feeding_save_counter >= self.FEEDING_SAVE_INTERVAL:
+                    self._feeding_save_counter = 0
+                    fn = int(zc_frame.frame_number)  # type: ignore[attr-defined]
+                    # Capture current motion bboxes as bbox candidates
+                    self._feeding_last_motion_bboxes = list(self._motion_bboxes)
+                    try:
+                        self.feeding_collect_dir.mkdir(parents=True, exist_ok=True)
+                        nv12_path = (
+                            self.feeding_collect_dir
+                            / f"feeding_{fn:08d}_1280x720.nv12"
+                        )
+                        with open(nv12_path, "wb") as _f:
+                            _f.write(bytes(nv12_data))
+                        # Save motion bbox annotations as sidecar JSON
+                        anno = {
+                            "frame": fn,
+                            "timestamp": now,
+                            "width": 1280,
+                            "height": 720,
+                            "nz_ratio": round(self._feeding_base_nz, 4),
+                            "motion_bboxes": [
+                                {
+                                    "x": d.bbox.x,
+                                    "y": d.bbox.y,
+                                    "w": d.bbox.w,
+                                    "h": d.bbox.h,
+                                }
+                                for d in self._feeding_last_motion_bboxes
+                            ],
+                        }
+                        anno_path = nv12_path.with_suffix(".json")
+                        with open(anno_path, "w") as _af:
+                            json.dump(anno, _af)
+                        logger.debug(f"Feeding frame saved: {nv12_path.name}")
+                    except Exception as _e:
+                        logger.warning(f"Feeding frame save failed: {_e}")
+            else:
+                if self._feeding_motion:
+                    self._feeding_quiet_count += 1
+                    if self._feeding_quiet_count >= self.FEEDING_QUIET_GAP:
+                        # Event ended
+                        duration = now - (self._feeding_event_start or now)
+                        event = {
+                            "start": round(self._feeding_event_start or now, 3),
+                            "end": round(now, 3),
+                            "duration_sec": round(duration, 2),
+                        }
+                        try:
+                            with open(self.feeding_events_path, "a") as _ef:
+                                _ef.write(json.dumps(event) + "\n")
+                        except Exception as _e:
+                            logger.warning(f"Feeding event write failed: {_e}")
+                        logger.info(
+                            f"Feeding zone: motion ended ({duration:.1f}s)"
+                        )
+                        self._feeding_motion = False
+                        self._feeding_event_start = None
+                        self._feeding_quiet_count = 0
+                        self._feeding_save_counter = 0
+
         # ── YOLO: both ROIs in one frame (every 2nd frame) ─────────
         run_yolo = (
             vse_active
@@ -1438,19 +1533,21 @@ class YoloDetectorDaemon:
                     clahe_cache_key=f"roi{roi_idx}",
                 )
 
-                roi_sx, roi_sy, _, _ = self.VSE_ROI_REGIONS[roi_idx]
+                roi_sx, roi_sy, roi_sw, _ = self.VSE_ROI_REGIONS[roi_idx]
                 roi_ox = int(roi_sx * (1280.0 / 1920.0))
                 roi_oy = int(roi_sy * (720.0 / 1080.0))
+                # 640x640 → 1280x720: scale = roi_sw / 960.0
+                det_scale = roi_sw / 960.0
                 for det in detections:
                     all_yolo_dicts.append(
                         DetDict(
                             class_name=det.class_name,
                             confidence=det.confidence,
                             bbox=DetBbox(
-                                x=det.bbox.x + roi_ox,
-                                y=det.bbox.y + roi_oy,
-                                w=det.bbox.w,
-                                h=det.bbox.h,
+                                x=int(det.bbox.x * det_scale) + roi_ox,
+                                y=int(det.bbox.y * det_scale) + roi_oy,
+                                w=int(det.bbox.w * det_scale),
+                                h=int(det.bbox.h * det_scale),
                             ),
                         )
                     )
