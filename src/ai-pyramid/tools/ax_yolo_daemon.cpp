@@ -521,48 +521,8 @@ static void handle_stream(int client_fd, AxModel& model, const RequestHeader& re
         return;
     }
 
-    // --- Create VDEC group (Init already done in main) ---
-    // Heap-allocate all VDEC structs — stack alignment issues with AX650 BSP.
-    auto* grp_attr = new AX_VDEC_GRP_ATTR_T();
-    memset(grp_attr, 0, sizeof(*grp_attr));
-    grp_attr->enCodecType = PT_H265;
-    grp_attr->enInputMode = AX_VDEC_INPUT_MODE_STREAM;
-    grp_attr->u32MaxPicWidth = FRAME_W;
-    grp_attr->u32MaxPicHeight = FRAME_H;
-    grp_attr->u32StreamBufSize = STREAM_BUF_SIZE;
-    grp_attr->bSdkAutoFramePool = AX_TRUE;
-
-    int ret = AX_VDEC_CreateGrp(VDEC_GRP, grp_attr);
-    delete grp_attr;
-    if (ret != 0) {
-        fprintf(stderr, "[STREAM] AX_VDEC_CreateGrp failed: 0x%x\n", ret);
-        send_error(client_fd, "vdec create failed");
-        close(tcp_fd);
-        return;
-    }
-
-    // Set decode mode to IPB (decode all frame types).
-    auto* grp_param = new AX_VDEC_GRP_PARAM_T();
-    memset(grp_param, 0, sizeof(*grp_param));
-    grp_param->stVdecVideoParam.enOutputOrder = AX_VDEC_OUTPUT_ORDER_DEC;
-    grp_param->stVdecVideoParam.enVdecMode = VIDEO_DEC_MODE_IPB;
-    AX_VDEC_SetGrpParam(VDEC_GRP, grp_param);
-    delete grp_param;
-
-    // Configure output channel: NV12 at original resolution.
-    auto* recv_param = new AX_VDEC_RECV_PIC_PARAM_T();
-    memset(recv_param, 0, sizeof(*recv_param));
-    recv_param->s32RecvPicNum = -1; // unlimited
-    ret = AX_VDEC_StartRecvStream(VDEC_GRP, recv_param);
-    delete recv_param;
-    if (ret != 0) {
-        fprintf(stderr, "[STREAM] AX_VDEC_StartRecvStream failed: 0x%x\n", ret);
-        AX_VDEC_DestroyGrp(VDEC_GRP);
-        AX_VDEC_Deinit();
-        send_error(client_fd, "vdec start failed");
-        close(tcp_fd);
-        return;
-    }
+    // VDEC group already created and recv started in main().
+    // Just need to send stream data and get frames.
 
     // Send initial OK.
     {
@@ -579,6 +539,8 @@ static void handle_stream(int client_fd, AxModel& model, const RequestHeader& re
         std::vector<uint8_t> tcp_buf(256 * 1024);
         auto last_heartbeat = std::chrono::steady_clock::now();
         uint64_t frames = 0;
+        uint64_t send_count = 0;
+        uint64_t total_bytes = 0;
         const uint64_t clahe_mask = 127; // CLAHE every 128 frames (~4.3s at 30fps).
 
         while (g_running) {
@@ -599,15 +561,26 @@ static void handle_stream(int client_fd, AxModel& model, const RequestHeader& re
             stream.u32StreamPackLen = (AX_U32)nr;
             stream.bEndOfFrame = AX_FALSE;
             stream.bEndOfStream = AX_FALSE;
-            ret = AX_VDEC_SendStream(VDEC_GRP, &stream, 100);
+            int ret = AX_VDEC_SendStream(VDEC_GRP, &stream, -1); // blocking
+            send_count++;
+            total_bytes += nr;
             if (ret != 0 && ret != (int)AX_ERR_VDEC_BUF_FULL) {
-                fprintf(stderr, "[STREAM] VDEC SendStream error: 0x%x\n", ret);
+                fprintf(stderr, "[STREAM] VDEC SendStream error: 0x%x (after %lu sends, %lu bytes)\n",
+                        ret, (unsigned long)send_count, (unsigned long)total_bytes);
                 break;
             }
+            if (send_count <= 3) {
+                fprintf(stderr, "[DBG] SendStream #%lu: %zd bytes, ret=0x%x\n",
+                        (unsigned long)send_count, nr, ret);
+            }
 
-            // --- Try to get decoded frames ---
+            // --- Try to get decoded frames (100ms timeout) ---
             AX_VIDEO_FRAME_INFO_T frame_info = {};
-            while (AX_VDEC_GetChnFrame(VDEC_GRP, VDEC_CHN, &frame_info, 0) == 0) {
+            int get_ret = AX_VDEC_GetChnFrame(VDEC_GRP, VDEC_CHN, &frame_info, 100);
+            if (get_ret != 0 && send_count <= 5) {
+                fprintf(stderr, "[DBG] GetChnFrame: 0x%x\n", get_ret);
+            }
+            while (get_ret == 0) {
                 const auto& vf = frame_info.stVFrame;
                 const int fw = vf.u32Width;
                 const int fh = vf.u32Height;
@@ -698,6 +671,8 @@ static void handle_stream(int client_fd, AxModel& model, const RequestHeader& re
                 }
 
                 AX_VDEC_ReleaseChnFrame(VDEC_GRP, VDEC_CHN, &frame_info);
+                frame_info = {};
+                get_ret = AX_VDEC_GetChnFrame(VDEC_GRP, VDEC_CHN, &frame_info, 0);
             }
 
             // Heartbeat.
@@ -708,9 +683,9 @@ static void handle_stream(int client_fd, AxModel& model, const RequestHeader& re
                 if (!send_detections(client_fd, empty, 0)) {
                     break;
                 }
-                if (frames > 0) {
-                    fprintf(stderr, "[STREAM] %lu frames processed\n", (unsigned long)frames);
-                }
+                fprintf(stderr, "[STREAM] sends=%lu bytes=%lu decoded=%lu\n",
+                        (unsigned long)send_count, (unsigned long)total_bytes,
+                        (unsigned long)frames);
                 frames = 0;
                 last_heartbeat = now;
             }
@@ -718,8 +693,6 @@ static void handle_stream(int client_fd, AxModel& model, const RequestHeader& re
     }
 
 cleanup:
-    AX_VDEC_StopRecvStream(VDEC_GRP);
-    AX_VDEC_DestroyGrp(VDEC_GRP);
     close(tcp_fd);
     fprintf(stderr, "[STREAM] Ended\n");
 }
@@ -888,9 +861,9 @@ int main(int argc, char** argv) {
     }
     fprintf(stderr, "[INFO] AX Engine %s\n", AX_ENGINE_GetVersion());
 
-    // VDEC must be initialized BEFORE model load (CreateHandle).
-    // CreateHandle consumes kernel resources that prevent VDEC init.
-    // VDEC struct must be heap-allocated — stack alignment issues with AX650 BSP.
+    // VDEC must be fully set up BEFORE model load (CreateHandle).
+    // CreateHandle/CreateContext spawn NPU threads that interfere with VDEC.
+    // All VDEC structs heap-allocated — stack alignment issues with AX650 BSP.
     bool vdec_ok = false;
     {
         auto* vdec_mod = new AX_VDEC_MOD_ATTR_T();
@@ -898,13 +871,69 @@ int main(int argc, char** argv) {
         vdec_mod->u32MaxGroupCount = 16;
         vdec_mod->enDecModule = AX_ENABLE_BOTH_VDEC_JDEC;
         ret = AX_VDEC_Init(vdec_mod);
-        if (ret == 0) {
-            vdec_ok = true;
-            fprintf(stderr, "[INFO] VDEC HW enabled\n");
-        } else {
-            fprintf(stderr, "[WARN] AX_VDEC_Init: 0x%x (stream unavailable)\n", ret);
-        }
         delete vdec_mod;
+        if (ret != 0) {
+            fprintf(stderr, "[WARN] AX_VDEC_Init: 0x%x (stream unavailable)\n", ret);
+        } else {
+            // Pre-create group + start recv before model load.
+            auto* ga = new AX_VDEC_GRP_ATTR_T();
+            memset(ga, 0, sizeof(*ga));
+            ga->enCodecType = PT_H265;
+            ga->enInputMode = AX_VDEC_INPUT_MODE_STREAM;
+            ga->u32MaxPicWidth = FRAME_W;
+            ga->u32MaxPicHeight = FRAME_H;
+            ga->u32StreamBufSize = STREAM_BUF_SIZE;
+            ga->bSdkAutoFramePool = AX_TRUE;
+            ret = AX_VDEC_CreateGrp(VDEC_GRP, ga);
+            delete ga;
+            if (ret != 0) {
+                fprintf(stderr, "[WARN] AX_VDEC_CreateGrp: 0x%x\n", ret);
+                AX_VDEC_Deinit();
+            } else {
+                auto* gp = new AX_VDEC_GRP_PARAM_T();
+                memset(gp, 0, sizeof(*gp));
+                gp->stVdecVideoParam.enOutputOrder = AX_VDEC_OUTPUT_ORDER_DEC;
+                gp->stVdecVideoParam.enVdecMode = VIDEO_DEC_MODE_IPB;
+                AX_VDEC_SetGrpParam(VDEC_GRP, gp);
+                delete gp;
+
+                // Set channel attributes and enable channel 0.
+                auto* ca = new AX_VDEC_CHN_ATTR_T();
+                memset(ca, 0, sizeof(*ca));
+                ca->u32PicWidth = FRAME_W;
+                ca->u32PicHeight = FRAME_H;
+                ca->u32OutputFifoDepth = 4;
+                ca->u32FrameBufCnt = 8;
+                ca->u32FrameBufSize = FRAME_W * FRAME_H * 3 / 2; // NV12
+                ca->enOutputMode = AX_VDEC_OUTPUT_ORIGINAL;
+                ca->enImgFormat = AX_FORMAT_YUV420_SEMIPLANAR;
+                ret = AX_VDEC_SetChnAttr(VDEC_GRP, VDEC_CHN, ca);
+                delete ca;
+                if (ret != 0) {
+                    fprintf(stderr, "[WARN] AX_VDEC_SetChnAttr: 0x%x\n", ret);
+                }
+                ret = AX_VDEC_EnableChn(VDEC_GRP, VDEC_CHN);
+                if (ret != 0) {
+                    fprintf(stderr, "[WARN] AX_VDEC_EnableChn: 0x%x\n", ret);
+                }
+
+                AX_VDEC_SetDisplayMode(VDEC_GRP, AX_VDEC_DISPLAY_MODE_PREVIEW);
+
+                auto* rp = new AX_VDEC_RECV_PIC_PARAM_T();
+                memset(rp, 0, sizeof(*rp));
+                rp->s32RecvPicNum = -1;
+                ret = AX_VDEC_StartRecvStream(VDEC_GRP, rp);
+                delete rp;
+                if (ret != 0) {
+                    fprintf(stderr, "[WARN] AX_VDEC_StartRecvStream: 0x%x\n", ret);
+                    AX_VDEC_DestroyGrp(VDEC_GRP);
+                    AX_VDEC_Deinit();
+                } else {
+                    vdec_ok = true;
+                    fprintf(stderr, "[INFO] VDEC HW enabled (group pre-created)\n");
+                }
+            }
+        }
     }
 
     bool ivps_ok = AX_IVPS_Init() == 0;
@@ -975,6 +1004,8 @@ int main(int argc, char** argv) {
         AX_IVPS_Deinit();
     }
     if (vdec_ok) {
+        AX_VDEC_StopRecvStream(VDEC_GRP);
+        AX_VDEC_DestroyGrp(VDEC_GRP);
         AX_VDEC_Deinit();
     }
     AX_ENGINE_Deinit();
