@@ -47,8 +47,8 @@ static void* accept_thread_fn(void* arg) {
             if (cfd >= 0) {
                 if (r->client_fd >= 0) {
                     // Already have a client; reject the new one
-                    LOG_INFO("TcpRelay", "Rejecting extra client (fd=%d, already have fd=%d)",
-                             cfd, r->client_fd);
+                    LOG_INFO("TcpRelay", "Rejecting extra client (fd=%d, already have fd=%d)", cfd,
+                             r->client_fd);
                     close(cfd);
                 } else {
                     int opt = 1;
