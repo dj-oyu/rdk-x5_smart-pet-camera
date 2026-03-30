@@ -1,9 +1,61 @@
 use crate::db::DetectionInput;
 use crate::ingest::filename::parse_comic_filename;
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
+
+// ---------------------------------------------------------------------------
+// Wire protocol structs (must match ax_yolo_daemon.cpp exactly)
+// ---------------------------------------------------------------------------
+
+const CMD_DETECT: u16 = 0;
+const INPUT_JPEG_PATH: u16 = 0;
+const INPUT_NV12_RAW: u16 = 1;
+
+#[repr(C, packed)]
+struct RequestHeader {
+    cmd: u16,
+    input_type: u16,
+    width: u16,
+    height: u16,
+    payload_size: u32,
+    reserved: u32,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct ResponseHeader {
+    status: u16,
+    det_count: u16,
+    elapsed_ms: f32,
+    error_len: u32,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct WireDetection {
+    x1: i16,
+    y1: i16,
+    x2: i16,
+    y2: i16,
+    class_id: u16,
+    confidence: u16, // prob × 10000
+}
+
+// COCO class names for class_id → name mapping.
+const COCO_NAMES: &[&str] = &[
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+    "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog",
+    "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
+    "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite",
+    "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle",
+    "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant",
+    "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
+    "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors",
+    "teddy bear", "hair drier", "toothbrush",
+];
 
 /// COCO class IDs worth keeping for pet camera context.
 const KEEP_CLASSES: &[i32] = &[
@@ -63,7 +115,34 @@ impl LocalDetector {
 
     /// Run YOLO26l detection on a single JPEG image via daemon socket.
     pub async fn detect_image(&self, jpeg_path: &Path) -> Result<Vec<RawLocalDetection>, String> {
-        self.run_daemon_detect(jpeg_path).await
+        let path_bytes = jpeg_path.to_string_lossy().into_owned().into_bytes();
+        let header = RequestHeader {
+            cmd: CMD_DETECT,
+            input_type: INPUT_JPEG_PATH,
+            width: 0,
+            height: 0,
+            payload_size: path_bytes.len() as u32,
+            reserved: 0,
+        };
+        self.send_request(&header, &path_bytes).await
+    }
+
+    /// Run YOLO26l detection on a raw NV12 frame via daemon socket.
+    pub async fn detect_nv12(
+        &self,
+        nv12: &[u8],
+        width: u16,
+        height: u16,
+    ) -> Result<Vec<RawLocalDetection>, String> {
+        let header = RequestHeader {
+            cmd: CMD_DETECT,
+            input_type: INPUT_NV12_RAW,
+            width,
+            height,
+            payload_size: nv12.len() as u32,
+            reserved: 0,
+        };
+        self.send_request(&header, nv12).await
     }
 
     /// Detect pets in a comic image using raw-first strategy:
@@ -196,82 +275,83 @@ impl LocalDetector {
         Ok(all_inputs)
     }
 
-    async fn run_daemon_detect(
+    /// Send a binary request and read binary response.
+    async fn send_request(
         &self,
-        image: &Path,
+        header: &RequestHeader,
+        payload: &[u8],
     ) -> Result<Vec<RawLocalDetection>, String> {
-        let stream = UnixStream::connect(&self.config.daemon_socket)
+        let mut stream = UnixStream::connect(&self.config.daemon_socket)
             .await
             .map_err(|e| format!("connect {}: {e}", self.config.daemon_socket.display()))?;
 
-        let (reader, mut writer) = stream.into_split();
-
-        // Send request.
-        let req = format!(
-            "{{\"cmd\":\"detect\",\"image\":\"{}\"}}\n",
-            image.display()
-        );
-        writer
-            .write_all(req.as_bytes())
+        // Send header + payload.
+        let hdr_bytes =
+            unsafe { std::slice::from_raw_parts(header as *const _ as *const u8, 16) };
+        stream
+            .write_all(hdr_bytes)
             .await
-            .map_err(|e| format!("write: {e}"))?;
-        writer.shutdown().await.map_err(|e| format!("shutdown: {e}"))?;
-
-        // Read response line.
-        let mut buf_reader = BufReader::new(reader);
-        let mut line = String::new();
-        buf_reader
-            .read_line(&mut line)
+            .map_err(|e| format!("write header: {e}"))?;
+        if !payload.is_empty() {
+            stream
+                .write_all(payload)
+                .await
+                .map_err(|e| format!("write payload: {e}"))?;
+        }
+        stream
+            .shutdown()
             .await
-            .map_err(|e| format!("read: {e}"))?;
+            .map_err(|e| format!("shutdown: {e}"))?;
 
-        parse_daemon_response(&line)
+        // Read response header (12 bytes).
+        let mut resp_buf = [0u8; 12];
+        stream
+            .read_exact(&mut resp_buf)
+            .await
+            .map_err(|e| format!("read response header: {e}"))?;
+        let resp: ResponseHeader = unsafe { std::ptr::read_unaligned(resp_buf.as_ptr().cast()) };
+
+        if resp.status != 0 {
+            // Read error string.
+            let mut err_buf = vec![0u8; resp.error_len as usize];
+            if resp.error_len > 0 {
+                stream
+                    .read_exact(&mut err_buf)
+                    .await
+                    .map_err(|e| format!("read error: {e}"))?;
+            }
+            let msg = String::from_utf8_lossy(&err_buf).to_string();
+            return Err(msg);
+        }
+
+        // Read detections (12 bytes each).
+        let count = resp.det_count as usize;
+        let mut results = Vec::with_capacity(count);
+        for _ in 0..count {
+            let mut det_buf = [0u8; 12];
+            stream
+                .read_exact(&mut det_buf)
+                .await
+                .map_err(|e| format!("read detection: {e}"))?;
+            let wd: WireDetection =
+                unsafe { std::ptr::read_unaligned(det_buf.as_ptr().cast()) };
+            let class_id = wd.class_id as i32;
+            let class_name = COCO_NAMES
+                .get(class_id as usize)
+                .unwrap_or(&"unknown")
+                .to_string();
+            results.push(RawLocalDetection {
+                class_id,
+                class_name,
+                confidence: wd.confidence as f64 / 10000.0,
+                bbox_x: wd.x1 as i32,
+                bbox_y: wd.y1 as i32,
+                bbox_w: (wd.x2 - wd.x1) as i32,
+                bbox_h: (wd.y2 - wd.y1) as i32,
+            });
+        }
+        Ok(results)
     }
-}
-
-/// Parse JSON response from ax_yolo_daemon.
-fn parse_daemon_response(json: &str) -> Result<Vec<RawLocalDetection>, String> {
-    let v: serde_json::Value =
-        serde_json::from_str(json.trim()).map_err(|e| format!("JSON parse: {e}"))?;
-
-    if v.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-        let err = v
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown error");
-        return Err(err.to_string());
-    }
-
-    let dets = v.get("dets").and_then(|v| v.as_array());
-    let Some(dets) = dets else {
-        return Ok(vec![]);
-    };
-
-    let mut results = Vec::with_capacity(dets.len());
-    for d in dets {
-        let class_id = d.get("id").and_then(|v| v.as_i64()).unwrap_or(-1) as i32;
-        let class_name = d
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-        let confidence = d.get("conf").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let x1 = d.get("x1").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-        let y1 = d.get("y1").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-        let x2 = d.get("x2").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-        let y2 = d.get("y2").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-
-        results.push(RawLocalDetection {
-            class_id,
-            class_name,
-            confidence,
-            bbox_x: x1,
-            bbox_y: y1,
-            bbox_w: x2 - x1,
-            bbox_h: y2 - y1,
-        });
-    }
-    Ok(results)
 }
 
 #[derive(Debug, Clone)]
@@ -400,33 +480,36 @@ mod tests {
     }
 
     #[test]
-    fn parse_daemon_json_response() {
-        let json = r#"{"ok":true,"dets":[{"id":15,"name":"cat","conf":0.71,"x1":231,"y1":325,"x2":343,"y2":406},{"id":45,"name":"bowl","conf":0.50,"x1":177,"y1":396,"x2":226,"y2":435},{"id":60,"name":"dining table","conf":0.38,"x1":357,"y1":268,"x2":639,"y2":499}],"ms":11.7}"#;
-
-        let dets = parse_daemon_response(json).unwrap();
-        assert_eq!(dets.len(), 3);
-        assert_eq!(dets[0].class_name, "cat");
-        assert_eq!(dets[0].class_id, 15);
-        assert!((dets[0].confidence - 0.71).abs() < 0.01);
-        assert_eq!(dets[0].bbox_x, 231);
-        assert_eq!(dets[0].bbox_w, 343 - 231); // x2 - x1
-        assert_eq!(dets[1].class_name, "bowl");
-        assert_eq!(dets[2].class_name, "dining table");
+    fn wire_detection_round_trip() {
+        let wd = WireDetection {
+            x1: 231,
+            y1: 325,
+            x2: 343,
+            y2: 406,
+            class_id: 15,
+            confidence: 7100, // 0.71 × 10000
+        };
+        let det = RawLocalDetection {
+            class_id: wd.class_id as i32,
+            class_name: COCO_NAMES[wd.class_id as usize].to_string(),
+            confidence: wd.confidence as f64 / 10000.0,
+            bbox_x: wd.x1 as i32,
+            bbox_y: wd.y1 as i32,
+            bbox_w: (wd.x2 - wd.x1) as i32,
+            bbox_h: (wd.y2 - wd.y1) as i32,
+        };
+        assert_eq!(det.class_name, "cat");
+        assert_eq!(det.class_id, 15);
+        assert!((det.confidence - 0.71).abs() < 0.01);
+        assert_eq!(det.bbox_x, 231);
+        assert_eq!(det.bbox_w, 343 - 231);
     }
 
     #[test]
-    fn parse_daemon_error_response() {
-        let json = r#"{"ok":false,"error":"imread failed"}"#;
-        let result = parse_daemon_response(json);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "imread failed");
-    }
-
-    #[test]
-    fn parse_daemon_empty_dets() {
-        let json = r#"{"ok":true,"dets":[],"ms":0.5}"#;
-        let dets = parse_daemon_response(json).unwrap();
-        assert!(dets.is_empty());
+    fn wire_struct_sizes() {
+        assert_eq!(std::mem::size_of::<RequestHeader>(), 16);
+        assert_eq!(std::mem::size_of::<ResponseHeader>(), 12);
+        assert_eq!(std::mem::size_of::<WireDetection>(), 12);
     }
 
     #[test]

@@ -216,7 +216,7 @@ impl NightAssistWorker {
         Ok(())
     }
 
-    /// Process a single raw RGB frame: CLAHE → JPEG → YOLO → broadcast.
+    /// Process a single NV12 frame: CLAHE → NV12 direct → YOLO → broadcast.
     async fn process_frame(&self, nv12_data: &[u8], frames_processed: &mut u64) {
         // Try to acquire NPU — skip if VLM is running
         let permit = match self.npu_semaphore.clone().try_acquire_owned() {
@@ -224,31 +224,27 @@ impl NightAssistWorker {
             Err(_) => return,
         };
 
-        // CLAHE + JPEG encode (blocking CPU work, run in spawn_blocking)
+        // CLAHE on NV12 (blocking CPU work, no JPEG encode)
         let nv12 = nv12_data.to_vec();
-        let jpeg_data = tokio::task::spawn_blocking(move || {
-            clahe::apply_clahe_nv12_to_jpeg(&nv12, FRAME_WIDTH, FRAME_HEIGHT, 90)
+        let clahe_nv12 = tokio::task::spawn_blocking(move || {
+            clahe::apply_clahe_nv12(&nv12, FRAME_WIDTH, FRAME_HEIGHT)
         })
         .await;
 
-        let jpeg_data = match jpeg_data {
+        let clahe_nv12 = match clahe_nv12 {
             Ok(data) => data,
             Err(e) => {
-                warn!("CLAHE/JPEG encode failed: {e}");
+                warn!("CLAHE failed: {e}");
                 drop(permit);
                 return;
             }
         };
 
-        // Write JPEG to temp file for YOLO
-        if let Err(e) = tokio::fs::write(&self.config.frame_path, &jpeg_data).await {
-            warn!("Failed to write frame: {e}");
-            drop(permit);
-            return;
-        }
-
-        // Run YOLO26l
-        let result = self.detector.detect_image(&self.config.frame_path).await;
+        // Send NV12 directly to daemon (no JPEG encode/decode, no disk I/O)
+        let result = self
+            .detector
+            .detect_nv12(&clahe_nv12, FRAME_WIDTH as u16, FRAME_HEIGHT as u16)
+            .await;
         drop(permit);
 
         match result {
