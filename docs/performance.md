@@ -145,11 +145,13 @@ if self.night_roi_mode and self._quiet_frames >= self.IDLE_TIER1_FRAMES:
 
 | シナリオ | CPU使用率 |
 |---------|----------|
-| streaming-server アクティブ（WebRTC 1クライアント） | ~120% |
+| streaming-server アクティブ（WebRTC 1クライアント） | ~40% |
 | streaming-server アイドル（クライアント0） | ~0.7% |
 | detector 夜間 idle（T2スロットリング） | ~25% |
 | detector 夜間 active（motion/YOLO） | ~180% |
 | detector 昼間（YOLO常時実行） | ~40% |
+
+[注記] 旧H.264時代の `~120%` はソフトウェアエンコードと高ビットレート配信を含む過去測定値で、同文書後半の H.265 ハードウェアエンコード構成とは前提が異なる。現行構成の説明と整合する値として、本節では後段の `streaming-server ~40%` を採用する。
 
 ---
 
