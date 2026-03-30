@@ -1,0 +1,15 @@
+[Unit]
+Description=YOLO NPU Detection Daemon
+After=ax-proc-perms.service
+
+[Service]
+ExecStart=/usr/local/bin/ax_yolo_daemon \
+  --model /home/admin-user/models/yolo26/ax650/yolo26l.axmodel \
+  --socket /run/ax_yolo_daemon.sock \
+  --min-headroom-mb 40
+Environment=LD_LIBRARY_PATH=/soc/lib
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

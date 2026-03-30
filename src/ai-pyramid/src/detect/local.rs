@@ -1,7 +1,8 @@
 use crate::db::DetectionInput;
 use crate::ingest::filename::parse_comic_filename;
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
 /// COCO class IDs worth keeping for pet camera context.
@@ -31,103 +32,17 @@ const KEEP_CLASSES: &[i32] = &[
     74, // clock
 ];
 
-/// COCO class names by ID (80 classes).
-const COCO_NAMES: &[&str] = &[
-    "person",
-    "bicycle",
-    "car",
-    "motorcycle",
-    "airplane",
-    "bus",
-    "train",
-    "truck",
-    "boat",
-    "traffic light",
-    "fire hydrant",
-    "stop sign",
-    "parking meter",
-    "bench",
-    "bird",
-    "cat",
-    "dog",
-    "horse",
-    "sheep",
-    "cow",
-    "elephant",
-    "bear",
-    "zebra",
-    "giraffe",
-    "backpack",
-    "umbrella",
-    "handbag",
-    "tie",
-    "suitcase",
-    "frisbee",
-    "skis",
-    "snowboard",
-    "sports ball",
-    "kite",
-    "baseball bat",
-    "baseball glove",
-    "skateboard",
-    "surfboard",
-    "tennis racket",
-    "bottle",
-    "wine glass",
-    "cup",
-    "fork",
-    "knife",
-    "spoon",
-    "bowl",
-    "banana",
-    "apple",
-    "sandwich",
-    "orange",
-    "broccoli",
-    "carrot",
-    "hot dog",
-    "pizza",
-    "donut",
-    "cake",
-    "chair",
-    "couch",
-    "potted plant",
-    "bed",
-    "dining table",
-    "toilet",
-    "tv",
-    "laptop",
-    "mouse",
-    "remote",
-    "keyboard",
-    "cell phone",
-    "microwave",
-    "oven",
-    "toaster",
-    "sink",
-    "refrigerator",
-    "book",
-    "clock",
-    "vase",
-    "scissors",
-    "teddy bear",
-    "hair drier",
-    "toothbrush",
-];
 
 #[derive(Debug, Clone)]
 pub struct LocalDetectorConfig {
-    pub wrapper_path: PathBuf,
-    pub yolo26l_binary: String,
-    pub yolo26l_model: PathBuf,
+    /// Unix socket path for ax_yolo_daemon.
+    pub daemon_socket: PathBuf,
 }
 
 impl Default for LocalDetectorConfig {
     fn default() -> Self {
         Self {
-            wrapper_path: PathBuf::from("/usr/local/bin/ax_yolo_run"),
-            yolo26l_binary: "ax_yolo26".into(),
-            yolo26l_model: PathBuf::from("/home/admin-user/models/yolo26/ax650/yolo26l.axmodel"),
+            daemon_socket: PathBuf::from("/run/ax_yolo_daemon.sock"),
         }
     }
 }
@@ -141,19 +56,14 @@ impl LocalDetector {
         Self { config }
     }
 
-    /// Check if binaries and models exist.
+    /// Check if the daemon socket exists.
     pub fn is_available(&self) -> bool {
-        self.config.wrapper_path.exists() && self.config.yolo26l_model.exists()
+        self.config.daemon_socket.exists()
     }
 
-    /// Run YOLO26l detection on a single JPEG image.
+    /// Run YOLO26l detection on a single JPEG image via daemon socket.
     pub async fn detect_image(&self, jpeg_path: &Path) -> Result<Vec<RawLocalDetection>, String> {
-        self.run_model(
-            &self.config.yolo26l_binary,
-            &self.config.yolo26l_model,
-            jpeg_path,
-        )
-        .await
+        self.run_daemon_detect(jpeg_path).await
     }
 
     /// Detect pets in a comic image using raw-first strategy:
@@ -286,30 +196,82 @@ impl LocalDetector {
         Ok(all_inputs)
     }
 
-    async fn run_model(
+    async fn run_daemon_detect(
         &self,
-        binary: &str,
-        model: &Path,
         image: &Path,
     ) -> Result<Vec<RawLocalDetection>, String> {
-        let output = Command::new("sudo")
-            .arg(&self.config.wrapper_path)
-            .arg(binary)
-            .arg("-m")
-            .arg(model)
-            .arg("-i")
-            .arg(image)
-            .output()
+        let stream = UnixStream::connect(&self.config.daemon_socket)
             .await
-            .map_err(|e| format!("spawn {binary}: {e}"))?;
+            .map_err(|e| format!("connect {}: {e}", self.config.daemon_socket.display()))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("{binary} failed: {stderr}"));
-        }
+        let (reader, mut writer) = stream.into_split();
 
-        parse_ax_output(&String::from_utf8_lossy(&output.stdout))
+        // Send request.
+        let req = format!(
+            "{{\"cmd\":\"detect\",\"image\":\"{}\"}}\n",
+            image.display()
+        );
+        writer
+            .write_all(req.as_bytes())
+            .await
+            .map_err(|e| format!("write: {e}"))?;
+        writer.shutdown().await.map_err(|e| format!("shutdown: {e}"))?;
+
+        // Read response line.
+        let mut buf_reader = BufReader::new(reader);
+        let mut line = String::new();
+        buf_reader
+            .read_line(&mut line)
+            .await
+            .map_err(|e| format!("read: {e}"))?;
+
+        parse_daemon_response(&line)
     }
+}
+
+/// Parse JSON response from ax_yolo_daemon.
+fn parse_daemon_response(json: &str) -> Result<Vec<RawLocalDetection>, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(json.trim()).map_err(|e| format!("JSON parse: {e}"))?;
+
+    if v.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        let err = v
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        return Err(err.to_string());
+    }
+
+    let dets = v.get("dets").and_then(|v| v.as_array());
+    let Some(dets) = dets else {
+        return Ok(vec![]);
+    };
+
+    let mut results = Vec::with_capacity(dets.len());
+    for d in dets {
+        let class_id = d.get("id").and_then(|v| v.as_i64()).unwrap_or(-1) as i32;
+        let class_name = d
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let confidence = d.get("conf").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let x1 = d.get("x1").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let y1 = d.get("y1").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let x2 = d.get("x2").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let y2 = d.get("y2").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+
+        results.push(RawLocalDetection {
+            class_id,
+            class_name,
+            confidence,
+            bbox_x: x1,
+            bbox_y: y1,
+            bbox_w: x2 - x1,
+            bbox_h: y2 - y1,
+        });
+    }
+    Ok(results)
 }
 
 #[derive(Debug, Clone)]
@@ -323,70 +285,6 @@ pub struct RawLocalDetection {
     pub bbox_h: i32,
 }
 
-/// Parse ax_yolo stdout format:
-/// `15:  81%, [ 231,  329,  344,  406], cat`
-fn parse_ax_output(stdout: &str) -> Result<Vec<RawLocalDetection>, String> {
-    let mut dets = Vec::new();
-    for line in stdout.lines() {
-        let line = line.trim();
-        // Match pattern: "class_id:  conf%, [ x1, y1, x2, y2], class_name"
-        if !line.contains('%') || !line.contains('[') {
-            continue;
-        }
-        let parts: Vec<&str> = line.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            continue;
-        }
-        let class_id: i32 = match parts[0].trim().parse() {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let rest = parts[1];
-        // Extract confidence
-        let conf_end = match rest.find('%') {
-            Some(i) => i,
-            None => continue,
-        };
-        let conf: f64 = match rest[..conf_end].trim().parse::<f64>() {
-            Ok(v) => v / 100.0,
-            Err(_) => continue,
-        };
-        // Extract bbox [x1, y1, x2, y2]
-        let bracket_start = match rest.find('[') {
-            Some(i) => i,
-            None => continue,
-        };
-        let bracket_end = match rest.find(']') {
-            Some(i) => i,
-            None => continue,
-        };
-        let coords: Vec<i32> = rest[bracket_start + 1..bracket_end]
-            .split(',')
-            .filter_map(|s| s.trim().parse().ok())
-            .collect();
-        if coords.len() != 4 {
-            continue;
-        }
-        let (x1, y1, x2, y2) = (coords[0], coords[1], coords[2], coords[3]);
-
-        let class_name = if (class_id as usize) < COCO_NAMES.len() {
-            COCO_NAMES[class_id as usize].to_string()
-        } else {
-            format!("class_{class_id}")
-        };
-
-        dets.push(RawLocalDetection {
-            class_id,
-            class_name,
-            confidence: conf,
-            bbox_x: x1,
-            bbox_y: y1,
-            bbox_w: x2 - x1,
-            bbox_h: y2 - y1,
-        });
-    }
-    Ok(dets)
-}
 
 // Comic layout constants (must match server::crop_panel)
 const MARGIN: i32 = 12;
@@ -502,29 +400,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_ax_yolo_output() {
-        let stdout = r#"--------------------------------------
-model file : /home/admin-user/models/yolo26/ax650/yolo26l.axmodel
-image file : /tmp/test_panel.jpg
-img_h, img_w : 640 640
---------------------------------------
-Engine creating handle is done.
-Engine creating context is done.
-Engine get io info is done.
-Engine alloc io is done.
-Engine push input is done.
---------------------------------------
-post process cost time:3.22 ms
---------------------------------------
-Repeat 1 times, avg time 11.71 ms, max_time 11.71 ms, min_time 11.71 ms
---------------------------------------
-detection num: 3
-15:  71%, [ 231,  325,  343,  406], cat
-45:  50%, [ 177,  396,  226,  435], bowl
-60:  38%, [ 357,  268,  639,  499], dining table
---------------------------------------"#;
+    fn parse_daemon_json_response() {
+        let json = r#"{"ok":true,"dets":[{"id":15,"name":"cat","conf":0.71,"x1":231,"y1":325,"x2":343,"y2":406},{"id":45,"name":"bowl","conf":0.50,"x1":177,"y1":396,"x2":226,"y2":435},{"id":60,"name":"dining table","conf":0.38,"x1":357,"y1":268,"x2":639,"y2":499}],"ms":11.7}"#;
 
-        let dets = parse_ax_output(stdout).unwrap();
+        let dets = parse_daemon_response(json).unwrap();
         assert_eq!(dets.len(), 3);
         assert_eq!(dets[0].class_name, "cat");
         assert_eq!(dets[0].class_id, 15);
@@ -533,6 +412,21 @@ detection num: 3
         assert_eq!(dets[0].bbox_w, 343 - 231); // x2 - x1
         assert_eq!(dets[1].class_name, "bowl");
         assert_eq!(dets[2].class_name, "dining table");
+    }
+
+    #[test]
+    fn parse_daemon_error_response() {
+        let json = r#"{"ok":false,"error":"imread failed"}"#;
+        let result = parse_daemon_response(json);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "imread failed");
+    }
+
+    #[test]
+    fn parse_daemon_empty_dets() {
+        let json = r#"{"ok":true,"dets":[],"ms":0.5}"#;
+        let dets = parse_daemon_response(json).unwrap();
+        assert!(dets.is_empty());
     }
 
     #[test]
