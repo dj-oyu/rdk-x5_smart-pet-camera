@@ -358,11 +358,12 @@ class YoloDetectorDaemon:
         # VSE ROI coordinate mapping: regions are defined on 1920x1080 sensor space.
         # Both ROIs focus on the feeding area (bottom-left of frame).
         # VSE output is always 640x640; scale depends on crop size:
-        #   ROI 0 (480x480 crop → 640x640): 1.33x zoom, scale_640_to_1280 = 480/960 = 0.5
-        #   ROI 1 (960x960 crop → 640x640): 1.0x zoom,  scale_640_to_1280 = 960/960 = 1.0
+        #   ROI 0 (640x640 crop → 640x640): 1:1,  scale_640_to_1280 = 640/960 = 0.667
+        #   ROI 1 (960x960 crop → 640x640): 1.0x, scale_640_to_1280 = 960/960 = 1.0
         # General formula: scale_640_to_1280 = roi_w / 960.0
+        # Note: VSE only supports downscaling; 640x640 is the minimum valid crop size.
         self.VSE_ROI_REGIONS: list[tuple[int, int, int, int]] = [
-            (240, 552, 480, 480),  # ROI 0: feeding area tight (motion detection)
+            (160, 440, 640, 640),  # ROI 0: feeding area tight (1:1, min VSE crop)
             (144, 120, 960, 960),  # ROI 1: feeding area wide (YOLO + approach)
         ]
 
@@ -1172,27 +1173,48 @@ class YoloDetectorDaemon:
                         )
                         m_y_size = mf.width * mf.height
                         y_plane = m_y_arr[:m_y_size].reshape(mf.height, mf.width)
-                        y_denoised = cv2.medianBlur(y_plane, 3)
-                        small_denoised = cv2.resize(
-                            y_denoised, (320, 320), interpolation=cv2.INTER_AREA
-                        )
 
+                        # ROI 0: direct 480×480 center crop from 640×640 VSE output.
+                        # NV12 rows are contiguous; ascontiguousarray packs the strided
+                        # slice into a contiguous 480×480 buffer for medianBlur.
+                        # ROI 1: resize 640×640 → 320×320 (960px sensor crop needs scale).
                         rkey = f"roi{motion_roi_idx}"
-                        _y_denoised_for_base = y_denoised
+                        if motion_roi_idx == 0:
+                            _crop_size = 480
+                            _crop_x0 = (mf.width - _crop_size) // 2   # = 80
+                            _crop_y0 = (mf.height - _crop_size) // 2  # = 80
+                            y_small = cv2.medianBlur(
+                                np.ascontiguousarray(
+                                    y_plane[
+                                        _crop_y0 : _crop_y0 + _crop_size,
+                                        _crop_x0 : _crop_x0 + _crop_size,
+                                    ]
+                                ),
+                                3,
+                            )
+                            small_size = _crop_size
+                        else:
+                            y_small = cv2.resize(
+                                cv2.medianBlur(y_plane, 3),
+                                (320, 320),
+                                interpolation=cv2.INTER_AREA,
+                            )
+                            small_size = 320
+                            _crop_x0 = _crop_y0 = 0  # unused for roi1
+
+                        _y_denoised_for_base = y_small
                         _rkey_for_base = rkey
 
-                        # ── frame_diff (320x320) ──
+                        # ── frame_diff ──
                         if rkey in self._prev_roi_small:
-                            diff = cv2.absdiff(
-                                small_denoised, self._prev_roi_small[rkey]
-                            )
+                            diff = cv2.absdiff(y_small, self._prev_roi_small[rkey])
                             diff = cv2.GaussianBlur(diff, (5, 5), 0)
                             diff[diff < 8] = 0  # cut IR noise floor
 
-                            # Temporal sum accumulation (320x320 uint16)
+                            # Temporal sum accumulation (uint16, same size as y_small)
                             if rkey not in self._diff_acc:
                                 self._diff_acc[rkey] = np.zeros(
-                                    (320, 320), dtype=np.uint16
+                                    (small_size, small_size), dtype=np.uint16
                                 )
                             acc = self._diff_acc[rkey]
                             acc >>= 1
@@ -1212,11 +1234,8 @@ class YoloDetectorDaemon:
                                 thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
                             )
 
-                            # Contours in 320x320 → scale 2x to 640 (=1280x720 output)
-                            roi_sx, roi_sy, _, _ = self.VSE_ROI_REGIONS[motion_roi_idx]
-                            roi_ox = int(roi_sx * (1280.0 / 1920.0))
-                            roi_oy = int(roi_sy * (720.0 / 1080.0))
-                            small_pixels = 320 * 320
+                            roi_sx, roi_sy, roi_sw, _ = self.VSE_ROI_REGIONS[motion_roi_idx]
+                            small_pixels = small_size * small_size
                             min_area = small_pixels * 0.001
                             for cnt in contours:
                                 area = cv2.contourArea(cnt)
@@ -1226,44 +1245,57 @@ class YoloDetectorDaemon:
                                 if bw < 5 or bh < 5:
                                     continue
                                 motion_detected_this_frame = True
-                                # 320x320 → 1280x720: scale = roi_w / 480.0
-                                _, _, roi_w_s, roi_h_s = self.VSE_ROI_REGIONS[motion_roi_idx]
-                                ms = roi_w_s / 480.0
+                                if motion_roi_idx == 0:
+                                    # ROI 0 is 1:1 crop: pixel → sensor coord via crop offset
+                                    _sx = 1280.0 / 1920.0
+                                    _sy = 720.0 / 1080.0
+                                    x_d = int((bx + _crop_x0 + roi_sx) * _sx)
+                                    y_d = int((by + _crop_y0 + roi_sy) * _sy)
+                                    w_d = int(bw * _sx)
+                                    h_d = int(bh * _sy)
+                                else:
+                                    # ROI 1: 320→sensor via resize scale = roi_sw/480
+                                    ms = roi_sw / 480.0
+                                    roi_ox = int(roi_sx * (1280.0 / 1920.0))
+                                    roi_oy = int(roi_sy * (720.0 / 1080.0))
+                                    x_d = int(bx * ms) + roi_ox
+                                    y_d = int(by * ms) + roi_oy
+                                    w_d = int(bw * ms)
+                                    h_d = int(bh * ms)
                                 self._motion_bboxes.append(
                                     DetDict(
                                         class_name=DetectionClass.MOTION,
                                         confidence=min(
                                             1.0, area / (small_pixels * 0.05)
                                         ),
-                                        bbox=DetBbox(
-                                            x=int(bx * ms) + roi_ox,
-                                            y=int(by * ms) + roi_oy,
-                                            w=int(bw * ms),
-                                            h=int(bh * ms),
-                                        ),
+                                        bbox=DetBbox(x=x_d, y=y_d, w=w_d, h=h_d),
                                     )
                                 )
                             if len(self._motion_bboxes) > 10:
                                 self._motion_bboxes = self._motion_bboxes[-5:]
 
-                        # ── base_diff (320x320, shared small_denoised) ──
+                        # ── base_diff ──
                         if self._base_valid.get(rkey, False):
                             base_u8 = cv2.convertScaleAbs(self._base_roi_y[rkey])
-                            small_base = cv2.resize(
-                                base_u8, (320, 320), interpolation=cv2.INTER_AREA
-                            )
-                            bdiff_raw = cv2.absdiff(small_denoised, small_base)
+                            # ROI 0 base is stored at crop size (480×480); no resize needed
+                            if motion_roi_idx == 0:
+                                small_base = base_u8
+                            else:
+                                small_base = cv2.resize(
+                                    base_u8, (320, 320), interpolation=cv2.INTER_AREA
+                                )
+                            bdiff_raw = cv2.absdiff(y_small, small_base)
                             bdiff_raw = cv2.GaussianBlur(bdiff_raw, (5, 5), 0)
                             base_noise_floor = max(20, int(self._noise_sigma * 4))
                             bdiff = bdiff_raw.copy()
                             bdiff[bdiff < base_noise_floor] = 0
-                            # Mask border (outer 5%) — IR LED illumination unevenness
+                            # Mask border (outer ~3%) — IR LED illumination unevenness
                             b = 16
                             bdiff[:b, :] = 0
                             bdiff[-b:, :] = 0
                             bdiff[:, :b] = 0
                             bdiff[:, -b:] = 0
-                            nz_ratio = cv2.countNonZero(bdiff) / (320 * 320)
+                            nz_ratio = cv2.countNonZero(bdiff) / (small_size * small_size)
                             if nz_ratio > 0.01:
                                 motion_detected_this_frame = True
                             if motion_roi_idx == 0:
@@ -1282,8 +1314,6 @@ class YoloDetectorDaemon:
                             self._roi_grids[rkey] = grid
                             if fp % 10 == 0:  # ~3fps instead of 30fps
                                 try:
-                                    import json as _json
-
                                     grid_size = 16
                                     g0 = self._roi_grids.get(
                                         "roi0", [[0.0] * grid_size] * grid_size
@@ -1292,7 +1322,7 @@ class YoloDetectorDaemon:
                                         "roi1", [[0.0] * grid_size] * grid_size
                                     )
                                     combined = [g0[r] + g1[r] for r in range(grid_size)]
-                                    _json_str = _json.dumps(
+                                    _json_str = json.dumps(
                                         {
                                             "grid": combined,
                                             "rows": grid_size,
@@ -1314,7 +1344,7 @@ class YoloDetectorDaemon:
                                 except Exception:
                                     pass
 
-                        self._prev_roi_small[rkey] = small_denoised
+                        self._prev_roi_small[rkey] = y_small
                         m_hb_buf.release()
                     except Exception as e:
                         logger.warning(

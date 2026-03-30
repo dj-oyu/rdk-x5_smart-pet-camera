@@ -283,14 +283,15 @@ int vio_create(vio_context_t* ctx, int camera_index, int sensor_width, int senso
         // ROI definitions (sensor coordinates 1920x1080)
         // RDK X5 VSE: max 5 output channels (Ch0-4). Ch3-4 for 2 ROI crops.
         // Both ROIs focused on the feeding area (bottom-left of frame):
-        //   ROI 0: feeding area tight (240, 552, 480, 480) → 640x640 (1.33x zoom)
+        //   ROI 0: feeding area tight (160, 440, 640, 640) → 640x640 (1:1, min VSE size)
         //           motion detection + fine-tuning frame collection
+        //           Note: VSE only supports downscaling; 640x640 is the minimum input size
         //   ROI 1: feeding area wide  (144, 120, 960, 960) → 640x640 (1.0x)
         //           YOLO detection + approach detection
         struct {
             int x, y, w, h;
         } rois[NUM_ROI_REGIONS] = {
-            {240, 552, 480, 480},  // ROI 0: feeding area tight
+            {160, 440, 640, 640},  // ROI 0: feeding area tight (1:1, min VSE crop)
             {144, 120, 960, 960},  // ROI 1: feeding area wide
         };
         for (int i = 0; i < NUM_ROI_REGIONS; i++) {
