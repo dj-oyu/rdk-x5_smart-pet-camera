@@ -59,12 +59,19 @@ static constexpr int STREAM_HEARTBEAT_SEC = 10;
 
 static volatile sig_atomic_t g_running = 1;
 static int g_listen_fd = -1;
+static int g_stream_tcp_fd = -1; // Active stream TCP fd for clean shutdown.
 
 static void signal_handler(int /*sig*/) {
     g_running = 0;
     if (g_listen_fd >= 0) {
+        shutdown(g_listen_fd, SHUT_RDWR);
         close(g_listen_fd);
         g_listen_fd = -1;
+    }
+    if (g_stream_tcp_fd >= 0) {
+        shutdown(g_stream_tcp_fd, SHUT_RDWR);
+        close(g_stream_tcp_fd);
+        g_stream_tcp_fd = -1;
     }
 }
 
@@ -803,58 +810,57 @@ int main(int argc, char** argv) {
                     }
                 }
                 fprintf(stderr, "[STREAM] Started (%dx%d H.265)\n", FRAME_W, FRAME_H);
+                g_stream_tcp_fd = stcp;
                 {
                     uint8_t sbuf[256 * 1024];
-                    int ss = 0, sd = 0;
+                    int sends = 0, decoded = 0;
+                    const int clahe_interval = 128;
+                    std::vector<uint8_t> clahe_y; // Cached CLAHE Y plane.
                     auto last_hb = std::chrono::steady_clock::now();
+
                     while (g_running) {
                         ssize_t nr = recv(stcp, sbuf, sizeof(sbuf), 0);
                         if (nr <= 0) {
-                            fprintf(stderr, "[STREAM] %s\n", nr == 0 ? "EOF" : strerror(errno));
+                            if (nr == 0 || (errno != EAGAIN && errno != EINTR))
+                                fprintf(stderr, "[STREAM] %s\n", nr == 0 ? "EOF" : strerror(errno));
                             break;
                         }
                         AX_VDEC_STREAM_T st = {};
                         st.pu8Addr = sbuf;
                         st.u32StreamPackLen = nr;
                         AX_VDEC_SendStream(VDEC_GRP, &st, -1);
-                        ss++;
+                        sends++;
+
                         AX_VIDEO_FRAME_INFO_T fi = {};
-                        int gr = AX_VDEC_GetChnFrame(VDEC_GRP, VDEC_CHN, &fi, 100);
-                        if (gr == 0) {
-                            sd++;
+                        if (AX_VDEC_GetChnFrame(VDEC_GRP, VDEC_CHN, &fi, 100) != 0)
+                            goto heartbeat;
+
+                        {
                             const auto& vf = fi.stVFrame;
                             const int fw = vf.u32Width, fh = vf.u32Height;
-                            // VDEC output has phy only; mmap entire NV12 for CPU access.
                             const int ysz = fw * fh;
                             const int nv12sz = ysz * 3 / 2;
+
+                            // Mmap VDEC output (phy-only pool).
                             void* nv12_map = nullptr;
-                            if (fw > 0 && fh > 0 && vf.u64PhyAddr[0] && !vf.u64VirAddr[0]) {
+                            if (fw > 0 && fh > 0 && vf.u64PhyAddr[0] && !vf.u64VirAddr[0])
                                 nv12_map = AX_SYS_Mmap(vf.u64PhyAddr[0], nv12sz);
-                            }
                             uint8_t* y = vf.u64VirAddr[0] ? (uint8_t*)(uintptr_t)vf.u64VirAddr[0]
                                                           : (uint8_t*)nv12_map;
                             uint8_t* uv = y ? y + ysz : nullptr;
-                            if (sd <= 3)
-                                fprintf(stderr, "[STREAM] Frame %d: %dx%d y=%p uv=%p\n", sd, fw, fh,
-                                        y, uv);
-                            if (fw > 0 && fh > 0 && y && uv) {
-                                if ((sd & 127) == 0) {
-                                    const int ysz = fw * fh;
-                                    std::vector<uint8_t> tmp(y, y + ysz);
-                                    apply_clahe_nv12(tmp.data(), fw, fh);
-                                    memcpy(y, tmp.data(), ysz);
-                                    memset(uv, 128, ysz / 2);
-                                } else {
-                                    memset(uv, 128, fw * fh / 2);
+
+                            if (y && uv) {
+                                // CLAHE: recompute every N frames, apply cache to all.
+                                if ((decoded % clahe_interval) == 0) {
+                                    clahe_y.assign(y, y + ysz);
+                                    apply_clahe_nv12(clahe_y.data(), fw, fh);
                                 }
-                                AX_SYS_MflushCache(vf.u64PhyAddr[0], y, fw * fh);
-                                AX_SYS_MflushCache(vf.u64PhyAddr[1], uv, fw * fh / 2);
-                                if (sd <= 3)
-                                    fprintf(stderr,
-                                            "[STREAM] Frame %d: %dx%d vir=%lx phy=%lx ivps=%d\n",
-                                            sd, fw, fh, (unsigned long)vf.u64VirAddr[0],
-                                            (unsigned long)vf.u64PhyAddr[0], model.ivps_ready);
-                                if (model.ivps_ready) {
+                                if (!clahe_y.empty())
+                                    memcpy(y, clahe_y.data(), ysz);
+                                memset(uv, 128, ysz / 2);
+
+                                // IVPS HW NV12→BGR letterbox + NPU inference.
+                                if (model.ivps_ready && model.handle) {
                                     AX_VIDEO_FRAME_T sf = {};
                                     sf.u32Width = fw;
                                     sf.u32Height = fh;
@@ -878,11 +884,7 @@ int main(int argc, char** argv) {
                                     ar.nBgColor = 0x727272;
                                     ar.eAligns[0] = AX_IVPS_ASPECT_RATIO_HORIZONTAL_CENTER;
                                     ar.eAligns[1] = AX_IVPS_ASPECT_RATIO_VERTICAL_CENTER;
-                                    int ivps_ret = AX_IVPS_CropResizeTdp(&sf, &df, &ar);
-                                    if (sd <= 3)
-                                        fprintf(stderr, "[STREAM] Frame %d: %dx%d, IVPS=0x%x\n", sd,
-                                                fw, fh, ivps_ret);
-                                    if (ivps_ret == 0) {
+                                    if (AX_IVPS_CropResizeTdp(&sf, &df, &ar) == 0) {
                                         AX_SYS_MinvalidateCache(model.io_data.pInputs[0].phyAddr,
                                                                 model.io_data.pInputs[0].pVirAddr,
                                                                 model.io_data.pInputs[0].nSize);
@@ -890,31 +892,32 @@ int main(int argc, char** argv) {
                                         double ms = 0;
                                         const auto t0 = std::chrono::steady_clock::now();
                                         run_npu_and_postprocess(model, fw, fh, dets, ms, t0);
-                                        if (!dets.empty()) {
+                                        if (!dets.empty())
                                             send_detections(cfd, dets, (float)ms);
-                                        }
-                                        if (sd <= 3)
-                                            fprintf(stderr, "[STREAM]   NPU: %zu dets, %.1fms\n",
-                                                    dets.size(), ms);
                                     }
                                 }
+                                decoded++;
                             }
+
                             if (nv12_map)
                                 AX_SYS_Munmap(nv12_map, nv12sz);
-                            AX_VDEC_ReleaseChnFrame(VDEC_GRP, VDEC_CHN, &fi);
                         }
+                        AX_VDEC_ReleaseChnFrame(VDEC_GRP, VDEC_CHN, &fi);
+
+                    heartbeat:
                         auto now = std::chrono::steady_clock::now();
                         if (std::chrono::duration_cast<std::chrono::seconds>(now - last_hb)
                                 .count() >= STREAM_HEARTBEAT_SEC) {
                             std::vector<Detection> empty;
                             if (!send_detections(cfd, empty, 0))
                                 break;
-                            fprintf(stderr, "[STREAM] sends=%d decoded=%d\n", ss, sd);
+                            fprintf(stderr, "[STREAM] sends=%d decoded=%d\n", sends, decoded);
                             last_hb = now;
                         }
                     }
-                    fprintf(stderr, "[STREAM] FINAL sends=%d decoded=%d\n", ss, sd);
+                    fprintf(stderr, "[STREAM] Ended (sends=%d decoded=%d)\n", sends, decoded);
                 }
+                g_stream_tcp_fd = -1;
                 shutdown(stcp, SHUT_RDWR);
                 close(stcp);
             } break;
