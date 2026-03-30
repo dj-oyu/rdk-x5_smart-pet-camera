@@ -151,7 +151,7 @@ export function App() {
                 <img
                   ref={videoPlayer.mjpegRef}
                   alt="Camera stream"
-                  style={{ width: '100%', height: 'auto', borderRadius: '8px 8px 0 0' }}
+                  style={{ width: '100%', height: 'auto', aspectRatio: '768/432', borderRadius: '8px 8px 0 0' }}
                 />
               </div>
             </div>
