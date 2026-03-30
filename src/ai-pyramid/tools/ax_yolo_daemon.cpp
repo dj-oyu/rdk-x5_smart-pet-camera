@@ -9,6 +9,7 @@
 // BSD 3-Clause License (follows ax-pipeline conventions).
 
 #include <ax_engine_api.h>
+#include <ax_ivps_api.h>
 #include <ax_sys_api.h>
 
 #include <opencv2/imgcodecs.hpp>
@@ -221,6 +222,12 @@ struct AxModel {
     ModelColorSpace color_space = ModelColorSpace::UNKNOWN;
     std::string model_path;
     uint32_t cmm_bytes = 0;
+
+    // CMM buffer for NV12 input (reusable across frames).
+    AX_U64 nv12_phy = 0;
+    void* nv12_vir = nullptr;
+    uint32_t nv12_size = 0;
+    bool ivps_ready = false;
 };
 
 static void free_io(AX_ENGINE_IO_T* io) {
@@ -354,67 +361,32 @@ static void unload_model(AxModel& m) {
 // Image preprocessing
 // ---------------------------------------------------------------------------
 
-static cv::Mat preprocess(const cv::Mat& src, int target_w, int target_h, ModelColorSpace cs) {
+// Letterbox BGR src into a pre-allocated CMM-backed dst Mat.
+static void letterbox_into(const cv::Mat& src, cv::Mat& dst) {
+    const int target_w = dst.cols;
+    const int target_h = dst.rows;
     const float scale = std::min((float)target_w / src.cols, (float)target_h / src.rows);
     const int new_w = (int)(scale * src.cols);
     const int new_h = (int)(scale * src.rows);
 
-    cv::Mat resized;
-    cv::resize(src, resized, cv::Size(new_w, new_h));
+    // Fill padding (114,114,114 = YOLO standard gray).
+    dst.setTo(cv::Scalar(114, 114, 114));
 
-    cv::Mat padded(target_h, target_w, CV_8UC3, cv::Scalar(114, 114, 114));
+    // Resize directly into the ROI of the CMM-backed Mat.
     const int dx = (target_w - new_w) / 2;
     const int dy = (target_h - new_h) / 2;
-    resized.copyTo(padded(cv::Rect(dx, dy, new_w, new_h)));
-
-    if (cs == ModelColorSpace::NV12) {
-        cv::Mat yuv;
-        cv::cvtColor(padded, yuv, cv::COLOR_BGR2YUV_I420);
-        const int y_size = target_w * target_h;
-        const int uv_h = target_h / 2;
-        const int uv_w = target_w / 2;
-        cv::Mat nv12(target_h * 3 / 2, target_w, CV_8UC1);
-        memcpy(nv12.data, yuv.data, y_size);
-        const uint8_t* u_plane = yuv.data + y_size;
-        const uint8_t* v_plane = u_plane + uv_h * uv_w;
-        uint8_t* uv_dst = nv12.data + y_size;
-        for (int i = 0; i < uv_h * uv_w; ++i) {
-            uv_dst[2 * i] = u_plane[i];
-            uv_dst[2 * i + 1] = v_plane[i];
-        }
-        return nv12;
-    }
-
-    if (cs == ModelColorSpace::RGB) {
-        cv::cvtColor(padded, padded, cv::COLOR_BGR2RGB);
-    }
-    return padded;
-}
-
-// Preprocess NV12 raw frame: convert to BGR, then letterbox.
-static cv::Mat preprocess_nv12(const uint8_t* nv12, int src_w, int src_h, int target_w,
-                               int target_h, ModelColorSpace cs) {
-    cv::Mat nv12_mat(src_h * 3 / 2, src_w, CV_8UC1, const_cast<uint8_t*>(nv12));
-    cv::Mat bgr;
-    cv::cvtColor(nv12_mat, bgr, cv::COLOR_YUV2BGR_NV12);
-    return preprocess(bgr, target_w, target_h, cs);
+    cv::Mat roi = dst(cv::Rect(dx, dy, new_w, new_h));
+    cv::resize(src, roi, cv::Size(new_w, new_h));
 }
 
 // ---------------------------------------------------------------------------
-// Run inference
+// Run inference — preprocesses directly into CMM buffer (zero memcpy).
 // ---------------------------------------------------------------------------
 
-static int run_inference(AxModel& m, const cv::Mat& input, int orig_w, int orig_h,
-                         std::vector<Detection>& results, double& elapsed_ms) {
-    results.clear();
-    const auto t0 = std::chrono::steady_clock::now();
-
-    const size_t data_size = input.total() * input.elemSize();
-    const size_t buf_size = m.io_data.pInputs[0].nSize;
-    memcpy(m.io_data.pInputs[0].pVirAddr, input.data, std::min(data_size, buf_size));
-    AX_SYS_MflushCache(m.io_data.pInputs[0].phyAddr, m.io_data.pInputs[0].pVirAddr,
-                        m.io_data.pInputs[0].nSize);
-
+// Shared: RunSync + post-processing (called after preprocess writes to CMM).
+static int run_npu_and_postprocess(AxModel& m, int orig_w, int orig_h,
+                                   std::vector<Detection>& results, double& elapsed_ms,
+                                   std::chrono::steady_clock::time_point t0) {
     const int ret = AX_ENGINE_RunSync(m.handle, &m.io_data);
     if (ret != 0) {
         fprintf(stderr, "[ERROR] AX_ENGINE_RunSync failed: 0x%x\n", ret);
@@ -448,6 +420,114 @@ static int run_inference(AxModel& m, const cv::Mat& input, int orig_w, int orig_
     const auto t1 = std::chrono::steady_clock::now();
     elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     return 0;
+}
+
+// Run inference from a BGR cv::Mat (JPEG path).
+static int run_inference_bgr(AxModel& m, const cv::Mat& bgr, int orig_w, int orig_h,
+                             std::vector<Detection>& results, double& elapsed_ms) {
+    results.clear();
+    const auto t0 = std::chrono::steady_clock::now();
+
+    // Wrap CMM input buffer as cv::Mat — writes go directly to NPU memory.
+    cv::Mat cmm_mat(m.input_h, m.input_w, CV_8UC3, m.io_data.pInputs[0].pVirAddr);
+    letterbox_into(bgr, cmm_mat);
+    AX_SYS_MflushCache(m.io_data.pInputs[0].phyAddr, m.io_data.pInputs[0].pVirAddr,
+                        m.io_data.pInputs[0].nSize);
+
+    return run_npu_and_postprocess(m, orig_w, orig_h, results, elapsed_ms, t0);
+}
+
+// Ensure NV12 CMM buffer is allocated for the given size.
+static int ensure_nv12_cmm(AxModel& m, int w, int h) {
+    const uint32_t needed = w * h * 3 / 2;
+    if (m.nv12_vir && m.nv12_size >= needed) {
+        return 0;
+    }
+    if (m.nv12_vir) {
+        AX_SYS_MemFree(m.nv12_phy, m.nv12_vir);
+        m.nv12_vir = nullptr;
+    }
+    const int ret =
+        AX_SYS_MemAllocCached(&m.nv12_phy, &m.nv12_vir, needed, CMM_ALIGN, (const AX_S8*)CMM_TOKEN);
+    if (ret != 0) {
+        fprintf(stderr, "[ERROR] NV12 CMM alloc failed: 0x%x\n", ret);
+        return ret;
+    }
+    m.nv12_size = needed;
+    return 0;
+}
+
+// Run inference from raw NV12 data using IVPS HW (NV12→BGR + resize + letterbox).
+// Falls back to OpenCV if IVPS is not available.
+static int run_inference_nv12(AxModel& m, const uint8_t* nv12, int src_w, int src_h,
+                              std::vector<Detection>& results, double& elapsed_ms) {
+    results.clear();
+    const auto t0 = std::chrono::steady_clock::now();
+
+    if (m.ivps_ready) {
+        // --- IVPS HW path: NV12 → BGR 640×640 letterbox in one HW call ---
+        if (ensure_nv12_cmm(m, src_w, src_h) != 0) {
+            return -1;
+        }
+        const uint32_t nv12_bytes = src_w * src_h * 3 / 2;
+        memcpy(m.nv12_vir, nv12, nv12_bytes);
+        AX_SYS_MflushCache(m.nv12_phy, m.nv12_vir, nv12_bytes);
+
+        // Source: NV12
+        AX_VIDEO_FRAME_T src_frame = {};
+        src_frame.u32Width = src_w;
+        src_frame.u32Height = src_h;
+        src_frame.enImgFormat = AX_FORMAT_YUV420_SEMIPLANAR; // NV12
+        src_frame.u32PicStride[0] = src_w;
+        src_frame.u64PhyAddr[0] = m.nv12_phy;                       // Y plane
+        src_frame.u64VirAddr[0] = (AX_U64)(uintptr_t)m.nv12_vir;
+        src_frame.u64PhyAddr[1] = m.nv12_phy + src_w * src_h;       // UV plane
+        src_frame.u64VirAddr[1] = (AX_U64)(uintptr_t)((uint8_t*)m.nv12_vir + src_w * src_h);
+
+        // Destination: BGR 640×640, backed by NPU input CMM buffer.
+        AX_VIDEO_FRAME_T dst_frame = {};
+        dst_frame.u32Width = m.input_w;
+        dst_frame.u32Height = m.input_h;
+        dst_frame.enImgFormat = AX_FORMAT_BGR888;
+        dst_frame.u32PicStride[0] = m.input_w * 3;
+        dst_frame.u64PhyAddr[0] = m.io_data.pInputs[0].phyAddr;
+        dst_frame.u64VirAddr[0] = (AX_U64)(uintptr_t)m.io_data.pInputs[0].pVirAddr;
+        dst_frame.u32FrameSize = m.io_data.pInputs[0].nSize;
+
+        // Aspect-ratio preserving resize with letterbox padding.
+        AX_IVPS_ASPECT_RATIO_T ar = {};
+        ar.eMode = AX_IVPS_ASPECT_RATIO_AUTO;
+        ar.nBgColor = 0x727272; // 114,114,114 in BGR packed
+        ar.eAligns[0] = AX_IVPS_ASPECT_RATIO_HORIZONTAL_CENTER;
+        ar.eAligns[1] = AX_IVPS_ASPECT_RATIO_VERTICAL_CENTER;
+
+        const int ret = AX_IVPS_CropResizeTdp(&src_frame, &dst_frame, &ar);
+        if (ret != 0) {
+            fprintf(stderr, "[WARN] IVPS CropResizeTdp failed: 0x%x, falling back to CPU\n", ret);
+            goto cpu_fallback;
+        }
+
+        // IVPS writes directly to NPU input buffer — just flush.
+        AX_SYS_MinvalidateCache(m.io_data.pInputs[0].phyAddr, m.io_data.pInputs[0].pVirAddr,
+                                m.io_data.pInputs[0].nSize);
+
+        return run_npu_and_postprocess(m, src_w, src_h, results, elapsed_ms, t0);
+    }
+
+cpu_fallback:
+    // --- CPU fallback: OpenCV NV12→BGR + letterbox ---
+    {
+        cv::Mat nv12_mat(src_h * 3 / 2, src_w, CV_8UC1, const_cast<uint8_t*>(nv12));
+        cv::Mat bgr;
+        cv::cvtColor(nv12_mat, bgr, cv::COLOR_YUV2BGR_NV12);
+
+        cv::Mat cmm_mat(m.input_h, m.input_w, CV_8UC3, m.io_data.pInputs[0].pVirAddr);
+        letterbox_into(bgr, cmm_mat);
+        AX_SYS_MflushCache(m.io_data.pInputs[0].phyAddr, m.io_data.pInputs[0].pVirAddr,
+                            m.io_data.pInputs[0].nSize);
+
+        return run_npu_and_postprocess(m, src_w, src_h, results, elapsed_ms, t0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -575,10 +655,7 @@ static void handle_detect(int fd, AxModel& m, const RequestHeader& req) {
             send_error(fd, "imread failed");
             return;
         }
-        const int orig_w = img.cols;
-        const int orig_h = img.rows;
-        cv::Mat input = preprocess(img, m.input_w, m.input_h, m.color_space);
-        if (run_inference(m, input, orig_w, orig_h, dets, ms) != 0) {
+        if (run_inference_bgr(m, img, img.cols, img.rows, dets, ms) != 0) {
             send_error(fd, "inference failed");
             return;
         }
@@ -588,7 +665,6 @@ static void handle_detect(int fd, AxModel& m, const RequestHeader& req) {
         const int src_h = req.height;
         const size_t expected = (size_t)src_w * src_h * 3 / 2;
         if (req.payload_size != expected) {
-            // Drain payload to avoid protocol desync.
             std::vector<uint8_t> drain(req.payload_size);
             read_exact(fd, drain.data(), req.payload_size);
             send_error(fd, "nv12 size mismatch");
@@ -601,9 +677,7 @@ static void handle_detect(int fd, AxModel& m, const RequestHeader& req) {
             return;
         }
 
-        cv::Mat input = preprocess_nv12(nv12.data(), src_w, src_h, m.input_w, m.input_h,
-                                        m.color_space);
-        if (run_inference(m, input, src_w, src_h, dets, ms) != 0) {
+        if (run_inference_nv12(m, nv12.data(), src_w, src_h, dets, ms) != 0) {
             send_error(fd, "inference failed");
             return;
         }
@@ -736,9 +810,20 @@ int main(int argc, char** argv) {
 
     fprintf(stderr, "[INFO] AX Engine initialized (version: %s)\n", AX_ENGINE_GetVersion());
 
+    // Initialize IVPS for HW NV12→BGR + letterbox.
+    bool ivps_ok = false;
+    ret = AX_IVPS_Init();
+    if (ret == 0) {
+        ivps_ok = true;
+        fprintf(stderr, "[INFO] IVPS initialized (HW preprocess enabled)\n");
+    } else {
+        fprintf(stderr, "[WARN] AX_IVPS_Init failed: 0x%x (CPU fallback)\n", ret);
+    }
+
     AxModel model;
     model.input_w = input_w;
     model.input_h = input_h;
+    model.ivps_ready = ivps_ok;
     ret = load_model(model, model_path, input_w, input_h);
     if (ret != 0) {
         AX_ENGINE_Deinit();
@@ -798,7 +883,13 @@ int main(int argc, char** argv) {
         close(g_listen_fd);
     }
     unlink(socket_path.c_str());
+    if (model.nv12_vir) {
+        AX_SYS_MemFree(model.nv12_phy, model.nv12_vir);
+    }
     unload_model(model);
+    if (ivps_ok) {
+        AX_IVPS_Deinit();
+    }
     AX_ENGINE_Deinit();
     AX_SYS_Deinit();
     return 0;
