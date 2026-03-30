@@ -366,6 +366,20 @@ class YoloDetectorDaemon:
             (160, 440, 640, 640),  # ROI 0: feeding area tight (1:1, min VSE crop)
             (144, 120, 960, 960),  # ROI 1: feeding area wide (YOLO + approach)
         ]
+        # Grid bounding rects in 1280×720 video space [[x,y,w,h], [x,y,w,h]]
+        # ROI0: center 480×480 sub-crop of 640×640 VSE output
+        # ROI1: full 640×640 VSE output
+        _grid_rects: list[list[int]] = []
+        for _ri, (_rx, _ry, _rw, _) in enumerate(self.VSE_ROI_REGIONS):
+            _ox = int(_rx * 1280.0 / 1920.0)
+            _oy = int(_ry * 720.0 / 1080.0)
+            _sc = _rw / 960.0
+            if _ri == 0:
+                _off = (640 - 480) // 2  # center-crop offset = 80
+                _grid_rects.append([_ox + int(_off * _sc), _oy + int(_off * _sc), int(480 * _sc), int(480 * _sc)])
+            else:
+                _grid_rects.append([_ox, _oy, int(640 * _sc), int(640 * _sc)])
+        self._grid_roi_rects: list[list[int]] = _grid_rects
 
         # Detection result cache for temporal integration
         self.detection_cache: list[list[DetDict]] = []  # [roi_0_dets, roi_1_dets, ...]
@@ -399,6 +413,9 @@ class YoloDetectorDaemon:
         self._quiet_frames: int = (
             0  # consecutive frames with no motion AND no YOLO detection
         )
+        self._base_quiet_frames: int = (
+            0  # consecutive frames with no base_diff/frame_diff motion (YOLO-independent)
+        )
         self._noise_sigma: float = (
             4.8  # pre-computed from recordings (NIR + H.265 noise)
         )
@@ -406,6 +423,8 @@ class YoloDetectorDaemon:
         self.BASE_QUIET_THRESHOLD: int = (
             1800  # ~60s @ 30fps for initial base build only
         )
+        self.BASE_NOISE_FLOOR: int = 15  # abs-diff threshold before morph OPEN (sweep-tuned)
+        self.BASE_MOTION_THRESH: float = 0.015  # nz_ratio threshold after morph OPEN (sweep-tuned)
         self.BASE_INIT_FRAMES: int = 50  # EMA frames for initial base
         self.SNAPSHOT_INTERVAL: int = 300  # ~10s @ 30fps between snapshot updates
         self.SNAPSHOT_BLEND_ALPHA: float = 0.05  # how fast base absorbs stable changes
@@ -1207,7 +1226,7 @@ class YoloDetectorDaemon:
                         if rkey in self._prev_roi_small:
                             diff = cv2.absdiff(y_small, self._prev_roi_small[rkey])
                             diff = cv2.GaussianBlur(diff, (5, 5), 0)
-                            diff[diff < 8] = 0  # cut IR noise floor
+                            diff[diff < 15] = 0  # IR noise floor (3σ threshold for frame-diff)
 
                             # Temporal sum accumulation (uint16, same size as y_small)
                             if rkey not in self._diff_acc:
@@ -1220,28 +1239,50 @@ class YoloDetectorDaemon:
 
                             acc_u8 = cv2.convertScaleAbs(acc)
                             _, thresh = cv2.threshold(
-                                acc_u8, 30, 255, cv2.THRESH_BINARY
+                                acc_u8, 50, 255, cv2.THRESH_BINARY
                             )
-                            close_kernel = cv2.getStructuringElement(
-                                cv2.MORPH_ELLIPSE, (7, 7)
+                            # MORPH_OPEN: remove isolated scatter noise
+                            open_kernel = cv2.getStructuringElement(
+                                cv2.MORPH_ELLIPSE, (5, 5)
                             )
                             thresh = cv2.morphologyEx(
-                                thresh, cv2.MORPH_CLOSE, close_kernel
+                                thresh, cv2.MORPH_OPEN, open_kernel
                             )
+                            # Group nearby blobs: connect edge-clustered fragments
+                            # (real objects show diff along their silhouette edges)
+                            group_kernel = cv2.getStructuringElement(
+                                cv2.MORPH_ELLIPSE, (9, 9)
+                            )
+                            thresh_grouped = cv2.dilate(thresh, group_kernel)
                             contours, _ = cv2.findContours(
-                                thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                                thresh_grouped, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
                             )
 
                             roi_sx, roi_sy, roi_sw, _ = self.VSE_ROI_REGIONS[motion_roi_idx]
                             small_pixels = small_size * small_size
-                            min_area = small_pixels * 0.001
+                            min_orig_pixels = small_pixels * 0.001  # original pixel count floor
                             for cnt in contours:
-                                area = cv2.contourArea(cnt)
-                                if area < min_area:
+                                gx, gy, gw, gh = cv2.boundingRect(cnt)
+                                if gw < 20 or gh < 20:
                                     continue
-                                bx, by, bw, bh = cv2.boundingRect(cnt)
-                                if bw < 5 or bh < 5:
+                                # Count original (pre-dilation) pixels in group bbox
+                                orig_pixels = cv2.countNonZero(
+                                    thresh[gy : gy + gh, gx : gx + gw]
+                                )
+                                if orig_pixels < min_orig_pixels:
                                     continue
+                                # Fill ratio: sparse noise → low fill; real object → high fill
+                                fill_ratio = orig_pixels / (gw * gh)
+                                if fill_ratio < 0.08:
+                                    continue
+                                # Use tight bbox of original pixels for accurate coords
+                                orig_pts = cv2.findNonZero(
+                                    thresh[gy : gy + gh, gx : gx + gw]
+                                )
+                                if orig_pts is None:
+                                    continue
+                                ox, oy, ow, oh = cv2.boundingRect(orig_pts)
+                                bx, by, bw, bh = gx + ox, gy + oy, ow, oh
                                 motion_detected_this_frame = True
                                 if motion_roi_idx == 0:
                                     # ROI 0 is 1:1 crop: pixel → sensor coord via crop offset
@@ -1264,7 +1305,7 @@ class YoloDetectorDaemon:
                                     DetDict(
                                         class_name=DetectionClass.MOTION,
                                         confidence=min(
-                                            1.0, area / (small_pixels * 0.05)
+                                            1.0, orig_pixels / (small_pixels * 0.05)
                                         ),
                                         bbox=DetBbox(x=x_d, y=y_d, w=w_d, h=h_d),
                                     )
@@ -1284,23 +1325,34 @@ class YoloDetectorDaemon:
                                 )
                             bdiff_raw = cv2.absdiff(y_small, small_base)
                             bdiff_raw = cv2.GaussianBlur(bdiff_raw, (5, 5), 0)
-                            base_noise_floor = max(20, int(self._noise_sigma * 4))
                             bdiff = bdiff_raw.copy()
-                            bdiff[bdiff < base_noise_floor] = 0
+                            bdiff[bdiff < self.BASE_NOISE_FLOOR] = 0
                             # Mask border (outer ~3%) — IR LED illumination unevenness
                             b = 16
                             bdiff[:b, :] = 0
                             bdiff[-b:, :] = 0
                             bdiff[:, :b] = 0
                             bdiff[:, -b:] = 0
-                            nz_ratio = cv2.countNonZero(bdiff) / (small_size * small_size)
-                            if nz_ratio > 0.01:
+                            # Morphological OPEN: remove spatially scattered noise pixels
+                            # while preserving coherent motion regions (e.g. dark cat)
+                            _morph_k = cv2.getStructuringElement(
+                                cv2.MORPH_ELLIPSE, (5, 5)
+                            )
+                            bdiff_coherent = cv2.morphologyEx(
+                                bdiff, cv2.MORPH_OPEN, _morph_k
+                            )
+                            nz_ratio = cv2.countNonZero(bdiff_coherent) / (
+                                small_size * small_size
+                            )
+                            if nz_ratio > self.BASE_MOTION_THRESH:
                                 motion_detected_this_frame = True
                             if motion_roi_idx == 0:
                                 self._feeding_base_nz = nz_ratio
                             if fp % 300 == 0:
                                 logger.info(
-                                    f"base_diff {rkey}: nz={nz_ratio:.4f} floor={base_noise_floor}"
+                                    f"base_diff {rkey}: nz={nz_ratio:.4f} "
+                                    f"floor={self.BASE_NOISE_FLOOR} "
+                                    f"base_quiet={self._base_quiet_frames}"
                                 )
                             # 16x16 heatmap grid for web UI
                             grid_arr = cv2.resize(
@@ -1327,9 +1379,11 @@ class YoloDetectorDaemon:
                                             "cols": grid_size * 2,
                                             "base_valid": True,
                                             "quiet_frames": self._quiet_frames,
+                                            "base_quiet_frames": self._base_quiet_frames,
                                             "score_threshold": round(
                                                 self.detector.score_threshold, 3
                                             ),
+                                            "roi_rects": self._grid_roi_rects,
                                         }
                                     )
                                     with open(
@@ -1360,12 +1414,14 @@ class YoloDetectorDaemon:
             self.motion_cooldown = 8
             self._roi_has_motion = True
             self._quiet_frames = 0
+            self._base_quiet_frames = 0  # only reset by sensor motion, not YOLO
         elif self.motion_cooldown > 0:
             self.motion_cooldown -= 1
             if self.motion_cooldown == 0:
                 self._roi_has_motion = False
         else:
             self._quiet_frames += 1
+            self._base_quiet_frames += 1
 
         # ── Base image management (snapshot-based) ─────────
         if _y_denoised_for_base is not None and _rkey_for_base:
@@ -1373,7 +1429,7 @@ class YoloDetectorDaemon:
             y_f32 = _y_denoised_for_base.astype(np.float32)
 
             if not self._base_valid.get(rk, False):
-                if self._quiet_frames >= self.BASE_QUIET_THRESHOLD:
+                if self._base_quiet_frames >= self.BASE_QUIET_THRESHOLD:
                     if rk not in self._base_roi_y:
                         self._base_roi_y[rk] = y_f32.copy()
                         self._base_init_count[rk] = 1
@@ -1398,8 +1454,7 @@ class YoloDetectorDaemon:
                     snap_u8 = cv2.convertScaleAbs(snap)
                     snap_diff = cv2.absdiff(_y_denoised_for_base, snap_u8)
                     snap_diff = cv2.GaussianBlur(snap_diff, (5, 5), 0)
-                    snap_noise_floor = max(20, int(self._noise_sigma * 4))
-                    snap_diff[snap_diff < snap_noise_floor] = 0
+                    snap_diff[snap_diff < self.BASE_NOISE_FLOOR] = 0
                     snap_stable = cv2.countNonZero(snap_diff) / snap_diff.size
 
                     if snap_stable < 0.005:
@@ -1417,6 +1472,7 @@ class YoloDetectorDaemon:
             self._base_init_count.clear()
             self._snapshot_roi_y.clear()
             self._quiet_frames = 0
+            self._base_quiet_frames = 0
             self._snapshot_timer = 0
             logger.info("Base images cleared (brightness change)")
         self._last_brightness = zc_frame.brightness_avg  # type: ignore[attr-defined]
