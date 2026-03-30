@@ -1175,8 +1175,8 @@ class YoloDetectorDaemon:
                         y_plane = m_y_arr[:m_y_size].reshape(mf.height, mf.width)
 
                         # ROI 0: direct 480×480 center crop from 640×640 VSE output.
-                        # NV12 rows are contiguous; ascontiguousarray packs the strided
-                        # slice into a contiguous 480×480 buffer for medianBlur.
+                        # cv2 functions accept strided numpy views via cv::Mat strides,
+                        # so no copy is needed — the slice is passed as-is.
                         # ROI 1: resize 640×640 → 320×320 (960px sensor crop needs scale).
                         rkey = f"roi{motion_roi_idx}"
                         if motion_roi_idx == 0:
@@ -1184,12 +1184,10 @@ class YoloDetectorDaemon:
                             _crop_x0 = (mf.width - _crop_size) // 2   # = 80
                             _crop_y0 = (mf.height - _crop_size) // 2  # = 80
                             y_small = cv2.medianBlur(
-                                np.ascontiguousarray(
-                                    y_plane[
-                                        _crop_y0 : _crop_y0 + _crop_size,
-                                        _crop_x0 : _crop_x0 + _crop_size,
-                                    ]
-                                ),
+                                y_plane[
+                                    _crop_y0 : _crop_y0 + _crop_size,
+                                    _crop_x0 : _crop_x0 + _crop_size,
+                                ],
                                 3,
                             )
                             small_size = _crop_size
