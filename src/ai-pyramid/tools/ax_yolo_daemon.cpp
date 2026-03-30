@@ -89,6 +89,7 @@ struct AxModel {
     void* nv12_vir = nullptr;
     uint32_t nv12_size = 0;
     bool ivps_ready = false;
+    bool vdec_ready = false;
 
     // Mutex for NPU access (stream vs on-demand).
     std::mutex npu_mutex;
@@ -514,53 +515,46 @@ static void handle_stream(int client_fd, AxModel& model, const RequestHeader& re
         return;
     }
 
-    // --- Init VDEC ---
-    AX_VDEC_MOD_ATTR_T vdec_mod = {};
-    vdec_mod.u32MaxGroupCount = 1;
-    vdec_mod.enDecModule = AX_ENABLE_ONLY_VDEC;
-    int ret = AX_VDEC_Init(&vdec_mod);
-    if (ret != 0) {
-        fprintf(stderr, "[STREAM] AX_VDEC_Init failed: 0x%x\n", ret);
-        send_error(client_fd, "vdec init failed");
+    if (!model.vdec_ready) {
+        send_error(client_fd, "vdec not initialized");
         close(tcp_fd);
         return;
     }
 
-    AX_VDEC_GRP_ATTR_T grp_attr = {};
-    grp_attr.enCodecType = PT_H265;
-    grp_attr.enInputMode = AX_VDEC_INPUT_MODE_STREAM;
-    grp_attr.u32MaxPicWidth = FRAME_W;
-    grp_attr.u32MaxPicHeight = FRAME_H;
-    grp_attr.u32StreamBufSize = STREAM_BUF_SIZE;
-    grp_attr.bSdkAutoFramePool = AX_TRUE;
+    // --- Create VDEC group (Init already done in main) ---
+    // Heap-allocate all VDEC structs — stack alignment issues with AX650 BSP.
+    auto* grp_attr = new AX_VDEC_GRP_ATTR_T();
+    memset(grp_attr, 0, sizeof(*grp_attr));
+    grp_attr->enCodecType = PT_H265;
+    grp_attr->enInputMode = AX_VDEC_INPUT_MODE_STREAM;
+    grp_attr->u32MaxPicWidth = FRAME_W;
+    grp_attr->u32MaxPicHeight = FRAME_H;
+    grp_attr->u32StreamBufSize = STREAM_BUF_SIZE;
+    grp_attr->bSdkAutoFramePool = AX_TRUE;
 
-    ret = AX_VDEC_CreateGrp(VDEC_GRP, &grp_attr);
+    int ret = AX_VDEC_CreateGrp(VDEC_GRP, grp_attr);
+    delete grp_attr;
     if (ret != 0) {
         fprintf(stderr, "[STREAM] AX_VDEC_CreateGrp failed: 0x%x\n", ret);
         send_error(client_fd, "vdec create failed");
-        AX_VDEC_Deinit();
         close(tcp_fd);
         return;
     }
 
     // Set decode mode to IPB (decode all frame types).
-    AX_VDEC_GRP_PARAM_T grp_param = {};
-    grp_param.stVdecVideoParam.enOutputOrder = AX_VDEC_OUTPUT_ORDER_DEC;
-    grp_param.stVdecVideoParam.enVdecMode = VIDEO_DEC_MODE_IPB;
-    AX_VDEC_SetGrpParam(VDEC_GRP, &grp_param);
+    auto* grp_param = new AX_VDEC_GRP_PARAM_T();
+    memset(grp_param, 0, sizeof(*grp_param));
+    grp_param->stVdecVideoParam.enOutputOrder = AX_VDEC_OUTPUT_ORDER_DEC;
+    grp_param->stVdecVideoParam.enVdecMode = VIDEO_DEC_MODE_IPB;
+    AX_VDEC_SetGrpParam(VDEC_GRP, grp_param);
+    delete grp_param;
 
     // Configure output channel: NV12 at original resolution.
-    AX_VDEC_CHN_ATTR_T chn_attr = {};
-    chn_attr.u32PicWidth = FRAME_W;
-    chn_attr.u32PicHeight = FRAME_H;
-    chn_attr.u32OutputFifoDepth = 4;
-    chn_attr.u32FrameBufCnt = 8;
-    chn_attr.enOutputMode = AX_VDEC_OUTPUT_ORIGINAL;
-    chn_attr.enImgFormat = AX_FORMAT_YUV420_SEMIPLANAR; // NV12
-
-    AX_VDEC_RECV_PIC_PARAM_T recv_param = {};
-    recv_param.s32RecvPicNum = -1; // unlimited
-    ret = AX_VDEC_StartRecvStream(VDEC_GRP, &recv_param);
+    auto* recv_param = new AX_VDEC_RECV_PIC_PARAM_T();
+    memset(recv_param, 0, sizeof(*recv_param));
+    recv_param->s32RecvPicNum = -1; // unlimited
+    ret = AX_VDEC_StartRecvStream(VDEC_GRP, recv_param);
+    delete recv_param;
     if (ret != 0) {
         fprintf(stderr, "[STREAM] AX_VDEC_StartRecvStream failed: 0x%x\n", ret);
         AX_VDEC_DestroyGrp(VDEC_GRP);
@@ -726,7 +720,6 @@ static void handle_stream(int client_fd, AxModel& model, const RequestHeader& re
 cleanup:
     AX_VDEC_StopRecvStream(VDEC_GRP);
     AX_VDEC_DestroyGrp(VDEC_GRP);
-    AX_VDEC_Deinit();
     close(tcp_fd);
     fprintf(stderr, "[STREAM] Ended\n");
 }
@@ -877,10 +870,6 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (model_path.empty()) {
-        print_usage(argv[0]);
-        return 1;
-    }
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -899,6 +888,25 @@ int main(int argc, char** argv) {
     }
     fprintf(stderr, "[INFO] AX Engine %s\n", AX_ENGINE_GetVersion());
 
+    // VDEC must be initialized BEFORE model load (CreateHandle).
+    // CreateHandle consumes kernel resources that prevent VDEC init.
+    // VDEC struct must be heap-allocated — stack alignment issues with AX650 BSP.
+    bool vdec_ok = false;
+    {
+        auto* vdec_mod = new AX_VDEC_MOD_ATTR_T();
+        memset(vdec_mod, 0, sizeof(*vdec_mod));
+        vdec_mod->u32MaxGroupCount = 16;
+        vdec_mod->enDecModule = AX_ENABLE_BOTH_VDEC_JDEC;
+        ret = AX_VDEC_Init(vdec_mod);
+        if (ret == 0) {
+            vdec_ok = true;
+            fprintf(stderr, "[INFO] VDEC HW enabled\n");
+        } else {
+            fprintf(stderr, "[WARN] AX_VDEC_Init: 0x%x (stream unavailable)\n", ret);
+        }
+        delete vdec_mod;
+    }
+
     bool ivps_ok = AX_IVPS_Init() == 0;
     if (ivps_ok) {
         fprintf(stderr, "[INFO] IVPS HW enabled\n");
@@ -908,6 +916,7 @@ int main(int argc, char** argv) {
     model.input_w = input_w;
     model.input_h = input_h;
     model.ivps_ready = ivps_ok;
+    model.vdec_ready = vdec_ok;
     if (load_model(model, model_path, input_w, input_h) != 0) {
         return 1;
     }
@@ -964,6 +973,9 @@ int main(int argc, char** argv) {
     unload_model(model);
     if (ivps_ok) {
         AX_IVPS_Deinit();
+    }
+    if (vdec_ok) {
+        AX_VDEC_Deinit();
     }
     AX_ENGINE_Deinit();
     AX_SYS_Deinit();
