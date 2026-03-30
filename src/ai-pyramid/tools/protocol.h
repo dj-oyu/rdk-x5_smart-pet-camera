@@ -27,10 +27,10 @@ struct RequestHeader {
 };
 
 struct ResponseHeader {
-    uint16_t status;     // 0=ok, 1=error
-    uint16_t det_count;  // number of WireDetection following
+    uint16_t status;    // 0=ok, 1=error
+    uint16_t det_count; // number of WireDetection following
     float elapsed_ms;
-    uint32_t error_len;  // if status=1, bytes of error string following
+    uint32_t error_len; // if status=1, bytes of error string following
 };
 
 struct WireDetection {

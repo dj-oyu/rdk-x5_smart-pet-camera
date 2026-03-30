@@ -142,7 +142,7 @@ static int load_model(AxModel& m, const std::string& path, int input_w, int inpu
         auto& buf = m.io_data.pInputs[i];
         buf.nSize = m.io_info->pInputs[i].nSize;
         ret = AX_SYS_MemAllocCached(&buf.phyAddr, &buf.pVirAddr, buf.nSize, CMM_ALIGN,
-                                     (const AX_S8*)CMM_TOKEN);
+                                    (const AX_S8*)CMM_TOKEN);
         if (ret != 0) {
             return ret;
         }
@@ -153,7 +153,7 @@ static int load_model(AxModel& m, const std::string& path, int input_w, int inpu
         auto& buf = m.io_data.pOutputs[i];
         buf.nSize = m.io_info->pOutputs[i].nSize;
         ret = AX_SYS_MemAllocCached(&buf.phyAddr, &buf.pVirAddr, buf.nSize, CMM_ALIGN,
-                                     (const AX_S8*)CMM_TOKEN);
+                                    (const AX_S8*)CMM_TOKEN);
         if (ret != 0) {
             return ret;
         }
@@ -247,8 +247,8 @@ static int run_npu_and_postprocess(AxModel& m, int orig_w, int orig_h,
     }
     nms(results, NMS_THRESHOLD);
     scale_detections(results, m.input_w, m.input_h, orig_w, orig_h);
-    elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
-                     .count();
+    elapsed_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     return 0;
 }
 
@@ -271,8 +271,8 @@ static int ensure_nv12_cmm(AxModel& m, int w, int h) {
 }
 
 // Inference from NV12 in CMM (already copied + flushed). Uses IVPS or CPU fallback.
-static int run_inference_nv12_cmm(AxModel& m, int src_w, int src_h,
-                                  std::vector<Detection>& results, double& elapsed_ms) {
+static int run_inference_nv12_cmm(AxModel& m, int src_w, int src_h, std::vector<Detection>& results,
+                                  double& elapsed_ms) {
     results.clear();
     const auto t0 = std::chrono::steady_clock::now();
 
@@ -317,7 +317,7 @@ static int run_inference_nv12_cmm(AxModel& m, int src_w, int src_h,
     cv::Mat cmm_mat(m.input_h, m.input_w, CV_8UC3, m.io_data.pInputs[0].pVirAddr);
     letterbox_into(bgr, cmm_mat);
     AX_SYS_MflushCache(m.io_data.pInputs[0].phyAddr, m.io_data.pInputs[0].pVirAddr,
-                        m.io_data.pInputs[0].nSize);
+                       m.io_data.pInputs[0].nSize);
     return run_npu_and_postprocess(m, src_w, src_h, results, elapsed_ms, t0);
 }
 
@@ -664,8 +664,7 @@ static void handle_stream(int client_fd, AxModel& model, const RequestHeader& re
                             df.enImgFormat = AX_FORMAT_BGR888;
                             df.u32PicStride[0] = model.input_w * 3;
                             df.u64PhyAddr[0] = model.io_data.pInputs[0].phyAddr;
-                            df.u64VirAddr[0] =
-                                (AX_U64)(uintptr_t)model.io_data.pInputs[0].pVirAddr;
+                            df.u64VirAddr[0] = (AX_U64)(uintptr_t)model.io_data.pInputs[0].pVirAddr;
                             df.u32FrameSize = model.io_data.pInputs[0].nSize;
 
                             AX_IVPS_ASPECT_RATIO_T ar = {};
@@ -675,10 +674,9 @@ static void handle_stream(int client_fd, AxModel& model, const RequestHeader& re
                             ar.eAligns[1] = AX_IVPS_ASPECT_RATIO_VERTICAL_CENTER;
 
                             if (AX_IVPS_CropResizeTdp(&sf, &df, &ar) == 0) {
-                                AX_SYS_MinvalidateCache(
-                                    model.io_data.pInputs[0].phyAddr,
-                                    model.io_data.pInputs[0].pVirAddr,
-                                    model.io_data.pInputs[0].nSize);
+                                AX_SYS_MinvalidateCache(model.io_data.pInputs[0].phyAddr,
+                                                        model.io_data.pInputs[0].pVirAddr,
+                                                        model.io_data.pInputs[0].nSize);
                                 run_npu_and_postprocess(model, fw, fh, dets, ms, t0);
                             } else {
                                 // CPU fallback.
@@ -761,7 +759,7 @@ static void handle_detect(int fd, AxModel& m, const RequestHeader& req) {
         cv::Mat cmm_mat(m.input_h, m.input_w, CV_8UC3, m.io_data.pInputs[0].pVirAddr);
         letterbox_into(img, cmm_mat);
         AX_SYS_MflushCache(m.io_data.pInputs[0].phyAddr, m.io_data.pInputs[0].pVirAddr,
-                            m.io_data.pInputs[0].nSize);
+                           m.io_data.pInputs[0].nSize);
         if (run_npu_and_postprocess(m, img.cols, img.rows, dets, ms, t0) != 0) {
             send_error(fd, "inference failed");
             return;

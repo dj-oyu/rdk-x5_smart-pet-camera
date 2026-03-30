@@ -19,10 +19,9 @@ static float sigmoid(float x) {
 }
 
 // YOLO26 separated-head: bbox [1,H,W,4] + cls [1,H,W,C].
-static void generate_proposals_separated(int stride, const float* bbox_feat,
-                                         const float* cls_feat, float prob_threshold,
-                                         std::vector<Detection>& dets, int input_w,
-                                         int input_h, int cls_num) {
+static void generate_proposals_separated(int stride, const float* bbox_feat, const float* cls_feat,
+                                         float prob_threshold, std::vector<Detection>& dets,
+                                         int input_w, int input_h, int cls_num) {
     const int feat_w = input_w / stride;
     const int feat_h = input_h / stride;
 

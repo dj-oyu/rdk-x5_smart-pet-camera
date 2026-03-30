@@ -76,8 +76,7 @@ static void clahe_y_plane(const uint8_t* y_in, uint8_t* y_out, int w, int h) {
             }
             const uint32_t denom = std::max((uint32_t)tile_pixels - cdf_min, 1u);
             for (int i = 0; i < HIST_BINS; ++i) {
-                const float val =
-                    (float)(cdf[i] > cdf_min ? cdf[i] - cdf_min : 0) / denom * 255.f;
+                const float val = (float)(cdf[i] > cdf_min ? cdf[i] - cdf_min : 0) / denom * 255.f;
                 cdfs[ty * CLAHE_TILE_X + tx][i] = (uint8_t)(val + 0.5f);
             }
         }

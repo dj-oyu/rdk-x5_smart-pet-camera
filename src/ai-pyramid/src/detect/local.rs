@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 // ---------------------------------------------------------------------------
 
 const CMD_DETECT: u16 = 0;
+const CMD_STREAM: u16 = 4;
 const INPUT_JPEG_PATH: u16 = 0;
 const INPUT_NV12_RAW: u16 = 1;
 
@@ -111,6 +112,11 @@ impl LocalDetector {
     /// Check if the daemon socket exists.
     pub fn is_available(&self) -> bool {
         self.config.daemon_socket.exists()
+    }
+
+    /// Get the daemon socket path.
+    pub fn socket_path(&self) -> &std::path::Path {
+        &self.config.daemon_socket
     }
 
     /// Run YOLO26l detection on a single JPEG image via daemon socket.
@@ -352,6 +358,31 @@ impl LocalDetector {
         }
         Ok(results)
     }
+}
+
+/// Build a CMD_STREAM request header + host payload as bytes.
+pub fn stream_request_header(host: &[u8]) -> Vec<u8> {
+    let hdr = RequestHeader {
+        cmd: CMD_STREAM,
+        input_type: 0,
+        width: 0,
+        height: 0,
+        payload_size: host.len() as u32,
+        reserved: 0,
+    };
+    let hdr_bytes = unsafe { std::slice::from_raw_parts(&hdr as *const _ as *const u8, 16) };
+    let mut buf = Vec::with_capacity(16 + host.len());
+    buf.extend_from_slice(hdr_bytes);
+    buf.extend_from_slice(host);
+    buf
+}
+
+/// Get COCO class name by ID.
+pub fn coco_name(class_id: u16) -> String {
+    COCO_NAMES
+        .get(class_id as usize)
+        .unwrap_or(&"unknown")
+        .to_string()
 }
 
 #[derive(Debug, Clone)]
