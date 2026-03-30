@@ -850,10 +850,14 @@ int main(int argc, char** argv) {
                             uint8_t* uv = y ? y + ysz : nullptr;
 
                             if (y && uv) {
-                                // CLAHE: recompute every N frames, apply cache to all.
+                                // CLAHE: recompute Y every N frames, cache result.
+                                // Use median_blur + clahe_y_plane directly (not apply_clahe_nv12
+                                // which writes UV past Y buffer).
                                 if ((decoded % clahe_interval) == 0) {
-                                    clahe_y.assign(y, y + ysz);
-                                    apply_clahe_nv12(clahe_y.data(), fw, fh);
+                                    clahe_y.resize(ysz);
+                                    median_blur_3x3(y, clahe_y.data(), fw, fh);
+                                    std::vector<uint8_t> tmp(clahe_y);
+                                    clahe_y_plane(tmp.data(), clahe_y.data(), fw, fh);
                                 }
                                 if (!clahe_y.empty())
                                     memcpy(y, clahe_y.data(), ysz);
