@@ -717,76 +717,6 @@ class HbMemGraphicBuffer:
 # ============================================================================
 
 
-def import_nv12_planes(
-    share_id_y: int,
-    share_id_uv: int,
-    y_size: int,
-    uv_size: int,
-) -> tuple[np.ndarray, np.ndarray, list["HbMemBuffer"]]:
-    """
-    Import Y and UV planes of an NV12 buffer.
-
-    For D-Robotics VIO, NV12 buffers may use:
-    - Separate share_ids for Y and UV (share_id_uv != 0)
-    - Single contiguous buffer with Y share_id only (share_id_uv == 0)
-
-    Args:
-        share_id_y: share_id for Y plane
-        share_id_uv: share_id for UV plane (0 if contiguous with Y)
-        y_size: Size of Y plane in bytes
-        uv_size: Size of UV plane in bytes
-
-    Returns:
-        Tuple of (y_array, uv_array, buffers_to_release)
-        The buffers_to_release list should be passed to release_buffers() when done.
-    """
-    buffers = []
-    try:
-        # Case 1: Separate share_ids for Y and UV
-        if share_id_uv != 0 and share_id_uv != share_id_y:
-            buf_y = HbMemBuffer.import_from_share_id(share_id_y, y_size)
-            buffers.append(buf_y)
-
-            buf_uv = HbMemBuffer.import_from_share_id(share_id_uv, uv_size)
-            buffers.append(buf_uv)
-
-            y_arr = buf_y.as_numpy()
-            uv_arr = buf_uv.as_numpy()
-
-            return y_arr, uv_arr, buffers
-
-        # Case 2: Contiguous NV12 buffer (UV at offset y_size within same buffer)
-        # VIO allocates NV12 as single contiguous buffer with share_id[1]=0
-        else:
-            buf = HbMemBuffer.import_from_share_id(share_id_y, y_size)
-            buffers.append(buf)
-
-            actual_size = buf.size
-            total_needed = y_size + uv_size
-
-            # Get Y plane
-            full_arr = buf.as_numpy()
-            y_arr = full_arr[:y_size]
-
-            # Check if UV is in the same buffer (contiguous NV12)
-            if actual_size >= total_needed:
-                # UV is contiguous after Y
-                uv_arr = full_arr[y_size:y_size + uv_size]
-            else:
-                # UV is not in this buffer - fall back to memcpy path
-                for b in buffers:
-                    b.release()
-                raise RuntimeError(f"UV plane not accessible via zero-copy (share_id[1]=0, Y buffer too small)")
-
-            return y_arr, uv_arr, buffers
-
-    except Exception:
-        # Clean up on error
-        for buf in buffers:
-            buf.release()
-        raise
-
-
 _import_state: dict[str, bool] = {}
 
 
@@ -867,17 +797,6 @@ def import_nv12_graph_buf(
     except Exception:
         buf.release()
         raise
-
-
-def release_buffers(buffers: list["HbMemBuffer"]) -> None:
-    """
-    Release a list of imported buffers.
-
-    Args:
-        buffers: List of HbMemBuffer instances to release
-    """
-    for buf in buffers:
-        buf.release()
 
 
 # ============================================================================
