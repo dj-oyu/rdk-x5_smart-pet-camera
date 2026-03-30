@@ -291,8 +291,8 @@ int vio_create(vio_context_t* ctx, int camera_index, int sensor_width, int senso
         struct {
             int x, y, w, h;
         } rois[NUM_ROI_REGIONS] = {
-            {160, 440, 640, 640},  // ROI 0: feeding area tight (1:1, min VSE crop)
-            {144, 120, 960, 960},  // ROI 1: feeding area wide
+            {160, 440, 640, 640}, // ROI 0: feeding area tight (1:1, min VSE crop)
+            {144, 120, 960, 960}, // ROI 1: feeding area wide
         };
         for (int i = 0; i < NUM_ROI_REGIONS; i++) {
             // Clamp ROI to sensor bounds
