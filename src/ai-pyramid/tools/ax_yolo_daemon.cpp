@@ -805,37 +805,40 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "[STREAM] Started (%dx%d H.265)\n", FRAME_W, FRAME_H);
                 {
                     uint8_t sbuf[256 * 1024];
-                    uint64_t sends = 0, decoded = 0, total_bytes = 0;
-                    const uint64_t clahe_mask = 127;
+                    int ss = 0, sd = 0;
                     auto last_hb = std::chrono::steady_clock::now();
-                    bool client_ok = true;
-
-                    while (g_running && client_ok) {
-                        const ssize_t nr = recv(stcp, sbuf, sizeof(sbuf), 0);
+                    while (g_running) {
+                        ssize_t nr = recv(stcp, sbuf, sizeof(sbuf), 0);
                         if (nr <= 0) {
-                            if (nr == 0)
-                                fprintf(stderr, "[STREAM] TCP EOF\n");
-                            else
-                                fprintf(stderr, "[STREAM] TCP: %s\n", strerror(errno));
+                            fprintf(stderr, "[STREAM] %s\n", nr == 0 ? "EOF" : strerror(errno));
                             break;
                         }
                         AX_VDEC_STREAM_T st = {};
                         st.pu8Addr = sbuf;
-                        st.u32StreamPackLen = (AX_U32)nr;
+                        st.u32StreamPackLen = nr;
                         AX_VDEC_SendStream(VDEC_GRP, &st, -1);
-                        sends++;
-                        total_bytes += nr;
-
-                        // Get decoded frames.
+                        ss++;
                         AX_VIDEO_FRAME_INFO_T fi = {};
                         int gr = AX_VDEC_GetChnFrame(VDEC_GRP, VDEC_CHN, &fi, 100);
-                        while (gr == 0) {
+                        if (gr == 0) {
+                            sd++;
                             const auto& vf = fi.stVFrame;
                             const int fw = vf.u32Width, fh = vf.u32Height;
-                            if (fw > 0 && fh > 0 && vf.u64VirAddr[0]) {
-                                uint8_t* y = (uint8_t*)(uintptr_t)vf.u64VirAddr[0];
-                                uint8_t* uv = (uint8_t*)(uintptr_t)vf.u64VirAddr[1];
-                                if ((decoded & clahe_mask) == 0) {
+                            // VDEC output has phy only; mmap entire NV12 for CPU access.
+                            const int ysz = fw * fh;
+                            const int nv12sz = ysz * 3 / 2;
+                            void* nv12_map = nullptr;
+                            if (fw > 0 && fh > 0 && vf.u64PhyAddr[0] && !vf.u64VirAddr[0]) {
+                                nv12_map = AX_SYS_Mmap(vf.u64PhyAddr[0], nv12sz);
+                            }
+                            uint8_t* y = vf.u64VirAddr[0] ? (uint8_t*)(uintptr_t)vf.u64VirAddr[0]
+                                                          : (uint8_t*)nv12_map;
+                            uint8_t* uv = y ? y + ysz : nullptr;
+                            if (sd <= 3)
+                                fprintf(stderr, "[STREAM] Frame %d: %dx%d y=%p uv=%p\n", sd, fw, fh,
+                                        y, uv);
+                            if (fw > 0 && fh > 0 && y && uv) {
+                                if ((sd & 127) == 0) {
                                     const int ysz = fw * fh;
                                     std::vector<uint8_t> tmp(y, y + ysz);
                                     apply_clahe_nv12(tmp.data(), fw, fh);
@@ -846,69 +849,71 @@ int main(int argc, char** argv) {
                                 }
                                 AX_SYS_MflushCache(vf.u64PhyAddr[0], y, fw * fh);
                                 AX_SYS_MflushCache(vf.u64PhyAddr[1], uv, fw * fh / 2);
-
-                                std::vector<Detection> dets;
-                                double ms = 0;
-                                {
-                                    std::lock_guard<std::mutex> lock(model.npu_mutex);
-                                    const auto t0 = std::chrono::steady_clock::now();
-                                    if (model.ivps_ready) {
-                                        AX_VIDEO_FRAME_T sf = {};
-                                        sf.u32Width = fw;
-                                        sf.u32Height = fh;
-                                        sf.enImgFormat = AX_FORMAT_YUV420_SEMIPLANAR;
-                                        sf.u32PicStride[0] = vf.u32PicStride[0];
-                                        sf.u64PhyAddr[0] = vf.u64PhyAddr[0];
-                                        sf.u64VirAddr[0] = vf.u64VirAddr[0];
-                                        sf.u64PhyAddr[1] = vf.u64PhyAddr[1];
-                                        sf.u64VirAddr[1] = vf.u64VirAddr[1];
-                                        AX_VIDEO_FRAME_T df = {};
-                                        df.u32Width = model.input_w;
-                                        df.u32Height = model.input_h;
-                                        df.enImgFormat = AX_FORMAT_BGR888;
-                                        df.u32PicStride[0] = model.input_w * 3;
-                                        df.u64PhyAddr[0] = model.io_data.pInputs[0].phyAddr;
-                                        df.u64VirAddr[0] =
-                                            (AX_U64)(uintptr_t)model.io_data.pInputs[0].pVirAddr;
-                                        df.u32FrameSize = model.io_data.pInputs[0].nSize;
-                                        AX_IVPS_ASPECT_RATIO_T ar = {};
-                                        ar.eMode = AX_IVPS_ASPECT_RATIO_AUTO;
-                                        ar.nBgColor = 0x727272;
-                                        ar.eAligns[0] = AX_IVPS_ASPECT_RATIO_HORIZONTAL_CENTER;
-                                        ar.eAligns[1] = AX_IVPS_ASPECT_RATIO_VERTICAL_CENTER;
-                                        if (AX_IVPS_CropResizeTdp(&sf, &df, &ar) == 0) {
-                                            AX_SYS_MinvalidateCache(
-                                                model.io_data.pInputs[0].phyAddr,
-                                                model.io_data.pInputs[0].pVirAddr,
-                                                model.io_data.pInputs[0].nSize);
-                                            run_npu_and_postprocess(model, fw, fh, dets, ms, t0);
+                                if (sd <= 3)
+                                    fprintf(stderr,
+                                            "[STREAM] Frame %d: %dx%d vir=%lx phy=%lx ivps=%d\n",
+                                            sd, fw, fh, (unsigned long)vf.u64VirAddr[0],
+                                            (unsigned long)vf.u64PhyAddr[0], model.ivps_ready);
+                                if (model.ivps_ready) {
+                                    AX_VIDEO_FRAME_T sf = {};
+                                    sf.u32Width = fw;
+                                    sf.u32Height = fh;
+                                    sf.enImgFormat = AX_FORMAT_YUV420_SEMIPLANAR;
+                                    sf.u32PicStride[0] = vf.u32PicStride[0];
+                                    sf.u64PhyAddr[0] = vf.u64PhyAddr[0];
+                                    sf.u64VirAddr[0] = (AX_U64)(uintptr_t)y;
+                                    sf.u64PhyAddr[1] = vf.u64PhyAddr[0] + ysz;
+                                    sf.u64VirAddr[1] = (AX_U64)(uintptr_t)uv;
+                                    AX_VIDEO_FRAME_T df = {};
+                                    df.u32Width = model.input_w;
+                                    df.u32Height = model.input_h;
+                                    df.enImgFormat = AX_FORMAT_BGR888;
+                                    df.u32PicStride[0] = model.input_w * 3;
+                                    df.u64PhyAddr[0] = model.io_data.pInputs[0].phyAddr;
+                                    df.u64VirAddr[0] =
+                                        (AX_U64)(uintptr_t)model.io_data.pInputs[0].pVirAddr;
+                                    df.u32FrameSize = model.io_data.pInputs[0].nSize;
+                                    AX_IVPS_ASPECT_RATIO_T ar = {};
+                                    ar.eMode = AX_IVPS_ASPECT_RATIO_AUTO;
+                                    ar.nBgColor = 0x727272;
+                                    ar.eAligns[0] = AX_IVPS_ASPECT_RATIO_HORIZONTAL_CENTER;
+                                    ar.eAligns[1] = AX_IVPS_ASPECT_RATIO_VERTICAL_CENTER;
+                                    int ivps_ret = AX_IVPS_CropResizeTdp(&sf, &df, &ar);
+                                    if (sd <= 3)
+                                        fprintf(stderr, "[STREAM] Frame %d: %dx%d, IVPS=0x%x\n", sd,
+                                                fw, fh, ivps_ret);
+                                    if (ivps_ret == 0) {
+                                        AX_SYS_MinvalidateCache(model.io_data.pInputs[0].phyAddr,
+                                                                model.io_data.pInputs[0].pVirAddr,
+                                                                model.io_data.pInputs[0].nSize);
+                                        std::vector<Detection> dets;
+                                        double ms = 0;
+                                        const auto t0 = std::chrono::steady_clock::now();
+                                        run_npu_and_postprocess(model, fw, fh, dets, ms, t0);
+                                        if (!dets.empty()) {
+                                            send_detections(cfd, dets, (float)ms);
                                         }
+                                        if (sd <= 3)
+                                            fprintf(stderr, "[STREAM]   NPU: %zu dets, %.1fms\n",
+                                                    dets.size(), ms);
                                     }
                                 }
-                                if (!dets.empty()) {
-                                    client_ok = send_detections(cfd, dets, (float)ms);
-                                }
-                                decoded++;
                             }
+                            if (nv12_map)
+                                AX_SYS_Munmap(nv12_map, nv12sz);
                             AX_VDEC_ReleaseChnFrame(VDEC_GRP, VDEC_CHN, &fi);
-                            memset(&fi, 0, sizeof(fi));
-                            gr = AX_VDEC_GetChnFrame(VDEC_GRP, VDEC_CHN, &fi, 0);
                         }
-
-                        // Heartbeat.
-                        const auto now = std::chrono::steady_clock::now();
+                        auto now = std::chrono::steady_clock::now();
                         if (std::chrono::duration_cast<std::chrono::seconds>(now - last_hb)
                                 .count() >= STREAM_HEARTBEAT_SEC) {
                             std::vector<Detection> empty;
-                            client_ok = send_detections(cfd, empty, 0);
-                            fprintf(stderr, "[STREAM] sends=%lu decoded=%lu bytes=%lu\n",
-                                    (unsigned long)sends, (unsigned long)decoded,
-                                    (unsigned long)total_bytes);
+                            if (!send_detections(cfd, empty, 0))
+                                break;
+                            fprintf(stderr, "[STREAM] sends=%d decoded=%d\n", ss, sd);
                             last_hb = now;
                         }
                     }
-                    fprintf(stderr, "[STREAM] Ended (sends=%lu decoded=%lu)\n",
-                            (unsigned long)sends, (unsigned long)decoded);
+                    fprintf(stderr, "[STREAM] FINAL sends=%d decoded=%d\n", ss, sd);
                 }
                 shutdown(stcp, SHUT_RDWR);
                 close(stcp);
