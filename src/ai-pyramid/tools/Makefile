@@ -4,7 +4,7 @@ CPPFLAGS := -I/home/admin-user/ax650_bsp_headers $(shell pkg-config --cflags ope
 
 BUILD_DIR := ../../../build
 LDFLAGS := -L/soc/lib
-LDLIBS := -lax_engine -lax_sys -lax_ivps $(shell pkg-config --libs opencv4) -lpthread
+LDLIBS := -lax_engine -lax_sys -lax_ivps -lax_vdec $(shell pkg-config --libs opencv4) -lpthread
 
 DAEMON_BINARY := $(BUILD_DIR)/ax_yolo_daemon
 DAEMON_SOURCES := ax_yolo_daemon.cpp

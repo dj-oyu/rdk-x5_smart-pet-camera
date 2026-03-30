@@ -1,93 +1,56 @@
 // ax_yolo_daemon — Persistent YOLO NPU detection daemon for AX650.
 //
-// Loads an axmodel once, listens on a Unix socket, and serves detection
-// requests via fixed-length binary protocol.  Eliminates ~900ms model-load
-// overhead per invocation by keeping the model resident in CMM.
+// Modes:
+//   1. On-demand: CMD_DETECT with JPEG_PATH or NV12_RAW input
+//   2. Stream: CMD_STREAM connects TCP to rdk-x5, HW decodes H.265 via VDEC,
+//      applies CLAHE, preprocesses via IVPS HW, runs NPU, pushes detections
 //
-// Protocol: see struct RequestHeader / ResponseHeader / WireDetection.
+// Binary protocol over Unix socket. See protocol.h.
 //
 // BSD 3-Clause License (follows ax-pipeline conventions).
+
+#include "clahe.h"
+#include "protocol.h"
+#include "yolo_postprocess.h"
 
 #include <ax_engine_api.h>
 #include <ax_ivps_api.h>
 #include <ax_sys_api.h>
+#include <ax_vdec_api.h>
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
-#include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <csignal>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <vector>
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <getopt.h>
+#include <netdb.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 // ---------------------------------------------------------------------------
-// Wire protocol (shared with Rust client via #[repr(C)])
-// ---------------------------------------------------------------------------
-
-// Commands
-static constexpr uint16_t CMD_DETECT = 0;
-static constexpr uint16_t CMD_LOAD = 1;
-static constexpr uint16_t CMD_UNLOAD = 2;
-static constexpr uint16_t CMD_STATUS = 3;
-
-// Input types for CMD_DETECT
-static constexpr uint16_t INPUT_JPEG_PATH = 0;
-static constexpr uint16_t INPUT_NV12_RAW = 1;
-
-#pragma pack(push, 1)
-
-struct RequestHeader {
-    uint16_t cmd;          // CMD_*
-    uint16_t input_type;   // INPUT_* (detect only)
-    uint16_t width;        // NV12_RAW: frame width; JPEG_PATH: 0
-    uint16_t height;       // NV12_RAW: frame height; JPEG_PATH: 0
-    uint32_t payload_size; // bytes following this header
-    uint32_t reserved;     // must be 0
-};
-
-struct ResponseHeader {
-    uint16_t status;     // 0=ok, 1=error
-    uint16_t det_count;  // number of WireDetection structs following
-    float elapsed_ms;    // inference time
-    uint32_t error_len;  // if status=1, bytes of error string following
-};
-
-struct WireDetection {
-    int16_t x1, y1, x2, y2;
-    uint16_t class_id;
-    uint16_t confidence; // prob × 10000
-};
-
-#pragma pack(pop)
-
-static_assert(sizeof(RequestHeader) == 16, "RequestHeader must be 16 bytes");
-static_assert(sizeof(ResponseHeader) == 12, "ResponseHeader must be 12 bytes");
-static_assert(sizeof(WireDetection) == 12, "WireDetection must be 12 bytes");
-
-// ---------------------------------------------------------------------------
-// Configuration
+// Config
 // ---------------------------------------------------------------------------
 
 static constexpr int DEFAULT_INPUT_W = 640;
 static constexpr int DEFAULT_INPUT_H = 640;
-static constexpr float SCORE_THRESHOLD = 0.25f;
-static constexpr float NMS_THRESHOLD = 0.45f;
 static constexpr int CLS_NUM = 80;
 static constexpr int CMM_ALIGN = 128;
 static const char* CMM_TOKEN = "ax_yolo_daemon";
+
+static constexpr int STREAM_RELAY_PORT = 9265;
+static constexpr int STREAM_HEARTBEAT_SEC = 10;
 
 // ---------------------------------------------------------------------------
 // Globals
@@ -104,110 +67,8 @@ static void signal_handler(int /*sig*/) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// YOLO post-processing (yolo26 separated-head format)
-// ---------------------------------------------------------------------------
+// Post-processing, CLAHE, and protocol structs are in headers.
 
-struct Detection {
-    int class_id;
-    float confidence;
-    float x1, y1, x2, y2;
-};
-
-static float sigmoid(float x) {
-    return 1.f / (1.f + std::exp(-x));
-}
-
-static void generate_proposals_separated(int stride, const float* bbox_feat,
-                                         const float* cls_feat, float prob_threshold,
-                                         std::vector<Detection>& dets, int input_w,
-                                         int input_h, int cls_num) {
-    const int feat_w = input_w / stride;
-    const int feat_h = input_h / stride;
-
-    for (int h = 0; h < feat_h; ++h) {
-        for (int w = 0; w < feat_w; ++w) {
-            const int idx = h * feat_w + w;
-            const float* cls_ptr = cls_feat + idx * cls_num;
-
-            int best_cls = 0;
-            float best_score = -1e9f;
-            for (int c = 0; c < cls_num; ++c) {
-                if (cls_ptr[c] > best_score) {
-                    best_score = cls_ptr[c];
-                    best_cls = c;
-                }
-            }
-            const float prob = sigmoid(best_score);
-            if (prob > prob_threshold) {
-                const float* box = bbox_feat + idx * 4;
-                const float gx = w + 0.5f;
-                const float gy = h + 0.5f;
-                Detection d;
-                d.class_id = best_cls;
-                d.confidence = prob;
-                d.x1 = std::max((gx - box[0]) * stride, 0.f);
-                d.y1 = std::max((gy - box[1]) * stride, 0.f);
-                d.x2 = std::min((gx + box[2]) * stride, (float)(input_w - 1));
-                d.y2 = std::min((gy + box[3]) * stride, (float)(input_h - 1));
-                if (d.x2 > d.x1 && d.y2 > d.y1) {
-                    dets.push_back(d);
-                }
-            }
-        }
-    }
-}
-
-static float iou(const Detection& a, const Detection& b) {
-    const float ix1 = std::max(a.x1, b.x1);
-    const float iy1 = std::max(a.y1, b.y1);
-    const float ix2 = std::min(a.x2, b.x2);
-    const float iy2 = std::min(a.y2, b.y2);
-    const float inter = std::max(ix2 - ix1, 0.f) * std::max(iy2 - iy1, 0.f);
-    const float area_a = (a.x2 - a.x1) * (a.y2 - a.y1);
-    const float area_b = (b.x2 - b.x1) * (b.y2 - b.y1);
-    const float uni = area_a + area_b - inter;
-    return uni > 0.f ? inter / uni : 0.f;
-}
-
-static void nms(std::vector<Detection>& dets, float nms_threshold) {
-    std::sort(dets.begin(), dets.end(),
-              [](const Detection& a, const Detection& b) { return a.confidence > b.confidence; });
-    std::vector<Detection> kept;
-    for (const auto& d : dets) {
-        bool suppressed = false;
-        for (const auto& k : kept) {
-            if (iou(d, k) > nms_threshold) {
-                suppressed = true;
-                break;
-            }
-        }
-        if (!suppressed) {
-            kept.push_back(d);
-        }
-    }
-    dets = std::move(kept);
-}
-
-static void scale_detections(std::vector<Detection>& dets, int input_w, int input_h, int orig_w,
-                             int orig_h) {
-    const float scale = std::min((float)input_w / orig_w, (float)input_h / orig_h);
-    const int new_w = (int)(scale * orig_w);
-    const int new_h = (int)(scale * orig_h);
-    const float pad_w = (input_w - new_w) / 2.f;
-    const float pad_h = (input_h - new_h) / 2.f;
-    const float ratio_x = (float)orig_w / new_w;
-    const float ratio_y = (float)orig_h / new_h;
-
-    for (auto& d : dets) {
-        d.x1 = std::max((d.x1 - pad_w) * ratio_x, 0.f);
-        d.y1 = std::max((d.y1 - pad_h) * ratio_y, 0.f);
-        d.x2 = std::min((d.x2 - pad_w) * ratio_x, (float)(orig_w - 1));
-        d.y2 = std::min((d.y2 - pad_h) * ratio_y, (float)(orig_h - 1));
-    }
-}
-
-// ---------------------------------------------------------------------------
 // AX Engine wrapper
 // ---------------------------------------------------------------------------
 
@@ -223,11 +84,14 @@ struct AxModel {
     std::string model_path;
     uint32_t cmm_bytes = 0;
 
-    // CMM buffer for NV12 input (reusable across frames).
+    // CMM buffer for NV12 input (reusable).
     AX_U64 nv12_phy = 0;
     void* nv12_vir = nullptr;
     uint32_t nv12_size = 0;
     bool ivps_ready = false;
+
+    // Mutex for NPU access (stream vs on-demand).
+    std::mutex npu_mutex;
 };
 
 static void free_io(AX_ENGINE_IO_T* io) {
@@ -255,29 +119,23 @@ static int load_model(AxModel& m, const std::string& path, int input_w, int inpu
 
     int ret = AX_ENGINE_CreateHandle(&m.handle, model_data.data(), (AX_U32)file_size);
     if (ret != 0) {
-        fprintf(stderr, "[ERROR] AX_ENGINE_CreateHandle failed: 0x%x\n", ret);
+        fprintf(stderr, "[ERROR] AX_ENGINE_CreateHandle: 0x%x\n", ret);
         return ret;
     }
-
     ret = AX_ENGINE_CreateContext(m.handle);
     if (ret != 0) {
-        fprintf(stderr, "[ERROR] AX_ENGINE_CreateContext failed: 0x%x\n", ret);
         AX_ENGINE_DestroyHandle(m.handle);
         m.handle = nullptr;
         return ret;
     }
-
     ret = AX_ENGINE_GetIOInfo(m.handle, &m.io_info);
     if (ret != 0) {
-        fprintf(stderr, "[ERROR] AX_ENGINE_GetIOInfo failed: 0x%x\n", ret);
         AX_ENGINE_DestroyHandle(m.handle);
         m.handle = nullptr;
         return ret;
     }
 
     memset(&m.io_data, 0, sizeof(m.io_data));
-
-    // Input: cached CMM (must flush after memcpy).
     m.io_data.nInputSize = m.io_info->nInputSize;
     m.io_data.pInputs = new AX_ENGINE_IO_BUFFER_T[m.io_info->nInputSize]();
     for (uint32_t i = 0; i < m.io_info->nInputSize; ++i) {
@@ -286,12 +144,9 @@ static int load_model(AxModel& m, const std::string& path, int input_w, int inpu
         ret = AX_SYS_MemAllocCached(&buf.phyAddr, &buf.pVirAddr, buf.nSize, CMM_ALIGN,
                                      (const AX_S8*)CMM_TOKEN);
         if (ret != 0) {
-            fprintf(stderr, "[ERROR] AX_SYS_MemAllocCached input[%u] failed: 0x%x\n", i, ret);
             return ret;
         }
     }
-
-    // Outputs: cached CMM.
     m.io_data.nOutputSize = m.io_info->nOutputSize;
     m.io_data.pOutputs = new AX_ENGINE_IO_BUFFER_T[m.io_info->nOutputSize]();
     for (uint32_t i = 0; i < m.io_info->nOutputSize; ++i) {
@@ -300,7 +155,6 @@ static int load_model(AxModel& m, const std::string& path, int input_w, int inpu
         ret = AX_SYS_MemAllocCached(&buf.phyAddr, &buf.pVirAddr, buf.nSize, CMM_ALIGN,
                                      (const AX_S8*)CMM_TOKEN);
         if (ret != 0) {
-            fprintf(stderr, "[ERROR] AX_SYS_MemAllocCached output[%u] failed: 0x%x\n", i, ret);
             return ret;
         }
     }
@@ -335,8 +189,7 @@ static int load_model(AxModel& m, const std::string& path, int input_w, int inpu
     m.input_w = input_w;
     m.input_h = input_h;
     m.model_path = path;
-
-    fprintf(stderr, "[INFO] Model loaded: %s (CMM %u KB, input %dx%d, %s)\n", path.c_str(),
+    fprintf(stderr, "[INFO] Model loaded: %s (CMM %u KB, %dx%d, %s)\n", path.c_str(),
             m.cmm_bytes / 1024, input_w, input_h, cs_name);
     return 0;
 }
@@ -354,90 +207,51 @@ static void unload_model(AxModel& m) {
     m.io_info = nullptr;
     m.cmm_bytes = 0;
     m.model_path.clear();
-    fprintf(stderr, "[INFO] Model unloaded\n");
 }
 
 // ---------------------------------------------------------------------------
-// Image preprocessing
+// Preprocessing + inference
 // ---------------------------------------------------------------------------
 
-// Letterbox BGR src into a pre-allocated CMM-backed dst Mat.
 static void letterbox_into(const cv::Mat& src, cv::Mat& dst) {
-    const int target_w = dst.cols;
-    const int target_h = dst.rows;
-    const float scale = std::min((float)target_w / src.cols, (float)target_h / src.rows);
-    const int new_w = (int)(scale * src.cols);
-    const int new_h = (int)(scale * src.rows);
-
-    // Fill padding (114,114,114 = YOLO standard gray).
+    const int tw = dst.cols, th = dst.rows;
+    const float scale = std::min((float)tw / src.cols, (float)th / src.rows);
+    const int nw = (int)(scale * src.cols), nh = (int)(scale * src.rows);
     dst.setTo(cv::Scalar(114, 114, 114));
-
-    // Resize directly into the ROI of the CMM-backed Mat.
-    const int dx = (target_w - new_w) / 2;
-    const int dy = (target_h - new_h) / 2;
-    cv::Mat roi = dst(cv::Rect(dx, dy, new_w, new_h));
-    cv::resize(src, roi, cv::Size(new_w, new_h));
+    cv::Mat roi = dst(cv::Rect((tw - nw) / 2, (th - nh) / 2, nw, nh));
+    cv::resize(src, roi, cv::Size(nw, nh));
 }
 
-// ---------------------------------------------------------------------------
-// Run inference — preprocesses directly into CMM buffer (zero memcpy).
-// ---------------------------------------------------------------------------
-
-// Shared: RunSync + post-processing (called after preprocess writes to CMM).
 static int run_npu_and_postprocess(AxModel& m, int orig_w, int orig_h,
                                    std::vector<Detection>& results, double& elapsed_ms,
                                    std::chrono::steady_clock::time_point t0) {
     const int ret = AX_ENGINE_RunSync(m.handle, &m.io_data);
     if (ret != 0) {
-        fprintf(stderr, "[ERROR] AX_ENGINE_RunSync failed: 0x%x\n", ret);
         return ret;
     }
-
     for (uint32_t i = 0; i < m.io_data.nOutputSize; ++i) {
         AX_SYS_MinvalidateCache(m.io_data.pOutputs[i].phyAddr, m.io_data.pOutputs[i].pVirAddr,
                                 m.io_data.pOutputs[i].nSize);
     }
-
-    const uint32_t num_outputs = m.io_data.nOutputSize;
-    for (uint32_t i = 0; i + 1 < num_outputs; i += 2) {
-        const auto& bbox_meta = m.io_info->pOutputs[i];
-        const int feat_w = bbox_meta.nShapeSize >= 4 ? bbox_meta.pShape[2] : 0;
-        if (feat_w <= 0) {
+    for (uint32_t i = 0; i + 1 < m.io_data.nOutputSize; i += 2) {
+        const auto& bm = m.io_info->pOutputs[i];
+        const int fw = bm.nShapeSize >= 4 ? bm.pShape[2] : 0;
+        if (fw <= 0) {
             continue;
         }
-        const int stride = m.input_w / feat_w;
-        const auto& cls_meta = m.io_info->pOutputs[i + 1];
-        const int cls_ch = cls_meta.nShapeSize >= 4 ? cls_meta.pShape[3] : CLS_NUM;
-        const float* bbox_data = (const float*)m.io_data.pOutputs[i].pVirAddr;
-        const float* cls_data = (const float*)m.io_data.pOutputs[i + 1].pVirAddr;
-        generate_proposals_separated(stride, bbox_data, cls_data, SCORE_THRESHOLD, results,
-                                     m.input_w, m.input_h, cls_ch);
+        const auto& cm = m.io_info->pOutputs[i + 1];
+        const int cc = cm.nShapeSize >= 4 ? cm.pShape[3] : CLS_NUM;
+        generate_proposals_separated(m.input_w / fw, (const float*)m.io_data.pOutputs[i].pVirAddr,
+                                     (const float*)m.io_data.pOutputs[i + 1].pVirAddr,
+                                     SCORE_THRESHOLD, results, m.input_w, m.input_h, cc);
     }
-
     nms(results, NMS_THRESHOLD);
     scale_detections(results, m.input_w, m.input_h, orig_w, orig_h);
-
-    const auto t1 = std::chrono::steady_clock::now();
-    elapsed_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                     .count();
     return 0;
 }
 
-// Run inference from a BGR cv::Mat (JPEG path).
-static int run_inference_bgr(AxModel& m, const cv::Mat& bgr, int orig_w, int orig_h,
-                             std::vector<Detection>& results, double& elapsed_ms) {
-    results.clear();
-    const auto t0 = std::chrono::steady_clock::now();
-
-    // Wrap CMM input buffer as cv::Mat — writes go directly to NPU memory.
-    cv::Mat cmm_mat(m.input_h, m.input_w, CV_8UC3, m.io_data.pInputs[0].pVirAddr);
-    letterbox_into(bgr, cmm_mat);
-    AX_SYS_MflushCache(m.io_data.pInputs[0].phyAddr, m.io_data.pInputs[0].pVirAddr,
-                        m.io_data.pInputs[0].nSize);
-
-    return run_npu_and_postprocess(m, orig_w, orig_h, results, elapsed_ms, t0);
-}
-
-// Ensure NV12 CMM buffer is allocated for the given size.
 static int ensure_nv12_cmm(AxModel& m, int w, int h) {
     const uint32_t needed = w * h * 3 / 2;
     if (m.nv12_vir && m.nv12_size >= needed) {
@@ -450,88 +264,65 @@ static int ensure_nv12_cmm(AxModel& m, int w, int h) {
     const int ret =
         AX_SYS_MemAllocCached(&m.nv12_phy, &m.nv12_vir, needed, CMM_ALIGN, (const AX_S8*)CMM_TOKEN);
     if (ret != 0) {
-        fprintf(stderr, "[ERROR] NV12 CMM alloc failed: 0x%x\n", ret);
         return ret;
     }
     m.nv12_size = needed;
     return 0;
 }
 
-// Run inference from raw NV12 data using IVPS HW (NV12→BGR + resize + letterbox).
-// Falls back to OpenCV if IVPS is not available.
-static int run_inference_nv12(AxModel& m, const uint8_t* nv12, int src_w, int src_h,
-                              std::vector<Detection>& results, double& elapsed_ms) {
+// Inference from NV12 in CMM (already copied + flushed). Uses IVPS or CPU fallback.
+static int run_inference_nv12_cmm(AxModel& m, int src_w, int src_h,
+                                  std::vector<Detection>& results, double& elapsed_ms) {
     results.clear();
     const auto t0 = std::chrono::steady_clock::now();
 
     if (m.ivps_ready) {
-        // --- IVPS HW path: NV12 → BGR 640×640 letterbox in one HW call ---
-        if (ensure_nv12_cmm(m, src_w, src_h) != 0) {
-            return -1;
-        }
-        const uint32_t nv12_bytes = src_w * src_h * 3 / 2;
-        memcpy(m.nv12_vir, nv12, nv12_bytes);
-        AX_SYS_MflushCache(m.nv12_phy, m.nv12_vir, nv12_bytes);
+        AX_VIDEO_FRAME_T sf = {};
+        sf.u32Width = src_w;
+        sf.u32Height = src_h;
+        sf.enImgFormat = AX_FORMAT_YUV420_SEMIPLANAR;
+        sf.u32PicStride[0] = src_w;
+        sf.u64PhyAddr[0] = m.nv12_phy;
+        sf.u64VirAddr[0] = (AX_U64)(uintptr_t)m.nv12_vir;
+        sf.u64PhyAddr[1] = m.nv12_phy + src_w * src_h;
+        sf.u64VirAddr[1] = (AX_U64)(uintptr_t)((uint8_t*)m.nv12_vir + src_w * src_h);
 
-        // Source: NV12
-        AX_VIDEO_FRAME_T src_frame = {};
-        src_frame.u32Width = src_w;
-        src_frame.u32Height = src_h;
-        src_frame.enImgFormat = AX_FORMAT_YUV420_SEMIPLANAR; // NV12
-        src_frame.u32PicStride[0] = src_w;
-        src_frame.u64PhyAddr[0] = m.nv12_phy;                       // Y plane
-        src_frame.u64VirAddr[0] = (AX_U64)(uintptr_t)m.nv12_vir;
-        src_frame.u64PhyAddr[1] = m.nv12_phy + src_w * src_h;       // UV plane
-        src_frame.u64VirAddr[1] = (AX_U64)(uintptr_t)((uint8_t*)m.nv12_vir + src_w * src_h);
+        AX_VIDEO_FRAME_T df = {};
+        df.u32Width = m.input_w;
+        df.u32Height = m.input_h;
+        df.enImgFormat = AX_FORMAT_BGR888;
+        df.u32PicStride[0] = m.input_w * 3;
+        df.u64PhyAddr[0] = m.io_data.pInputs[0].phyAddr;
+        df.u64VirAddr[0] = (AX_U64)(uintptr_t)m.io_data.pInputs[0].pVirAddr;
+        df.u32FrameSize = m.io_data.pInputs[0].nSize;
 
-        // Destination: BGR 640×640, backed by NPU input CMM buffer.
-        AX_VIDEO_FRAME_T dst_frame = {};
-        dst_frame.u32Width = m.input_w;
-        dst_frame.u32Height = m.input_h;
-        dst_frame.enImgFormat = AX_FORMAT_BGR888;
-        dst_frame.u32PicStride[0] = m.input_w * 3;
-        dst_frame.u64PhyAddr[0] = m.io_data.pInputs[0].phyAddr;
-        dst_frame.u64VirAddr[0] = (AX_U64)(uintptr_t)m.io_data.pInputs[0].pVirAddr;
-        dst_frame.u32FrameSize = m.io_data.pInputs[0].nSize;
-
-        // Aspect-ratio preserving resize with letterbox padding.
         AX_IVPS_ASPECT_RATIO_T ar = {};
         ar.eMode = AX_IVPS_ASPECT_RATIO_AUTO;
-        ar.nBgColor = 0x727272; // 114,114,114 in BGR packed
+        ar.nBgColor = 0x727272;
         ar.eAligns[0] = AX_IVPS_ASPECT_RATIO_HORIZONTAL_CENTER;
         ar.eAligns[1] = AX_IVPS_ASPECT_RATIO_VERTICAL_CENTER;
 
-        const int ret = AX_IVPS_CropResizeTdp(&src_frame, &dst_frame, &ar);
-        if (ret != 0) {
-            fprintf(stderr, "[WARN] IVPS CropResizeTdp failed: 0x%x, falling back to CPU\n", ret);
-            goto cpu_fallback;
+        if (AX_IVPS_CropResizeTdp(&sf, &df, &ar) == 0) {
+            AX_SYS_MinvalidateCache(m.io_data.pInputs[0].phyAddr, m.io_data.pInputs[0].pVirAddr,
+                                    m.io_data.pInputs[0].nSize);
+            return run_npu_and_postprocess(m, src_w, src_h, results, elapsed_ms, t0);
         }
-
-        // IVPS writes directly to NPU input buffer — just flush.
-        AX_SYS_MinvalidateCache(m.io_data.pInputs[0].phyAddr, m.io_data.pInputs[0].pVirAddr,
-                                m.io_data.pInputs[0].nSize);
-
-        return run_npu_and_postprocess(m, src_w, src_h, results, elapsed_ms, t0);
+        fprintf(stderr, "[WARN] IVPS failed, CPU fallback\n");
     }
 
-cpu_fallback:
-    // --- CPU fallback: OpenCV NV12→BGR + letterbox ---
-    {
-        cv::Mat nv12_mat(src_h * 3 / 2, src_w, CV_8UC1, const_cast<uint8_t*>(nv12));
-        cv::Mat bgr;
-        cv::cvtColor(nv12_mat, bgr, cv::COLOR_YUV2BGR_NV12);
-
-        cv::Mat cmm_mat(m.input_h, m.input_w, CV_8UC3, m.io_data.pInputs[0].pVirAddr);
-        letterbox_into(bgr, cmm_mat);
-        AX_SYS_MflushCache(m.io_data.pInputs[0].phyAddr, m.io_data.pInputs[0].pVirAddr,
-                            m.io_data.pInputs[0].nSize);
-
-        return run_npu_and_postprocess(m, src_w, src_h, results, elapsed_ms, t0);
-    }
+    // CPU fallback.
+    cv::Mat nv12_mat(src_h * 3 / 2, src_w, CV_8UC1, m.nv12_vir);
+    cv::Mat bgr;
+    cv::cvtColor(nv12_mat, bgr, cv::COLOR_YUV2BGR_NV12);
+    cv::Mat cmm_mat(m.input_h, m.input_w, CV_8UC3, m.io_data.pInputs[0].pVirAddr);
+    letterbox_into(bgr, cmm_mat);
+    AX_SYS_MflushCache(m.io_data.pInputs[0].phyAddr, m.io_data.pInputs[0].pVirAddr,
+                        m.io_data.pInputs[0].nSize);
+    return run_npu_and_postprocess(m, src_w, src_h, results, elapsed_ms, t0);
 }
 
 // ---------------------------------------------------------------------------
-// Socket I/O helpers
+// Socket I/O
 // ---------------------------------------------------------------------------
 
 static bool read_exact(int fd, void* buf, size_t n) {
@@ -560,49 +351,36 @@ static bool write_exact(int fd, const void* buf, size_t n) {
     return true;
 }
 
-static int create_listen_socket(const char* socket_path) {
-    unlink(socket_path);
-
+static int create_listen_socket(const char* path) {
+    unlink(path);
     const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
-        perror("socket");
         return -1;
     }
-
     struct sockaddr_un addr = {};
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
-
-    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("bind");
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0 || listen(fd, 4) < 0) {
         close(fd);
         return -1;
     }
-
-    chmod(socket_path, 0666);
-
-    if (listen(fd, 4) < 0) {
-        perror("listen");
-        close(fd);
-        return -1;
-    }
-
+    chmod(path, 0666);
     return fd;
 }
 
 // ---------------------------------------------------------------------------
-// Send response helpers
+// Send helpers
 // ---------------------------------------------------------------------------
 
-static void send_ok(int fd, const std::vector<Detection>& dets, float elapsed_ms) {
+static bool send_detections(int fd, const std::vector<Detection>& dets, float ms) {
     const uint16_t count = (uint16_t)std::min(dets.size(), (size_t)UINT16_MAX);
     ResponseHeader hdr = {};
     hdr.status = 0;
     hdr.det_count = count;
-    hdr.elapsed_ms = elapsed_ms;
-    hdr.error_len = 0;
-    write_exact(fd, &hdr, sizeof(hdr));
-
+    hdr.elapsed_ms = ms;
+    if (!write_exact(fd, &hdr, sizeof(hdr))) {
+        return false;
+    }
     for (uint16_t i = 0; i < count; ++i) {
         const auto& d = dets[i];
         WireDetection wd = {};
@@ -612,25 +390,351 @@ static void send_ok(int fd, const std::vector<Detection>& dets, float elapsed_ms
         wd.y2 = (int16_t)std::clamp(d.y2, -32768.f, 32767.f);
         wd.class_id = (uint16_t)d.class_id;
         wd.confidence = (uint16_t)(d.confidence * 10000.f);
-        write_exact(fd, &wd, sizeof(wd));
+        if (!write_exact(fd, &wd, sizeof(wd))) {
+            return false;
+        }
     }
+    return true;
 }
 
 static void send_error(int fd, const char* msg) {
-    const uint32_t len = (uint32_t)strlen(msg);
     ResponseHeader hdr = {};
     hdr.status = 1;
-    hdr.det_count = 0;
-    hdr.elapsed_ms = 0;
-    hdr.error_len = len;
+    hdr.error_len = (uint32_t)strlen(msg);
     write_exact(fd, &hdr, sizeof(hdr));
-    if (len > 0) {
-        write_exact(fd, msg, len);
+    if (hdr.error_len > 0) {
+        write_exact(fd, msg, hdr.error_len);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Request handlers
+// H.265 NAL parser
+// ---------------------------------------------------------------------------
+
+// H.265 NAL unit types relevant for keyframe detection.
+static constexpr uint8_t HEVC_NAL_IDR_W_RADL = 19;
+static constexpr uint8_t HEVC_NAL_IDR_N_LP = 20;
+static constexpr uint8_t HEVC_NAL_CRA = 21;
+static constexpr uint8_t HEVC_NAL_VPS = 32;
+static constexpr uint8_t HEVC_NAL_SPS = 33;
+static constexpr uint8_t HEVC_NAL_PPS = 34;
+
+static uint8_t hevc_nal_type(const uint8_t* nal) {
+    // H.265: nal_unit_type is bits 1-6 of the first byte after start code.
+    return (nal[0] >> 1) & 0x3F;
+}
+
+static bool hevc_is_idr(uint8_t nal_type) {
+    return nal_type == HEVC_NAL_IDR_W_RADL || nal_type == HEVC_NAL_IDR_N_LP ||
+           nal_type == HEVC_NAL_CRA;
+}
+
+static bool hevc_is_vcl(uint8_t nal_type) {
+    return nal_type <= 31; // VCL NAL units are 0-31
+}
+
+// Find next start code (00 00 01 or 00 00 00 01) in buffer.
+// Returns pointer to first byte after start code, or nullptr if not found.
+static const uint8_t* find_start_code(const uint8_t* p, const uint8_t* end) {
+    while (p + 2 < end) {
+        if (p[0] == 0 && p[1] == 0) {
+            if (p[2] == 1) {
+                return p + 3;
+            }
+            if (p + 3 < end && p[2] == 0 && p[3] == 1) {
+                return p + 4;
+            }
+        }
+        ++p;
+    }
+    return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// TCP client
+// ---------------------------------------------------------------------------
+
+static int tcp_connect(const char* host, int port) {
+    struct addrinfo hints = {}, *res = nullptr;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%d", port);
+    if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) {
+        fprintf(stderr, "[STREAM] DNS resolve failed: %s\n", host);
+        return -1;
+    }
+    const int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0) {
+        freeaddrinfo(res);
+        return -1;
+    }
+    // Set recv timeout (10s).
+    struct timeval tv = {10, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
+        fprintf(stderr, "[STREAM] Connect failed: %s:%d (%s)\n", host, port, strerror(errno));
+        close(fd);
+        freeaddrinfo(res);
+        return -1;
+    }
+    freeaddrinfo(res);
+    return fd;
+}
+
+// ---------------------------------------------------------------------------
+// Stream mode: TCP → VDEC HW → CLAHE → IVPS → NPU → push to client
+// ---------------------------------------------------------------------------
+
+static constexpr AX_VDEC_GRP VDEC_GRP = 0;
+static constexpr AX_VDEC_CHN VDEC_CHN = 0;
+static constexpr int STREAM_BUF_SIZE = 2 * 1024 * 1024; // 2MB stream buffer
+static constexpr int FRAME_W = 1280;
+static constexpr int FRAME_H = 720;
+
+static void handle_stream(int client_fd, AxModel& model, const RequestHeader& req) {
+    // Read rdk-x5 host from payload.
+    std::string host(req.payload_size, '\0');
+    if (req.payload_size > 0 && !read_exact(client_fd, host.data(), req.payload_size)) {
+        send_error(client_fd, "read host failed");
+        return;
+    }
+    if (host.empty()) {
+        send_error(client_fd, "missing host");
+        return;
+    }
+
+    fprintf(stderr, "[STREAM] Connecting to %s:%d\n", host.c_str(), STREAM_RELAY_PORT);
+
+    // --- TCP connect ---
+    const int tcp_fd = tcp_connect(host.c_str(), STREAM_RELAY_PORT);
+    if (tcp_fd < 0) {
+        send_error(client_fd, "tcp connect failed");
+        return;
+    }
+
+    // --- Init VDEC ---
+    AX_VDEC_MOD_ATTR_T vdec_mod = {};
+    vdec_mod.u32MaxGroupCount = 1;
+    vdec_mod.enDecModule = AX_ENABLE_ONLY_VDEC;
+    int ret = AX_VDEC_Init(&vdec_mod);
+    if (ret != 0) {
+        fprintf(stderr, "[STREAM] AX_VDEC_Init failed: 0x%x\n", ret);
+        send_error(client_fd, "vdec init failed");
+        close(tcp_fd);
+        return;
+    }
+
+    AX_VDEC_GRP_ATTR_T grp_attr = {};
+    grp_attr.enCodecType = PT_H265;
+    grp_attr.enInputMode = AX_VDEC_INPUT_MODE_STREAM;
+    grp_attr.u32MaxPicWidth = FRAME_W;
+    grp_attr.u32MaxPicHeight = FRAME_H;
+    grp_attr.u32StreamBufSize = STREAM_BUF_SIZE;
+    grp_attr.bSdkAutoFramePool = AX_TRUE;
+
+    ret = AX_VDEC_CreateGrp(VDEC_GRP, &grp_attr);
+    if (ret != 0) {
+        fprintf(stderr, "[STREAM] AX_VDEC_CreateGrp failed: 0x%x\n", ret);
+        send_error(client_fd, "vdec create failed");
+        AX_VDEC_Deinit();
+        close(tcp_fd);
+        return;
+    }
+
+    // Set decode mode to IPB (decode all frame types).
+    AX_VDEC_GRP_PARAM_T grp_param = {};
+    grp_param.stVdecVideoParam.enOutputOrder = AX_VDEC_OUTPUT_ORDER_DEC;
+    grp_param.stVdecVideoParam.enVdecMode = VIDEO_DEC_MODE_IPB;
+    AX_VDEC_SetGrpParam(VDEC_GRP, &grp_param);
+
+    // Configure output channel: NV12 at original resolution.
+    AX_VDEC_CHN_ATTR_T chn_attr = {};
+    chn_attr.u32PicWidth = FRAME_W;
+    chn_attr.u32PicHeight = FRAME_H;
+    chn_attr.u32OutputFifoDepth = 4;
+    chn_attr.u32FrameBufCnt = 8;
+    chn_attr.enOutputMode = AX_VDEC_OUTPUT_ORIGINAL;
+    chn_attr.enImgFormat = AX_FORMAT_YUV420_SEMIPLANAR; // NV12
+
+    AX_VDEC_RECV_PIC_PARAM_T recv_param = {};
+    recv_param.s32RecvPicNum = -1; // unlimited
+    ret = AX_VDEC_StartRecvStream(VDEC_GRP, &recv_param);
+    if (ret != 0) {
+        fprintf(stderr, "[STREAM] AX_VDEC_StartRecvStream failed: 0x%x\n", ret);
+        AX_VDEC_DestroyGrp(VDEC_GRP);
+        AX_VDEC_Deinit();
+        send_error(client_fd, "vdec start failed");
+        close(tcp_fd);
+        return;
+    }
+
+    // Send initial OK.
+    {
+        std::vector<Detection> empty;
+        if (!send_detections(client_fd, empty, 0)) {
+            goto cleanup;
+        }
+    }
+
+    fprintf(stderr, "[STREAM] HW decode started (%dx%d H.265)\n", FRAME_W, FRAME_H);
+
+    {
+        // TCP recv + VDEC send + frame get loop.
+        std::vector<uint8_t> tcp_buf(256 * 1024);
+        auto last_heartbeat = std::chrono::steady_clock::now();
+        uint64_t frames = 0;
+        const uint64_t clahe_mask = 127; // CLAHE every 128 frames (~4.3s at 30fps).
+
+        while (g_running) {
+            // --- Read H.265 data from TCP ---
+            const ssize_t nr = recv(tcp_fd, tcp_buf.data(), tcp_buf.size(), 0);
+            if (nr <= 0) {
+                if (nr == 0) {
+                    fprintf(stderr, "[STREAM] TCP EOF\n");
+                } else if (errno != EAGAIN && errno != EINTR) {
+                    fprintf(stderr, "[STREAM] TCP recv error: %s\n", strerror(errno));
+                }
+                break;
+            }
+
+            // --- Send to VDEC ---
+            AX_VDEC_STREAM_T stream = {};
+            stream.pu8Addr = tcp_buf.data();
+            stream.u32StreamPackLen = (AX_U32)nr;
+            stream.bEndOfFrame = AX_FALSE;
+            stream.bEndOfStream = AX_FALSE;
+            ret = AX_VDEC_SendStream(VDEC_GRP, &stream, 100);
+            if (ret != 0 && ret != (int)AX_ERR_VDEC_BUF_FULL) {
+                fprintf(stderr, "[STREAM] VDEC SendStream error: 0x%x\n", ret);
+                break;
+            }
+
+            // --- Try to get decoded frames ---
+            AX_VIDEO_FRAME_INFO_T frame_info = {};
+            while (AX_VDEC_GetChnFrame(VDEC_GRP, VDEC_CHN, &frame_info, 0) == 0) {
+                const auto& vf = frame_info.stVFrame;
+                const int fw = vf.u32Width;
+                const int fh = vf.u32Height;
+
+                if (fw > 0 && fh > 0 && vf.u64VirAddr[0]) {
+                    // CLAHE on Y plane (in-place on VDEC output — may need copy).
+                    uint8_t* y_ptr = (uint8_t*)(uintptr_t)vf.u64VirAddr[0];
+                    uint8_t* uv_ptr = (uint8_t*)(uintptr_t)vf.u64VirAddr[1];
+
+                    if ((frames & clahe_mask) == 0) {
+                        // CLAHE needs writable buffer — copy Y to temp.
+                        const int y_size = fw * fh;
+                        std::vector<uint8_t> y_tmp(y_ptr, y_ptr + y_size);
+                        apply_clahe_nv12(y_tmp.data(), fw, fh);
+                        // Copy back CLAHE'd Y (UV already set to 128 by apply_clahe_nv12).
+                        memcpy(y_ptr, y_tmp.data(), y_size);
+                        memset(uv_ptr, 128, y_size / 2);
+                    } else {
+                        // Just desaturate UV.
+                        memset(uv_ptr, 128, fw * fh / 2);
+                    }
+
+                    // Flush VDEC frame (Y + UV) for IVPS/NPU.
+                    AX_SYS_MflushCache(vf.u64PhyAddr[0], y_ptr, fw * fh);
+                    AX_SYS_MflushCache(vf.u64PhyAddr[1], uv_ptr, fw * fh / 2);
+
+                    // --- IVPS + NPU (use VDEC frame directly as IVPS source) ---
+                    std::vector<Detection> dets;
+                    double ms = 0;
+                    {
+                        std::lock_guard<std::mutex> lock(model.npu_mutex);
+                        const auto t0 = std::chrono::steady_clock::now();
+
+                        if (model.ivps_ready) {
+                            AX_VIDEO_FRAME_T sf = {};
+                            sf.u32Width = fw;
+                            sf.u32Height = fh;
+                            sf.enImgFormat = AX_FORMAT_YUV420_SEMIPLANAR;
+                            sf.u32PicStride[0] = vf.u32PicStride[0];
+                            sf.u64PhyAddr[0] = vf.u64PhyAddr[0];
+                            sf.u64VirAddr[0] = vf.u64VirAddr[0];
+                            sf.u64PhyAddr[1] = vf.u64PhyAddr[1];
+                            sf.u64VirAddr[1] = vf.u64VirAddr[1];
+
+                            AX_VIDEO_FRAME_T df = {};
+                            df.u32Width = model.input_w;
+                            df.u32Height = model.input_h;
+                            df.enImgFormat = AX_FORMAT_BGR888;
+                            df.u32PicStride[0] = model.input_w * 3;
+                            df.u64PhyAddr[0] = model.io_data.pInputs[0].phyAddr;
+                            df.u64VirAddr[0] =
+                                (AX_U64)(uintptr_t)model.io_data.pInputs[0].pVirAddr;
+                            df.u32FrameSize = model.io_data.pInputs[0].nSize;
+
+                            AX_IVPS_ASPECT_RATIO_T ar = {};
+                            ar.eMode = AX_IVPS_ASPECT_RATIO_AUTO;
+                            ar.nBgColor = 0x727272;
+                            ar.eAligns[0] = AX_IVPS_ASPECT_RATIO_HORIZONTAL_CENTER;
+                            ar.eAligns[1] = AX_IVPS_ASPECT_RATIO_VERTICAL_CENTER;
+
+                            if (AX_IVPS_CropResizeTdp(&sf, &df, &ar) == 0) {
+                                AX_SYS_MinvalidateCache(
+                                    model.io_data.pInputs[0].phyAddr,
+                                    model.io_data.pInputs[0].pVirAddr,
+                                    model.io_data.pInputs[0].nSize);
+                                run_npu_and_postprocess(model, fw, fh, dets, ms, t0);
+                            } else {
+                                // CPU fallback.
+                                cv::Mat nv12_mat(fh * 3 / 2, fw, CV_8UC1, y_ptr);
+                                cv::Mat bgr;
+                                cv::cvtColor(nv12_mat, bgr, cv::COLOR_YUV2BGR_NV12);
+                                cv::Mat cmm(model.input_h, model.input_w, CV_8UC3,
+                                            model.io_data.pInputs[0].pVirAddr);
+                                letterbox_into(bgr, cmm);
+                                AX_SYS_MflushCache(model.io_data.pInputs[0].phyAddr,
+                                                   model.io_data.pInputs[0].pVirAddr,
+                                                   model.io_data.pInputs[0].nSize);
+                                run_npu_and_postprocess(model, fw, fh, dets, ms, t0);
+                            }
+                        }
+                    }
+
+                    if (!dets.empty()) {
+                        if (!send_detections(client_fd, dets, (float)ms)) {
+                            AX_VDEC_ReleaseChnFrame(VDEC_GRP, VDEC_CHN, &frame_info);
+                            goto cleanup;
+                        }
+                    }
+                    frames++;
+                }
+
+                AX_VDEC_ReleaseChnFrame(VDEC_GRP, VDEC_CHN, &frame_info);
+            }
+
+            // Heartbeat.
+            const auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - last_heartbeat).count() >=
+                STREAM_HEARTBEAT_SEC) {
+                std::vector<Detection> empty;
+                if (!send_detections(client_fd, empty, 0)) {
+                    break;
+                }
+                if (frames > 0) {
+                    fprintf(stderr, "[STREAM] %lu frames processed\n", (unsigned long)frames);
+                }
+                frames = 0;
+                last_heartbeat = now;
+            }
+        }
+    }
+
+cleanup:
+    AX_VDEC_StopRecvStream(VDEC_GRP);
+    AX_VDEC_DestroyGrp(VDEC_GRP);
+    AX_VDEC_Deinit();
+    close(tcp_fd);
+    fprintf(stderr, "[STREAM] Ended\n");
+}
+
+// ---------------------------------------------------------------------------
+// On-demand handlers
 // ---------------------------------------------------------------------------
 
 static void handle_detect(int fd, AxModel& m, const RequestHeader& req) {
@@ -638,51 +742,55 @@ static void handle_detect(int fd, AxModel& m, const RequestHeader& req) {
         send_error(fd, "no model loaded");
         return;
     }
-
     std::vector<Detection> dets;
     double ms = 0;
 
     if (req.input_type == INPUT_JPEG_PATH) {
-        // Read file path from payload.
         std::string path(req.payload_size, '\0');
         if (!read_exact(fd, path.data(), req.payload_size)) {
             send_error(fd, "read path failed");
             return;
         }
-
         cv::Mat img = cv::imread(path, cv::IMREAD_COLOR);
         if (img.empty()) {
             send_error(fd, "imread failed");
             return;
         }
-        if (run_inference_bgr(m, img, img.cols, img.rows, dets, ms) != 0) {
+        std::lock_guard<std::mutex> lock(m.npu_mutex);
+        const auto t0 = std::chrono::steady_clock::now();
+        cv::Mat cmm_mat(m.input_h, m.input_w, CV_8UC3, m.io_data.pInputs[0].pVirAddr);
+        letterbox_into(img, cmm_mat);
+        AX_SYS_MflushCache(m.io_data.pInputs[0].phyAddr, m.io_data.pInputs[0].pVirAddr,
+                            m.io_data.pInputs[0].nSize);
+        if (run_npu_and_postprocess(m, img.cols, img.rows, dets, ms, t0) != 0) {
             send_error(fd, "inference failed");
             return;
         }
     } else if (req.input_type == INPUT_NV12_RAW) {
-        // Read raw NV12 frame from payload.
-        const int src_w = req.width;
-        const int src_h = req.height;
-        const size_t expected = (size_t)src_w * src_h * 3 / 2;
+        const size_t expected = (size_t)req.width * req.height * 3 / 2;
         if (req.payload_size != expected) {
             std::vector<uint8_t> drain(req.payload_size);
             read_exact(fd, drain.data(), req.payload_size);
             send_error(fd, "nv12 size mismatch");
             return;
         }
-
-        std::vector<uint8_t> nv12(expected);
-        if (!read_exact(fd, nv12.data(), expected)) {
+        if (ensure_nv12_cmm(m, req.width, req.height) != 0) {
+            std::vector<uint8_t> drain(expected);
+            read_exact(fd, drain.data(), expected);
+            send_error(fd, "cmm alloc failed");
+            return;
+        }
+        if (!read_exact(fd, m.nv12_vir, expected)) {
             send_error(fd, "read nv12 failed");
             return;
         }
-
-        if (run_inference_nv12(m, nv12.data(), src_w, src_h, dets, ms) != 0) {
+        AX_SYS_MflushCache(m.nv12_phy, m.nv12_vir, expected);
+        std::lock_guard<std::mutex> lock(m.npu_mutex);
+        if (run_inference_nv12_cmm(m, req.width, req.height, dets, ms) != 0) {
             send_error(fd, "inference failed");
             return;
         }
     } else {
-        // Drain unknown payload.
         if (req.payload_size > 0) {
             std::vector<uint8_t> drain(req.payload_size);
             read_exact(fd, drain.data(), req.payload_size);
@@ -691,7 +799,7 @@ static void handle_detect(int fd, AxModel& m, const RequestHeader& req) {
         return;
     }
 
-    send_ok(fd, dets, (float)ms);
+    send_detections(fd, dets, (float)ms);
 }
 
 static void handle_load(int fd, AxModel& m, const RequestHeader& req) {
@@ -700,34 +808,27 @@ static void handle_load(int fd, AxModel& m, const RequestHeader& req) {
         send_error(fd, "read path failed");
         return;
     }
-    if (path.empty()) {
-        send_error(fd, "missing model path");
-        return;
-    }
-
+    std::lock_guard<std::mutex> lock(m.npu_mutex);
     unload_model(m);
-    const int ret = load_model(m, path, m.input_w > 0 ? m.input_w : DEFAULT_INPUT_W,
-                               m.input_h > 0 ? m.input_h : DEFAULT_INPUT_H);
-    if (ret != 0) {
+    if (load_model(m, path, m.input_w ? m.input_w : DEFAULT_INPUT_W,
+                   m.input_h ? m.input_h : DEFAULT_INPUT_H) != 0) {
         send_error(fd, "load failed");
         return;
     }
-
-    // Send ok with 0 detections.
     std::vector<Detection> empty;
-    send_ok(fd, empty, 0);
+    send_detections(fd, empty, 0);
 }
 
 static void handle_unload(int fd, AxModel& m) {
+    std::lock_guard<std::mutex> lock(m.npu_mutex);
     unload_model(m);
     std::vector<Detection> empty;
-    send_ok(fd, empty, 0);
+    send_detections(fd, empty, 0);
 }
 
 static void handle_status(int fd, const AxModel& m) {
-    // Encode status as: ok + 0 dets + elapsed_ms = CMM KB (repurposed).
     std::vector<Detection> empty;
-    send_ok(fd, empty, m.handle ? (float)(m.cmm_bytes / 1024) : 0.f);
+    send_detections(fd, empty, m.handle ? (float)(m.cmm_bytes / 1024) : 0.f);
 }
 
 // ---------------------------------------------------------------------------
@@ -737,31 +838,28 @@ static void handle_status(int fd, const AxModel& m) {
 static void print_usage(const char* prog) {
     fprintf(stderr,
             "Usage: %s --model <path> [options]\n"
-            "  --model <path>           axmodel file path (required)\n"
-            "  --socket <path>          Unix socket path (default: /run/ax_yolo_daemon.sock)\n"
-            "  --min-headroom-mb <N>    CMM headroom threshold (default: 40)\n"
-            "  --input-size <WxH>       Model input size (default: 640x640)\n",
+            "  --model <path>           axmodel file (required)\n"
+            "  --socket <path>          Unix socket (default: /run/ax_yolo_daemon.sock)\n"
+            "  --input-size <WxH>       Model input (default: 640x640)\n",
             prog);
 }
 
 int main(int argc, char** argv) {
     std::string model_path;
     std::string socket_path = "/run/ax_yolo_daemon.sock";
-    int min_headroom_mb = 40;
     int input_w = DEFAULT_INPUT_W;
     int input_h = DEFAULT_INPUT_H;
 
     static struct option long_opts[] = {
         {"model", required_argument, nullptr, 'm'},
         {"socket", required_argument, nullptr, 's'},
-        {"min-headroom-mb", required_argument, nullptr, 'H'},
         {"input-size", required_argument, nullptr, 'i'},
         {"help", no_argument, nullptr, 'h'},
         {nullptr, 0, nullptr, 0},
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "m:s:H:i:h", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "m:s:i:h", long_opts, nullptr)) != -1) {
         switch (opt) {
         case 'm':
             model_path = optarg;
@@ -769,16 +867,12 @@ int main(int argc, char** argv) {
         case 's':
             socket_path = optarg;
             break;
-        case 'H':
-            min_headroom_mb = atoi(optarg);
-            break;
         case 'i':
             if (sscanf(optarg, "%dx%d", &input_w, &input_h) != 2) {
-                fprintf(stderr, "[ERROR] Invalid --input-size: %s (expected WxH)\n", optarg);
+                fprintf(stderr, "[ERROR] Invalid --input-size\n");
                 return 1;
             }
             break;
-        case 'h':
         default:
             print_usage(argv[0]);
             return opt == 'h' ? 0 : 1;
@@ -786,7 +880,6 @@ int main(int argc, char** argv) {
     }
 
     if (model_path.empty()) {
-        fprintf(stderr, "[ERROR] --model is required\n");
         print_usage(argv[0]);
         return 1;
     }
@@ -797,7 +890,6 @@ int main(int argc, char** argv) {
 
     int ret = AX_SYS_Init();
     if (ret != 0) {
-        fprintf(stderr, "[ERROR] AX_SYS_Init failed: 0x%x\n", ret);
         return 1;
     }
 
@@ -805,49 +897,33 @@ int main(int argc, char** argv) {
     npu_attr.eHardMode = AX_ENGINE_VIRTUAL_NPU_DISABLE;
     ret = AX_ENGINE_Init(&npu_attr);
     if (ret != 0) {
-        fprintf(stderr, "[WARN] AX_ENGINE_Init failed: 0x%x (trying without Init)\n", ret);
+        fprintf(stderr, "[WARN] AX_ENGINE_Init: 0x%x\n", ret);
     }
+    fprintf(stderr, "[INFO] AX Engine %s\n", AX_ENGINE_GetVersion());
 
-    fprintf(stderr, "[INFO] AX Engine initialized (version: %s)\n", AX_ENGINE_GetVersion());
-
-    // Initialize IVPS for HW NV12→BGR + letterbox.
-    bool ivps_ok = false;
-    ret = AX_IVPS_Init();
-    if (ret == 0) {
-        ivps_ok = true;
-        fprintf(stderr, "[INFO] IVPS initialized (HW preprocess enabled)\n");
-    } else {
-        fprintf(stderr, "[WARN] AX_IVPS_Init failed: 0x%x (CPU fallback)\n", ret);
+    bool ivps_ok = AX_IVPS_Init() == 0;
+    if (ivps_ok) {
+        fprintf(stderr, "[INFO] IVPS HW enabled\n");
     }
 
     AxModel model;
     model.input_w = input_w;
     model.input_h = input_h;
     model.ivps_ready = ivps_ok;
-    ret = load_model(model, model_path, input_w, input_h);
-    if (ret != 0) {
-        AX_ENGINE_Deinit();
-        AX_SYS_Deinit();
+    if (load_model(model, model_path, input_w, input_h) != 0) {
         return 1;
     }
 
     g_listen_fd = create_listen_socket(socket_path.c_str());
     if (g_listen_fd < 0) {
-        unload_model(model);
-        AX_ENGINE_Deinit();
-        AX_SYS_Deinit();
         return 1;
     }
-
-    fprintf(stderr, "[INFO] Listening on %s (binary protocol v1)\n", socket_path.c_str());
+    fprintf(stderr, "[INFO] Listening on %s\n", socket_path.c_str());
 
     while (g_running) {
-        const int client_fd = accept(g_listen_fd, nullptr, nullptr);
-        if (client_fd < 0) {
-            if (!g_running) {
-                break;
-            }
-            if (errno == EINTR) {
+        const int cfd = accept(g_listen_fd, nullptr, nullptr);
+        if (cfd < 0) {
+            if (!g_running || errno == EINTR) {
                 continue;
             }
             perror("accept");
@@ -855,30 +931,31 @@ int main(int argc, char** argv) {
         }
 
         RequestHeader req = {};
-        if (read_exact(client_fd, &req, sizeof(req))) {
+        if (read_exact(cfd, &req, sizeof(req))) {
             switch (req.cmd) {
             case CMD_DETECT:
-                handle_detect(client_fd, model, req);
+                handle_detect(cfd, model, req);
                 break;
             case CMD_LOAD:
-                handle_load(client_fd, model, req);
+                handle_load(cfd, model, req);
                 break;
             case CMD_UNLOAD:
-                handle_unload(client_fd, model);
+                handle_unload(cfd, model);
                 break;
             case CMD_STATUS:
-                handle_status(client_fd, model);
+                handle_status(cfd, model);
+                break;
+            case CMD_STREAM:
+                handle_stream(cfd, model, req);
                 break;
             default:
-                send_error(client_fd, "unknown command");
+                send_error(cfd, "unknown command");
                 break;
             }
         }
-
-        close(client_fd);
+        close(cfd);
     }
 
-    fprintf(stderr, "[INFO] Shutting down...\n");
     if (g_listen_fd >= 0) {
         close(g_listen_fd);
     }
