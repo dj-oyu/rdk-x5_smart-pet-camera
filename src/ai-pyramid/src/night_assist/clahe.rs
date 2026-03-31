@@ -9,6 +9,27 @@ const TILE_Y: usize = 8;
 const CLIP_LIMIT: f32 = 3.0;
 const HIST_BINS: usize = 256;
 
+/// Apply CLAHE + median blur to an NV12 frame, return processed NV12.
+///
+/// NV12 layout: [Y: W×H bytes] [UV interleaved: W×H/2 bytes]
+///
+/// 1. Median blur (k=3) on Y plane — IR noise reduction
+/// 2. CLAHE on Y plane
+/// 3. UV plane set to 128 (IR desaturation)
+pub fn apply_clahe_nv12(nv12: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let y_size = width * height;
+    debug_assert_eq!(nv12.len(), y_size * 3 / 2);
+
+    let y_plane = &nv12[..y_size];
+    let y_blurred = median_blur_3x3(y_plane, width, height);
+    let y_clahe = clahe(&y_blurred, width, height);
+
+    let mut out = vec![0u8; nv12.len()];
+    out[..y_size].copy_from_slice(&y_clahe);
+    out[y_size..].fill(128); // neutral UV (IR desaturation)
+    out
+}
+
 /// Apply CLAHE + median blur to an NV12 frame, then encode to JPEG.
 ///
 /// NV12 layout: [Y: W×H bytes] [UV interleaved: W×H/2 bytes]

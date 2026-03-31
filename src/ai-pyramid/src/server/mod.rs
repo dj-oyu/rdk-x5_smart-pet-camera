@@ -56,8 +56,7 @@ pub struct AppState {
     pub detect_client: Option<Arc<DetectClient>>,
     pub local_detector: Option<Arc<crate::detect::local::LocalDetector>>,
     pub backfill_running: Arc<AtomicBool>,
-    pub night_assist_tx:
-        Option<tokio::sync::broadcast::Sender<crate::night_assist::DetectionEvent>>,
+    pub night_assist_host: Option<String>,
 }
 
 /// Load pet display names from environment variables.
@@ -631,7 +630,9 @@ async fn handle_backfill(State(state): State<AppState>) -> impl IntoResponse {
             }
 
             // Detect: prefer local (level2), fallback to remote (level1)
+            // Acquire NPU semaphore for local detection to prevent concurrent NPU access.
             let dets = if let Some(ref ld) = local {
+                let _permit = context.npu_semaphore().acquire().await;
                 ld.detect_comic(&photos_dir, &photo.source_filename).await
             } else if let Some(ref rc) = remote {
                 rc.detect(&photo.source_filename).await
@@ -733,6 +734,7 @@ async fn handle_detect_now(
     let photos_dir = state.photos_dir.clone();
     let commands = state.commands();
     let sse_tx = state.event_tx.clone();
+    let npu_semaphore = state.context.npu_semaphore().clone();
 
     // Channel for streaming partial detections
     let (det_tx, mut det_rx) = tokio::sync::mpsc::channel::<crate::db::DetectionInput>(64);
@@ -753,6 +755,9 @@ async fn handle_detect_now(
             });
         }
     });
+
+    // Acquire NPU semaphore to prevent concurrent NPU access with VLM.
+    let _permit = npu_semaphore.acquire().await;
 
     // Run streaming detection
     let result = local
@@ -840,28 +845,92 @@ async fn handle_sse(
 }
 
 async fn handle_night_assist_sse(State(state): State<AppState>) -> impl IntoResponse {
-    let Some(ref tx) = state.night_assist_tx else {
+    let Some(ref host) = state.night_assist_host else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "night assist not configured",
         )
             .into_response();
     };
-    let rx = tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
-        Ok(event) => {
-            let event_name = if event.detections.is_empty() {
-                "heartbeat"
-            } else {
-                "detection"
-            };
-            let json = serde_json::to_string(&event).unwrap_or_default();
-            Some(Ok::<_, std::convert::Infallible>(
-                Event::default().event(event_name).data(json),
-            ))
+
+    let socket_path = state
+        .local_detector
+        .as_ref()
+        .map(|ld| ld.socket_path().to_path_buf())
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(
+                std::env::var("AX_YOLO_DAEMON_SOCKET")
+                    .unwrap_or_else(|_| "/run/ax_yolo_daemon.sock".to_string()),
+            )
+        });
+
+    let host = host.clone();
+
+    // Connect to daemon and send CMD_STREAM.
+    let setup = async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut conn = tokio::net::UnixStream::connect(&socket_path).await.ok()?;
+        let header = crate::detect::local::stream_request_header(host.as_bytes());
+        conn.write_all(&header).await.ok()?;
+        // Read initial OK response (12 bytes).
+        let mut resp_buf = [0u8; 12];
+        conn.read_exact(&mut resp_buf).await.ok()?;
+        Some(conn)
+    };
+
+    let conn = setup.await;
+    let stream = futures_util::stream::unfold(conn, |state| async move {
+        use tokio::io::AsyncReadExt;
+        let mut conn = state?;
+
+        // Read ResponseHeader (12 bytes).
+        let mut hdr_buf = [0u8; 12];
+        conn.read_exact(&mut hdr_buf).await.ok()?;
+        let det_count = u16::from_ne_bytes([hdr_buf[2], hdr_buf[3]]) as usize;
+
+        // Read detections (12 bytes each).
+        let mut dets = Vec::new();
+        for _ in 0..det_count {
+            let mut det_buf = [0u8; 12];
+            conn.read_exact(&mut det_buf).await.ok()?;
+            let x1 = i16::from_ne_bytes([det_buf[0], det_buf[1]]);
+            let y1 = i16::from_ne_bytes([det_buf[2], det_buf[3]]);
+            let x2 = i16::from_ne_bytes([det_buf[4], det_buf[5]]);
+            let y2 = i16::from_ne_bytes([det_buf[6], det_buf[7]]);
+            let class_id = u16::from_ne_bytes([det_buf[8], det_buf[9]]);
+            let confidence = u16::from_ne_bytes([det_buf[10], det_buf[11]]);
+            dets.push(crate::night_assist::NightAssistDetection {
+                class_name: crate::detect::local::coco_name(class_id),
+                confidence: confidence as f64 / 10000.0,
+                bbox: crate::night_assist::BBox {
+                    x: x1 as i32,
+                    y: y1 as i32,
+                    w: (x2 - x1) as i32,
+                    h: (y2 - y1) as i32,
+                },
+            });
         }
-        Err(_) => None,
+
+        let event_name = if dets.is_empty() {
+            "heartbeat"
+        } else {
+            "detection"
+        };
+        let event = crate::night_assist::DetectionEvent {
+            detections: dets,
+            source_width: 1280,
+            source_height: 720,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64(),
+        };
+        let json = serde_json::to_string(&event).unwrap_or_default();
+        let sse_event =
+            Ok::<_, std::convert::Infallible>(Event::default().event(event_name).data(json));
+        Some((sse_event, Some(conn)))
     });
+
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
@@ -1164,7 +1233,7 @@ mod tests {
             detect_client: None,
             local_detector: None,
             backfill_running: Arc::new(AtomicBool::new(false)),
-            night_assist_tx: None,
+            night_assist_host: None,
         }
     }
 
