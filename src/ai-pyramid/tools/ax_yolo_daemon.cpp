@@ -202,7 +202,8 @@ static int load_model(AxModel& m, const std::string& path, const int input_w, co
     m.model_path = path;
     fprintf(stderr, "[INFO] Model loaded: %s (CMM %u KB, %dx%d, %s)\n", path.c_str(),
             m.cmm_bytes / 1024, input_w, input_h, cs_name);
-    fprintf(stderr, "[INFO]   inputs=%u outputs=%u\n", m.io_info->nInputSize, m.io_info->nOutputSize);
+    fprintf(stderr, "[INFO]   inputs=%u outputs=%u\n", m.io_info->nInputSize,
+            m.io_info->nOutputSize);
     for (uint32_t i = 0; i < m.io_info->nOutputSize; ++i) {
         const auto& o = m.io_info->pOutputs[i];
         fprintf(stderr, "[INFO]   output[%u]: dims=%u shape=[", i, o.nShapeSize);
@@ -266,9 +267,11 @@ static int run_npu_and_postprocess(AxModel& m, const int orig_w, const int orig_
             const auto& om = m.io_info->pOutputs[i];
             const int fw = om.nShapeSize >= 4 ? om.pShape[2] : 0;
             const int ch = om.nShapeSize >= 4 ? om.pShape[3] : 0;
-            if (fw <= 0 || ch <= 0) continue;
+            if (fw <= 0 || ch <= 0)
+                continue;
             const int cls_num = ch - 4 * DFL_REG_MAX;
-            if (cls_num <= 0) continue;
+            if (cls_num <= 0)
+                continue;
             generate_proposals_dfl(m.input_w / fw, (const float*)m.io_data.pOutputs[i].pVirAddr,
                                    SCORE_THRESHOLD, results, m.input_w, m.input_h, cls_num);
         }
@@ -277,10 +280,12 @@ static int run_npu_and_postprocess(AxModel& m, const int orig_w, const int orig_
         for (uint32_t i = 0; i + 1 < m.io_data.nOutputSize; i += 2) {
             const auto& bm = m.io_info->pOutputs[i];
             const int fw = bm.nShapeSize >= 4 ? bm.pShape[2] : 0;
-            if (fw <= 0) continue;
+            if (fw <= 0)
+                continue;
             const auto& cm = m.io_info->pOutputs[i + 1];
             const int cc = cm.nShapeSize >= 4 ? cm.pShape[3] : CLS_NUM;
-            generate_proposals_separated(m.input_w / fw, (const float*)m.io_data.pOutputs[i].pVirAddr,
+            generate_proposals_separated(m.input_w / fw,
+                                         (const float*)m.io_data.pOutputs[i].pVirAddr,
                                          (const float*)m.io_data.pOutputs[i + 1].pVirAddr,
                                          SCORE_THRESHOLD, results, m.input_w, m.input_h, cc);
         }
@@ -576,15 +581,19 @@ static std::string resolve_model(const std::string& name_or_path) {
     const std::string target = name_or_path + ".axmodel";
     std::string result;
     std::function<void(const std::string&)> search = [&](const std::string& dir) {
-        if (!result.empty()) return;
+        if (!result.empty())
+            return;
         DIR* d = opendir(dir.c_str());
-        if (!d) return;
+        if (!d)
+            return;
         struct dirent* ent;
         while ((ent = readdir(d)) != nullptr) {
-            if (ent->d_name[0] == '.') continue;
+            if (ent->d_name[0] == '.')
+                continue;
             std::string full = dir + "/" + ent->d_name;
             struct stat st;
-            if (stat(full.c_str(), &st) != 0) continue;
+            if (stat(full.c_str(), &st) != 0)
+                continue;
             if (S_ISDIR(st.st_mode)) {
                 search(full);
             } else if (ent->d_name == target) {
@@ -602,13 +611,16 @@ static std::vector<std::string> list_models() {
     std::vector<std::string> names;
     std::function<void(const std::string&)> scan = [&](const std::string& dir) {
         DIR* d = opendir(dir.c_str());
-        if (!d) return;
+        if (!d)
+            return;
         struct dirent* ent;
         while ((ent = readdir(d)) != nullptr) {
-            if (ent->d_name[0] == '.') continue;
+            if (ent->d_name[0] == '.')
+                continue;
             std::string full = dir + "/" + ent->d_name;
             struct stat st;
-            if (stat(full.c_str(), &st) != 0) continue;
+            if (stat(full.c_str(), &st) != 0)
+                continue;
             if (S_ISDIR(st.st_mode)) {
                 scan(full);
             } else {
@@ -636,8 +648,8 @@ static void handle_load(const int fd, AxModel& m, const RequestHeader& req) {
     const std::string resolved = resolve_model(name_or_path);
     if (resolved.empty()) {
         char msg[256];
-        snprintf(msg, sizeof(msg), "model not found: %s (model_dir: %s)",
-                 name_or_path.c_str(), g_model_dir.c_str());
+        snprintf(msg, sizeof(msg), "model not found: %s (model_dir: %s)", name_or_path.c_str(),
+                 g_model_dir.c_str());
         send_error(fd, msg);
         return;
     }
@@ -715,7 +727,8 @@ static void print_usage(const char* const prog) {
     fprintf(stderr,
             "Usage: %s --model <name-or-path> [options]\n"
             "  --model <name-or-path>   axmodel name (e.g. yolo26l) or absolute path (required)\n"
-            "  --model-dir <path>       Directory to search for models (default: /home/admin-user/models)\n"
+            "  --model-dir <path>       Directory to search for models (default: "
+            "/home/admin-user/models)\n"
             "  --socket <path>          Unix socket (default: /run/ax_yolo_daemon.sock)\n"
             "  --input-size <WxH>       Model input (default: 640x640)\n",
             prog);
@@ -896,8 +909,8 @@ vdec_done:
             fprintf(stderr, "[ERROR] Model name '%s' requires --model-dir or AX_YOLO_MODEL_DIR\n",
                     model_path.c_str());
         } else {
-            fprintf(stderr, "[ERROR] Model not found: %s (model_dir: %s)\n",
-                    model_path.c_str(), g_model_dir.c_str());
+            fprintf(stderr, "[ERROR] Model not found: %s (model_dir: %s)\n", model_path.c_str(),
+                    g_model_dir.c_str());
         }
         return 1;
     }

@@ -66,7 +66,8 @@ static float dfl_decode(const float* bins, int reg_max) {
     // softmax over reg_max bins, then weighted sum = expected distance
     float max_val = bins[0];
     for (int i = 1; i < reg_max; ++i) {
-        if (bins[i] > max_val) max_val = bins[i];
+        if (bins[i] > max_val)
+            max_val = bins[i];
     }
     float sum_exp = 0.f;
     float weighted = 0.f;
@@ -99,7 +100,8 @@ static void generate_proposals_dfl(int stride, const float* feat, float prob_thr
                 }
             }
             const float prob = sigmoid(best_score);
-            if (prob <= prob_threshold) continue;
+            if (prob <= prob_threshold)
+                continue;
 
             // Decode DFL: 4 distances (left, top, right, bottom) from grid center
             const float dl = dfl_decode(cell + 0 * reg_max, reg_max);
