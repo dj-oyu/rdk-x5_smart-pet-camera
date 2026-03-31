@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
 
 #[derive(Parser)]
 #[command(name = "pet-album", about = "AI Pyramid Pro album service")]

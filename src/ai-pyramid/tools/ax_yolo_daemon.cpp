@@ -820,8 +820,8 @@ vdec_done:
                     uint8_t sbuf[256 * 1024];
                     int sends = 0, decoded = 0;
                     const int clahe_interval_mask = 256 - 1; // Must be power-of-2.
-                    ClaheCache clahe_cdfs;         // 16KB CDF tables.
-                    std::vector<uint8_t> blur_buf; // Scratch for median blur.
+                    ClaheCache clahe_cdfs;                   // 16KB CDF tables.
+                    std::vector<uint8_t> blur_buf;           // Scratch for median blur.
                     bool clahe_cdfs_valid = false;
                     auto last_hb = std::chrono::steady_clock::now();
                     bool stream_alive = true;
