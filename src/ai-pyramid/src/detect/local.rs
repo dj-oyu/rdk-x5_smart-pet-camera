@@ -223,10 +223,10 @@ impl LocalDetector {
         self.send_request(&header, nv12).await
     }
 
-    /// Detect pets in a comic image using raw-first strategy:
+    /// Detect pets in a comic image using always-2-pass strategy:
     /// 1. Run YOLO on the full 848×496 comic (1 inference)
-    /// 2. Map each bbox to its panel_index
-    /// 3. If zero pet detections, fallback to per-panel detection (4 inferences)
+    /// 2. Run YOLO on each of the 4 panels (4 inferences)
+    /// 3. Merge results by IoU to deduplicate overlapping detections
     pub async fn detect_comic(
         &self,
         photos_dir: &Path,
@@ -243,24 +243,17 @@ impl LocalDetector {
 
         // Pass 1: detect on the full comic image
         let raw_dets = self.detect_image(&jpeg_path).await?;
-        let inputs = raw_dets_to_inputs(&raw_dets, &detected_at, "yolo26l-ax650-raw");
+        let mut all_raw = raw_dets;
 
-        // If we found at least one pet, return raw results
-        if inputs.iter().any(|d| is_pet_class(d.yolo_class.as_deref())) {
-            return Ok(inputs);
-        }
-
-        // Pass 2: fallback to per-panel detection
-        tracing::debug!("Raw-comic found no pets for {filename}, falling back to panel split");
+        // Pass 2: detect on each panel (higher resolution per object)
         let img =
             image::open(&jpeg_path).map_err(|e| format!("open {}: {e}", jpeg_path.display()))?;
-        let mut all_inputs = inputs; // keep non-pet detections from raw pass
-        all_inputs.extend(
-            self.detect_panels(&img, &detected_at, "yolo26l-ax650-panel")
-                .await?,
-        );
+        let panel_raw = self.detect_panels_raw(&img).await?;
+        all_raw.extend(panel_raw);
 
-        Ok(all_inputs)
+        // Merge overlapping detections from both passes
+        let merged = merge_detections(all_raw);
+        Ok(raw_dets_to_inputs(&merged, &detected_at, "yolo26l-ax650-merged"))
     }
 
     /// Streaming variant: sends each detection via `tx` as soon as it's found.
@@ -281,39 +274,40 @@ impl LocalDetector {
 
         // Pass 1: raw comic
         let raw_dets = self.detect_image(&jpeg_path).await?;
-        let inputs = raw_dets_to_inputs(&raw_dets, &detected_at, "yolo26l-ax650-raw");
-        for input in &inputs {
+        // Stream pass 1 results immediately
+        let pass1_inputs = raw_dets_to_inputs(&raw_dets, &detected_at, "yolo26l-ax650-raw");
+        for input in &pass1_inputs {
             let _ = tx.send(input.clone()).await;
         }
 
-        if inputs.iter().any(|d| is_pet_class(d.yolo_class.as_deref())) {
-            return Ok(inputs);
-        }
-
-        // Pass 2: panel fallback
-        tracing::debug!("Raw-comic found no pets for {filename}, falling back to panel split");
+        // Pass 2: per-panel detection
         let img =
             image::open(&jpeg_path).map_err(|e| format!("open {}: {e}", jpeg_path.display()))?;
-        let panel_inputs = self
-            .detect_panels(&img, &detected_at, "yolo26l-ax650-panel")
-            .await?;
-        for input in &panel_inputs {
-            let _ = tx.send(input.clone()).await;
+        let panel_raw = self.detect_panels_raw(&img).await?;
+
+        // Merge all raw detections from both passes
+        let mut all_raw = raw_dets;
+        all_raw.extend(panel_raw);
+        let merged = merge_detections(all_raw);
+        let final_inputs = raw_dets_to_inputs(&merged, &detected_at, "yolo26l-ax650-merged");
+
+        // Stream any new detections from pass 2 (not already sent in pass 1)
+        for input in &final_inputs {
+            if !pass1_inputs.iter().any(|p| input_overlaps(p, input)) {
+                let _ = tx.send(input.clone()).await;
+            }
         }
 
-        let mut all = inputs;
-        all.extend(panel_inputs);
-        Ok(all)
+        Ok(final_inputs)
     }
 
-    /// Detect on each of the 4 comic panels individually.
-    async fn detect_panels(
+    /// Detect on each of the 4 comic panels, returning raw detections
+    /// with coordinates mapped back to comic space.
+    async fn detect_panels_raw(
         &self,
         img: &image::DynamicImage,
-        detected_at: &str,
-        model_tag: &str,
-    ) -> Result<Vec<DetectionInput>, String> {
-        let mut all_inputs = Vec::new();
+    ) -> Result<Vec<RawLocalDetection>, String> {
+        let mut all = Vec::new();
 
         for panel in 0..4u32 {
             let (x, y) = panel_origin(panel);
@@ -327,30 +321,21 @@ impl LocalDetector {
             let dets = self.detect_image(&tmp_path).await?;
             let _ = std::fs::remove_file(&tmp_path);
 
+            // Map panel-local coordinates back to comic space
             for d in dets {
-                if !KEEP_CLASSES.contains(&d.class_id) {
-                    continue;
-                }
-                let class_name = normalize_class(d.class_id, d.class_name);
-
-                all_inputs.push(DetectionInput {
-                    panel_index: Some(panel as i32),
+                all.push(RawLocalDetection {
+                    class_id: d.class_id,
+                    class_name: d.class_name,
+                    confidence: d.confidence,
                     bbox_x: x + d.bbox_x.max(0),
                     bbox_y: y + d.bbox_y.max(0),
                     bbox_w: d.bbox_w.min(PANEL_W - d.bbox_x.max(0)),
                     bbox_h: d.bbox_h.min(PANEL_H - d.bbox_y.max(0)),
-                    yolo_class: Some(class_name),
-                    pet_class: None,
-                    confidence: Some(d.confidence),
-                    detected_at: detected_at.to_string(),
-                    color_metrics: None,
-                    det_level: 2,
-                    model: Some(model_tag.into()),
                 });
             }
         }
 
-        Ok(all_inputs)
+        Ok(all)
     }
 
     /// Send a binary request and read binary response.
@@ -497,10 +482,6 @@ fn bbox_to_panel(bbox_x: i32, bbox_y: i32, bbox_w: i32, bbox_h: i32) -> Option<i
     None
 }
 
-fn is_pet_class(class: Option<&str>) -> bool {
-    matches!(class, Some("cat" | "dog"))
-}
-
 fn normalize_class(class_id: i32, class_name: String) -> String {
     if class_id == 16 {
         "cat".to_string() // dog -> cat (家に犬はいない)
@@ -538,46 +519,64 @@ fn raw_dets_to_inputs(
         .collect()
 }
 
+/// Merge overlapping detections from multiple passes.
+/// Same-class overlapping boxes (IoU > 0.5) get confidence-boosted.
+/// Cross-class overlapping boxes (IoU > 0.3) are deduplicated by confidence.
+fn merge_detections(mut dets: Vec<RawLocalDetection>) -> Vec<RawLocalDetection> {
+    dets.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+    // Pass 1: merge same-class overlaps with confidence boosting
+    let mut merged: Vec<RawLocalDetection> = Vec::new();
+    for det in dets {
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|m| m.class_id == det.class_id && iou_raw(m, &det) > 0.5)
+        {
+            let boosted = 1.0 - (1.0 - existing.confidence) * (1.0 - det.confidence);
+            existing.confidence = boosted;
+        } else {
+            merged.push(det);
+        }
+    }
+    // Pass 2: remove lower-confidence boxes dominated by higher-confidence ones
+    merged.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+    let mut result: Vec<RawLocalDetection> = Vec::new();
+    for det in merged {
+        let dominated = result.iter().any(|m| iou_raw(m, &det) > 0.3);
+        if !dominated {
+            result.push(det);
+        }
+    }
+    result
+}
+
+fn iou_raw(a: &RawLocalDetection, b: &RawLocalDetection) -> f64 {
+    let x1 = a.bbox_x.max(b.bbox_x);
+    let y1 = a.bbox_y.max(b.bbox_y);
+    let x2 = (a.bbox_x + a.bbox_w).min(b.bbox_x + b.bbox_w);
+    let y2 = (a.bbox_y + a.bbox_h).min(b.bbox_y + b.bbox_h);
+    let inter = (x2 - x1).max(0) as f64 * (y2 - y1).max(0) as f64;
+    let area_a = a.bbox_w as f64 * a.bbox_h as f64;
+    let area_b = b.bbox_w as f64 * b.bbox_h as f64;
+    let union = area_a + area_b - inter;
+    if union <= 0.0 { 0.0 } else { inter / union }
+}
+
+fn input_overlaps(a: &DetectionInput, b: &DetectionInput) -> bool {
+    let x1 = a.bbox_x.max(b.bbox_x);
+    let y1 = a.bbox_y.max(b.bbox_y);
+    let x2 = (a.bbox_x + a.bbox_w).min(b.bbox_x + b.bbox_w);
+    let y2 = (a.bbox_y + a.bbox_h).min(b.bbox_y + b.bbox_h);
+    let inter = (x2 - x1).max(0) as f64 * (y2 - y1).max(0) as f64;
+    let area_a = a.bbox_w as f64 * a.bbox_h as f64;
+    let area_b = b.bbox_w as f64 * b.bbox_h as f64;
+    let union = area_a + area_b - inter;
+    if union <= 0.0 { return false; }
+    inter / union > 0.3
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn merge_detections(mut dets: Vec<RawLocalDetection>) -> Vec<RawLocalDetection> {
-        dets.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
-        let mut pass1: Vec<RawLocalDetection> = Vec::new();
-        for det in dets {
-            if let Some(existing) = pass1
-                .iter_mut()
-                .find(|m| m.class_id == det.class_id && iou(m, &det) > 0.5)
-            {
-                let boosted = 1.0 - (1.0 - existing.confidence) * (1.0 - det.confidence);
-                existing.confidence = boosted;
-            } else {
-                pass1.push(det);
-            }
-        }
-        pass1.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
-        let mut pass2: Vec<RawLocalDetection> = Vec::new();
-        for det in pass1 {
-            let dominated = pass2.iter().any(|m| iou(m, &det) > 0.3);
-            if !dominated {
-                pass2.push(det);
-            }
-        }
-        pass2
-    }
-
-    fn iou(a: &RawLocalDetection, b: &RawLocalDetection) -> f64 {
-        let x1 = a.bbox_x.max(b.bbox_x);
-        let y1 = a.bbox_y.max(b.bbox_y);
-        let x2 = (a.bbox_x + a.bbox_w).min(b.bbox_x + b.bbox_w);
-        let y2 = (a.bbox_y + a.bbox_h).min(b.bbox_y + b.bbox_h);
-        let inter = (x2 - x1).max(0) as f64 * (y2 - y1).max(0) as f64;
-        let area_a = a.bbox_w as f64 * a.bbox_h as f64;
-        let area_b = b.bbox_w as f64 * b.bbox_h as f64;
-        let union = area_a + area_b - inter;
-        if union <= 0.0 { 0.0 } else { inter / union }
-    }
 
     #[test]
     fn wire_detection_round_trip() {
@@ -735,11 +734,4 @@ mod tests {
         assert_eq!(inputs[2].yolo_class.as_deref(), Some("chair"));
     }
 
-    #[test]
-    fn is_pet_class_checks() {
-        assert!(is_pet_class(Some("cat")));
-        assert!(is_pet_class(Some("dog")));
-        assert!(!is_pet_class(Some("chair")));
-        assert!(!is_pet_class(None));
-    }
 }
