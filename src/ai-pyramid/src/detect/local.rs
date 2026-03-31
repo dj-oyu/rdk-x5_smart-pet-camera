@@ -248,8 +248,7 @@ impl LocalDetector {
         let mut stream = tokio::net::UnixStream::connect(&self.config.daemon_socket)
             .await
             .map_err(|e| format!("connect: {e}"))?;
-        let hdr_bytes =
-            unsafe { std::slice::from_raw_parts(&header as *const _ as *const u8, 16) };
+        let hdr_bytes = unsafe { std::slice::from_raw_parts(&header as *const _ as *const u8, 16) };
         stream
             .write_all(hdr_bytes)
             .await
@@ -368,9 +367,7 @@ impl LocalDetector {
         let panels: Vec<_> = (0..4u32)
             .map(|i| {
                 let (ox, oy) = panel_origin(i);
-                let rgb = img
-                    .crop_imm(ox as u32, oy as u32, pw, ph)
-                    .to_rgb8();
+                let rgb = img.crop_imm(ox as u32, oy as u32, pw, ph).to_rgb8();
                 (ox, oy, rgb)
             })
             .collect();
@@ -401,9 +398,7 @@ impl LocalDetector {
 
             for (_, _, rgb) in &panels {
                 let nv12_orig = rgb_to_nv12(rgb, pw, ph);
-                let dets = self
-                    .detect_nv12(&nv12_orig, pw as u16, ph as u16)
-                    .await?;
+                let dets = self.detect_nv12(&nv12_orig, pw as u16, ph as u16).await?;
 
                 if !dets.is_empty() {
                     panel_results.push(PanelResult {
@@ -456,9 +451,7 @@ impl LocalDetector {
             for (i, pr) in panel_results.iter().enumerate() {
                 let (ox, oy) = (panels[i].0, panels[i].1);
 
-                let accurate_dets = self
-                    .detect_nv12(&pr.nv12, pr.width, pr.height)
-                    .await?;
+                let accurate_dets = self.detect_nv12(&pr.nv12, pr.width, pr.height).await?;
 
                 let mut combined = pr.fast_dets.clone();
                 combined.extend(accurate_dets);
@@ -506,31 +499,42 @@ impl LocalDetector {
     ) -> Result<(Vec<u8>, u16, u16, f64, f64, Vec<RawLocalDetection>), String> {
         // Variant A: shrink width 75%
         let new_w = (pw * 3 / 4) & !1;
-        let shrunk_w = image::imageops::resize(
-            panel_rgb, new_w, ph, image::imageops::FilterType::Triangle,
-        );
+        let shrunk_w =
+            image::imageops::resize(panel_rgb, new_w, ph, image::imageops::FilterType::Triangle);
         let nv12_w = rgb_to_nv12(&shrunk_w, new_w, ph);
         let dets_w = self.detect_nv12(&nv12_w, new_w as u16, ph as u16).await?;
 
         // Variant B: shrink height 75%
         let new_h = (ph * 3 / 4) & !1;
-        let shrunk_h = image::imageops::resize(
-            panel_rgb, pw, new_h, image::imageops::FilterType::Triangle,
-        );
+        let shrunk_h =
+            image::imageops::resize(panel_rgb, pw, new_h, image::imageops::FilterType::Triangle);
         let nv12_h = rgb_to_nv12(&shrunk_h, pw, new_h);
         let dets_h = self.detect_nv12(&nv12_h, pw as u16, new_h as u16).await?;
 
         if dets_w.len() >= dets_h.len() && !dets_w.is_empty() {
-            Ok((nv12_w, new_w as u16, ph as u16, pw as f64 / new_w as f64, 1.0, dets_w))
+            Ok((
+                nv12_w,
+                new_w as u16,
+                ph as u16,
+                pw as f64 / new_w as f64,
+                1.0,
+                dets_w,
+            ))
         } else if !dets_h.is_empty() {
-            Ok((nv12_h, pw as u16, new_h as u16, 1.0, ph as f64 / new_h as f64, dets_h))
+            Ok((
+                nv12_h,
+                pw as u16,
+                new_h as u16,
+                1.0,
+                ph as f64 / new_h as f64,
+                dets_h,
+            ))
         } else {
             // Neither variant found anything — fall back to original
             let nv12_orig = rgb_to_nv12(panel_rgb, pw, ph);
             Ok((nv12_orig, pw as u16, ph as u16, 1.0, 1.0, Vec::new()))
         }
     }
-
 
     /// Send a binary request and read binary response.
     async fn send_request(
@@ -677,11 +681,7 @@ fn bbox_to_panel(bbox_x: i32, bbox_y: i32, bbox_w: i32, bbox_h: i32) -> Option<i
 }
 
 /// Map a detection from panel-local coords back to comic space (no scaling).
-fn map_to_comic(
-    d: RawLocalDetection,
-    ox: i32,
-    oy: i32,
-) -> RawLocalDetection {
+fn map_to_comic(d: RawLocalDetection, ox: i32, oy: i32) -> RawLocalDetection {
     RawLocalDetection {
         class_id: d.class_id,
         class_name: d.class_name,
@@ -772,10 +772,8 @@ fn rgb_to_nv12(rgb: &image::RgbImage, w: u32, h: u32) -> Vec<u8> {
     for row in (0..h).step_by(2) {
         for col in (0..w).step_by(2) {
             let p = rgb.get_pixel(col, row).0;
-            let u =
-                (-38 * p[0] as i32 - 74 * p[1] as i32 + 112 * p[2] as i32 + 128) / 256 + 128;
-            let v =
-                (112 * p[0] as i32 - 94 * p[1] as i32 - 18 * p[2] as i32 + 128) / 256 + 128;
+            let u = (-38 * p[0] as i32 - 74 * p[1] as i32 + 112 * p[2] as i32 + 128) / 256 + 128;
+            let v = (112 * p[0] as i32 - 94 * p[1] as i32 - 18 * p[2] as i32 + 128) / 256 + 128;
             let uv_idx = (row / 2 * w + col) as usize;
             uv_plane[uv_idx] = u.clamp(0, 255) as u8;
             uv_plane[uv_idx + 1] = v.clamp(0, 255) as u8;
@@ -986,5 +984,4 @@ mod tests {
         assert_eq!(inputs[2].panel_index, Some(1));
         assert_eq!(inputs[2].yolo_class.as_deref(), Some("chair"));
     }
-
 }
