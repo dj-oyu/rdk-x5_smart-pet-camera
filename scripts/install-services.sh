@@ -76,8 +76,9 @@ case "${TARGET}" in
     echo "Logs:       journalctl -u pet-camera-capture -u pet-camera-detector -f"
     ;;
   ai-pyramid)
-    echo "Start:      sudo systemctl start pet-album.service"
-    echo "Stop:       sudo systemctl stop pet-album.service"
-    echo "Logs:       journalctl -u pet-album -f"
+    echo "Start all:  sudo systemctl start ai-pyramid.target"
+    echo "Stop all:   sudo systemctl stop ai-pyramid.target"
+    echo "Status:     systemctl status pet-album ax-yolo-daemon"
+    echo "Logs:       journalctl -u pet-album -u ax-yolo-daemon -f"
     ;;
 esac

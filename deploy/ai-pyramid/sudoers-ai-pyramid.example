@@ -1,0 +1,41 @@
+# /etc/sudoers.d/ai-pyramid
+# AI Pyramid systemd operations — NOPASSWD
+# Install:
+#   sed 's/__USER__/youruser/' sudoers-ai-pyramid.example > /tmp/sudoers-ai-pyramid
+#   sudo visudo -cf /tmp/sudoers-ai-pyramid && sudo cp /tmp/sudoers-ai-pyramid /etc/sudoers.d/ai-pyramid && sudo chmod 440 /etc/sudoers.d/ai-pyramid
+
+# systemctl operations on ai-pyramid units
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start ai-pyramid*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl stop ai-pyramid*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl restart ai-pyramid*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl enable ai-pyramid*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl disable ai-pyramid*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl status ai-pyramid*
+
+# pet-album service
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start pet-album*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl stop pet-album*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl restart pet-album*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl status pet-album*
+
+# ax-yolo-daemon service
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start ax-yolo-daemon*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl stop ax-yolo-daemon*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl restart ax-yolo-daemon*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl status ax-yolo-daemon*
+
+# daemon-reload
+__USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload
+
+# journalctl
+__USER__ ALL=(root) NOPASSWD: /usr/bin/journalctl -u pet-album*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/journalctl -u ax-yolo-daemon*
+__USER__ ALL=(root) NOPASSWD: /usr/bin/journalctl -u pet-album* -f
+__USER__ ALL=(root) NOPASSWD: /usr/bin/journalctl -u ax-yolo-daemon* -f
+__USER__ ALL=(root) NOPASSWD: /usr/bin/journalctl -u pet-album* --no-pager
+__USER__ ALL=(root) NOPASSWD: /usr/bin/journalctl -u ax-yolo-daemon* --no-pager
+__USER__ ALL=(root) NOPASSWD: /usr/bin/journalctl -u pet-album* --no-pager -n *
+__USER__ ALL=(root) NOPASSWD: /usr/bin/journalctl -u ax-yolo-daemon* --no-pager -n *
+
+# install script
+__USER__ ALL=(root) NOPASSWD: /opt/smart-pet-camera/scripts/install-services.sh *

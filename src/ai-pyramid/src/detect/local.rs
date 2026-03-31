@@ -1,37 +1,50 @@
 use crate::db::DetectionInput;
 use crate::ingest::filename::parse_comic_filename;
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
-/// COCO class IDs worth keeping for pet camera context.
-const KEEP_CLASSES: &[i32] = &[
-    0,  // person
-    14, // bird
-    15, // cat
-    16, // dog
-    24, // backpack
-    26, // handbag
-    28, // suitcase
-    39, // bottle
-    41, // cup
-    43, // knife (cat knocked it off?)
-    45, // bowl
-    56, // chair
-    57, // couch
-    59, // bed
-    60, // dining table
-    62, // tv
-    63, // laptop
-    66, // keyboard
-    67, // remote
-    73, // book
-    75, // vase
-    58, // potted plant
-    74, // clock
-];
+// ---------------------------------------------------------------------------
+// Wire protocol structs (must match ax_yolo_daemon.cpp exactly)
+// ---------------------------------------------------------------------------
 
-/// COCO class names by ID (80 classes).
+const CMD_DETECT: u16 = 0;
+const CMD_STREAM: u16 = 4;
+const INPUT_JPEG_PATH: u16 = 0;
+const INPUT_NV12_RAW: u16 = 1;
+
+#[repr(C, packed)]
+struct RequestHeader {
+    cmd: u16,
+    input_type: u16,
+    width: u16,
+    height: u16,
+    payload_size: u32,
+    reserved: u32,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct ResponseHeader {
+    status: u16,
+    det_count: u16,
+    elapsed_ms: f32,
+    error_len: u32,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct WireDetection {
+    x1: i16,
+    y1: i16,
+    x2: i16,
+    y2: i16,
+    class_id: u16,
+    confidence: u16, // prob × 10000
+}
+
+// COCO class names for class_id → name mapping.
 const COCO_NAMES: &[&str] = &[
     "person",
     "bicycle",
@@ -115,19 +128,46 @@ const COCO_NAMES: &[&str] = &[
     "toothbrush",
 ];
 
+/// COCO class IDs worth keeping for pet camera context.
+const KEEP_CLASSES: &[i32] = &[
+    0,  // person
+    14, // bird
+    15, // cat
+    16, // dog
+    24, // backpack
+    26, // handbag
+    28, // suitcase
+    39, // bottle
+    41, // cup
+    43, // knife (cat knocked it off?)
+    45, // bowl
+    56, // chair
+    57, // couch
+    59, // bed
+    60, // dining table
+    62, // tv
+    63, // laptop
+    66, // keyboard
+    67, // remote
+    73, // book
+    75, // vase
+    58, // potted plant
+    74, // clock
+];
+
 #[derive(Debug, Clone)]
 pub struct LocalDetectorConfig {
-    pub wrapper_path: PathBuf,
-    pub yolo26l_binary: String,
-    pub yolo26l_model: PathBuf,
+    /// Unix socket path for ax_yolo_daemon.
+    pub daemon_socket: PathBuf,
 }
 
 impl Default for LocalDetectorConfig {
     fn default() -> Self {
         Self {
-            wrapper_path: PathBuf::from("/usr/local/bin/ax_yolo_run"),
-            yolo26l_binary: "ax_yolo26".into(),
-            yolo26l_model: PathBuf::from("/home/admin-user/models/yolo26/ax650/yolo26l.axmodel"),
+            daemon_socket: PathBuf::from(
+                std::env::var("AX_YOLO_DAEMON_SOCKET")
+                    .unwrap_or_else(|_| "/run/ax_yolo_daemon.sock".to_string()),
+            ),
         }
     }
 }
@@ -141,19 +181,46 @@ impl LocalDetector {
         Self { config }
     }
 
-    /// Check if binaries and models exist.
+    /// Check if the daemon socket exists.
     pub fn is_available(&self) -> bool {
-        self.config.wrapper_path.exists() && self.config.yolo26l_model.exists()
+        self.config.daemon_socket.exists()
     }
 
-    /// Run YOLO26l detection on a single JPEG image.
+    /// Get the daemon socket path.
+    pub fn socket_path(&self) -> &std::path::Path {
+        &self.config.daemon_socket
+    }
+
+    /// Run YOLO26l detection on a single JPEG image via daemon socket.
     pub async fn detect_image(&self, jpeg_path: &Path) -> Result<Vec<RawLocalDetection>, String> {
-        self.run_model(
-            &self.config.yolo26l_binary,
-            &self.config.yolo26l_model,
-            jpeg_path,
-        )
-        .await
+        let path_bytes = jpeg_path.to_string_lossy().into_owned().into_bytes();
+        let header = RequestHeader {
+            cmd: CMD_DETECT,
+            input_type: INPUT_JPEG_PATH,
+            width: 0,
+            height: 0,
+            payload_size: path_bytes.len() as u32,
+            reserved: 0,
+        };
+        self.send_request(&header, &path_bytes).await
+    }
+
+    /// Run YOLO26l detection on a raw NV12 frame via daemon socket.
+    pub async fn detect_nv12(
+        &self,
+        nv12: &[u8],
+        width: u16,
+        height: u16,
+    ) -> Result<Vec<RawLocalDetection>, String> {
+        let header = RequestHeader {
+            cmd: CMD_DETECT,
+            input_type: INPUT_NV12_RAW,
+            width,
+            height,
+            payload_size: nv12.len() as u32,
+            reserved: 0,
+        };
+        self.send_request(&header, nv12).await
     }
 
     /// Detect pets in a comic image using raw-first strategy:
@@ -286,30 +353,106 @@ impl LocalDetector {
         Ok(all_inputs)
     }
 
-    async fn run_model(
+    /// Send a binary request and read binary response.
+    async fn send_request(
         &self,
-        binary: &str,
-        model: &Path,
-        image: &Path,
+        header: &RequestHeader,
+        payload: &[u8],
     ) -> Result<Vec<RawLocalDetection>, String> {
-        let output = Command::new("sudo")
-            .arg(&self.config.wrapper_path)
-            .arg(binary)
-            .arg("-m")
-            .arg(model)
-            .arg("-i")
-            .arg(image)
-            .output()
+        let mut stream = UnixStream::connect(&self.config.daemon_socket)
             .await
-            .map_err(|e| format!("spawn {binary}: {e}"))?;
+            .map_err(|e| format!("connect {}: {e}", self.config.daemon_socket.display()))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("{binary} failed: {stderr}"));
+        // Send header + payload.
+        let hdr_bytes = unsafe { std::slice::from_raw_parts(header as *const _ as *const u8, 16) };
+        stream
+            .write_all(hdr_bytes)
+            .await
+            .map_err(|e| format!("write header: {e}"))?;
+        if !payload.is_empty() {
+            stream
+                .write_all(payload)
+                .await
+                .map_err(|e| format!("write payload: {e}"))?;
+        }
+        stream
+            .shutdown()
+            .await
+            .map_err(|e| format!("shutdown: {e}"))?;
+
+        // Read response header (12 bytes).
+        let mut resp_buf = [0u8; 12];
+        stream
+            .read_exact(&mut resp_buf)
+            .await
+            .map_err(|e| format!("read response header: {e}"))?;
+        let resp: ResponseHeader = unsafe { std::ptr::read_unaligned(resp_buf.as_ptr().cast()) };
+
+        if resp.status != 0 {
+            // Read error string.
+            let mut err_buf = vec![0u8; resp.error_len as usize];
+            if resp.error_len > 0 {
+                stream
+                    .read_exact(&mut err_buf)
+                    .await
+                    .map_err(|e| format!("read error: {e}"))?;
+            }
+            let msg = String::from_utf8_lossy(&err_buf).to_string();
+            return Err(msg);
         }
 
-        parse_ax_output(&String::from_utf8_lossy(&output.stdout))
+        // Read detections (12 bytes each).
+        let count = resp.det_count as usize;
+        let mut results = Vec::with_capacity(count);
+        for _ in 0..count {
+            let mut det_buf = [0u8; 12];
+            stream
+                .read_exact(&mut det_buf)
+                .await
+                .map_err(|e| format!("read detection: {e}"))?;
+            let wd: WireDetection = unsafe { std::ptr::read_unaligned(det_buf.as_ptr().cast()) };
+            let class_id = wd.class_id as i32;
+            let class_name = COCO_NAMES
+                .get(class_id as usize)
+                .unwrap_or(&"unknown")
+                .to_string();
+            results.push(RawLocalDetection {
+                class_id,
+                class_name,
+                confidence: wd.confidence as f64 / 10000.0,
+                bbox_x: wd.x1 as i32,
+                bbox_y: wd.y1 as i32,
+                bbox_w: (wd.x2 - wd.x1) as i32,
+                bbox_h: (wd.y2 - wd.y1) as i32,
+            });
+        }
+        Ok(results)
     }
+}
+
+/// Build a CMD_STREAM request header + host payload as bytes.
+pub fn stream_request_header(host: &[u8]) -> Vec<u8> {
+    let hdr = RequestHeader {
+        cmd: CMD_STREAM,
+        input_type: 0,
+        width: 0,
+        height: 0,
+        payload_size: host.len() as u32,
+        reserved: 0,
+    };
+    let hdr_bytes = unsafe { std::slice::from_raw_parts(&hdr as *const _ as *const u8, 16) };
+    let mut buf = Vec::with_capacity(16 + host.len());
+    buf.extend_from_slice(hdr_bytes);
+    buf.extend_from_slice(host);
+    buf
+}
+
+/// Get COCO class name by ID.
+pub fn coco_name(class_id: u16) -> String {
+    COCO_NAMES
+        .get(class_id as usize)
+        .unwrap_or(&"unknown")
+        .to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -321,71 +464,6 @@ pub struct RawLocalDetection {
     pub bbox_y: i32,
     pub bbox_w: i32,
     pub bbox_h: i32,
-}
-
-/// Parse ax_yolo stdout format:
-/// `15:  81%, [ 231,  329,  344,  406], cat`
-fn parse_ax_output(stdout: &str) -> Result<Vec<RawLocalDetection>, String> {
-    let mut dets = Vec::new();
-    for line in stdout.lines() {
-        let line = line.trim();
-        // Match pattern: "class_id:  conf%, [ x1, y1, x2, y2], class_name"
-        if !line.contains('%') || !line.contains('[') {
-            continue;
-        }
-        let parts: Vec<&str> = line.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            continue;
-        }
-        let class_id: i32 = match parts[0].trim().parse() {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let rest = parts[1];
-        // Extract confidence
-        let conf_end = match rest.find('%') {
-            Some(i) => i,
-            None => continue,
-        };
-        let conf: f64 = match rest[..conf_end].trim().parse::<f64>() {
-            Ok(v) => v / 100.0,
-            Err(_) => continue,
-        };
-        // Extract bbox [x1, y1, x2, y2]
-        let bracket_start = match rest.find('[') {
-            Some(i) => i,
-            None => continue,
-        };
-        let bracket_end = match rest.find(']') {
-            Some(i) => i,
-            None => continue,
-        };
-        let coords: Vec<i32> = rest[bracket_start + 1..bracket_end]
-            .split(',')
-            .filter_map(|s| s.trim().parse().ok())
-            .collect();
-        if coords.len() != 4 {
-            continue;
-        }
-        let (x1, y1, x2, y2) = (coords[0], coords[1], coords[2], coords[3]);
-
-        let class_name = if (class_id as usize) < COCO_NAMES.len() {
-            COCO_NAMES[class_id as usize].to_string()
-        } else {
-            format!("class_{class_id}")
-        };
-
-        dets.push(RawLocalDetection {
-            class_id,
-            class_name,
-            confidence: conf,
-            bbox_x: x1,
-            bbox_y: y1,
-            bbox_w: x2 - x1,
-            bbox_h: y2 - y1,
-        });
-    }
-    Ok(dets)
 }
 
 // Comic layout constants (must match server::crop_panel)
@@ -502,37 +580,36 @@ mod tests {
     }
 
     #[test]
-    fn parse_ax_yolo_output() {
-        let stdout = r#"--------------------------------------
-model file : /home/admin-user/models/yolo26/ax650/yolo26l.axmodel
-image file : /tmp/test_panel.jpg
-img_h, img_w : 640 640
---------------------------------------
-Engine creating handle is done.
-Engine creating context is done.
-Engine get io info is done.
-Engine alloc io is done.
-Engine push input is done.
---------------------------------------
-post process cost time:3.22 ms
---------------------------------------
-Repeat 1 times, avg time 11.71 ms, max_time 11.71 ms, min_time 11.71 ms
---------------------------------------
-detection num: 3
-15:  71%, [ 231,  325,  343,  406], cat
-45:  50%, [ 177,  396,  226,  435], bowl
-60:  38%, [ 357,  268,  639,  499], dining table
---------------------------------------"#;
+    fn wire_detection_round_trip() {
+        let wd = WireDetection {
+            x1: 231,
+            y1: 325,
+            x2: 343,
+            y2: 406,
+            class_id: 15,
+            confidence: 7100, // 0.71 × 10000
+        };
+        let det = RawLocalDetection {
+            class_id: wd.class_id as i32,
+            class_name: COCO_NAMES[wd.class_id as usize].to_string(),
+            confidence: wd.confidence as f64 / 10000.0,
+            bbox_x: wd.x1 as i32,
+            bbox_y: wd.y1 as i32,
+            bbox_w: (wd.x2 - wd.x1) as i32,
+            bbox_h: (wd.y2 - wd.y1) as i32,
+        };
+        assert_eq!(det.class_name, "cat");
+        assert_eq!(det.class_id, 15);
+        assert!((det.confidence - 0.71).abs() < 0.01);
+        assert_eq!(det.bbox_x, 231);
+        assert_eq!(det.bbox_w, 343 - 231);
+    }
 
-        let dets = parse_ax_output(stdout).unwrap();
-        assert_eq!(dets.len(), 3);
-        assert_eq!(dets[0].class_name, "cat");
-        assert_eq!(dets[0].class_id, 15);
-        assert!((dets[0].confidence - 0.71).abs() < 0.01);
-        assert_eq!(dets[0].bbox_x, 231);
-        assert_eq!(dets[0].bbox_w, 343 - 231); // x2 - x1
-        assert_eq!(dets[1].class_name, "bowl");
-        assert_eq!(dets[2].class_name, "dining table");
+    #[test]
+    fn wire_struct_sizes() {
+        assert_eq!(std::mem::size_of::<RequestHeader>(), 16);
+        assert_eq!(std::mem::size_of::<ResponseHeader>(), 12);
+        assert_eq!(std::mem::size_of::<WireDetection>(), 12);
     }
 
     #[test]

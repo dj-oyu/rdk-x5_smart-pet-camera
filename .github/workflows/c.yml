@@ -8,6 +8,7 @@ on:
     branches: [main]
     paths:
       - 'src/capture/**'
+      - 'src/ai-pyramid/tools/**'
       - '.github/workflows/c.yml'
   workflow_dispatch:
 
@@ -21,7 +22,7 @@ jobs:
       - name: Install clang-format-13
         run: sudo apt-get update && sudo apt-get install -y clang-format-13
 
-      - name: Check formatting
+      - name: Check formatting (capture)
         working-directory: src/capture
         run: |
           unformatted=$(clang-format-13 --dry-run --Werror *.c *.h 2>&1 || true)
@@ -31,3 +32,20 @@ jobs:
             exit 1
           fi
           echo "All C files formatted correctly"
+
+      - name: Check formatting (ai-pyramid/tools)
+        working-directory: src/ai-pyramid/tools
+        run: |
+          shopt -s nullglob
+          files=(*.cpp *.hpp *.h)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No C++ files to check"
+            exit 0
+          fi
+          unformatted=$(clang-format-13 --dry-run --Werror "${files[@]}" 2>&1 || true)
+          if [ -n "$unformatted" ]; then
+            echo "::error::Unformatted C++ files detected. Run 'make format' in src/ai-pyramid/tools/"
+            clang-format-13 --dry-run --Werror "${files[@]}"
+            exit 1
+          fi
+          echo "All C++ files formatted correctly"

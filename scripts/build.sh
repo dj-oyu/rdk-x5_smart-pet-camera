@@ -88,6 +88,13 @@ build_detector() {
   restart_service pet-camera-detector.service
 }
 
+build_yolo_daemon() {
+  echo "[build] yolo-daemon (C++)..."
+  make -C "${REPO_ROOT}/src/ai-pyramid/tools" >/dev/null
+  echo "[build] yolo-daemon done"
+  restart_service ax-yolo-daemon.service
+}
+
 build_album() {
   echo "[build] album (downloading GitHub artifact)..."
   rm -rf /tmp/pet-album-dl
@@ -107,9 +114,10 @@ for module in "${MODULES[@]}"; do
     monitor)   build_monitor ;;
     detector)  build_detector ;;
     album)     build_album ;;
+    yolo-daemon) build_yolo_daemon ;;
     *)
       echo "[error] Unknown module: ${module}" >&2
-      echo "        Available: capture, web, streaming, monitor, detector, album" >&2
+      echo "        Available: capture, web, streaming, monitor, detector, album, yolo-daemon" >&2
       exit 1
       ;;
   esac
