@@ -121,11 +121,3 @@ static void clahe_apply_cdfs(const uint8_t* y_in, uint8_t* y_out, const ClaheCac
         }
     }
 }
-
-// Original combined function (kept for standalone use / tests).
-__attribute__((unused)) static void clahe_y_plane(const uint8_t* y_in, uint8_t* y_out, const int w,
-                                                  const int h) {
-    ClaheCache cache;
-    clahe_compute_cdfs(y_in, w, h, cache);
-    clahe_apply_cdfs(y_in, y_out, cache);
-}
