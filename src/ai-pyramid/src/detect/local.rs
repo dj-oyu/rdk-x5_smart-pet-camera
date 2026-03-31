@@ -10,7 +10,11 @@ use tokio::sync::mpsc;
 // ---------------------------------------------------------------------------
 
 const CMD_DETECT: u16 = 0;
+#[allow(dead_code)]
+const CMD_LOAD: u16 = 1;
 const CMD_STREAM: u16 = 4;
+#[allow(dead_code)]
+const CMD_HELP: u16 = 5;
 const INPUT_JPEG_PATH: u16 = 0;
 const INPUT_NV12_RAW: u16 = 1;
 
@@ -223,10 +227,14 @@ impl LocalDetector {
         self.send_request(&header, nv12).await
     }
 
-    /// Detect pets in a comic image using always-2-pass strategy:
-    /// 1. Run YOLO on the full 848×496 comic (1 inference)
-    /// 2. Run YOLO on each of the 4 panels (4 inferences)
-    /// 3. Merge results by IoU to deduplicate overlapping detections
+    /// Detect pets in a comic image using per-panel detection with
+    /// aspect-ratio correction fallback.
+    ///
+    /// For each panel:
+    /// 1. Run YOLO on the original panel crop
+    /// 2. If 0 detections, try padded variants (top/bottom, left/right)
+    ///    to compensate for aspect ratio distortion from Go's crop+scale
+    /// 3. Pick the variant with the most detections and remap bbox coords
     pub async fn detect_comic(
         &self,
         photos_dir: &Path,
@@ -241,19 +249,15 @@ impl LocalDetector {
             .map(|m| m.captured_at.format("%Y-%m-%dT%H:%M:%S").to_string())
             .unwrap_or_else(|_| chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
 
-        // Pass 1: detect on the full comic image
-        let raw_dets = self.detect_image(&jpeg_path).await?;
-        let mut all_raw = raw_dets;
-
-        // Pass 2: detect on each panel (higher resolution per object)
         let img =
             image::open(&jpeg_path).map_err(|e| format!("open {}: {e}", jpeg_path.display()))?;
-        let panel_raw = self.detect_panels_raw(&img).await?;
-        all_raw.extend(panel_raw);
-
-        // Merge overlapping detections from both passes
+        let all_raw = self.detect_panels_raw(&img).await?;
         let merged = merge_detections(all_raw);
-        Ok(raw_dets_to_inputs(&merged, &detected_at, "yolo26l-ax650-merged"))
+        Ok(raw_dets_to_inputs(
+            &merged,
+            &detected_at,
+            "yolo26l-ax650-panel",
+        ))
     }
 
     /// Streaming variant: sends each detection via `tx` as soon as it's found.
@@ -272,37 +276,26 @@ impl LocalDetector {
             .map(|m| m.captured_at.format("%Y-%m-%dT%H:%M:%S").to_string())
             .unwrap_or_else(|_| chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
 
-        // Pass 1: raw comic
-        let raw_dets = self.detect_image(&jpeg_path).await?;
-        // Stream pass 1 results immediately
-        let pass1_inputs = raw_dets_to_inputs(&raw_dets, &detected_at, "yolo26l-ax650-raw");
-        for input in &pass1_inputs {
+        let img =
+            image::open(&jpeg_path).map_err(|e| format!("open {}: {e}", jpeg_path.display()))?;
+        let all_raw = self.detect_panels_raw(&img).await?;
+
+        let merged = merge_detections(all_raw);
+        let inputs = raw_dets_to_inputs(&merged, &detected_at, "yolo26l-ax650-panel");
+        for input in &inputs {
             let _ = tx.send(input.clone()).await;
         }
 
-        // Pass 2: per-panel detection
-        let img =
-            image::open(&jpeg_path).map_err(|e| format!("open {}: {e}", jpeg_path.display()))?;
-        let panel_raw = self.detect_panels_raw(&img).await?;
-
-        // Merge all raw detections from both passes
-        let mut all_raw = raw_dets;
-        all_raw.extend(panel_raw);
-        let merged = merge_detections(all_raw);
-        let final_inputs = raw_dets_to_inputs(&merged, &detected_at, "yolo26l-ax650-merged");
-
-        // Stream any new detections from pass 2 (not already sent in pass 1)
-        for input in &final_inputs {
-            if !pass1_inputs.iter().any(|p| input_overlaps(p, input)) {
-                let _ = tx.send(input.clone()).await;
-            }
-        }
-
-        Ok(final_inputs)
+        Ok(inputs)
     }
 
-    /// Detect on each of the 4 comic panels, returning raw detections
-    /// with coordinates mapped back to comic space.
+    /// Detect on each of the 4 comic panels with aspect-ratio correction.
+    /// All detection uses NV12 direct input to ax_yolo_daemon (no JPEG I/O).
+    ///
+    /// For each panel:
+    /// 1. Crop panel from comic, convert to NV12, detect
+    /// 2. If 0 detections, try padded NV12 variants to correct aspect ratio distortion
+    /// 3. Pick the variant with the most detections, remap bbox coords to comic space
     async fn detect_panels_raw(
         &self,
         img: &image::DynamicImage,
@@ -310,32 +303,101 @@ impl LocalDetector {
         let mut all = Vec::new();
 
         for panel in 0..4u32 {
-            let (x, y) = panel_origin(panel);
+            let (ox, oy) = panel_origin(panel);
+            let panel_rgb = img
+                .crop_imm(ox as u32, oy as u32, PANEL_W as u32, PANEL_H as u32)
+                .to_rgb8();
+            let pw = PANEL_W as u16;
+            let ph = PANEL_H as u16;
 
-            let panel_img = img.crop_imm(x as u32, y as u32, PANEL_W as u32, PANEL_H as u32);
-            let tmp_path = std::env::temp_dir().join(format!("panel_{panel}.jpg"));
-            panel_img
-                .save(&tmp_path)
-                .map_err(|e| format!("save panel: {e}"))?;
+            // --- Original panel (NV12) ---
+            let nv12 = rgb_to_nv12(&panel_rgb, pw as u32, ph as u32);
+            let orig_dets = self.detect_nv12(&nv12, pw, ph).await?;
 
-            let dets = self.detect_image(&tmp_path).await?;
-            let _ = std::fs::remove_file(&tmp_path);
+            if !orig_dets.is_empty() {
+                for d in orig_dets {
+                    all.push(map_to_comic(d, ox, oy));
+                }
+                continue;
+            }
 
-            // Map panel-local coordinates back to comic space
-            for d in dets {
-                all.push(RawLocalDetection {
-                    class_id: d.class_id,
-                    class_name: d.class_name,
-                    confidence: d.confidence,
-                    bbox_x: x + d.bbox_x.max(0),
-                    bbox_y: y + d.bbox_y.max(0),
-                    bbox_w: d.bbox_w.min(PANEL_W - d.bbox_x.max(0)),
-                    bbox_h: d.bbox_h.min(PANEL_H - d.bbox_y.max(0)),
-                });
+            // --- 0 detections: try aspect ratio correction variants ---
+            let best = self.try_aspect_variants_nv12(&panel_rgb).await?;
+            for (d, scale_x, scale_y) in best {
+                all.push(map_to_comic_scaled(d, ox, oy, scale_x, scale_y));
             }
         }
 
         Ok(all)
+    }
+
+    /// Try aspect-ratio correction variants when original panel yields 0 detections.
+    /// The comic panel may be horizontally or vertically stretched due to Go's
+    /// crop+scale pipeline. We don't know which direction, so try both:
+    ///   - Variant A (横伸び想定): shrink width to 75% → 302×228
+    ///   - Variant B (縦伸び想定): shrink height to 75% → 404×170
+    ///
+    /// Daemon's letterbox handles padding internally. Returned bbox coords are
+    /// in the shrunk image space — caller scales back to original panel size.
+    async fn try_aspect_variants_nv12(
+        &self,
+        panel_rgb: &image::RgbImage,
+    ) -> Result<Vec<(RawLocalDetection, f64, f64)>, String> {
+        let pw = PANEL_W as u32;
+        let ph = PANEL_H as u32;
+
+        struct Variant {
+            dets: Vec<RawLocalDetection>,
+            scale_x: f64,
+            scale_y: f64,
+        }
+
+        let mut variants = Vec::new();
+
+        // Variant A: shrink width to 75% → 302×228
+        {
+            let new_w = (pw * 3 / 4) & !1; // even for NV12
+            let shrunk = image::imageops::resize(
+                panel_rgb, new_w, ph, image::imageops::FilterType::Triangle,
+            );
+            let nv12 = rgb_to_nv12(&shrunk, new_w, ph);
+            let dets = self.detect_nv12(&nv12, new_w as u16, ph as u16).await?;
+            variants.push(Variant {
+                dets,
+                scale_x: pw as f64 / new_w as f64,
+                scale_y: 1.0,
+            });
+        }
+
+        // Variant B: shrink height to 75% → 404×170
+        {
+            let new_h = (ph * 3 / 4) & !1; // even for NV12
+            let shrunk = image::imageops::resize(
+                panel_rgb, pw, new_h, image::imageops::FilterType::Triangle,
+            );
+            let nv12 = rgb_to_nv12(&shrunk, pw, new_h);
+            let dets = self.detect_nv12(&nv12, pw as u16, new_h as u16).await?;
+            variants.push(Variant {
+                dets,
+                scale_x: 1.0,
+                scale_y: ph as f64 / new_h as f64,
+            });
+        }
+
+        let best = variants
+            .into_iter()
+            .max_by_key(|v| v.dets.len())
+            .unwrap();
+
+        if best.dets.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        Ok(best
+            .dets
+            .into_iter()
+            .map(|d| (d, best.scale_x, best.scale_y))
+            .collect())
     }
 
     /// Send a binary request and read binary response.
@@ -482,6 +544,47 @@ fn bbox_to_panel(bbox_x: i32, bbox_y: i32, bbox_w: i32, bbox_h: i32) -> Option<i
     None
 }
 
+/// Map a detection from panel-local coords back to comic space (no scaling).
+fn map_to_comic(
+    d: RawLocalDetection,
+    ox: i32,
+    oy: i32,
+) -> RawLocalDetection {
+    RawLocalDetection {
+        class_id: d.class_id,
+        class_name: d.class_name,
+        confidence: d.confidence,
+        bbox_x: ox + d.bbox_x.max(0),
+        bbox_y: oy + d.bbox_y.max(0),
+        bbox_w: d.bbox_w.min(PANEL_W - d.bbox_x.max(0)),
+        bbox_h: d.bbox_h.min(PANEL_H - d.bbox_y.max(0)),
+    }
+}
+
+/// Map a detection from a shrunk variant back to comic space.
+/// bbox coords are in shrunk image space — scale back to original panel size.
+fn map_to_comic_scaled(
+    d: RawLocalDetection,
+    ox: i32,
+    oy: i32,
+    scale_x: f64,
+    scale_y: f64,
+) -> RawLocalDetection {
+    let local_x = (d.bbox_x as f64 * scale_x) as i32;
+    let local_y = (d.bbox_y as f64 * scale_y) as i32;
+    let local_w = (d.bbox_w as f64 * scale_x) as i32;
+    let local_h = (d.bbox_h as f64 * scale_y) as i32;
+    RawLocalDetection {
+        class_id: d.class_id,
+        class_name: d.class_name,
+        confidence: d.confidence,
+        bbox_x: ox + local_x.max(0),
+        bbox_y: oy + local_y.max(0),
+        bbox_w: local_w.min(PANEL_W - local_x.max(0)),
+        bbox_h: local_h.min(PANEL_H - local_y.max(0)),
+    }
+}
+
 fn normalize_class(class_id: i32, class_name: String) -> String {
     if class_id == 16 {
         "cat".to_string() // dog -> cat (家に犬はいない)
@@ -517,6 +620,37 @@ fn raw_dets_to_inputs(
             }
         })
         .collect()
+}
+
+/// Convert RGB image to NV12 (Y plane + interleaved UV plane).
+fn rgb_to_nv12(rgb: &image::RgbImage, w: u32, h: u32) -> Vec<u8> {
+    let mut nv12 = vec![0u8; (w * h * 3 / 2) as usize];
+    let (y_plane, uv_plane) = nv12.split_at_mut((w * h) as usize);
+
+    // Y plane
+    for row in 0..h {
+        for col in 0..w {
+            let p = rgb.get_pixel(col, row).0;
+            let y = (66 * p[0] as i32 + 129 * p[1] as i32 + 25 * p[2] as i32 + 128) / 256 + 16;
+            y_plane[(row * w + col) as usize] = y.clamp(0, 255) as u8;
+        }
+    }
+
+    // UV plane (subsampled 2×2)
+    for row in (0..h).step_by(2) {
+        for col in (0..w).step_by(2) {
+            let p = rgb.get_pixel(col, row).0;
+            let u =
+                (-38 * p[0] as i32 - 74 * p[1] as i32 + 112 * p[2] as i32 + 128) / 256 + 128;
+            let v =
+                (112 * p[0] as i32 - 94 * p[1] as i32 - 18 * p[2] as i32 + 128) / 256 + 128;
+            let uv_idx = (row / 2 * w + col) as usize;
+            uv_plane[uv_idx] = u.clamp(0, 255) as u8;
+            uv_plane[uv_idx + 1] = v.clamp(0, 255) as u8;
+        }
+    }
+
+    nv12
 }
 
 /// Merge overlapping detections from multiple passes.
@@ -559,19 +693,6 @@ fn iou_raw(a: &RawLocalDetection, b: &RawLocalDetection) -> f64 {
     let area_b = b.bbox_w as f64 * b.bbox_h as f64;
     let union = area_a + area_b - inter;
     if union <= 0.0 { 0.0 } else { inter / union }
-}
-
-fn input_overlaps(a: &DetectionInput, b: &DetectionInput) -> bool {
-    let x1 = a.bbox_x.max(b.bbox_x);
-    let y1 = a.bbox_y.max(b.bbox_y);
-    let x2 = (a.bbox_x + a.bbox_w).min(b.bbox_x + b.bbox_w);
-    let y2 = (a.bbox_y + a.bbox_h).min(b.bbox_y + b.bbox_h);
-    let inter = (x2 - x1).max(0) as f64 * (y2 - y1).max(0) as f64;
-    let area_a = a.bbox_w as f64 * a.bbox_h as f64;
-    let area_b = b.bbox_w as f64 * b.bbox_h as f64;
-    let union = area_a + area_b - inter;
-    if union <= 0.0 { return false; }
-    inter / union > 0.3
 }
 
 #[cfg(test)]
