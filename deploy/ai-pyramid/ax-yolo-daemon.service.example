@@ -1,0 +1,18 @@
+[Unit]
+Description=YOLO NPU Detection Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/opt/smart-pet-camera/.env
+Environment=LD_LIBRARY_PATH=/soc/lib
+Environment=AX_YOLO_DAEMON_SOCKET=/run/ax_yolo_daemon.sock
+Environment=AX_YOLO_MODEL_DIR=__MODEL_DIR__
+ExecStart=/opt/smart-pet-camera/build/ax_yolo_daemon \
+  --model yolo26l
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=ai-pyramid.target
