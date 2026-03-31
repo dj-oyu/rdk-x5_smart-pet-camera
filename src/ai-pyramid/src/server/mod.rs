@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
+use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
@@ -57,6 +59,7 @@ pub struct AppState {
     pub local_detector: Option<Arc<crate::detect::local::LocalDetector>>,
     pub backfill_running: Arc<AtomicBool>,
     pub night_assist_host: Option<String>,
+    daily_summary_cache: Arc<Mutex<Option<(String, Instant, serde_json::Value)>>>,
 }
 
 /// Load pet display names from environment variables.
@@ -72,6 +75,30 @@ pub fn load_pet_names() -> HashMap<String, String> {
 }
 
 impl AppState {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        context: AppContext,
+        photos_dir: PathBuf,
+        event_tx: tokio::sync::broadcast::Sender<PhotoEvent>,
+        pet_names: HashMap<String, String>,
+        detect_client: Option<Arc<DetectClient>>,
+        local_detector: Option<Arc<crate::detect::local::LocalDetector>>,
+        backfill_running: Arc<AtomicBool>,
+        night_assist_host: Option<String>,
+    ) -> Self {
+        Self {
+            context,
+            photos_dir,
+            event_tx,
+            pet_names,
+            detect_client,
+            local_detector,
+            backfill_running,
+            night_assist_host,
+            daily_summary_cache: Arc::new(Mutex::new(None)),
+        }
+    }
+
     fn queries(&self) -> EventQueries {
         self.context.event_queries()
     }
@@ -991,6 +1018,17 @@ async fn handle_daily_summary(
         .date
         .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
 
+    // Check cache (2-hour TTL)
+    {
+        let cache = state.daily_summary_cache.lock().await;
+        if let Some((ref d, cached_at, ref json)) = *cache
+            && d == &date
+            && cached_at.elapsed() < std::time::Duration::from_secs(2 * 3600)
+        {
+            return Json(json.clone()).into_response();
+        }
+    }
+
     let captions = match state.queries().captions_for_date(&date).await {
         Ok(c) => c,
         Err(e) => {
@@ -1042,12 +1080,20 @@ async fn handle_daily_summary(
         .summarize_day(&captions, random_photo.as_deref())
         .await
     {
-        Ok(summary) => Json(DailySummaryResponse {
-            date,
-            summary,
-            photo_count,
-        })
-        .into_response(),
+        Ok(summary) => {
+            let resp = DailySummaryResponse {
+                date: date.clone(),
+                summary,
+                photo_count,
+            };
+            let json = serde_json::to_value(&resp).unwrap();
+            state
+                .daily_summary_cache
+                .lock()
+                .await
+                .replace((date, Instant::now(), json));
+            Json(resp).into_response()
+        }
         Err(e) => {
             // Fallback: return captions list
             let fallback = format!("{photo_count} observations recorded. VLM unavailable: {e}");
@@ -1222,19 +1268,19 @@ mod tests {
             false,
             crate::vlm::VlmConfig::default(),
         );
-        AppState {
+        AppState::new(
             context,
             photos_dir,
             event_tx,
-            pet_names: HashMap::from([
+            HashMap::from([
                 ("mike".into(), "Mike".into()),
                 ("chatora".into(), "Chatora".into()),
             ]),
-            detect_client: None,
-            local_detector: None,
-            backfill_running: Arc::new(AtomicBool::new(false)),
-            night_assist_host: None,
-        }
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            None,
+        )
     }
 
     #[tokio::test]

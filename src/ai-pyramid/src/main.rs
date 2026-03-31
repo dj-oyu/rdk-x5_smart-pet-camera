@@ -210,16 +210,16 @@ async fn main() {
         info!("Night assist enabled: rdk-x5 at {h} (via ax_yolo_daemon)");
     }
 
-    let app_state = server::AppState {
-        context: app_context,
-        photos_dir: args.photos_dir,
-        event_tx: sse_event_tx,
+    let app_state = server::AppState::new(
+        app_context,
+        args.photos_dir,
+        sse_event_tx,
         pet_names,
         detect_client,
         local_detector,
-        backfill_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         night_assist_host,
-    };
+    );
     let app = server::router(app_state);
 
     match tls {
