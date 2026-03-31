@@ -1021,11 +1021,21 @@ async fn handle_daily_summary(
     // Check cache (2-hour TTL)
     {
         let cache = state.daily_summary_cache.lock().await;
-        if let Some((ref d, cached_at, ref json)) = *cache
-            && d == &date
-            && cached_at.elapsed() < std::time::Duration::from_secs(2 * 3600)
-        {
-            return Json(json.clone()).into_response();
+        match cache.as_ref() {
+            Some((d, cached_at, json)) if d == &date => {
+                let age = cached_at.elapsed();
+                if age < std::time::Duration::from_secs(2 * 3600) {
+                    tracing::info!("daily-summary cache HIT for {date} (age {age:.1?})");
+                    return Json(json.clone()).into_response();
+                }
+                tracing::info!("daily-summary cache EXPIRED for {date} (age {age:.1?})");
+            }
+            Some((d, _, _)) => {
+                tracing::info!("daily-summary cache MISS: cached={d}, requested={date}");
+            }
+            None => {
+                tracing::info!("daily-summary cache EMPTY, requesting VLM for {date}");
+            }
         }
     }
 
@@ -1075,12 +1085,19 @@ async fn handle_daily_summary(
 
     let vlm_config = state.context.vlm_config();
     let vlm_client = crate::vlm::VlmClient::new(vlm_config);
+    tracing::info!("daily-summary: acquiring NPU semaphore for {date}");
+    let sem_start = Instant::now();
     let _permit = state.context.npu_semaphore().acquire().await.unwrap();
+    tracing::info!(
+        "daily-summary: NPU semaphore acquired in {:.1?}, calling VLM for {date}",
+        sem_start.elapsed()
+    );
     match vlm_client
         .summarize_day(&captions, random_photo.as_deref())
         .await
     {
         Ok(summary) => {
+            tracing::info!("daily-summary: VLM OK for {date}, caching");
             let resp = DailySummaryResponse {
                 date: date.clone(),
                 summary,
