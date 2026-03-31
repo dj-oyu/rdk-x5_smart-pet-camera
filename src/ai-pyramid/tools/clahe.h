@@ -30,13 +30,20 @@ static void median_blur_3x3(const uint8_t* src, uint8_t* dst, int w, int h) {
     }
 }
 
-static void clahe_y_plane(const uint8_t* y_in, uint8_t* y_out, int w, int h) {
+// Cached CDF tables for incremental CLAHE (16KB).
+struct ClaheCache {
+    uint8_t cdfs[CLAHE_TILE_Y * CLAHE_TILE_X][HIST_BINS];
+    int w = 0, h = 0;
+};
+
+// Compute CDF tables from Y plane (expensive: histogram + clip + normalize).
+// Call every N frames to amortize cost; scene lighting changes slowly.
+static void clahe_compute_cdfs(const uint8_t* y_in, const int w, const int h, ClaheCache& cache) {
     const int tile_w = w / CLAHE_TILE_X;
     const int tile_h = h / CLAHE_TILE_Y;
     const int tile_pixels = tile_w * tile_h;
     const uint32_t clip_count = (uint32_t)(CLAHE_CLIP_LIMIT * tile_pixels / HIST_BINS);
 
-    uint8_t cdfs[CLAHE_TILE_Y * CLAHE_TILE_X][HIST_BINS];
     for (int ty = 0; ty < CLAHE_TILE_Y; ++ty) {
         for (int tx = 0; tx < CLAHE_TILE_X; ++tx) {
             uint32_t hist[HIST_BINS] = {};
@@ -77,11 +84,20 @@ static void clahe_y_plane(const uint8_t* y_in, uint8_t* y_out, int w, int h) {
             const uint32_t denom = std::max((uint32_t)tile_pixels - cdf_min, 1u);
             for (int i = 0; i < HIST_BINS; ++i) {
                 const float val = (float)(cdf[i] > cdf_min ? cdf[i] - cdf_min : 0) / denom * 255.f;
-                cdfs[ty * CLAHE_TILE_X + tx][i] = (uint8_t)(val + 0.5f);
+                cache.cdfs[ty * CLAHE_TILE_X + tx][i] = (uint8_t)(val + 0.5f);
             }
         }
     }
+    cache.w = w;
+    cache.h = h;
+}
 
+// Apply cached CDF tables to Y plane (cheap: per-pixel lookup + bilinear interp).
+// Safe for in-place (y_in == y_out): each pixel depends only on itself.
+static void clahe_apply_cdfs(const uint8_t* y_in, uint8_t* y_out, const ClaheCache& cache) {
+    const int w = cache.w, h = cache.h;
+    const int tile_w = w / CLAHE_TILE_X;
+    const int tile_h = h / CLAHE_TILE_Y;
     const float half_tw = tile_w / 2.f;
     const float half_th = tile_h / 2.f;
     for (int row = 0; row < h; ++row) {
@@ -95,10 +111,10 @@ static void clahe_y_plane(const uint8_t* y_in, uint8_t* y_out, int w, int h) {
             const int tx1 = std::min(tx0 + 1, CLAHE_TILE_X - 1);
             const float wy = std::clamp(fy - std::floor(fy), 0.f, 1.f);
             const float wx = std::clamp(fx - std::floor(fx), 0.f, 1.f);
-            const float v00 = cdfs[ty0 * CLAHE_TILE_X + tx0][val];
-            const float v01 = cdfs[ty0 * CLAHE_TILE_X + tx1][val];
-            const float v10 = cdfs[ty1 * CLAHE_TILE_X + tx0][val];
-            const float v11 = cdfs[ty1 * CLAHE_TILE_X + tx1][val];
+            const float v00 = cache.cdfs[ty0 * CLAHE_TILE_X + tx0][val];
+            const float v01 = cache.cdfs[ty0 * CLAHE_TILE_X + tx1][val];
+            const float v10 = cache.cdfs[ty1 * CLAHE_TILE_X + tx0][val];
+            const float v11 = cache.cdfs[ty1 * CLAHE_TILE_X + tx1][val];
             const float top = v00 * (1.f - wx) + v01 * wx;
             const float bot = v10 * (1.f - wx) + v11 * wx;
             y_out[row * w + col] = (uint8_t)(top * (1.f - wy) + bot * wy + 0.5f);
@@ -106,11 +122,10 @@ static void clahe_y_plane(const uint8_t* y_in, uint8_t* y_out, int w, int h) {
     }
 }
 
-// Apply CLAHE to NV12 frame in-place: median blur + CLAHE on Y, UV set to 128.
-static void apply_clahe_nv12(uint8_t* nv12, int w, int h) {
-    const int y_size = w * h;
-    std::vector<uint8_t> tmp(y_size);
-    median_blur_3x3(nv12, tmp.data(), w, h);
-    clahe_y_plane(tmp.data(), nv12, w, h);
-    memset(nv12 + y_size, 128, y_size / 2);
+// Original combined function (kept for standalone use / tests).
+__attribute__((unused)) static void clahe_y_plane(const uint8_t* y_in, uint8_t* y_out, const int w,
+                                                  const int h) {
+    ClaheCache cache;
+    clahe_compute_cdfs(y_in, w, h, cache);
+    clahe_apply_cdfs(y_in, y_out, cache);
 }

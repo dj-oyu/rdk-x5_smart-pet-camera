@@ -819,8 +819,10 @@ vdec_done:
                 {
                     uint8_t sbuf[256 * 1024];
                     int sends = 0, decoded = 0;
-                    const int clahe_interval = 128;
-                    std::vector<uint8_t> clahe_y; // Cached CLAHE Y plane.
+                    const int clahe_interval_mask = 256 - 1; // Must be power-of-2.
+                    ClaheCache clahe_cdfs;         // 16KB CDF tables.
+                    std::vector<uint8_t> blur_buf; // Scratch for median blur.
+                    bool clahe_cdfs_valid = false;
                     auto last_hb = std::chrono::steady_clock::now();
                     bool stream_alive = true;
 
@@ -922,15 +924,16 @@ vdec_done:
                                 uint8_t* const uv = y ? y + ysz : nullptr;
 
                                 if (y && uv) {
-                                    // CLAHE: recompute Y every N frames, cache result.
-                                    if ((decoded % clahe_interval) == 0) {
-                                        clahe_y.resize(ysz);
-                                        median_blur_3x3(y, clahe_y.data(), fw, fh);
-                                        std::vector<uint8_t> tmp(clahe_y);
-                                        clahe_y_plane(tmp.data(), clahe_y.data(), fw, fh);
+                                    // CLAHE: recompute CDFs every N frames (expensive),
+                                    // apply cached CDFs every frame (cheap lookup).
+                                    if ((decoded & clahe_interval_mask) == 0) {
+                                        blur_buf.resize(ysz);
+                                        median_blur_3x3(y, blur_buf.data(), fw, fh);
+                                        clahe_compute_cdfs(blur_buf.data(), fw, fh, clahe_cdfs);
+                                        clahe_cdfs_valid = true;
                                     }
-                                    if (!clahe_y.empty())
-                                        memcpy(y, clahe_y.data(), ysz);
+                                    if (clahe_cdfs_valid)
+                                        clahe_apply_cdfs(y, y, clahe_cdfs); // in-place
                                     memset(uv, 128, ysz / 2);
 
                                     // IVPS HW NV12→BGR letterbox + NPU inference.
