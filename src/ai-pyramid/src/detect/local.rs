@@ -163,6 +163,10 @@ const KEEP_CLASSES: &[i32] = &[
 pub struct LocalDetectorConfig {
     /// Unix socket path for ax_yolo_daemon.
     pub daemon_socket: PathBuf,
+    /// Fast model for aspect ratio probing (e.g. "yolo11s").
+    pub fast_model: String,
+    /// Accurate model for final detection (e.g. "yolo26l").
+    pub accurate_model: String,
 }
 
 impl Default for LocalDetectorConfig {
@@ -172,6 +176,8 @@ impl Default for LocalDetectorConfig {
                 std::env::var("AX_YOLO_DAEMON_SOCKET")
                     .unwrap_or_else(|_| "/run/ax_yolo_daemon.sock".to_string()),
             ),
+            fast_model: std::env::var("YOLO_FAST_MODEL").unwrap_or_default(),
+            accurate_model: std::env::var("YOLO_ACCURATE_MODEL").unwrap_or_default(),
         }
     }
 }
@@ -225,6 +231,58 @@ impl LocalDetector {
             reserved: 0,
         };
         self.send_request(&header, nv12).await
+    }
+
+    /// Hot-swap the daemon's loaded model by name (e.g. "yolo26l").
+    pub async fn load_model(&self, name: &str) -> Result<(), String> {
+        let payload = name.as_bytes();
+        let header = RequestHeader {
+            cmd: CMD_LOAD,
+            input_type: 0,
+            width: 0,
+            height: 0,
+            payload_size: payload.len() as u32,
+            reserved: 0,
+        };
+        // CMD_LOAD returns 0 detections on success, error on failure.
+        let mut stream = tokio::net::UnixStream::connect(&self.config.daemon_socket)
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        let hdr_bytes =
+            unsafe { std::slice::from_raw_parts(&header as *const _ as *const u8, 16) };
+        stream
+            .write_all(hdr_bytes)
+            .await
+            .map_err(|e| format!("write header: {e}"))?;
+        stream
+            .write_all(payload)
+            .await
+            .map_err(|e| format!("write payload: {e}"))?;
+        stream
+            .shutdown()
+            .await
+            .map_err(|e| format!("shutdown: {e}"))?;
+        let mut resp_buf = [0u8; 12];
+        stream
+            .read_exact(&mut resp_buf)
+            .await
+            .map_err(|e| format!("read response: {e}"))?;
+        #[repr(C, packed)]
+        struct RespHeader {
+            status: u16,
+            _det_count: u16,
+            _elapsed_ms: f32,
+            error_len: u32,
+        }
+        let resp: RespHeader = unsafe { std::ptr::read_unaligned(resp_buf.as_ptr().cast()) };
+        if resp.status != 0 {
+            let mut err_buf = vec![0u8; resp.error_len as usize];
+            if resp.error_len > 0 {
+                let _ = stream.read_exact(&mut err_buf).await;
+            }
+            return Err(String::from_utf8_lossy(&err_buf).to_string());
+        }
+        Ok(())
     }
 
     /// Detect pets in a comic image using per-panel detection with
@@ -289,116 +347,190 @@ impl LocalDetector {
         Ok(inputs)
     }
 
-    /// Detect on each of the 4 comic panels with aspect-ratio correction.
-    /// All detection uses NV12 direct input to ax_yolo_daemon (no JPEG I/O).
+    /// 2-model detection pipeline with aspect-ratio correction.
     ///
-    /// For each panel:
-    /// 1. Crop panel from comic, convert to NV12, detect
-    /// 2. If 0 detections, try padded NV12 variants to correct aspect ratio distortion
-    /// 3. Pick the variant with the most detections, remap bbox coords to comic space
+    /// Phase 1 (fast model, e.g. yolo11s):
+    ///   For each panel, detect on original NV12.
+    ///   If 0 detections, try shrink_w/shrink_h variants → pick best aspect ratio.
+    ///   Record per-panel: best NV12 data + dimensions + scale factors.
+    ///
+    /// Phase 2 (accurate model, e.g. yolo26l):
+    ///   Switch model once, re-detect all panels with the chosen aspect ratio.
+    ///   Merge results from both models.
     async fn detect_panels_raw(
         &self,
         img: &image::DynamicImage,
     ) -> Result<Vec<RawLocalDetection>, String> {
-        let mut all = Vec::new();
+        let pw = PANEL_W as u32;
+        let ph = PANEL_H as u32;
 
-        for panel in 0..4u32 {
-            let (ox, oy) = panel_origin(panel);
-            let panel_rgb = img
-                .crop_imm(ox as u32, oy as u32, PANEL_W as u32, PANEL_H as u32)
-                .to_rgb8();
-            let pw = PANEL_W as u16;
-            let ph = PANEL_H as u16;
+        // Pre-crop all panels
+        let panels: Vec<_> = (0..4u32)
+            .map(|i| {
+                let (ox, oy) = panel_origin(i);
+                let rgb = img
+                    .crop_imm(ox as u32, oy as u32, pw, ph)
+                    .to_rgb8();
+                (ox, oy, rgb)
+            })
+            .collect();
 
-            // --- Original panel (NV12) ---
-            let nv12 = rgb_to_nv12(&panel_rgb, pw as u32, ph as u32);
-            let orig_dets = self.detect_nv12(&nv12, pw, ph).await?;
+        // Per-panel state after phase 1
+        struct PanelResult {
+            nv12: Vec<u8>,
+            width: u16,
+            height: u16,
+            scale_x: f64,
+            scale_y: f64,
+            fast_dets: Vec<RawLocalDetection>,
+        }
 
-            if !orig_dets.is_empty() {
-                for d in orig_dets {
-                    all.push(map_to_comic(d, ox, oy));
+        let has_fast = !self.config.fast_model.is_empty();
+        let has_accurate = !self.config.accurate_model.is_empty();
+
+        if !has_fast && !has_accurate {
+            tracing::warn!("No YOLO models configured (YOLO_FAST_MODEL / YOLO_ACCURATE_MODEL)");
+            return Ok(Vec::new());
+        }
+
+        // --- Phase 1: fast model for aspect ratio probing ---
+        let mut panel_results = Vec::new();
+        if has_fast {
+            tracing::info!("Phase 1: loading fast model {}", self.config.fast_model);
+            self.load_model(&self.config.fast_model).await?;
+
+            for (_, _, rgb) in &panels {
+                let nv12_orig = rgb_to_nv12(rgb, pw, ph);
+                let dets = self
+                    .detect_nv12(&nv12_orig, pw as u16, ph as u16)
+                    .await?;
+
+                if !dets.is_empty() {
+                    panel_results.push(PanelResult {
+                        nv12: nv12_orig,
+                        width: pw as u16,
+                        height: ph as u16,
+                        scale_x: 1.0,
+                        scale_y: 1.0,
+                        fast_dets: dets,
+                    });
+                    continue;
                 }
-                continue;
-            }
 
-            // --- 0 detections: try aspect ratio correction variants ---
-            let best = self.try_aspect_variants_nv12(&panel_rgb).await?;
-            for (d, scale_x, scale_y) in best {
-                all.push(map_to_comic_scaled(d, ox, oy, scale_x, scale_y));
+                // Try aspect ratio variants with fast model
+                let (best_nv12, best_w, best_h, scale_x, scale_y, variant_dets) =
+                    self.probe_aspect_ratio(rgb, pw, ph).await?;
+                panel_results.push(PanelResult {
+                    nv12: best_nv12,
+                    width: best_w,
+                    height: best_h,
+                    scale_x,
+                    scale_y,
+                    fast_dets: variant_dets,
+                });
+            }
+        } else {
+            // No fast model — prepare original panels for accurate-only pass
+            for (_, _, rgb) in &panels {
+                let nv12_orig = rgb_to_nv12(rgb, pw, ph);
+                panel_results.push(PanelResult {
+                    nv12: nv12_orig,
+                    width: pw as u16,
+                    height: ph as u16,
+                    scale_x: 1.0,
+                    scale_y: 1.0,
+                    fast_dets: Vec::new(),
+                });
+            }
+        }
+
+        // --- Phase 2: accurate model on chosen aspect ratios ---
+        let mut all = Vec::new();
+        if has_accurate {
+            tracing::info!(
+                "Phase 2: loading accurate model {}",
+                self.config.accurate_model
+            );
+            self.load_model(&self.config.accurate_model).await?;
+
+            for (i, pr) in panel_results.iter().enumerate() {
+                let (ox, oy) = (panels[i].0, panels[i].1);
+
+                let accurate_dets = self
+                    .detect_nv12(&pr.nv12, pr.width, pr.height)
+                    .await?;
+
+                let mut combined = pr.fast_dets.clone();
+                combined.extend(accurate_dets);
+                let merged = merge_detections(combined);
+
+                for d in merged {
+                    if pr.scale_x == 1.0 && pr.scale_y == 1.0 {
+                        all.push(map_to_comic(d, ox, oy));
+                    } else {
+                        all.push(map_to_comic_scaled(d, ox, oy, pr.scale_x, pr.scale_y));
+                    }
+                }
+            }
+        } else {
+            // No accurate model — use fast model results only
+            for (i, pr) in panel_results.iter().enumerate() {
+                let (ox, oy) = (panels[i].0, panels[i].1);
+                for d in &pr.fast_dets {
+                    if pr.scale_x == 1.0 && pr.scale_y == 1.0 {
+                        all.push(map_to_comic(d.clone(), ox, oy));
+                    } else {
+                        all.push(map_to_comic_scaled(
+                            d.clone(),
+                            ox,
+                            oy,
+                            pr.scale_x,
+                            pr.scale_y,
+                        ));
+                    }
+                }
             }
         }
 
         Ok(all)
     }
 
-    /// Try aspect-ratio correction variants when original panel yields 0 detections.
-    /// The comic panel may be horizontally or vertically stretched due to Go's
-    /// crop+scale pipeline. We don't know which direction, so try both:
-    ///   - Variant A (横伸び想定): shrink width to 75% → 302×228
-    ///   - Variant B (縦伸び想定): shrink height to 75% → 404×170
-    ///
-    /// Daemon's letterbox handles padding internally. Returned bbox coords are
-    /// in the shrunk image space — caller scales back to original panel size.
-    async fn try_aspect_variants_nv12(
+    /// Probe aspect ratio variants with the currently loaded (fast) model.
+    /// Returns (nv12, w, h, scale_x, scale_y, detections) for the best variant.
+    /// If no variant finds anything, returns the original panel NV12.
+    async fn probe_aspect_ratio(
         &self,
         panel_rgb: &image::RgbImage,
-    ) -> Result<Vec<(RawLocalDetection, f64, f64)>, String> {
-        let pw = PANEL_W as u32;
-        let ph = PANEL_H as u32;
+        pw: u32,
+        ph: u32,
+    ) -> Result<(Vec<u8>, u16, u16, f64, f64, Vec<RawLocalDetection>), String> {
+        // Variant A: shrink width 75%
+        let new_w = (pw * 3 / 4) & !1;
+        let shrunk_w = image::imageops::resize(
+            panel_rgb, new_w, ph, image::imageops::FilterType::Triangle,
+        );
+        let nv12_w = rgb_to_nv12(&shrunk_w, new_w, ph);
+        let dets_w = self.detect_nv12(&nv12_w, new_w as u16, ph as u16).await?;
 
-        struct Variant {
-            dets: Vec<RawLocalDetection>,
-            scale_x: f64,
-            scale_y: f64,
+        // Variant B: shrink height 75%
+        let new_h = (ph * 3 / 4) & !1;
+        let shrunk_h = image::imageops::resize(
+            panel_rgb, pw, new_h, image::imageops::FilterType::Triangle,
+        );
+        let nv12_h = rgb_to_nv12(&shrunk_h, pw, new_h);
+        let dets_h = self.detect_nv12(&nv12_h, pw as u16, new_h as u16).await?;
+
+        if dets_w.len() >= dets_h.len() && !dets_w.is_empty() {
+            Ok((nv12_w, new_w as u16, ph as u16, pw as f64 / new_w as f64, 1.0, dets_w))
+        } else if !dets_h.is_empty() {
+            Ok((nv12_h, pw as u16, new_h as u16, 1.0, ph as f64 / new_h as f64, dets_h))
+        } else {
+            // Neither variant found anything — fall back to original
+            let nv12_orig = rgb_to_nv12(panel_rgb, pw, ph);
+            Ok((nv12_orig, pw as u16, ph as u16, 1.0, 1.0, Vec::new()))
         }
-
-        let mut variants = Vec::new();
-
-        // Variant A: shrink width to 75% → 302×228
-        {
-            let new_w = (pw * 3 / 4) & !1; // even for NV12
-            let shrunk = image::imageops::resize(
-                panel_rgb, new_w, ph, image::imageops::FilterType::Triangle,
-            );
-            let nv12 = rgb_to_nv12(&shrunk, new_w, ph);
-            let dets = self.detect_nv12(&nv12, new_w as u16, ph as u16).await?;
-            variants.push(Variant {
-                dets,
-                scale_x: pw as f64 / new_w as f64,
-                scale_y: 1.0,
-            });
-        }
-
-        // Variant B: shrink height to 75% → 404×170
-        {
-            let new_h = (ph * 3 / 4) & !1; // even for NV12
-            let shrunk = image::imageops::resize(
-                panel_rgb, pw, new_h, image::imageops::FilterType::Triangle,
-            );
-            let nv12 = rgb_to_nv12(&shrunk, pw, new_h);
-            let dets = self.detect_nv12(&nv12, pw as u16, new_h as u16).await?;
-            variants.push(Variant {
-                dets,
-                scale_x: 1.0,
-                scale_y: ph as f64 / new_h as f64,
-            });
-        }
-
-        let best = variants
-            .into_iter()
-            .max_by_key(|v| v.dets.len())
-            .unwrap();
-
-        if best.dets.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        Ok(best
-            .dets
-            .into_iter()
-            .map(|d| (d, best.scale_x, best.scale_y))
-            .collect())
     }
+
 
     /// Send a binary request and read binary response.
     async fn send_request(
