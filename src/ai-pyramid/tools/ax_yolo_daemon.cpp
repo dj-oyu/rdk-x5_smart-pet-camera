@@ -30,6 +30,9 @@
 #include <string>
 #include <vector>
 
+#include <algorithm>
+#include <dirent.h>
+#include <functional>
 #include <arpa/inet.h>
 #include <netinet/tcp.h>
 #include <errno.h>
@@ -60,6 +63,8 @@ static constexpr int STREAM_HEARTBEAT_SEC = 10;
 
 static volatile sig_atomic_t g_running = 1;
 static int g_listen_fd = -1;
+static std::string g_model_dir;
+static std::string g_default_model_path; // --model で指定された起動時モデル (自動復帰先)
 
 static void signal_handler(int /*sig*/) {
     g_running = 0;
@@ -198,6 +203,16 @@ static int load_model(AxModel& m, const std::string& path, const int input_w, co
     m.model_path = path;
     fprintf(stderr, "[INFO] Model loaded: %s (CMM %u KB, %dx%d, %s)\n", path.c_str(),
             m.cmm_bytes / 1024, input_w, input_h, cs_name);
+    fprintf(stderr, "[INFO]   inputs=%u outputs=%u\n", m.io_info->nInputSize,
+            m.io_info->nOutputSize);
+    for (uint32_t i = 0; i < m.io_info->nOutputSize; ++i) {
+        const auto& o = m.io_info->pOutputs[i];
+        fprintf(stderr, "[INFO]   output[%u]: dims=%u shape=[", i, o.nShapeSize);
+        for (uint32_t d = 0; d < o.nShapeSize; ++d) {
+            fprintf(stderr, "%s%d", d ? "," : "", o.pShape[d]);
+        }
+        fprintf(stderr, "] size=%u\n", o.nSize);
+    }
     return 0;
 }
 
@@ -240,17 +255,41 @@ static int run_npu_and_postprocess(AxModel& m, const int orig_w, const int orig_
         AX_SYS_MinvalidateCache(m.io_data.pOutputs[i].phyAddr, m.io_data.pOutputs[i].pVirAddr,
                                 m.io_data.pOutputs[i].nSize);
     }
-    for (uint32_t i = 0; i + 1 < m.io_data.nOutputSize; i += 2) {
-        const auto& bm = m.io_info->pOutputs[i];
-        const int fw = bm.nShapeSize >= 4 ? bm.pShape[2] : 0;
-        if (fw <= 0) {
-            continue;
+    // Auto-detect model type from output tensor count:
+    //   6 outputs (3 pairs of bbox+cls) → YOLO26 separated head
+    //   3 outputs (unified DFL+cls)     → YOLO11 DFL head
+    const bool is_dfl = (m.io_data.nOutputSize % 2 != 0) ||
+                        (m.io_data.nOutputSize == 3 && m.io_info->pOutputs[0].nShapeSize >= 4 &&
+                         m.io_info->pOutputs[0].pShape[3] > CLS_NUM);
+
+    if (is_dfl) {
+        // YOLO11 DFL: each output is [1,H,W, 4*REG_MAX + C]
+        for (uint32_t i = 0; i < m.io_data.nOutputSize; ++i) {
+            const auto& om = m.io_info->pOutputs[i];
+            const int fw = om.nShapeSize >= 4 ? om.pShape[2] : 0;
+            const int ch = om.nShapeSize >= 4 ? om.pShape[3] : 0;
+            if (fw <= 0 || ch <= 0)
+                continue;
+            const int cls_num = ch - 4 * DFL_REG_MAX;
+            if (cls_num <= 0)
+                continue;
+            generate_proposals_dfl(m.input_w / fw, (const float*)m.io_data.pOutputs[i].pVirAddr,
+                                   SCORE_THRESHOLD, results, m.input_w, m.input_h, cls_num);
         }
-        const auto& cm = m.io_info->pOutputs[i + 1];
-        const int cc = cm.nShapeSize >= 4 ? cm.pShape[3] : CLS_NUM;
-        generate_proposals_separated(m.input_w / fw, (const float*)m.io_data.pOutputs[i].pVirAddr,
-                                     (const float*)m.io_data.pOutputs[i + 1].pVirAddr,
-                                     SCORE_THRESHOLD, results, m.input_w, m.input_h, cc);
+    } else {
+        // YOLO26 separated: pairs of bbox[1,H,W,4] + cls[1,H,W,C]
+        for (uint32_t i = 0; i + 1 < m.io_data.nOutputSize; i += 2) {
+            const auto& bm = m.io_info->pOutputs[i];
+            const int fw = bm.nShapeSize >= 4 ? bm.pShape[2] : 0;
+            if (fw <= 0)
+                continue;
+            const auto& cm = m.io_info->pOutputs[i + 1];
+            const int cc = cm.nShapeSize >= 4 ? cm.pShape[3] : CLS_NUM;
+            generate_proposals_separated(m.input_w / fw,
+                                         (const float*)m.io_data.pOutputs[i].pVirAddr,
+                                         (const float*)m.io_data.pOutputs[i + 1].pVirAddr,
+                                         SCORE_THRESHOLD, results, m.input_w, m.input_h, cc);
+        }
     }
     nms(results, NMS_THRESHOLD);
     scale_detections(results, m.input_w, m.input_h, orig_w, orig_h);
@@ -532,23 +571,124 @@ static void handle_detect(const int fd, AxModel& m, const RequestHeader& req) {
     send_detections(fd, dets, (float)ms);
 }
 
+/// Resolve a model name or path to an absolute axmodel path.
+/// - Absolute path ("/...") → used as-is
+/// - Name ("yolo26l") → search g_model_dir recursively for {name}.axmodel
+static std::string resolve_model(const std::string& name_or_path) {
+    if (!name_or_path.empty() && name_or_path[0] == '/') {
+        return name_or_path; // absolute path
+    }
+    // Search: {model_dir}/**/{name}.axmodel
+    const std::string target = name_or_path + ".axmodel";
+    std::string result;
+    std::function<void(const std::string&)> search = [&](const std::string& dir) {
+        if (!result.empty())
+            return;
+        DIR* d = opendir(dir.c_str());
+        if (!d)
+            return;
+        struct dirent* ent;
+        while ((ent = readdir(d)) != nullptr) {
+            if (ent->d_name[0] == '.')
+                continue;
+            std::string full = dir + "/" + ent->d_name;
+            struct stat st;
+            if (stat(full.c_str(), &st) != 0)
+                continue;
+            if (S_ISDIR(st.st_mode)) {
+                search(full);
+            } else if (ent->d_name == target) {
+                result = full;
+            }
+        }
+        closedir(d);
+    };
+    search(g_model_dir);
+    return result;
+}
+
+/// List available .axmodel files under g_model_dir.
+static std::vector<std::string> list_models() {
+    std::vector<std::string> names;
+    std::function<void(const std::string&)> scan = [&](const std::string& dir) {
+        DIR* d = opendir(dir.c_str());
+        if (!d)
+            return;
+        struct dirent* ent;
+        while ((ent = readdir(d)) != nullptr) {
+            if (ent->d_name[0] == '.')
+                continue;
+            std::string full = dir + "/" + ent->d_name;
+            struct stat st;
+            if (stat(full.c_str(), &st) != 0)
+                continue;
+            if (S_ISDIR(st.st_mode)) {
+                scan(full);
+            } else {
+                std::string fname = ent->d_name;
+                const std::string suffix = ".axmodel";
+                if (fname.size() > suffix.size() &&
+                    fname.compare(fname.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                    names.push_back(fname.substr(0, fname.size() - suffix.size()));
+                }
+            }
+        }
+        closedir(d);
+    };
+    scan(g_model_dir);
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
 static void handle_load(const int fd, AxModel& m, const RequestHeader& req) {
-    std::string path(req.payload_size, '\0');
-    if (req.payload_size > 0 && !read_exact(fd, path.data(), req.payload_size)) {
+    std::string name_or_path(req.payload_size, '\0');
+    if (req.payload_size > 0 && !read_exact(fd, name_or_path.data(), req.payload_size)) {
         send_error(fd, "read path failed");
+        return;
+    }
+    const std::string resolved = resolve_model(name_or_path);
+    if (resolved.empty()) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "model not found: %s (model_dir: %s)", name_or_path.c_str(),
+                 g_model_dir.c_str());
+        send_error(fd, msg);
+        return;
+    }
+    // Skip if already loaded
+    if (m.handle && m.model_path == resolved) {
+        std::vector<Detection> empty;
+        send_detections(fd, empty, 0);
         return;
     }
     std::lock_guard<std::mutex> lock(m.npu_mutex);
     const int prev_w = m.input_w ? m.input_w : DEFAULT_INPUT_W;
     const int prev_h = m.input_h ? m.input_h : DEFAULT_INPUT_H;
     unload_model(m);
-    if (load_model(m, path, prev_w, prev_h) != 0) {
-        unload_model(m); // Clean up partial state from failed load.
+    if (load_model(m, resolved, prev_w, prev_h) != 0) {
+        unload_model(m);
         send_error(fd, "load failed");
         return;
     }
     std::vector<Detection> empty;
     send_detections(fd, empty, 0);
+}
+
+/// Restore the default model (--model startup arg) if not already loaded.
+static void restore_default_model(AxModel& m) {
+    if (g_default_model_path.empty() || (m.handle && m.model_path == g_default_model_path)) {
+        return; // already loaded or no default
+    }
+    std::lock_guard<std::mutex> lock(m.npu_mutex);
+    const int prev_w = m.input_w ? m.input_w : DEFAULT_INPUT_W;
+    const int prev_h = m.input_h ? m.input_h : DEFAULT_INPUT_H;
+    unload_model(m);
+    if (load_model(m, g_default_model_path, prev_w, prev_h) == 0) {
+        fprintf(stderr, "[INFO] Restored default model: %s\n", g_default_model_path.c_str());
+    } else {
+        fprintf(stderr, "[ERROR] Failed to restore default model: %s\n",
+                g_default_model_path.c_str());
+        unload_model(m);
+    }
 }
 
 static void handle_unload(const int fd, AxModel& m) {
@@ -563,14 +703,57 @@ static void handle_status(const int fd, const AxModel& m) {
     send_detections(fd, empty, m.handle ? (float)(m.cmm_bytes / 1024) : 0.f);
 }
 
+static void handle_help(const int fd, const AxModel& m) {
+    std::string text;
+    text += "ax_yolo_daemon commands (binary protocol over Unix socket):\n";
+    text += "  CMD_DETECT (0)  — Run inference. input_type: 0=JPEG_PATH, 1=NV12_RAW\n";
+    text += "  CMD_LOAD   (1)  — Hot-swap model. payload=name or absolute path\n";
+    text += "  CMD_UNLOAD (2)  — Unload model, free NPU/CMM\n";
+    text += "  CMD_STATUS (3)  — Returns 0 dets; elapsed_ms=CMM_KB if loaded, 0 if not\n";
+    text += "  CMD_STREAM (4)  — Start H.265 stream mode. payload=hostname\n";
+    text += "  CMD_HELP   (5)  — This message\n";
+    text += "\nCurrent state:\n";
+    char line[256];
+    snprintf(line, sizeof(line), "  Model:     %s\n", m.handle ? m.model_path.c_str() : "(none)");
+    text += line;
+    snprintf(line, sizeof(line), "  Input:     %dx%d\n", m.input_w, m.input_h);
+    text += line;
+    snprintf(line, sizeof(line), "  CMM:       %u KB\n", m.cmm_bytes / 1024);
+    text += line;
+    snprintf(line, sizeof(line), "  Model dir: %s\n", g_model_dir.c_str());
+    text += line;
+
+    const auto models = list_models();
+    text += "\nAvailable models:\n";
+    if (models.empty()) {
+        text += "  (none found)\n";
+    } else {
+        for (const auto& name : models) {
+            text += "  " + name;
+            if (m.handle && m.model_path.find(name + ".axmodel") != std::string::npos) {
+                text += " (loaded)";
+            }
+            text += "\n";
+        }
+    }
+
+    ResponseHeader hdr = {};
+    hdr.status = 0;
+    hdr.error_len = (uint32_t)text.size();
+    write_exact(fd, &hdr, sizeof(hdr));
+    write_exact(fd, text.data(), text.size());
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 static void print_usage(const char* const prog) {
     fprintf(stderr,
-            "Usage: %s --model <path> [options]\n"
-            "  --model <path>           axmodel file (required)\n"
+            "Usage: %s --model <name-or-path> [options]\n"
+            "  --model <name-or-path>   axmodel name (e.g. yolo26l) or absolute path (required)\n"
+            "  --model-dir <path>       Directory to search for models (default: "
+            "/home/admin-user/models)\n"
             "  --socket <path>          Unix socket (default: /run/ax_yolo_daemon.sock)\n"
             "  --input-size <WxH>       Model input (default: 640x640)\n",
             prog);
@@ -583,8 +766,14 @@ int main(int argc, char** argv) {
     int input_w = DEFAULT_INPUT_W;
     int input_h = DEFAULT_INPUT_H;
 
+    const char* const env_model_dir = getenv("AX_YOLO_MODEL_DIR");
+    if (env_model_dir) {
+        g_model_dir = env_model_dir;
+    }
+
     static struct option long_opts[] = {
         {"model", required_argument, nullptr, 'm'},
+        {"model-dir", required_argument, nullptr, 'd'},
         {"socket", required_argument, nullptr, 's'},
         {"input-size", required_argument, nullptr, 'i'},
         {"help", no_argument, nullptr, 'h'},
@@ -592,10 +781,13 @@ int main(int argc, char** argv) {
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "m:s:i:h", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "m:d:s:i:h", long_opts, nullptr)) != -1) {
         switch (opt) {
         case 'm':
             model_path = optarg;
+            break;
+        case 'd':
+            g_model_dir = optarg;
             break;
         case 's':
             socket_path = optarg;
@@ -736,7 +928,19 @@ vdec_done:
     model.ivps_ready = ivps_ok;
     model.vdec_ready = vdec_ok;
     model.vdec_pool_id = vdec_pool_id;
-    if (load_model(model, model_path, input_w, input_h) != 0) {
+    const std::string resolved_model = resolve_model(model_path);
+    if (resolved_model.empty()) {
+        if (model_path[0] != '/' && g_model_dir.empty()) {
+            fprintf(stderr, "[ERROR] Model name '%s' requires --model-dir or AX_YOLO_MODEL_DIR\n",
+                    model_path.c_str());
+        } else {
+            fprintf(stderr, "[ERROR] Model not found: %s (model_dir: %s)\n", model_path.c_str(),
+                    g_model_dir.c_str());
+        }
+        return 1;
+    }
+    g_default_model_path = resolved_model;
+    if (load_model(model, resolved_model, input_w, input_h) != 0) {
         return 1;
     }
 
@@ -778,6 +982,7 @@ vdec_done:
             switch (req.cmd) {
             case CMD_DETECT:
                 handle_detect(cfd, model, req);
+                restore_default_model(model);
                 break;
             case CMD_LOAD:
                 handle_load(cfd, model, req);
@@ -787,6 +992,9 @@ vdec_done:
                 break;
             case CMD_STATUS:
                 handle_status(cfd, model);
+                break;
+            case CMD_HELP:
+                handle_help(cfd, model);
                 break;
             case CMD_STREAM: {
                 // NOTE: VDEC GetChnFrame only works from main() scope on AX650 BSP V3.6.4.
@@ -864,6 +1072,7 @@ vdec_done:
                                     switch (new_req.cmd) {
                                     case CMD_DETECT:
                                         handle_detect(new_cfd, model, new_req);
+                                        restore_default_model(model);
                                         break;
                                     case CMD_LOAD:
                                         handle_load(new_cfd, model, new_req);
@@ -873,6 +1082,9 @@ vdec_done:
                                         break;
                                     case CMD_STATUS:
                                         handle_status(new_cfd, model);
+                                        break;
+                                    case CMD_HELP:
+                                        handle_help(new_cfd, model);
                                         break;
                                     case CMD_STREAM: {
                                         // Drain payload before rejecting.

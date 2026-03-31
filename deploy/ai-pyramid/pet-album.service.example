@@ -11,7 +11,7 @@ EnvironmentFile=-/opt/smart-pet-camera/.env
 Environment=PET_ALBUM_PHOTOS_DIR=/opt/smart-pet-camera/src/ai-pyramid/data/photos
 Environment=PET_ALBUM_DB_PATH=/opt/smart-pet-camera/src/ai-pyramid/data/pet-album.db
 Environment=PET_ALBUM_VLM_URL=http://localhost:8000
-Environment=PET_ALBUM_VLM_MODEL=AXERA-TECH/Qwen3-VL-2B-Instruct-GPTQ-Int4-C256-P3584-CTX4095
+Environment=PET_ALBUM_VLM_MODEL=__VLM_MODEL_NAME__
 
 ExecStartPre=/bin/mkdir -p ${PET_ALBUM_PHOTOS_DIR}
 ExecStart=/opt/smart-pet-camera/src/ai-pyramid/target/release/pet-album \

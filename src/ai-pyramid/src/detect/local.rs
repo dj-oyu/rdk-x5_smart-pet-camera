@@ -10,7 +10,11 @@ use tokio::sync::mpsc;
 // ---------------------------------------------------------------------------
 
 const CMD_DETECT: u16 = 0;
+#[allow(dead_code)]
+const CMD_LOAD: u16 = 1;
 const CMD_STREAM: u16 = 4;
+#[allow(dead_code)]
+const CMD_HELP: u16 = 5;
 const INPUT_JPEG_PATH: u16 = 0;
 const INPUT_NV12_RAW: u16 = 1;
 
@@ -159,6 +163,10 @@ const KEEP_CLASSES: &[i32] = &[
 pub struct LocalDetectorConfig {
     /// Unix socket path for ax_yolo_daemon.
     pub daemon_socket: PathBuf,
+    /// Fast model for aspect ratio probing (e.g. "yolo11s").
+    pub fast_model: String,
+    /// Accurate model for final detection (e.g. "yolo26l").
+    pub accurate_model: String,
 }
 
 impl Default for LocalDetectorConfig {
@@ -168,6 +176,8 @@ impl Default for LocalDetectorConfig {
                 std::env::var("AX_YOLO_DAEMON_SOCKET")
                     .unwrap_or_else(|_| "/run/ax_yolo_daemon.sock".to_string()),
             ),
+            fast_model: std::env::var("YOLO_FAST_MODEL").unwrap_or_default(),
+            accurate_model: std::env::var("YOLO_ACCURATE_MODEL").unwrap_or_default(),
         }
     }
 }
@@ -223,10 +233,65 @@ impl LocalDetector {
         self.send_request(&header, nv12).await
     }
 
-    /// Detect pets in a comic image using raw-first strategy:
-    /// 1. Run YOLO on the full 848×496 comic (1 inference)
-    /// 2. Map each bbox to its panel_index
-    /// 3. If zero pet detections, fallback to per-panel detection (4 inferences)
+    /// Hot-swap the daemon's loaded model by name (e.g. "yolo26l").
+    pub async fn load_model(&self, name: &str) -> Result<(), String> {
+        let payload = name.as_bytes();
+        let header = RequestHeader {
+            cmd: CMD_LOAD,
+            input_type: 0,
+            width: 0,
+            height: 0,
+            payload_size: payload.len() as u32,
+            reserved: 0,
+        };
+        // CMD_LOAD returns 0 detections on success, error on failure.
+        let mut stream = tokio::net::UnixStream::connect(&self.config.daemon_socket)
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        let hdr_bytes = unsafe { std::slice::from_raw_parts(&header as *const _ as *const u8, 16) };
+        stream
+            .write_all(hdr_bytes)
+            .await
+            .map_err(|e| format!("write header: {e}"))?;
+        stream
+            .write_all(payload)
+            .await
+            .map_err(|e| format!("write payload: {e}"))?;
+        stream
+            .shutdown()
+            .await
+            .map_err(|e| format!("shutdown: {e}"))?;
+        let mut resp_buf = [0u8; 12];
+        stream
+            .read_exact(&mut resp_buf)
+            .await
+            .map_err(|e| format!("read response: {e}"))?;
+        #[repr(C, packed)]
+        struct RespHeader {
+            status: u16,
+            _det_count: u16,
+            _elapsed_ms: f32,
+            error_len: u32,
+        }
+        let resp: RespHeader = unsafe { std::ptr::read_unaligned(resp_buf.as_ptr().cast()) };
+        if resp.status != 0 {
+            let mut err_buf = vec![0u8; resp.error_len as usize];
+            if resp.error_len > 0 {
+                let _ = stream.read_exact(&mut err_buf).await;
+            }
+            return Err(String::from_utf8_lossy(&err_buf).to_string());
+        }
+        Ok(())
+    }
+
+    /// Detect pets in a comic image using per-panel detection with
+    /// aspect-ratio correction fallback.
+    ///
+    /// For each panel:
+    /// 1. Run YOLO on the original panel crop
+    /// 2. If 0 detections, try padded variants (top/bottom, left/right)
+    ///    to compensate for aspect ratio distortion from Go's crop+scale
+    /// 3. Pick the variant with the most detections and remap bbox coords
     pub async fn detect_comic(
         &self,
         photos_dir: &Path,
@@ -241,26 +306,15 @@ impl LocalDetector {
             .map(|m| m.captured_at.format("%Y-%m-%dT%H:%M:%S").to_string())
             .unwrap_or_else(|_| chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
 
-        // Pass 1: detect on the full comic image
-        let raw_dets = self.detect_image(&jpeg_path).await?;
-        let inputs = raw_dets_to_inputs(&raw_dets, &detected_at, "yolo26l-ax650-raw");
-
-        // If we found at least one pet, return raw results
-        if inputs.iter().any(|d| is_pet_class(d.yolo_class.as_deref())) {
-            return Ok(inputs);
-        }
-
-        // Pass 2: fallback to per-panel detection
-        tracing::debug!("Raw-comic found no pets for {filename}, falling back to panel split");
         let img =
             image::open(&jpeg_path).map_err(|e| format!("open {}: {e}", jpeg_path.display()))?;
-        let mut all_inputs = inputs; // keep non-pet detections from raw pass
-        all_inputs.extend(
-            self.detect_panels(&img, &detected_at, "yolo26l-ax650-panel")
-                .await?,
-        );
-
-        Ok(all_inputs)
+        let all_raw = self.detect_panels_raw(&img).await?;
+        let merged = merge_detections(all_raw);
+        Ok(raw_dets_to_inputs(
+            &merged,
+            &detected_at,
+            "yolo26l-ax650-panel",
+        ))
     }
 
     /// Streaming variant: sends each detection via `tx` as soon as it's found.
@@ -279,78 +333,207 @@ impl LocalDetector {
             .map(|m| m.captured_at.format("%Y-%m-%dT%H:%M:%S").to_string())
             .unwrap_or_else(|_| chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
 
-        // Pass 1: raw comic
-        let raw_dets = self.detect_image(&jpeg_path).await?;
-        let inputs = raw_dets_to_inputs(&raw_dets, &detected_at, "yolo26l-ax650-raw");
+        let img =
+            image::open(&jpeg_path).map_err(|e| format!("open {}: {e}", jpeg_path.display()))?;
+        let all_raw = self.detect_panels_raw(&img).await?;
+
+        let merged = merge_detections(all_raw);
+        let inputs = raw_dets_to_inputs(&merged, &detected_at, "yolo26l-ax650-panel");
         for input in &inputs {
             let _ = tx.send(input.clone()).await;
         }
 
-        if inputs.iter().any(|d| is_pet_class(d.yolo_class.as_deref())) {
-            return Ok(inputs);
-        }
-
-        // Pass 2: panel fallback
-        tracing::debug!("Raw-comic found no pets for {filename}, falling back to panel split");
-        let img =
-            image::open(&jpeg_path).map_err(|e| format!("open {}: {e}", jpeg_path.display()))?;
-        let panel_inputs = self
-            .detect_panels(&img, &detected_at, "yolo26l-ax650-panel")
-            .await?;
-        for input in &panel_inputs {
-            let _ = tx.send(input.clone()).await;
-        }
-
-        let mut all = inputs;
-        all.extend(panel_inputs);
-        Ok(all)
+        Ok(inputs)
     }
 
-    /// Detect on each of the 4 comic panels individually.
-    async fn detect_panels(
+    /// 2-model detection pipeline with aspect-ratio correction.
+    ///
+    /// Phase 1 (fast model, e.g. yolo11s):
+    ///   For each panel, detect on original NV12.
+    ///   If 0 detections, try shrink_w/shrink_h variants → pick best aspect ratio.
+    ///   Record per-panel: best NV12 data + dimensions + scale factors.
+    ///
+    /// Phase 2 (accurate model, e.g. yolo26l):
+    ///   Switch model once, re-detect all panels with the chosen aspect ratio.
+    ///   Merge results from both models.
+    async fn detect_panels_raw(
         &self,
         img: &image::DynamicImage,
-        detected_at: &str,
-        model_tag: &str,
-    ) -> Result<Vec<DetectionInput>, String> {
-        let mut all_inputs = Vec::new();
+    ) -> Result<Vec<RawLocalDetection>, String> {
+        let pw = PANEL_W as u32;
+        let ph = PANEL_H as u32;
 
-        for panel in 0..4u32 {
-            let (x, y) = panel_origin(panel);
+        // Pre-crop all panels
+        let panels: Vec<_> = (0..4u32)
+            .map(|i| {
+                let (ox, oy) = panel_origin(i);
+                let rgb = img.crop_imm(ox as u32, oy as u32, pw, ph).to_rgb8();
+                (ox, oy, rgb)
+            })
+            .collect();
 
-            let panel_img = img.crop_imm(x as u32, y as u32, PANEL_W as u32, PANEL_H as u32);
-            let tmp_path = std::env::temp_dir().join(format!("panel_{panel}.jpg"));
-            panel_img
-                .save(&tmp_path)
-                .map_err(|e| format!("save panel: {e}"))?;
+        // Per-panel state after phase 1
+        struct PanelResult {
+            nv12: Vec<u8>,
+            width: u16,
+            height: u16,
+            scale_x: f64,
+            scale_y: f64,
+            fast_dets: Vec<RawLocalDetection>,
+        }
 
-            let dets = self.detect_image(&tmp_path).await?;
-            let _ = std::fs::remove_file(&tmp_path);
+        let has_fast = !self.config.fast_model.is_empty();
+        let has_accurate = !self.config.accurate_model.is_empty();
 
-            for d in dets {
-                if !KEEP_CLASSES.contains(&d.class_id) {
+        if !has_fast && !has_accurate {
+            tracing::warn!("No YOLO models configured (YOLO_FAST_MODEL / YOLO_ACCURATE_MODEL)");
+            return Ok(Vec::new());
+        }
+
+        // --- Phase 1: fast model for aspect ratio probing ---
+        let mut panel_results = Vec::new();
+        if has_fast {
+            tracing::info!("Phase 1: loading fast model {}", self.config.fast_model);
+            self.load_model(&self.config.fast_model).await?;
+
+            for (_, _, rgb) in &panels {
+                let nv12_orig = rgb_to_nv12(rgb, pw, ph);
+                let dets = self.detect_nv12(&nv12_orig, pw as u16, ph as u16).await?;
+
+                if !dets.is_empty() {
+                    panel_results.push(PanelResult {
+                        nv12: nv12_orig,
+                        width: pw as u16,
+                        height: ph as u16,
+                        scale_x: 1.0,
+                        scale_y: 1.0,
+                        fast_dets: dets,
+                    });
                     continue;
                 }
-                let class_name = normalize_class(d.class_id, d.class_name);
 
-                all_inputs.push(DetectionInput {
-                    panel_index: Some(panel as i32),
-                    bbox_x: x + d.bbox_x.max(0),
-                    bbox_y: y + d.bbox_y.max(0),
-                    bbox_w: d.bbox_w.min(PANEL_W - d.bbox_x.max(0)),
-                    bbox_h: d.bbox_h.min(PANEL_H - d.bbox_y.max(0)),
-                    yolo_class: Some(class_name),
-                    pet_class: None,
-                    confidence: Some(d.confidence),
-                    detected_at: detected_at.to_string(),
-                    color_metrics: None,
-                    det_level: 2,
-                    model: Some(model_tag.into()),
+                // Try aspect ratio variants with fast model
+                let (best_nv12, best_w, best_h, scale_x, scale_y, variant_dets) =
+                    self.probe_aspect_ratio(rgb, pw, ph).await?;
+                panel_results.push(PanelResult {
+                    nv12: best_nv12,
+                    width: best_w,
+                    height: best_h,
+                    scale_x,
+                    scale_y,
+                    fast_dets: variant_dets,
+                });
+            }
+        } else {
+            // No fast model — prepare original panels for accurate-only pass
+            for (_, _, rgb) in &panels {
+                let nv12_orig = rgb_to_nv12(rgb, pw, ph);
+                panel_results.push(PanelResult {
+                    nv12: nv12_orig,
+                    width: pw as u16,
+                    height: ph as u16,
+                    scale_x: 1.0,
+                    scale_y: 1.0,
+                    fast_dets: Vec::new(),
                 });
             }
         }
 
-        Ok(all_inputs)
+        // --- Phase 2: accurate model on chosen aspect ratios ---
+        let mut all = Vec::new();
+        if has_accurate {
+            tracing::info!(
+                "Phase 2: loading accurate model {}",
+                self.config.accurate_model
+            );
+            self.load_model(&self.config.accurate_model).await?;
+
+            for (i, pr) in panel_results.iter().enumerate() {
+                let (ox, oy) = (panels[i].0, panels[i].1);
+
+                let accurate_dets = self.detect_nv12(&pr.nv12, pr.width, pr.height).await?;
+
+                let mut combined = pr.fast_dets.clone();
+                combined.extend(accurate_dets);
+                let merged = merge_detections(combined);
+
+                for d in merged {
+                    if pr.scale_x == 1.0 && pr.scale_y == 1.0 {
+                        all.push(map_to_comic(d, ox, oy));
+                    } else {
+                        all.push(map_to_comic_scaled(d, ox, oy, pr.scale_x, pr.scale_y));
+                    }
+                }
+            }
+        } else {
+            // No accurate model — use fast model results only
+            for (i, pr) in panel_results.iter().enumerate() {
+                let (ox, oy) = (panels[i].0, panels[i].1);
+                for d in &pr.fast_dets {
+                    if pr.scale_x == 1.0 && pr.scale_y == 1.0 {
+                        all.push(map_to_comic(d.clone(), ox, oy));
+                    } else {
+                        all.push(map_to_comic_scaled(
+                            d.clone(),
+                            ox,
+                            oy,
+                            pr.scale_x,
+                            pr.scale_y,
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(all)
+    }
+
+    /// Probe aspect ratio variants with the currently loaded (fast) model.
+    /// Returns (nv12, w, h, scale_x, scale_y, detections) for the best variant.
+    /// If no variant finds anything, returns the original panel NV12.
+    async fn probe_aspect_ratio(
+        &self,
+        panel_rgb: &image::RgbImage,
+        pw: u32,
+        ph: u32,
+    ) -> Result<(Vec<u8>, u16, u16, f64, f64, Vec<RawLocalDetection>), String> {
+        // Variant A: shrink width 75%
+        let new_w = (pw * 3 / 4) & !1;
+        let shrunk_w =
+            image::imageops::resize(panel_rgb, new_w, ph, image::imageops::FilterType::Triangle);
+        let nv12_w = rgb_to_nv12(&shrunk_w, new_w, ph);
+        let dets_w = self.detect_nv12(&nv12_w, new_w as u16, ph as u16).await?;
+
+        // Variant B: shrink height 75%
+        let new_h = (ph * 3 / 4) & !1;
+        let shrunk_h =
+            image::imageops::resize(panel_rgb, pw, new_h, image::imageops::FilterType::Triangle);
+        let nv12_h = rgb_to_nv12(&shrunk_h, pw, new_h);
+        let dets_h = self.detect_nv12(&nv12_h, pw as u16, new_h as u16).await?;
+
+        if dets_w.len() >= dets_h.len() && !dets_w.is_empty() {
+            Ok((
+                nv12_w,
+                new_w as u16,
+                ph as u16,
+                pw as f64 / new_w as f64,
+                1.0,
+                dets_w,
+            ))
+        } else if !dets_h.is_empty() {
+            Ok((
+                nv12_h,
+                pw as u16,
+                new_h as u16,
+                1.0,
+                ph as f64 / new_h as f64,
+                dets_h,
+            ))
+        } else {
+            // Neither variant found anything — fall back to original
+            let nv12_orig = rgb_to_nv12(panel_rgb, pw, ph);
+            Ok((nv12_orig, pw as u16, ph as u16, 1.0, 1.0, Vec::new()))
+        }
     }
 
     /// Send a binary request and read binary response.
@@ -497,8 +680,41 @@ fn bbox_to_panel(bbox_x: i32, bbox_y: i32, bbox_w: i32, bbox_h: i32) -> Option<i
     None
 }
 
-fn is_pet_class(class: Option<&str>) -> bool {
-    matches!(class, Some("cat" | "dog"))
+/// Map a detection from panel-local coords back to comic space (no scaling).
+fn map_to_comic(d: RawLocalDetection, ox: i32, oy: i32) -> RawLocalDetection {
+    RawLocalDetection {
+        class_id: d.class_id,
+        class_name: d.class_name,
+        confidence: d.confidence,
+        bbox_x: ox + d.bbox_x.max(0),
+        bbox_y: oy + d.bbox_y.max(0),
+        bbox_w: d.bbox_w.min(PANEL_W - d.bbox_x.max(0)),
+        bbox_h: d.bbox_h.min(PANEL_H - d.bbox_y.max(0)),
+    }
+}
+
+/// Map a detection from a shrunk variant back to comic space.
+/// bbox coords are in shrunk image space — scale back to original panel size.
+fn map_to_comic_scaled(
+    d: RawLocalDetection,
+    ox: i32,
+    oy: i32,
+    scale_x: f64,
+    scale_y: f64,
+) -> RawLocalDetection {
+    let local_x = (d.bbox_x as f64 * scale_x) as i32;
+    let local_y = (d.bbox_y as f64 * scale_y) as i32;
+    let local_w = (d.bbox_w as f64 * scale_x) as i32;
+    let local_h = (d.bbox_h as f64 * scale_y) as i32;
+    RawLocalDetection {
+        class_id: d.class_id,
+        class_name: d.class_name,
+        confidence: d.confidence,
+        bbox_x: ox + local_x.max(0),
+        bbox_y: oy + local_y.max(0),
+        bbox_w: local_w.min(PANEL_W - local_x.max(0)),
+        bbox_h: local_h.min(PANEL_H - local_y.max(0)),
+    }
 }
 
 fn normalize_class(class_id: i32, class_name: String) -> String {
@@ -538,46 +754,80 @@ fn raw_dets_to_inputs(
         .collect()
 }
 
+/// Convert RGB image to NV12 (Y plane + interleaved UV plane).
+fn rgb_to_nv12(rgb: &image::RgbImage, w: u32, h: u32) -> Vec<u8> {
+    let mut nv12 = vec![0u8; (w * h * 3 / 2) as usize];
+    let (y_plane, uv_plane) = nv12.split_at_mut((w * h) as usize);
+
+    // Y plane
+    for row in 0..h {
+        for col in 0..w {
+            let p = rgb.get_pixel(col, row).0;
+            let y = (66 * p[0] as i32 + 129 * p[1] as i32 + 25 * p[2] as i32 + 128) / 256 + 16;
+            y_plane[(row * w + col) as usize] = y.clamp(0, 255) as u8;
+        }
+    }
+
+    // UV plane (subsampled 2×2)
+    for row in (0..h).step_by(2) {
+        for col in (0..w).step_by(2) {
+            let p = rgb.get_pixel(col, row).0;
+            let u = (-38 * p[0] as i32 - 74 * p[1] as i32 + 112 * p[2] as i32 + 128) / 256 + 128;
+            let v = (112 * p[0] as i32 - 94 * p[1] as i32 - 18 * p[2] as i32 + 128) / 256 + 128;
+            let uv_idx = (row / 2 * w + col) as usize;
+            uv_plane[uv_idx] = u.clamp(0, 255) as u8;
+            uv_plane[uv_idx + 1] = v.clamp(0, 255) as u8;
+        }
+    }
+
+    nv12
+}
+
+/// Merge overlapping detections from multiple passes.
+/// Same-class overlapping boxes (IoU > 0.5) get confidence-boosted.
+/// Cross-class overlapping boxes (IoU > 0.3) are deduplicated by confidence.
+fn merge_detections(mut dets: Vec<RawLocalDetection>) -> Vec<RawLocalDetection> {
+    dets.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+    // Pass 1: merge same-class overlaps with confidence boosting
+    let mut merged: Vec<RawLocalDetection> = Vec::new();
+    for det in dets {
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|m| m.class_id == det.class_id && iou_raw(m, &det) > 0.5)
+        {
+            let boosted = 1.0 - (1.0 - existing.confidence) * (1.0 - det.confidence);
+            existing.confidence = boosted;
+        } else {
+            merged.push(det);
+        }
+    }
+    // Pass 2: remove lower-confidence boxes dominated by higher-confidence ones
+    merged.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+    let mut result: Vec<RawLocalDetection> = Vec::new();
+    for det in merged {
+        let dominated = result.iter().any(|m| iou_raw(m, &det) > 0.3);
+        if !dominated {
+            result.push(det);
+        }
+    }
+    result
+}
+
+fn iou_raw(a: &RawLocalDetection, b: &RawLocalDetection) -> f64 {
+    let x1 = a.bbox_x.max(b.bbox_x);
+    let y1 = a.bbox_y.max(b.bbox_y);
+    let x2 = (a.bbox_x + a.bbox_w).min(b.bbox_x + b.bbox_w);
+    let y2 = (a.bbox_y + a.bbox_h).min(b.bbox_y + b.bbox_h);
+    let inter = (x2 - x1).max(0) as f64 * (y2 - y1).max(0) as f64;
+    let area_a = a.bbox_w as f64 * a.bbox_h as f64;
+    let area_b = b.bbox_w as f64 * b.bbox_h as f64;
+    let union = area_a + area_b - inter;
+    if union <= 0.0 { 0.0 } else { inter / union }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn merge_detections(mut dets: Vec<RawLocalDetection>) -> Vec<RawLocalDetection> {
-        dets.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
-        let mut pass1: Vec<RawLocalDetection> = Vec::new();
-        for det in dets {
-            if let Some(existing) = pass1
-                .iter_mut()
-                .find(|m| m.class_id == det.class_id && iou(m, &det) > 0.5)
-            {
-                let boosted = 1.0 - (1.0 - existing.confidence) * (1.0 - det.confidence);
-                existing.confidence = boosted;
-            } else {
-                pass1.push(det);
-            }
-        }
-        pass1.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
-        let mut pass2: Vec<RawLocalDetection> = Vec::new();
-        for det in pass1 {
-            let dominated = pass2.iter().any(|m| iou(m, &det) > 0.3);
-            if !dominated {
-                pass2.push(det);
-            }
-        }
-        pass2
-    }
-
-    fn iou(a: &RawLocalDetection, b: &RawLocalDetection) -> f64 {
-        let x1 = a.bbox_x.max(b.bbox_x);
-        let y1 = a.bbox_y.max(b.bbox_y);
-        let x2 = (a.bbox_x + a.bbox_w).min(b.bbox_x + b.bbox_w);
-        let y2 = (a.bbox_y + a.bbox_h).min(b.bbox_y + b.bbox_h);
-        let inter = (x2 - x1).max(0) as f64 * (y2 - y1).max(0) as f64;
-        let area_a = a.bbox_w as f64 * a.bbox_h as f64;
-        let area_b = b.bbox_w as f64 * b.bbox_h as f64;
-        let union = area_a + area_b - inter;
-        if union <= 0.0 { 0.0 } else { inter / union }
-    }
 
     #[test]
     fn wire_detection_round_trip() {
@@ -733,13 +983,5 @@ mod tests {
         assert_eq!(inputs[1].yolo_class.as_deref(), Some("cat")); // dog→cat
         assert_eq!(inputs[2].panel_index, Some(1));
         assert_eq!(inputs[2].yolo_class.as_deref(), Some("chair"));
-    }
-
-    #[test]
-    fn is_pet_class_checks() {
-        assert!(is_pet_class(Some("cat")));
-        assert!(is_pet_class(Some("dog")));
-        assert!(!is_pet_class(Some("chair")));
-        assert!(!is_pet_class(None));
     }
 }
