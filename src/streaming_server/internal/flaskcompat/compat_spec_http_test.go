@@ -19,9 +19,8 @@ func TestFlaskCompatIndex(t *testing.T) {
 	mustContain := []string{
 		"<title>Smart Pet Camera Monitor</title>",
 		"/assets/monitor.css",
-		"/assets/monitor.js",
-		"/assets/webrtc_client.js",
-		"/assets/bbox_overlay.js",
+		"type=\"module\"",
+		"/assets/main-",
 	}
 	for _, needle := range mustContain {
 		if !strings.Contains(html, needle) {
@@ -43,18 +42,44 @@ func TestFlaskCompatAssets(t *testing.T) {
 		t.Fatalf("monitor.css missing :root")
 	}
 
-	resp, body = client.get(t, "/assets/monitor.js")
+	// JS is bundled with content hash (e.g. /assets/main-x6fq2a8j.js).
+	// Extract the actual URL from index.html to verify the bundle is served.
+	_, indexBody := client.get(t, "/")
+	jsURL := extractSrcAttr(string(indexBody), "/assets/main-")
+	if jsURL == "" {
+		t.Fatalf("GET / did not contain a /assets/main-*.js script src")
+	}
+	resp, jsbody := client.get(t, jsURL)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /assets/monitor.js status = %d", resp.StatusCode)
+		t.Fatalf("GET %s status = %d", jsURL, resp.StatusCode)
 	}
 	contentType := resp.Header.Get("Content-Type")
 	if !strings.Contains(contentType, "application/javascript") &&
 		!strings.Contains(contentType, "text/javascript") {
-		t.Fatalf("monitor.js content-type = %q", contentType)
+		t.Fatalf("bundle content-type = %q", contentType)
 	}
-	if !strings.Contains(string(body), "/api/status") {
-		t.Fatalf("monitor.js missing /api/status usage")
+	if !strings.Contains(string(jsbody), "/api/status") {
+		t.Fatalf("bundle missing /api/status usage")
 	}
+}
+
+// extractSrcAttr returns the value of the first src="..." attribute whose
+// value starts with prefix, or "" if none is found.
+func extractSrcAttr(html, prefix string) string {
+	idx := strings.Index(html, prefix)
+	if idx < 0 {
+		return ""
+	}
+	// Walk back to find opening quote
+	start := idx
+	for start > 0 && html[start-1] != '"' {
+		start--
+	}
+	end := strings.IndexByte(html[idx:], '"')
+	if end < 0 {
+		return ""
+	}
+	return html[start : idx+end]
 }
 
 func TestFlaskCompatStatus(t *testing.T) {

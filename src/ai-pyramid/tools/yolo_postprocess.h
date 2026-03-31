@@ -58,6 +58,75 @@ static void generate_proposals_separated(int stride, const float* bbox_feat, con
     }
 }
 
+// YOLO11 unified DFL head: [1,H,W, 4*REG_MAX + C] where REG_MAX=16, C=80.
+// Channel layout per cell: [16 DFL bins × 4 coords, 80 class scores].
+static constexpr int DFL_REG_MAX = 16;
+
+static float dfl_decode(const float* bins, int reg_max) {
+    // softmax over reg_max bins, then weighted sum = expected distance
+    float max_val = bins[0];
+    for (int i = 1; i < reg_max; ++i) {
+        if (bins[i] > max_val)
+            max_val = bins[i];
+    }
+    float sum_exp = 0.f;
+    float weighted = 0.f;
+    for (int i = 0; i < reg_max; ++i) {
+        const float e = std::exp(bins[i] - max_val);
+        sum_exp += e;
+        weighted += e * i;
+    }
+    return weighted / sum_exp;
+}
+
+static void generate_proposals_dfl(int stride, const float* feat, float prob_threshold,
+                                   std::vector<Detection>& dets, int input_w, int input_h,
+                                   int cls_num, int reg_max = DFL_REG_MAX) {
+    const int feat_w = input_w / stride;
+    const int feat_h = input_h / stride;
+    const int ch = 4 * reg_max + cls_num; // 64 + 80 = 144
+
+    for (int h = 0; h < feat_h; ++h) {
+        for (int w = 0; w < feat_w; ++w) {
+            const float* cell = feat + (h * feat_w + w) * ch;
+            const float* cls_ptr = cell + 4 * reg_max; // class scores start after DFL bins
+
+            int best_cls = 0;
+            float best_score = -1e9f;
+            for (int c = 0; c < cls_num; ++c) {
+                if (cls_ptr[c] > best_score) {
+                    best_score = cls_ptr[c];
+                    best_cls = c;
+                }
+            }
+            const float prob = sigmoid(best_score);
+            if (prob <= prob_threshold)
+                continue;
+
+            // Decode DFL: 4 distances (left, top, right, bottom) from grid center
+            const float dl = dfl_decode(cell + 0 * reg_max, reg_max);
+            const float dt = dfl_decode(cell + 1 * reg_max, reg_max);
+            const float dr = dfl_decode(cell + 2 * reg_max, reg_max);
+            const float db = dfl_decode(cell + 3 * reg_max, reg_max);
+
+            // dist2bbox: grid center ± distance × stride
+            const float gx = (w + 0.5f) * stride;
+            const float gy = (h + 0.5f) * stride;
+
+            Detection d;
+            d.class_id = best_cls;
+            d.confidence = prob;
+            d.x1 = std::max(gx - dl * stride, 0.f);
+            d.y1 = std::max(gy - dt * stride, 0.f);
+            d.x2 = std::min(gx + dr * stride, (float)(input_w - 1));
+            d.y2 = std::min(gy + db * stride, (float)(input_h - 1));
+            if (d.x2 > d.x1 && d.y2 > d.y1) {
+                dets.push_back(d);
+            }
+        }
+    }
+}
+
 static float det_iou(const Detection& a, const Detection& b) {
     const float ix1 = std::max(a.x1, b.x1);
     const float iy1 = std::max(a.y1, b.y1);

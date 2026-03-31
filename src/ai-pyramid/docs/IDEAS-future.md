@@ -155,3 +155,36 @@ pet-album.service     ← 写真管理、Web UI
 pet-voice.service     ← NEW: 音声通知、コマンド (KWS→ASR→LLM→TTS)
 axllm-serve.service   ← VLM/LLM 推論 (共有)
 ```
+
+---
+
+## Edit History UI
+
+### 背景
+
+`edit_history` テーブルに pet_id / behavior / is_valid の変更が JSON 差分で記録されている (68件+)。
+現状は DB に溜まるだけで UI から参照できない。
+
+### UI アイデア
+
+- **モーダル内タブ**: EventDetail モーダルに「History」タブを追加。写真ごとの編集履歴をタイムライン表示
+  - `{created_at}  pet_id: mike → chatora`
+  - `{created_at}  behavior: resting → eating`
+  - 直感的な diff 表示 (色分け: old=赤、new=緑)
+
+- **全体のアクティビティフィード**: `/app` のサイドパネルまたは専用ページに、全写真の編集履歴を新しい順で一覧
+  - フィルタ: 日付範囲、編集者 (将来マルチユーザー対応時)、変更タイプ (pet_id / behavior / is_valid)
+
+- **VLM 補正の可視化**: VLM が判定した初期値 → ユーザーが修正した値の乖離を集計し、VLM の弱点を特定
+  - 例: 「mike を chatora に修正する頻度が高い」→ VLM prompt 改善のヒント
+
+### API
+
+- `GET /api/edit-history/{photo_id}` — 写真ごとの履歴
+- `GET /api/edit-history?limit=50&offset=0` — 全体フィード (ページネーション)
+
+### 実装メモ
+
+- DB スキーマは既に十分 (`photo_id`, `changes` JSON, `created_at`)
+- `changes` の JSON パースは UI 側 (TypeScript) で行い、表示用に整形
+- detection override (`pet_id_override`) の変更も edit_history に記録するとなお良い

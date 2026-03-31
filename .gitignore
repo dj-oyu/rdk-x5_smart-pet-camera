@@ -182,6 +182,8 @@ src/ai-pyramid/ui/*.zip
 *.ts.net.crt
 *.ts.net.key
 
-# sudoers (use .example template)
+# Deploy: device-specific files (use .example templates)
 deploy/*/sudoers-*
 !deploy/*/sudoers-*.example
+deploy/*/*.service
+!deploy/*/*.service.example
