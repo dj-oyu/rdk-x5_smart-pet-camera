@@ -64,6 +64,7 @@ static constexpr int STREAM_HEARTBEAT_SEC = 10;
 static volatile sig_atomic_t g_running = 1;
 static int g_listen_fd = -1;
 static std::string g_model_dir;
+static std::string g_default_model_path; // --model で指定された起動時モデル (自動復帰先)
 
 static void signal_handler(int /*sig*/) {
     g_running = 0;
@@ -653,6 +654,12 @@ static void handle_load(const int fd, AxModel& m, const RequestHeader& req) {
         send_error(fd, msg);
         return;
     }
+    // Skip if already loaded
+    if (m.handle && m.model_path == resolved) {
+        std::vector<Detection> empty;
+        send_detections(fd, empty, 0);
+        return;
+    }
     std::lock_guard<std::mutex> lock(m.npu_mutex);
     const int prev_w = m.input_w ? m.input_w : DEFAULT_INPUT_W;
     const int prev_h = m.input_h ? m.input_h : DEFAULT_INPUT_H;
@@ -664,6 +671,24 @@ static void handle_load(const int fd, AxModel& m, const RequestHeader& req) {
     }
     std::vector<Detection> empty;
     send_detections(fd, empty, 0);
+}
+
+/// Restore the default model (--model startup arg) if not already loaded.
+static void restore_default_model(AxModel& m) {
+    if (g_default_model_path.empty() || (m.handle && m.model_path == g_default_model_path)) {
+        return; // already loaded or no default
+    }
+    std::lock_guard<std::mutex> lock(m.npu_mutex);
+    const int prev_w = m.input_w ? m.input_w : DEFAULT_INPUT_W;
+    const int prev_h = m.input_h ? m.input_h : DEFAULT_INPUT_H;
+    unload_model(m);
+    if (load_model(m, g_default_model_path, prev_w, prev_h) == 0) {
+        fprintf(stderr, "[INFO] Restored default model: %s\n", g_default_model_path.c_str());
+    } else {
+        fprintf(stderr, "[ERROR] Failed to restore default model: %s\n",
+                g_default_model_path.c_str());
+        unload_model(m);
+    }
 }
 
 static void handle_unload(const int fd, AxModel& m) {
@@ -914,6 +939,7 @@ vdec_done:
         }
         return 1;
     }
+    g_default_model_path = resolved_model;
     if (load_model(model, resolved_model, input_w, input_h) != 0) {
         return 1;
     }
@@ -956,6 +982,7 @@ vdec_done:
             switch (req.cmd) {
             case CMD_DETECT:
                 handle_detect(cfd, model, req);
+                restore_default_model(model);
                 break;
             case CMD_LOAD:
                 handle_load(cfd, model, req);
@@ -1045,6 +1072,7 @@ vdec_done:
                                     switch (new_req.cmd) {
                                     case CMD_DETECT:
                                         handle_detect(new_cfd, model, new_req);
+                                        restore_default_model(model);
                                         break;
                                     case CMD_LOAD:
                                         handle_load(new_cfd, model, new_req);
