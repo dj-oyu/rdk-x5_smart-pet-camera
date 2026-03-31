@@ -810,9 +810,11 @@ func (sb *StatusBroadcaster) buildJSONStatus(
 	jsonHistory := make([]map[string]interface{}, len(history))
 	for i, h := range history {
 		jsonHistory[i] = map[string]interface{}{
-			"frame_number": h.FrameNumber,
-			"timestamp":    h.Timestamp,
-			"detections":   convertDetectionsToJSON(h.Detections),
+			"frame_number":   h.FrameNumber,
+			"timestamp":      h.Timestamp,
+			"num_detections": h.NumDetections,
+			"version":        h.Version,
+			"detections":     convertDetectionsToJSON(h.Detections),
 		}
 	}
 
