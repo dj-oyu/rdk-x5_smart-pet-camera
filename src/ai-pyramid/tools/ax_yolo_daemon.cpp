@@ -578,7 +578,8 @@ static void print_usage(const char* const prog) {
 
 int main(int argc, char** argv) {
     std::string model_path;
-    std::string socket_path = "/run/ax_yolo_daemon.sock";
+    const char* const env_sock = getenv("AX_YOLO_DAEMON_SOCKET");
+    std::string socket_path = env_sock ? env_sock : "/run/ax_yolo_daemon.sock";
     int input_w = DEFAULT_INPUT_W;
     int input_h = DEFAULT_INPUT_H;
 

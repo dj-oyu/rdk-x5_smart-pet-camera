@@ -46,16 +46,86 @@ struct WireDetection {
 
 // COCO class names for class_id → name mapping.
 const COCO_NAMES: &[&str] = &[
-    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
-    "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog",
-    "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
-    "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite",
-    "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle",
-    "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
-    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant",
-    "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
-    "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors",
-    "teddy bear", "hair drier", "toothbrush",
+    "person",
+    "bicycle",
+    "car",
+    "motorcycle",
+    "airplane",
+    "bus",
+    "train",
+    "truck",
+    "boat",
+    "traffic light",
+    "fire hydrant",
+    "stop sign",
+    "parking meter",
+    "bench",
+    "bird",
+    "cat",
+    "dog",
+    "horse",
+    "sheep",
+    "cow",
+    "elephant",
+    "bear",
+    "zebra",
+    "giraffe",
+    "backpack",
+    "umbrella",
+    "handbag",
+    "tie",
+    "suitcase",
+    "frisbee",
+    "skis",
+    "snowboard",
+    "sports ball",
+    "kite",
+    "baseball bat",
+    "baseball glove",
+    "skateboard",
+    "surfboard",
+    "tennis racket",
+    "bottle",
+    "wine glass",
+    "cup",
+    "fork",
+    "knife",
+    "spoon",
+    "bowl",
+    "banana",
+    "apple",
+    "sandwich",
+    "orange",
+    "broccoli",
+    "carrot",
+    "hot dog",
+    "pizza",
+    "donut",
+    "cake",
+    "chair",
+    "couch",
+    "potted plant",
+    "bed",
+    "dining table",
+    "toilet",
+    "tv",
+    "laptop",
+    "mouse",
+    "remote",
+    "keyboard",
+    "cell phone",
+    "microwave",
+    "oven",
+    "toaster",
+    "sink",
+    "refrigerator",
+    "book",
+    "clock",
+    "vase",
+    "scissors",
+    "teddy bear",
+    "hair drier",
+    "toothbrush",
 ];
 
 /// COCO class IDs worth keeping for pet camera context.
@@ -85,7 +155,6 @@ const KEEP_CLASSES: &[i32] = &[
     74, // clock
 ];
 
-
 #[derive(Debug, Clone)]
 pub struct LocalDetectorConfig {
     /// Unix socket path for ax_yolo_daemon.
@@ -95,7 +164,10 @@ pub struct LocalDetectorConfig {
 impl Default for LocalDetectorConfig {
     fn default() -> Self {
         Self {
-            daemon_socket: PathBuf::from("/run/ax_yolo_daemon.sock"),
+            daemon_socket: PathBuf::from(
+                std::env::var("AX_YOLO_DAEMON_SOCKET")
+                    .unwrap_or_else(|_| "/run/ax_yolo_daemon.sock".to_string()),
+            ),
         }
     }
 }
@@ -292,8 +364,7 @@ impl LocalDetector {
             .map_err(|e| format!("connect {}: {e}", self.config.daemon_socket.display()))?;
 
         // Send header + payload.
-        let hdr_bytes =
-            unsafe { std::slice::from_raw_parts(header as *const _ as *const u8, 16) };
+        let hdr_bytes = unsafe { std::slice::from_raw_parts(header as *const _ as *const u8, 16) };
         stream
             .write_all(hdr_bytes)
             .await
@@ -339,8 +410,7 @@ impl LocalDetector {
                 .read_exact(&mut det_buf)
                 .await
                 .map_err(|e| format!("read detection: {e}"))?;
-            let wd: WireDetection =
-                unsafe { std::ptr::read_unaligned(det_buf.as_ptr().cast()) };
+            let wd: WireDetection = unsafe { std::ptr::read_unaligned(det_buf.as_ptr().cast()) };
             let class_id = wd.class_id as i32;
             let class_name = COCO_NAMES
                 .get(class_id as usize)
@@ -395,7 +465,6 @@ pub struct RawLocalDetection {
     pub bbox_w: i32,
     pub bbox_h: i32,
 }
-
 
 // Comic layout constants (must match server::crop_panel)
 const MARGIN: i32 = 12;

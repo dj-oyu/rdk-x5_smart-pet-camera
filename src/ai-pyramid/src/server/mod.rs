@@ -857,7 +857,12 @@ async fn handle_night_assist_sse(State(state): State<AppState>) -> impl IntoResp
         .local_detector
         .as_ref()
         .map(|ld| ld.socket_path().to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("/run/ax_yolo_daemon.sock"));
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(
+                std::env::var("AX_YOLO_DAEMON_SOCKET")
+                    .unwrap_or_else(|_| "/run/ax_yolo_daemon.sock".to_string()),
+            )
+        });
 
     let host = host.clone();
 
@@ -921,9 +926,8 @@ async fn handle_night_assist_sse(State(state): State<AppState>) -> impl IntoResp
                 .as_secs_f64(),
         };
         let json = serde_json::to_string(&event).unwrap_or_default();
-        let sse_event = Ok::<_, std::convert::Infallible>(
-            Event::default().event(event_name).data(json),
-        );
+        let sse_event =
+            Ok::<_, std::convert::Infallible>(Event::default().event(event_name).data(json));
         Some((sse_event, Some(conn)))
     });
 
