@@ -490,38 +490,71 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 				}
 			}
 
-			expandW := int(float64(bw) * factor)
-			expandH := int(float64(bh) * factor)
-			// Ensure minimum crop size
-			if expandW < 64 {
-				expandW = 64
+			// --- aspect-ratio-preserving crop ---
+			const panelAspect = float64(comicPanelW) / float64(comicPanelH) // 404/228 ≈ 1.77
+
+			// Start from bbox expanded by factor
+			cropW := int(float64(bw) * factor)
+			cropH := int(float64(bh) * factor)
+			if cropW < 64 {
+				cropW = 64
 			}
-			if expandH < 64 {
-				expandH = 64
+			if cropH < 64 {
+				cropH = 64
 			}
-			x0, y0 := cx-expandW/2, cy-expandH/2
+
+			// Adjust to match panel aspect ratio (expand the smaller dimension)
+			if float64(cropW)/float64(cropH) < panelAspect {
+				// Too tall → widen
+				cropW = int(float64(cropH) * panelAspect)
+			} else {
+				// Too wide → heighten
+				cropH = int(float64(cropW) / panelAspect)
+			}
+
+			// Cap at 80% of frame to keep YOLO effective resolution
+			maxW := p.width * 4 / 5
+			maxH := p.height * 4 / 5
+			if cropW > maxW {
+				cropW = maxW
+				cropH = int(float64(cropW) / panelAspect)
+			}
+			if cropH > maxH {
+				cropH = maxH
+				cropW = int(float64(cropH) * panelAspect)
+			}
+
+			// Clamp to frame bounds (slide, don't shrink)
+			x0 := cx - cropW/2
+			y0 := cy - cropH/2
 			if x0 < 0 {
 				x0 = 0
 			}
 			if y0 < 0 {
 				y0 = 0
 			}
-			if x0+expandW > p.width {
-				expandW = p.width - x0
+			if x0+cropW > p.width {
+				x0 = p.width - cropW
 			}
-			if y0+expandH > p.height {
-				expandH = p.height - y0
+			if y0+cropH > p.height {
+				y0 = p.height - cropH
 			}
-			if expandW < 2 {
-				expandW = 2
+			// Final safety: if frame is smaller than crop (shouldn't happen), clamp
+			if x0 < 0 {
+				x0 = 0
+				cropW = p.width
+				cropH = int(float64(cropW) / panelAspect)
 			}
-			if expandH < 2 {
-				expandH = 2
+			if y0 < 0 {
+				y0 = 0
+				cropH = p.height
+				cropW = int(float64(cropH) * panelAspect)
 			}
-			cropRegions[i] = cropRegion{x0, y0, expandW, expandH}
+
+			cropRegions[i] = cropRegion{x0, y0, cropW, cropH}
 			cCrops[i] = C.comic_crop_t{
 				src_x: C.int(x0), src_y: C.int(y0),
-				src_w: C.int(expandW), src_h: C.int(expandH),
+				src_w: C.int(cropW), src_h: C.int(cropH),
 			}
 		}
 		// else: zero-initialized = full frame
