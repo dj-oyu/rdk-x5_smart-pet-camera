@@ -35,6 +35,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <netdb.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -48,7 +49,7 @@ static constexpr int DEFAULT_INPUT_W = 640;
 static constexpr int DEFAULT_INPUT_H = 640;
 static constexpr int CLS_NUM = 80;
 static constexpr int CMM_ALIGN = 128;
-static const char* CMM_TOKEN = "ax_yolo_daemon";
+static const char* const CMM_TOKEN = "ax_yolo_daemon";
 
 static constexpr int STREAM_RELAY_PORT = 9265;
 static constexpr int STREAM_HEARTBEAT_SEC = 10;
@@ -59,19 +60,15 @@ static constexpr int STREAM_HEARTBEAT_SEC = 10;
 
 static volatile sig_atomic_t g_running = 1;
 static int g_listen_fd = -1;
-static int g_stream_tcp_fd = -1; // Active stream TCP fd for clean shutdown.
 
 static void signal_handler(int /*sig*/) {
     g_running = 0;
+    // Shutdown listen socket to unblock accept(). Stream loop uses poll()
+    // with 1s timeout so it detects g_running=0 without fd close.
     if (g_listen_fd >= 0) {
         shutdown(g_listen_fd, SHUT_RDWR);
         close(g_listen_fd);
         g_listen_fd = -1;
-    }
-    if (g_stream_tcp_fd >= 0) {
-        shutdown(g_stream_tcp_fd, SHUT_RDWR);
-        close(g_stream_tcp_fd);
-        g_stream_tcp_fd = -1;
     }
 }
 
@@ -104,7 +101,7 @@ struct AxModel {
     std::mutex npu_mutex;
 };
 
-static void free_io(AX_ENGINE_IO_T* io) {
+static void free_io(AX_ENGINE_IO_T* const io) {
     for (uint32_t i = 0; i < io->nOutputSize; ++i) {
         AX_SYS_MemFree(io->pOutputs[i].phyAddr, io->pOutputs[i].pVirAddr);
     }
@@ -116,7 +113,7 @@ static void free_io(AX_ENGINE_IO_T* io) {
     io->nOutputSize = 0;
 }
 
-static int load_model(AxModel& m, const std::string& path, int input_w, int input_h) {
+static int load_model(AxModel& m, const std::string& path, const int input_w, const int input_h) {
     std::ifstream ifs(path, std::ios::binary | std::ios::ate);
     if (!ifs) {
         fprintf(stderr, "[ERROR] Cannot open model: %s\n", path.c_str());
@@ -232,9 +229,9 @@ static void letterbox_into(const cv::Mat& src, cv::Mat& dst) {
     cv::resize(src, roi, cv::Size(nw, nh));
 }
 
-static int run_npu_and_postprocess(AxModel& m, int orig_w, int orig_h,
+static int run_npu_and_postprocess(AxModel& m, const int orig_w, const int orig_h,
                                    std::vector<Detection>& results, double& elapsed_ms,
-                                   std::chrono::steady_clock::time_point t0) {
+                                   const std::chrono::steady_clock::time_point t0) {
     const int ret = AX_ENGINE_RunSync(m.handle, &m.io_data);
     if (ret != 0) {
         return ret;
@@ -262,7 +259,7 @@ static int run_npu_and_postprocess(AxModel& m, int orig_w, int orig_h,
     return 0;
 }
 
-static int ensure_nv12_cmm(AxModel& m, int w, int h) {
+static int ensure_nv12_cmm(AxModel& m, const int w, const int h) {
     const uint32_t needed = w * h * 3 / 2;
     if (m.nv12_vir && m.nv12_size >= needed) {
         return 0;
@@ -281,8 +278,8 @@ static int ensure_nv12_cmm(AxModel& m, int w, int h) {
 }
 
 // Inference from NV12 in CMM (already copied + flushed). Uses IVPS or CPU fallback.
-static int run_inference_nv12_cmm(AxModel& m, int src_w, int src_h, std::vector<Detection>& results,
-                                  double& elapsed_ms) {
+static int run_inference_nv12_cmm(AxModel& m, const int src_w, const int src_h,
+                                  std::vector<Detection>& results, double& elapsed_ms) {
     results.clear();
     const auto t0 = std::chrono::steady_clock::now();
 
@@ -335,7 +332,7 @@ static int run_inference_nv12_cmm(AxModel& m, int src_w, int src_h, std::vector<
 // Socket I/O
 // ---------------------------------------------------------------------------
 
-static bool read_exact(int fd, void* buf, size_t n) {
+static bool read_exact(const int fd, void* const buf, size_t n) {
     uint8_t* p = (uint8_t*)buf;
     while (n > 0) {
         const ssize_t r = read(fd, p, n);
@@ -348,7 +345,7 @@ static bool read_exact(int fd, void* buf, size_t n) {
     return true;
 }
 
-static bool write_exact(int fd, const void* buf, size_t n) {
+static bool write_exact(const int fd, const void* const buf, size_t n) {
     const uint8_t* p = (const uint8_t*)buf;
     while (n > 0) {
         const ssize_t w = write(fd, p, n);
@@ -361,7 +358,7 @@ static bool write_exact(int fd, const void* buf, size_t n) {
     return true;
 }
 
-static int create_listen_socket(const char* path) {
+static int create_listen_socket(const char* const path) {
     unlink(path);
     const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -382,7 +379,7 @@ static int create_listen_socket(const char* path) {
 // Send helpers
 // ---------------------------------------------------------------------------
 
-static bool send_detections(int fd, const std::vector<Detection>& dets, float ms) {
+static bool send_detections(const int fd, const std::vector<Detection>& dets, const float ms) {
     const uint16_t count = (uint16_t)std::min(dets.size(), (size_t)UINT16_MAX);
     ResponseHeader hdr = {};
     hdr.status = 0;
@@ -407,7 +404,7 @@ static bool send_detections(int fd, const std::vector<Detection>& dets, float ms
     return true;
 }
 
-static void send_error(int fd, const char* msg) {
+static void send_error(const int fd, const char* const msg) {
     ResponseHeader hdr = {};
     hdr.status = 1;
     hdr.error_len = (uint32_t)strlen(msg);
@@ -421,7 +418,7 @@ static void send_error(int fd, const char* msg) {
 // TCP client
 // ---------------------------------------------------------------------------
 
-static int tcp_connect(const char* host, int port) {
+static int tcp_connect(const char* const host, const int port) {
     struct addrinfo hints = {}, *res = nullptr;
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -437,11 +434,10 @@ static int tcp_connect(const char* host, int port) {
         return -1;
     }
     // Recv timeout (10s).
-    struct timeval tv = {10, 0};
+    const struct timeval tv = {10, 0};
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    // Connect timeout (5s) via non-blocking + poll.
     // TCP keepalive — detect dead connections quickly.
-    int keepalive = 1, idle = 5, interval = 2, count = 3;
+    const int keepalive = 1, idle = 5, interval = 2, count = 3;
     setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval));
@@ -471,7 +467,7 @@ static constexpr int FRAME_H = 720;
 // On-demand handlers
 // ---------------------------------------------------------------------------
 
-static void handle_detect(int fd, AxModel& m, const RequestHeader& req) {
+static void handle_detect(const int fd, AxModel& m, const RequestHeader& req) {
     if (!m.handle) {
         send_error(fd, "no model loaded");
         return;
@@ -485,7 +481,7 @@ static void handle_detect(int fd, AxModel& m, const RequestHeader& req) {
             send_error(fd, "read path failed");
             return;
         }
-        cv::Mat img = cv::imread(path, cv::IMREAD_COLOR);
+        const cv::Mat img = cv::imread(path, cv::IMREAD_COLOR);
         if (img.empty()) {
             send_error(fd, "imread failed");
             return;
@@ -536,16 +532,18 @@ static void handle_detect(int fd, AxModel& m, const RequestHeader& req) {
     send_detections(fd, dets, (float)ms);
 }
 
-static void handle_load(int fd, AxModel& m, const RequestHeader& req) {
+static void handle_load(const int fd, AxModel& m, const RequestHeader& req) {
     std::string path(req.payload_size, '\0');
     if (req.payload_size > 0 && !read_exact(fd, path.data(), req.payload_size)) {
         send_error(fd, "read path failed");
         return;
     }
     std::lock_guard<std::mutex> lock(m.npu_mutex);
+    const int prev_w = m.input_w ? m.input_w : DEFAULT_INPUT_W;
+    const int prev_h = m.input_h ? m.input_h : DEFAULT_INPUT_H;
     unload_model(m);
-    if (load_model(m, path, m.input_w ? m.input_w : DEFAULT_INPUT_W,
-                   m.input_h ? m.input_h : DEFAULT_INPUT_H) != 0) {
+    if (load_model(m, path, prev_w, prev_h) != 0) {
+        unload_model(m); // Clean up partial state from failed load.
         send_error(fd, "load failed");
         return;
     }
@@ -553,14 +551,14 @@ static void handle_load(int fd, AxModel& m, const RequestHeader& req) {
     send_detections(fd, empty, 0);
 }
 
-static void handle_unload(int fd, AxModel& m) {
+static void handle_unload(const int fd, AxModel& m) {
     std::lock_guard<std::mutex> lock(m.npu_mutex);
     unload_model(m);
     std::vector<Detection> empty;
     send_detections(fd, empty, 0);
 }
 
-static void handle_status(int fd, const AxModel& m) {
+static void handle_status(const int fd, const AxModel& m) {
     std::vector<Detection> empty;
     send_detections(fd, empty, m.handle ? (float)(m.cmm_bytes / 1024) : 0.f);
 }
@@ -569,7 +567,7 @@ static void handle_status(int fd, const AxModel& m) {
 // Main
 // ---------------------------------------------------------------------------
 
-static void print_usage(const char* prog) {
+static void print_usage(const char* const prog) {
     fprintf(stderr,
             "Usage: %s --model <path> [options]\n"
             "  --model <path>           axmodel file (required)\n"
@@ -670,10 +668,16 @@ int main(int argc, char** argv) {
                 delete ca;
                 if (ret != 0) {
                     fprintf(stderr, "[WARN] AX_VDEC_SetChnAttr: 0x%x\n", ret);
+                    AX_VDEC_DestroyGrp(VDEC_GRP);
+                    AX_VDEC_Deinit();
+                    goto vdec_done;
                 }
                 ret = AX_VDEC_EnableChn(VDEC_GRP, VDEC_CHN);
                 if (ret != 0) {
                     fprintf(stderr, "[WARN] AX_VDEC_EnableChn: 0x%x\n", ret);
+                    AX_VDEC_DestroyGrp(VDEC_GRP);
+                    AX_VDEC_Deinit();
+                    goto vdec_done;
                 }
 
                 // Manual frame pool (bSdkAutoFramePool=FALSE requires this).
@@ -686,7 +690,7 @@ int main(int argc, char** argv) {
                 pool_cfg.BlkSize = frame_buf_size;
                 pool_cfg.CacheMode = POOL_CACHE_MODE_NONCACHE;
                 strcpy((char*)pool_cfg.PartitionName, "anonymous");
-                AX_POOL pool_id = AX_POOL_CreatePool(&pool_cfg);
+                const AX_POOL pool_id = AX_POOL_CreatePool(&pool_cfg);
                 if (pool_id == AX_INVALID_POOLID) {
                     fprintf(stderr, "[WARN] AX_POOL_CreatePool failed\n");
                     AX_VDEC_DestroyGrp(VDEC_GRP);
@@ -709,6 +713,7 @@ int main(int argc, char** argv) {
             }
         }
     }
+vdec_done:
 
     // ENGINE_Init after VDEC setup — order matters for V3.6.4 BSP.
     AX_ENGINE_NPU_ATTR_T npu_attr = {};
@@ -719,7 +724,7 @@ int main(int argc, char** argv) {
     }
     fprintf(stderr, "[INFO] AX Engine %s\n", AX_ENGINE_GetVersion());
 
-    bool ivps_ok = AX_IVPS_Init() == 0;
+    const bool ivps_ok = AX_IVPS_Init() == 0;
     if (ivps_ok) {
         fprintf(stderr, "[INFO] IVPS HW enabled\n");
     }
@@ -795,7 +800,7 @@ int main(int argc, char** argv) {
                     break;
                 }
                 fprintf(stderr, "[STREAM] Connecting to %s:%d\n", shost.c_str(), STREAM_RELAY_PORT);
-                int stcp = tcp_connect(shost.c_str(), STREAM_RELAY_PORT);
+                const int stcp = tcp_connect(shost.c_str(), STREAM_RELAY_PORT);
                 if (stcp < 0) {
                     send_error(cfd, "tcp connect failed");
                     break;
@@ -810,105 +815,176 @@ int main(int argc, char** argv) {
                     }
                 }
                 fprintf(stderr, "[STREAM] Started (%dx%d H.265)\n", FRAME_W, FRAME_H);
-                g_stream_tcp_fd = stcp;
                 {
                     uint8_t sbuf[256 * 1024];
                     int sends = 0, decoded = 0;
                     const int clahe_interval = 128;
                     std::vector<uint8_t> clahe_y; // Cached CLAHE Y plane.
                     auto last_hb = std::chrono::steady_clock::now();
+                    bool stream_alive = true;
 
-                    while (g_running) {
-                        ssize_t nr = recv(stcp, sbuf, sizeof(sbuf), 0);
-                        if (nr <= 0) {
-                            if (nr == 0 || (errno != EAGAIN && errno != EINTR))
-                                fprintf(stderr, "[STREAM] %s\n", nr == 0 ? "EOF" : strerror(errno));
+                    // poll() multiplexing: accept other commands during stream.
+                    // pfds[0] = stream TCP (H.265 source from rdk-x5)
+                    // pfds[1] = listen socket (new daemon connections)
+                    // pfds[2] = stream client (detect disconnect)
+                    while (g_running && stream_alive) {
+                        struct pollfd pfds[3];
+                        pfds[0].fd = stcp;
+                        pfds[0].events = POLLIN;
+                        pfds[1].fd = g_listen_fd;
+                        pfds[1].events = POLLIN;
+                        pfds[2].fd = cfd;
+                        pfds[2].events = 0; // only POLLHUP/POLLERR
+
+                        const int pr = poll(pfds, 3, 1000); // 1s timeout for heartbeat check
+                        if (pr < 0) {
+                            if (errno == EINTR)
+                                continue;
                             break;
                         }
-                        AX_VDEC_STREAM_T st = {};
-                        st.pu8Addr = sbuf;
-                        st.u32StreamPackLen = nr;
-                        AX_VDEC_SendStream(VDEC_GRP, &st, -1);
-                        sends++;
 
-                        AX_VIDEO_FRAME_INFO_T fi = {};
-                        if (AX_VDEC_GetChnFrame(VDEC_GRP, VDEC_CHN, &fi, 100) != 0)
-                            goto heartbeat;
+                        // Stream client disconnected?
+                        if (pfds[2].revents & (POLLHUP | POLLERR)) {
+                            fprintf(stderr, "[STREAM] Client disconnected\n");
+                            break;
+                        }
 
-                        {
-                            const auto& vf = fi.stVFrame;
-                            const int fw = vf.u32Width, fh = vf.u32Height;
-                            const int ysz = fw * fh;
-                            const int nv12sz = ysz * 3 / 2;
-
-                            // Mmap VDEC output (phy-only pool).
-                            void* nv12_map = nullptr;
-                            if (fw > 0 && fh > 0 && vf.u64PhyAddr[0] && !vf.u64VirAddr[0])
-                                nv12_map = AX_SYS_Mmap(vf.u64PhyAddr[0], nv12sz);
-                            uint8_t* y = vf.u64VirAddr[0] ? (uint8_t*)(uintptr_t)vf.u64VirAddr[0]
-                                                          : (uint8_t*)nv12_map;
-                            uint8_t* uv = y ? y + ysz : nullptr;
-
-                            if (y && uv) {
-                                // CLAHE: recompute Y every N frames, cache result.
-                                // Use median_blur + clahe_y_plane directly (not apply_clahe_nv12
-                                // which writes UV past Y buffer).
-                                if ((decoded % clahe_interval) == 0) {
-                                    clahe_y.resize(ysz);
-                                    median_blur_3x3(y, clahe_y.data(), fw, fh);
-                                    std::vector<uint8_t> tmp(clahe_y);
-                                    clahe_y_plane(tmp.data(), clahe_y.data(), fw, fh);
-                                }
-                                if (!clahe_y.empty())
-                                    memcpy(y, clahe_y.data(), ysz);
-                                memset(uv, 128, ysz / 2);
-
-                                // IVPS HW NV12→BGR letterbox + NPU inference.
-                                if (model.ivps_ready && model.handle) {
-                                    AX_VIDEO_FRAME_T sf = {};
-                                    sf.u32Width = fw;
-                                    sf.u32Height = fh;
-                                    sf.enImgFormat = AX_FORMAT_YUV420_SEMIPLANAR;
-                                    sf.u32PicStride[0] = vf.u32PicStride[0];
-                                    sf.u64PhyAddr[0] = vf.u64PhyAddr[0];
-                                    sf.u64VirAddr[0] = (AX_U64)(uintptr_t)y;
-                                    sf.u64PhyAddr[1] = vf.u64PhyAddr[0] + ysz;
-                                    sf.u64VirAddr[1] = (AX_U64)(uintptr_t)uv;
-                                    AX_VIDEO_FRAME_T df = {};
-                                    df.u32Width = model.input_w;
-                                    df.u32Height = model.input_h;
-                                    df.enImgFormat = AX_FORMAT_BGR888;
-                                    df.u32PicStride[0] = model.input_w * 3;
-                                    df.u64PhyAddr[0] = model.io_data.pInputs[0].phyAddr;
-                                    df.u64VirAddr[0] =
-                                        (AX_U64)(uintptr_t)model.io_data.pInputs[0].pVirAddr;
-                                    df.u32FrameSize = model.io_data.pInputs[0].nSize;
-                                    AX_IVPS_ASPECT_RATIO_T ar = {};
-                                    ar.eMode = AX_IVPS_ASPECT_RATIO_AUTO;
-                                    ar.nBgColor = 0x727272;
-                                    ar.eAligns[0] = AX_IVPS_ASPECT_RATIO_HORIZONTAL_CENTER;
-                                    ar.eAligns[1] = AX_IVPS_ASPECT_RATIO_VERTICAL_CENTER;
-                                    if (AX_IVPS_CropResizeTdp(&sf, &df, &ar) == 0) {
-                                        AX_SYS_MinvalidateCache(model.io_data.pInputs[0].phyAddr,
-                                                                model.io_data.pInputs[0].pVirAddr,
-                                                                model.io_data.pInputs[0].nSize);
-                                        std::vector<Detection> dets;
-                                        double ms = 0;
-                                        const auto t0 = std::chrono::steady_clock::now();
-                                        run_npu_and_postprocess(model, fw, fh, dets, ms, t0);
-                                        if (!dets.empty())
-                                            send_detections(cfd, dets, (float)ms);
+                        // Handle new connections on listen socket during stream.
+                        if (pfds[1].revents & POLLIN) {
+                            const int new_cfd = accept(g_listen_fd, nullptr, nullptr);
+                            if (new_cfd >= 0) {
+                                // Short recv timeout for inline handling.
+                                const struct timeval tv = {2, 0};
+                                setsockopt(new_cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                                RequestHeader new_req = {};
+                                if (read_exact(new_cfd, &new_req, sizeof(new_req))) {
+                                    switch (new_req.cmd) {
+                                    case CMD_DETECT:
+                                        handle_detect(new_cfd, model, new_req);
+                                        break;
+                                    case CMD_LOAD:
+                                        handle_load(new_cfd, model, new_req);
+                                        break;
+                                    case CMD_UNLOAD:
+                                        handle_unload(new_cfd, model);
+                                        break;
+                                    case CMD_STATUS:
+                                        handle_status(new_cfd, model);
+                                        break;
+                                    case CMD_STREAM: {
+                                        // Drain payload before rejecting.
+                                        if (new_req.payload_size > 0) {
+                                            std::vector<uint8_t> drain(new_req.payload_size);
+                                            read_exact(new_cfd, drain.data(), new_req.payload_size);
+                                        }
+                                        send_error(new_cfd, "stream already active");
+                                    } break;
+                                    default:
+                                        send_error(new_cfd, "unknown command");
+                                        break;
                                     }
                                 }
-                                decoded++;
+                                close(new_cfd);
                             }
-
-                            if (nv12_map)
-                                AX_SYS_Munmap(nv12_map, nv12sz);
                         }
-                        AX_VDEC_ReleaseChnFrame(VDEC_GRP, VDEC_CHN, &fi);
 
-                    heartbeat:
+                        // Process stream data from TCP source.
+                        if (pfds[0].revents & POLLIN) {
+                            const ssize_t nr = recv(stcp, sbuf, sizeof(sbuf), 0);
+                            if (nr <= 0) {
+                                if (nr == 0 || (errno != EAGAIN && errno != EINTR))
+                                    fprintf(stderr, "[STREAM] %s\n",
+                                            nr == 0 ? "EOF" : strerror(errno));
+                                break;
+                            }
+                            AX_VDEC_STREAM_T st = {};
+                            st.pu8Addr = sbuf;
+                            st.u32StreamPackLen = nr;
+                            AX_VDEC_SendStream(VDEC_GRP, &st, -1);
+                            sends++;
+
+                            AX_VIDEO_FRAME_INFO_T fi = {};
+                            if (AX_VDEC_GetChnFrame(VDEC_GRP, VDEC_CHN, &fi, 100) == 0) {
+                                const auto& vf = fi.stVFrame;
+                                const int fw = vf.u32Width, fh = vf.u32Height;
+                                const int ysz = fw * fh;
+                                const int nv12sz = ysz * 3 / 2;
+
+                                // Mmap VDEC output (phy-only pool).
+                                void* const nv12_map =
+                                    (fw > 0 && fh > 0 && vf.u64PhyAddr[0] && !vf.u64VirAddr[0])
+                                        ? AX_SYS_Mmap(vf.u64PhyAddr[0], nv12sz)
+                                        : nullptr;
+                                uint8_t* const y = vf.u64VirAddr[0]
+                                                       ? (uint8_t*)(uintptr_t)vf.u64VirAddr[0]
+                                                       : (uint8_t*)nv12_map;
+                                uint8_t* const uv = y ? y + ysz : nullptr;
+
+                                if (y && uv) {
+                                    // CLAHE: recompute Y every N frames, cache result.
+                                    if ((decoded % clahe_interval) == 0) {
+                                        clahe_y.resize(ysz);
+                                        median_blur_3x3(y, clahe_y.data(), fw, fh);
+                                        std::vector<uint8_t> tmp(clahe_y);
+                                        clahe_y_plane(tmp.data(), clahe_y.data(), fw, fh);
+                                    }
+                                    if (!clahe_y.empty())
+                                        memcpy(y, clahe_y.data(), ysz);
+                                    memset(uv, 128, ysz / 2);
+
+                                    // IVPS HW NV12→BGR letterbox + NPU inference.
+                                    if (model.ivps_ready && model.handle) {
+                                        AX_VIDEO_FRAME_T sf = {};
+                                        sf.u32Width = fw;
+                                        sf.u32Height = fh;
+                                        sf.enImgFormat = AX_FORMAT_YUV420_SEMIPLANAR;
+                                        sf.u32PicStride[0] = vf.u32PicStride[0];
+                                        sf.u64PhyAddr[0] = vf.u64PhyAddr[0];
+                                        sf.u64VirAddr[0] = (AX_U64)(uintptr_t)y;
+                                        sf.u64PhyAddr[1] = vf.u64PhyAddr[0] + ysz;
+                                        sf.u64VirAddr[1] = (AX_U64)(uintptr_t)uv;
+                                        AX_VIDEO_FRAME_T df = {};
+                                        df.u32Width = model.input_w;
+                                        df.u32Height = model.input_h;
+                                        df.enImgFormat = AX_FORMAT_BGR888;
+                                        df.u32PicStride[0] = model.input_w * 3;
+                                        df.u64PhyAddr[0] = model.io_data.pInputs[0].phyAddr;
+                                        df.u64VirAddr[0] =
+                                            (AX_U64)(uintptr_t)model.io_data.pInputs[0].pVirAddr;
+                                        df.u32FrameSize = model.io_data.pInputs[0].nSize;
+                                        AX_IVPS_ASPECT_RATIO_T ar = {};
+                                        ar.eMode = AX_IVPS_ASPECT_RATIO_AUTO;
+                                        ar.nBgColor = 0x727272;
+                                        ar.eAligns[0] = AX_IVPS_ASPECT_RATIO_HORIZONTAL_CENTER;
+                                        ar.eAligns[1] = AX_IVPS_ASPECT_RATIO_VERTICAL_CENTER;
+                                        if (AX_IVPS_CropResizeTdp(&sf, &df, &ar) == 0) {
+                                            AX_SYS_MinvalidateCache(
+                                                model.io_data.pInputs[0].phyAddr,
+                                                model.io_data.pInputs[0].pVirAddr,
+                                                model.io_data.pInputs[0].nSize);
+                                            std::vector<Detection> dets;
+                                            double ms = 0;
+                                            const auto t0 = std::chrono::steady_clock::now();
+                                            run_npu_and_postprocess(model, fw, fh, dets, ms, t0);
+                                            if (!dets.empty()) {
+                                                if (!send_detections(cfd, dets, (float)ms))
+                                                    stream_alive = false;
+                                            }
+                                        }
+                                    }
+                                    decoded++;
+                                }
+
+                                if (nv12_map)
+                                    AX_SYS_Munmap(nv12_map, nv12sz);
+                                AX_VDEC_ReleaseChnFrame(VDEC_GRP, VDEC_CHN, &fi);
+                            }
+                        } else if (pfds[0].revents & (POLLHUP | POLLERR)) {
+                            fprintf(stderr, "[STREAM] TCP source disconnected\n");
+                            break;
+                        }
+
+                        // Heartbeat.
                         auto now = std::chrono::steady_clock::now();
                         if (std::chrono::duration_cast<std::chrono::seconds>(now - last_hb)
                                 .count() >= STREAM_HEARTBEAT_SEC) {
@@ -921,7 +997,6 @@ int main(int argc, char** argv) {
                     }
                     fprintf(stderr, "[STREAM] Ended (sends=%d decoded=%d)\n", sends, decoded);
                 }
-                g_stream_tcp_fd = -1;
                 shutdown(stcp, SHUT_RDWR);
                 close(stcp);
             } break;
@@ -946,6 +1021,7 @@ int main(int argc, char** argv) {
     }
     if (vdec_ok) {
         AX_VDEC_StopRecvStream(VDEC_GRP);
+        AX_VDEC_DisableChn(VDEC_GRP, VDEC_CHN);
         AX_VDEC_DetachPool(VDEC_GRP, VDEC_CHN);
         AX_VDEC_DestroyGrp(VDEC_GRP);
         if (model.vdec_pool_id != AX_INVALID_POOLID) {
