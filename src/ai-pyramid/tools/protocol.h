@@ -10,6 +10,7 @@ static constexpr uint16_t CMD_LOAD = 1;
 static constexpr uint16_t CMD_UNLOAD = 2;
 static constexpr uint16_t CMD_STATUS = 3;
 static constexpr uint16_t CMD_STREAM = 4;
+static constexpr uint16_t CMD_HELP = 5;
 
 // Input types for CMD_DETECT
 static constexpr uint16_t INPUT_JPEG_PATH = 0;
