@@ -1,5 +1,6 @@
 use crate::application::{AppContext, ObservationInput, ObservationResult};
 use crate::detect::DetectClient;
+use crate::detect::local::LocalDetector;
 use crate::ingest::filename::parse_comic_filename;
 use crate::vlm::{VlmClient, VlmConfig};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -18,6 +19,7 @@ pub struct PhotoWatcher {
     app: AppContext,
     vlm_config: VlmConfig,
     detect_client: Option<Arc<DetectClient>>,
+    local_detector: Option<Arc<LocalDetector>>,
 }
 
 impl PhotoWatcher {
@@ -25,11 +27,13 @@ impl PhotoWatcher {
         app: AppContext,
         vlm_config: VlmConfig,
         detect_client: Option<Arc<DetectClient>>,
+        local_detector: Option<Arc<LocalDetector>>,
     ) -> Self {
         Self {
             app,
             vlm_config,
             detect_client,
+            local_detector,
         }
     }
 
@@ -234,27 +238,70 @@ impl PhotoWatcher {
                 }
             }
 
-            // Run YOLO detection via rdk-x5 (non-fatal)
-            if let Some(ref detect_client) = self.detect_client {
+            // Run YOLO detection: try remote (rdk-x5), fallback to local daemon
+            let dets = if let Some(ref detect_client) = self.detect_client {
                 match detect_client.detect(&filename).await {
                     Ok(dets) if !dets.is_empty() => {
-                        if let Ok(meta) = parse_comic_filename(&filename) {
-                            let _ = commands
-                                .ingest_with_detections(
-                                    &filename,
-                                    meta.captured_at,
-                                    meta.pet_id.as_deref(),
-                                    &dets,
-                                )
-                                .await;
-                            self.app
-                                .notify_detection_complete(&filename, meta.pet_id.clone());
-                            info!("Detection: {filename} ({} dets)", dets.len());
+                        info!("Remote detection: {filename} ({} dets)", dets.len());
+                        Some(dets)
+                    }
+                    Ok(_) => {
+                        info!("Remote detection: {filename} (0 dets)");
+                        None
+                    }
+                    Err(e) => {
+                        warn!("Remote detection failed for {filename}: {e}");
+                        // Fallback to local detector
+                        if let Some(ref ld) = self.local_detector {
+                            match ld.detect_comic(&photos_dir, &filename).await {
+                                Ok(dets) if !dets.is_empty() => {
+                                    info!(
+                                        "Local fallback detection: {filename} ({} dets)",
+                                        dets.len()
+                                    );
+                                    Some(dets)
+                                }
+                                Ok(_) => None,
+                                Err(e2) => {
+                                    warn!("Local fallback also failed for {filename}: {e2}");
+                                    None
+                                }
+                            }
+                        } else {
+                            None
                         }
                     }
-                    Ok(_) => {}
-                    Err(e) => warn!("Detection failed for {filename}: {e}"),
                 }
+            } else if let Some(ref ld) = self.local_detector {
+                // No remote client configured — use local directly
+                match ld.detect_comic(&photos_dir, &filename).await {
+                    Ok(dets) if !dets.is_empty() => {
+                        info!("Local detection: {filename} ({} dets)", dets.len());
+                        Some(dets)
+                    }
+                    Ok(_) => None,
+                    Err(e) => {
+                        warn!("Local detection failed for {filename}: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            if let Some(dets) = dets
+                && let Ok(meta) = parse_comic_filename(&filename)
+            {
+                let _ = commands
+                    .ingest_with_detections(
+                        &filename,
+                        meta.captured_at,
+                        meta.pet_id.as_deref(),
+                        &dets,
+                    )
+                    .await;
+                self.app
+                    .notify_detection_complete(&filename, meta.pet_id.clone());
             }
         }
     }
