@@ -176,16 +176,6 @@ async fn main() {
         None
     };
 
-    let watcher = PhotoWatcher::new(app_context.clone(), vlm_config, detect_client.clone());
-    tokio::spawn(async move {
-        watcher.run().await;
-    });
-
-    let pet_names = server::load_pet_names();
-    if !pet_names.is_empty() {
-        info!("Pet names: {:?}", pet_names);
-    }
-
     // Local NPU detector (YOLO26l on AX650)
     let local_detector = {
         let config = pet_album::detect::local::LocalDetectorConfig::default();
@@ -198,6 +188,21 @@ async fn main() {
             None
         }
     };
+
+    let watcher = PhotoWatcher::new(
+        app_context.clone(),
+        vlm_config,
+        detect_client.clone(),
+        local_detector.clone(),
+    );
+    tokio::spawn(async move {
+        watcher.run().await;
+    });
+
+    let pet_names = server::load_pet_names();
+    if !pet_names.is_empty() {
+        info!("Pet names: {:?}", pet_names);
+    }
 
     // Night assist host: detection is handled by ax_yolo_daemon CMD_STREAM.
     // We just pass the host to the SSE handler for daemon connection.
