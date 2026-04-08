@@ -289,19 +289,19 @@ impl PhotoWatcher {
                 None
             };
 
-            if let Some(dets) = dets {
-                if let Ok(meta) = parse_comic_filename(&filename) {
-                    let _ = commands
-                        .ingest_with_detections(
-                            &filename,
-                            meta.captured_at,
-                            meta.pet_id.as_deref(),
-                            &dets,
-                        )
-                        .await;
-                    self.app
-                        .notify_detection_complete(&filename, meta.pet_id.clone());
-                }
+            if let Some(dets) = dets
+                && let Ok(meta) = parse_comic_filename(&filename)
+            {
+                let _ = commands
+                    .ingest_with_detections(
+                        &filename,
+                        meta.captured_at,
+                        meta.pet_id.as_deref(),
+                        &dets,
+                    )
+                    .await;
+                self.app
+                    .notify_detection_complete(&filename, meta.pet_id.clone());
             }
         }
     }
