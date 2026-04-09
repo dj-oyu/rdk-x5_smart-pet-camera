@@ -101,8 +101,8 @@ struct AxModel {
     // Avoids CMM fragmentation from repeated alloc/free cycles.
     uint32_t num_input_bufs = 0;
     uint32_t num_output_bufs = 0;
-    std::vector<uint32_t> input_buf_caps;   // allocated capacity per input slot
-    std::vector<uint32_t> output_buf_caps;  // allocated capacity per output slot
+    std::vector<uint32_t> input_buf_caps;  // allocated capacity per input slot
+    std::vector<uint32_t> output_buf_caps; // allocated capacity per output slot
 
     // CMM buffer for NV12 input (reusable).
     AX_U64 nv12_phy = 0;
@@ -288,14 +288,14 @@ static int load_model(AxModel& m, const std::string& path, const int input_w, co
         m.num_output_bufs = new_nout;
     }
 
-buffers_done:
+buffers_done :
 
-    {
-        AX_ENGINE_CMM_INFO cmm_info = {};
-        if (AX_ENGINE_GetCMMUsage(m.handle, &cmm_info) == 0) {
-            m.cmm_bytes = cmm_info.nCMMSize;
-        }
+{
+    AX_ENGINE_CMM_INFO cmm_info = {};
+    if (AX_ENGINE_GetCMMUsage(m.handle, &cmm_info) == 0) {
+        m.cmm_bytes = cmm_info.nCMMSize;
     }
+}
 
     {
         const char* cs_name = "unknown";
@@ -392,17 +392,22 @@ static void letterbox_into(const cv::Mat& src, cv::Mat& dst) {
 
 static void watchdog_ping() {
     const char* sock = getenv("NOTIFY_SOCKET");
-    if (!sock) return;
+    if (!sock)
+        return;
     const int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) return;
+    if (fd < 0)
+        return;
     struct sockaddr_un addr = {};
     addr.sun_family = AF_UNIX;
     const size_t len = strlen(sock);
-    if (len >= sizeof(addr.sun_path)) { close(fd); return; }
+    if (len >= sizeof(addr.sun_path)) {
+        close(fd);
+        return;
+    }
     memcpy(addr.sun_path, sock, len);
     socklen_t addr_len = offsetof(struct sockaddr_un, sun_path) + len;
     if (addr.sun_path[0] == '@') {
-        addr.sun_path[0] = '\0';  // abstract socket
+        addr.sun_path[0] = '\0'; // abstract socket
     }
     sendto(fd, "WATCHDOG=1", 10, 0, (struct sockaddr*)&addr, addr_len);
     close(fd);
@@ -416,9 +421,8 @@ static int run_npu_and_postprocess(AxModel& m, const int orig_w, const int orig_
                                    std::vector<Detection>& results, double& elapsed_ms,
                                    const std::chrono::steady_clock::time_point t0) {
     // Run inference in a separate thread with timeout to detect NPU hangs.
-    auto fut = std::async(std::launch::async, [&]() {
-        return AX_ENGINE_RunSync(m.handle, &m.io_data);
-    });
+    auto fut =
+        std::async(std::launch::async, [&]() { return AX_ENGINE_RunSync(m.handle, &m.io_data); });
     if (fut.wait_for(std::chrono::milliseconds(NPU_TIMEOUT_MS)) == std::future_status::timeout) {
         fprintf(stderr, "[ERROR] NPU RunSync timeout (%dms), possible NPU deadlock\n",
                 NPU_TIMEOUT_MS);
