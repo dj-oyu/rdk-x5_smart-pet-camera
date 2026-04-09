@@ -1,5 +1,6 @@
 [Unit]
 Description=Pet Camera Daemon (camera_daemon_drobotics)
+After=cam-service.service
 PartOf=pet-camera.target
 
 [Service]
