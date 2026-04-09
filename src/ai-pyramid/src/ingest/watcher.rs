@@ -190,7 +190,7 @@ impl PhotoWatcher {
         let tx_for_rescan = tx.clone();
         let app_for_rescan = self.app.clone();
         let commands = self.app.observation_commands();
-        let vlm_semaphore = self.app.vlm_semaphore().clone();
+        let npu_semaphore = self.app.npu_semaphore().clone();
 
         tokio::spawn(async move {
             let queries = app_for_rescan.event_queries();
@@ -215,7 +215,8 @@ impl PhotoWatcher {
             }
 
             info!("Observing source photo: {filename}");
-            let _permit = vlm_semaphore.acquire().await.unwrap();
+            // Hold NPU permit for both VLM + YOLO to prevent concurrent NPU access.
+            let _permit = npu_semaphore.acquire().await.unwrap();
             match vlm_client.analyze(&jpeg_path).await {
                 Ok(response) => {
                     if let Err(error) = commands
