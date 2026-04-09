@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <future>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -56,6 +57,8 @@ static const char* const CMM_TOKEN = "ax_yolo_daemon";
 
 static constexpr int STREAM_RELAY_PORT = 9265;
 static constexpr int STREAM_HEARTBEAT_SEC = 10;
+static constexpr int NPU_TIMEOUT_MS = 5000;
+static constexpr int NPU_TIMEOUT_MAX_CONSECUTIVE = 3;
 
 // ---------------------------------------------------------------------------
 // Globals
@@ -94,6 +97,13 @@ struct AxModel {
     std::string model_path;
     uint32_t cmm_bytes = 0;
 
+    // Pre-allocated CMM I/O buffer capacities for reuse across model hot-swaps.
+    // Avoids CMM fragmentation from repeated alloc/free cycles.
+    uint32_t num_input_bufs = 0;
+    uint32_t num_output_bufs = 0;
+    std::vector<uint32_t> input_buf_caps;  // allocated capacity per input slot
+    std::vector<uint32_t> output_buf_caps; // allocated capacity per output slot
+
     // CMM buffer for NV12 input (reusable).
     AX_U64 nv12_phy = 0;
     void* nv12_vir = nullptr;
@@ -102,13 +112,23 @@ struct AxModel {
     bool vdec_ready = false;
     AX_POOL vdec_pool_id = AX_INVALID_POOLID;
 
+    // NPU timeout tracking.
+    int consecutive_timeouts = 0;
+
     // Mutex for NPU access (stream vs on-demand).
     std::mutex npu_mutex;
 };
 
 static void free_io(AX_ENGINE_IO_T* const io) {
+    for (uint32_t i = 0; i < io->nInputSize; ++i) {
+        if (io->pInputs[i].phyAddr) {
+            AX_SYS_MemFree(io->pInputs[i].phyAddr, io->pInputs[i].pVirAddr);
+        }
+    }
     for (uint32_t i = 0; i < io->nOutputSize; ++i) {
-        AX_SYS_MemFree(io->pOutputs[i].phyAddr, io->pOutputs[i].pVirAddr);
+        if (io->pOutputs[i].phyAddr) {
+            AX_SYS_MemFree(io->pOutputs[i].phyAddr, io->pOutputs[i].pVirAddr);
+        }
     }
     delete[] io->pInputs;
     delete[] io->pOutputs;
@@ -147,88 +167,210 @@ static int load_model(AxModel& m, const std::string& path, const int input_w, co
         return ret;
     }
 
-    memset(&m.io_data, 0, sizeof(m.io_data));
-    m.io_data.nInputSize = m.io_info->nInputSize;
-    m.io_data.pInputs = new AX_ENGINE_IO_BUFFER_T[m.io_info->nInputSize]();
-    for (uint32_t i = 0; i < m.io_info->nInputSize; ++i) {
-        auto& buf = m.io_data.pInputs[i];
-        buf.nSize = m.io_info->pInputs[i].nSize;
-        ret = AX_SYS_MemAllocCached(&buf.phyAddr, &buf.pVirAddr, buf.nSize, CMM_ALIGN,
-                                    (const AX_S8*)CMM_TOKEN);
-        if (ret != 0) {
-            return ret;
+    // --- Allocate or reuse CMM I/O buffers ---
+    // Reuse existing buffers when possible to prevent CMM fragmentation
+    // from repeated alloc/free cycles during model hot-swap.
+
+    const uint32_t new_nin = m.io_info->nInputSize;
+    const uint32_t new_nout = m.io_info->nOutputSize;
+
+    // Input buffers: reuse if slot count matches and capacity is sufficient.
+    if (m.num_input_bufs >= new_nin) {
+        // Reuse existing input buffer array.
+        m.io_data.nInputSize = new_nin;
+        for (uint32_t i = 0; i < new_nin; ++i) {
+            const uint32_t needed = m.io_info->pInputs[i].nSize;
+            if (m.input_buf_caps[i] >= needed) {
+                m.io_data.pInputs[i].nSize = needed;
+            } else {
+                // Need larger buffer — free old, alloc new.
+                AX_SYS_MemFree(m.io_data.pInputs[i].phyAddr, m.io_data.pInputs[i].pVirAddr);
+                m.io_data.pInputs[i] = {};
+                m.io_data.pInputs[i].nSize = needed;
+                ret = AX_SYS_MemAllocCached(&m.io_data.pInputs[i].phyAddr,
+                                            &m.io_data.pInputs[i].pVirAddr, needed, CMM_ALIGN,
+                                            (const AX_S8*)CMM_TOKEN);
+                if (ret != 0) {
+                    fprintf(stderr, "[ERROR] CMM alloc input[%u] realloc: 0x%x\n", i, ret);
+                    goto fail_cleanup;
+                }
+                m.input_buf_caps[i] = needed;
+            }
         }
-    }
-    m.io_data.nOutputSize = m.io_info->nOutputSize;
-    m.io_data.pOutputs = new AX_ENGINE_IO_BUFFER_T[m.io_info->nOutputSize]();
-    for (uint32_t i = 0; i < m.io_info->nOutputSize; ++i) {
-        auto& buf = m.io_data.pOutputs[i];
-        buf.nSize = m.io_info->pOutputs[i].nSize;
-        ret = AX_SYS_MemAllocCached(&buf.phyAddr, &buf.pVirAddr, buf.nSize, CMM_ALIGN,
-                                    (const AX_S8*)CMM_TOKEN);
-        if (ret != 0) {
-            return ret;
+    } else {
+        // Fresh allocation (first load or slot count increased).
+        if (m.io_data.pInputs) {
+            free_io(&m.io_data);
+            m.num_input_bufs = 0;
+            m.num_output_bufs = 0;
+            m.input_buf_caps.clear();
+            m.output_buf_caps.clear();
         }
+        memset(&m.io_data, 0, sizeof(m.io_data));
+        m.io_data.nInputSize = new_nin;
+        m.io_data.pInputs = new AX_ENGINE_IO_BUFFER_T[new_nin]();
+        m.input_buf_caps.resize(new_nin, 0);
+        for (uint32_t i = 0; i < new_nin; ++i) {
+            auto& buf = m.io_data.pInputs[i];
+            buf.nSize = m.io_info->pInputs[i].nSize;
+            ret = AX_SYS_MemAllocCached(&buf.phyAddr, &buf.pVirAddr, buf.nSize, CMM_ALIGN,
+                                        (const AX_S8*)CMM_TOKEN);
+            if (ret != 0) {
+                fprintf(stderr, "[ERROR] CMM alloc input[%u]: 0x%x\n", i, ret);
+                goto fail_cleanup;
+            }
+            m.input_buf_caps[i] = buf.nSize;
+        }
+        m.num_input_bufs = new_nin;
+
+        // Output buffers (fresh).
+        m.io_data.nOutputSize = new_nout;
+        m.io_data.pOutputs = new AX_ENGINE_IO_BUFFER_T[new_nout]();
+        m.output_buf_caps.resize(new_nout, 0);
+        for (uint32_t i = 0; i < new_nout; ++i) {
+            auto& buf = m.io_data.pOutputs[i];
+            buf.nSize = m.io_info->pOutputs[i].nSize;
+            ret = AX_SYS_MemAllocCached(&buf.phyAddr, &buf.pVirAddr, buf.nSize, CMM_ALIGN,
+                                        (const AX_S8*)CMM_TOKEN);
+            if (ret != 0) {
+                fprintf(stderr, "[ERROR] CMM alloc output[%u]: 0x%x\n", i, ret);
+                goto fail_cleanup;
+            }
+            m.output_buf_caps[i] = buf.nSize;
+        }
+        m.num_output_bufs = new_nout;
+        goto buffers_done;
     }
 
+    // Output buffers: reuse path (only reached when input reuse succeeded).
+    if (m.num_output_bufs >= new_nout) {
+        m.io_data.nOutputSize = new_nout;
+        for (uint32_t i = 0; i < new_nout; ++i) {
+            const uint32_t needed = m.io_info->pOutputs[i].nSize;
+            if (m.output_buf_caps[i] >= needed) {
+                m.io_data.pOutputs[i].nSize = needed;
+            } else {
+                AX_SYS_MemFree(m.io_data.pOutputs[i].phyAddr, m.io_data.pOutputs[i].pVirAddr);
+                m.io_data.pOutputs[i] = {};
+                m.io_data.pOutputs[i].nSize = needed;
+                ret = AX_SYS_MemAllocCached(&m.io_data.pOutputs[i].phyAddr,
+                                            &m.io_data.pOutputs[i].pVirAddr, needed, CMM_ALIGN,
+                                            (const AX_S8*)CMM_TOKEN);
+                if (ret != 0) {
+                    fprintf(stderr, "[ERROR] CMM alloc output[%u] realloc: 0x%x\n", i, ret);
+                    goto fail_cleanup;
+                }
+                m.output_buf_caps[i] = needed;
+            }
+        }
+    } else {
+        // Output slot count increased — free old outputs, alloc fresh.
+        for (uint32_t i = 0; i < m.num_output_bufs; ++i) {
+            if (m.io_data.pOutputs[i].phyAddr) {
+                AX_SYS_MemFree(m.io_data.pOutputs[i].phyAddr, m.io_data.pOutputs[i].pVirAddr);
+            }
+        }
+        delete[] m.io_data.pOutputs;
+        m.io_data.nOutputSize = new_nout;
+        m.io_data.pOutputs = new AX_ENGINE_IO_BUFFER_T[new_nout]();
+        m.output_buf_caps.resize(new_nout, 0);
+        for (uint32_t i = 0; i < new_nout; ++i) {
+            auto& buf = m.io_data.pOutputs[i];
+            buf.nSize = m.io_info->pOutputs[i].nSize;
+            ret = AX_SYS_MemAllocCached(&buf.phyAddr, &buf.pVirAddr, buf.nSize, CMM_ALIGN,
+                                        (const AX_S8*)CMM_TOKEN);
+            if (ret != 0) {
+                fprintf(stderr, "[ERROR] CMM alloc output[%u]: 0x%x\n", i, ret);
+                goto fail_cleanup;
+            }
+            m.output_buf_caps[i] = buf.nSize;
+        }
+        m.num_output_bufs = new_nout;
+    }
+
+buffers_done :
+
+{
     AX_ENGINE_CMM_INFO cmm_info = {};
     if (AX_ENGINE_GetCMMUsage(m.handle, &cmm_info) == 0) {
         m.cmm_bytes = cmm_info.nCMMSize;
     }
-
-    const char* cs_name = "unknown";
-    if (m.io_info->nInputSize > 0 && m.io_info->pInputs[0].pExtraMeta) {
-        switch (m.io_info->pInputs[0].pExtraMeta->eColorSpace) {
-        case AX_ENGINE_CS_NV12:
-            m.color_space = ModelColorSpace::NV12;
-            cs_name = "NV12";
-            break;
-        case AX_ENGINE_CS_RGB:
-            m.color_space = ModelColorSpace::RGB;
-            cs_name = "RGB";
-            break;
-        case AX_ENGINE_CS_BGR:
-            m.color_space = ModelColorSpace::BGR;
-            cs_name = "BGR";
-            break;
-        default:
-            m.color_space = ModelColorSpace::RGB;
-            cs_name = "unknown(fallback RGB)";
-            break;
-        }
-    }
-
-    m.input_w = input_w;
-    m.input_h = input_h;
-    m.model_path = path;
-    fprintf(stderr, "[INFO] Model loaded: %s (CMM %u KB, %dx%d, %s)\n", path.c_str(),
-            m.cmm_bytes / 1024, input_w, input_h, cs_name);
-    fprintf(stderr, "[INFO]   inputs=%u outputs=%u\n", m.io_info->nInputSize,
-            m.io_info->nOutputSize);
-    for (uint32_t i = 0; i < m.io_info->nOutputSize; ++i) {
-        const auto& o = m.io_info->pOutputs[i];
-        fprintf(stderr, "[INFO]   output[%u]: dims=%u shape=[", i, o.nShapeSize);
-        for (uint32_t d = 0; d < o.nShapeSize; ++d) {
-            fprintf(stderr, "%s%d", d ? "," : "", o.pShape[d]);
-        }
-        fprintf(stderr, "] size=%u\n", o.nSize);
-    }
-    return 0;
 }
 
+    {
+        const char* cs_name = "unknown";
+        if (m.io_info->nInputSize > 0 && m.io_info->pInputs[0].pExtraMeta) {
+            switch (m.io_info->pInputs[0].pExtraMeta->eColorSpace) {
+            case AX_ENGINE_CS_NV12:
+                m.color_space = ModelColorSpace::NV12;
+                cs_name = "NV12";
+                break;
+            case AX_ENGINE_CS_RGB:
+                m.color_space = ModelColorSpace::RGB;
+                cs_name = "RGB";
+                break;
+            case AX_ENGINE_CS_BGR:
+                m.color_space = ModelColorSpace::BGR;
+                cs_name = "BGR";
+                break;
+            default:
+                m.color_space = ModelColorSpace::RGB;
+                cs_name = "unknown(fallback RGB)";
+                break;
+            }
+        }
+
+        m.input_w = input_w;
+        m.input_h = input_h;
+        m.model_path = path;
+        fprintf(stderr, "[INFO] Model loaded: %s (CMM %u KB, %dx%d, %s)\n", path.c_str(),
+                m.cmm_bytes / 1024, input_w, input_h, cs_name);
+        fprintf(stderr, "[INFO]   inputs=%u outputs=%u (bufs reused: in=%u out=%u)\n",
+                m.io_info->nInputSize, m.io_info->nOutputSize, m.num_input_bufs, m.num_output_bufs);
+        for (uint32_t i = 0; i < m.io_info->nOutputSize; ++i) {
+            const auto& o = m.io_info->pOutputs[i];
+            fprintf(stderr, "[INFO]   output[%u]: dims=%u shape=[", i, o.nShapeSize);
+            for (uint32_t d = 0; d < o.nShapeSize; ++d) {
+                fprintf(stderr, "%s%d", d ? "," : "", o.pShape[d]);
+            }
+            fprintf(stderr, "] size=%u\n", o.nSize);
+        }
+    }
+    return 0;
+
+fail_cleanup:
+    fprintf(stderr, "[ERROR] CMM allocation failed, cleaning up partial state\n");
+    free_io(&m.io_data);
+    m.num_input_bufs = 0;
+    m.num_output_bufs = 0;
+    m.input_buf_caps.clear();
+    m.output_buf_caps.clear();
+    AX_ENGINE_DestroyHandle(m.handle);
+    m.handle = nullptr;
+    m.io_info = nullptr;
+    return ret;
+}
+
+/// Unload model handle only — keeps CMM I/O buffers for reuse by next load_model.
 static void unload_model(AxModel& m) {
     if (!m.handle) {
         return;
     }
-    for (uint32_t i = 0; i < m.io_data.nInputSize; ++i) {
-        AX_SYS_MemFree(m.io_data.pInputs[i].phyAddr, m.io_data.pInputs[i].pVirAddr);
-    }
-    free_io(&m.io_data);
     AX_ENGINE_DestroyHandle(m.handle);
     m.handle = nullptr;
     m.io_info = nullptr;
     m.cmm_bytes = 0;
     m.model_path.clear();
+}
+
+/// Full cleanup: free CMM I/O buffers (call only at shutdown).
+static void cleanup_model(AxModel& m) {
+    unload_model(m);
+    free_io(&m.io_data);
+    m.num_input_bufs = 0;
+    m.num_output_bufs = 0;
+    m.input_buf_caps.clear();
+    m.output_buf_caps.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -244,13 +386,59 @@ static void letterbox_into(const cv::Mat& src, cv::Mat& dst) {
     cv::resize(src, roi, cv::Size(nw, nh));
 }
 
+// ---------------------------------------------------------------------------
+// systemd watchdog (no libsystemd dependency)
+// ---------------------------------------------------------------------------
+
+static void watchdog_ping() {
+    const char* sock = getenv("NOTIFY_SOCKET");
+    if (!sock)
+        return;
+    const int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return;
+    struct sockaddr_un addr = {};
+    addr.sun_family = AF_UNIX;
+    const size_t len = strlen(sock);
+    if (len >= sizeof(addr.sun_path)) {
+        close(fd);
+        return;
+    }
+    memcpy(addr.sun_path, sock, len);
+    socklen_t addr_len = offsetof(struct sockaddr_un, sun_path) + len;
+    if (addr.sun_path[0] == '@') {
+        addr.sun_path[0] = '\0'; // abstract socket
+    }
+    sendto(fd, "WATCHDOG=1", 10, 0, (struct sockaddr*)&addr, addr_len);
+    close(fd);
+}
+
+// ---------------------------------------------------------------------------
+// NPU inference with timeout
+// ---------------------------------------------------------------------------
+
 static int run_npu_and_postprocess(AxModel& m, const int orig_w, const int orig_h,
                                    std::vector<Detection>& results, double& elapsed_ms,
                                    const std::chrono::steady_clock::time_point t0) {
-    const int ret = AX_ENGINE_RunSync(m.handle, &m.io_data);
+    // Run inference in a separate thread with timeout to detect NPU hangs.
+    auto fut =
+        std::async(std::launch::async, [&]() { return AX_ENGINE_RunSync(m.handle, &m.io_data); });
+    if (fut.wait_for(std::chrono::milliseconds(NPU_TIMEOUT_MS)) == std::future_status::timeout) {
+        fprintf(stderr, "[ERROR] NPU RunSync timeout (%dms), possible NPU deadlock\n",
+                NPU_TIMEOUT_MS);
+        m.consecutive_timeouts++;
+        if (m.consecutive_timeouts >= NPU_TIMEOUT_MAX_CONSECUTIVE) {
+            fprintf(stderr, "[FATAL] %d consecutive NPU timeouts, requesting exit\n",
+                    m.consecutive_timeouts);
+            g_running = 0;
+        }
+        return -1;
+    }
+    const int ret = fut.get();
     if (ret != 0) {
         return ret;
     }
+    m.consecutive_timeouts = 0;
     for (uint32_t i = 0; i < m.io_data.nOutputSize; ++i) {
         AX_SYS_MinvalidateCache(m.io_data.pOutputs[i].phyAddr, m.io_data.pOutputs[i].pVirAddr,
                                 m.io_data.pOutputs[i].nSize);
@@ -968,6 +1156,7 @@ vdec_done:
     }
 
     while (g_running) {
+        watchdog_ping();
         const int cfd = accept(g_listen_fd, nullptr, nullptr);
         if (cfd < 0) {
             if (!g_running || errno == EINTR) {
@@ -1200,7 +1389,7 @@ vdec_done:
                             break;
                         }
 
-                        // Heartbeat.
+                        // Heartbeat + watchdog.
                         auto now = std::chrono::steady_clock::now();
                         if (std::chrono::duration_cast<std::chrono::seconds>(now - last_hb)
                                 .count() >= STREAM_HEARTBEAT_SEC) {
@@ -1209,6 +1398,7 @@ vdec_done:
                                 break;
                             fprintf(stderr, "[STREAM] sends=%d decoded=%d\n", sends, decoded);
                             last_hb = now;
+                            watchdog_ping();
                         }
                     }
                     fprintf(stderr, "[STREAM] Ended (sends=%d decoded=%d)\n", sends, decoded);
@@ -1231,7 +1421,7 @@ vdec_done:
     if (model.nv12_vir) {
         AX_SYS_MemFree(model.nv12_phy, model.nv12_vir);
     }
-    unload_model(model);
+    cleanup_model(model);
     if (ivps_ok) {
         AX_IVPS_Deinit();
     }
