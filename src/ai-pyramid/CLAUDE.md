@@ -39,11 +39,18 @@ artifactをダウンロードする方が速い。
 
 ```bash
 # 最新のartifactをダウンロード
+rm -rf /tmp/pet-album
 gh run download --name pet-album-aarch64 --dir /tmp/pet-album
 chmod +x /tmp/pet-album/pet-album
-# 実行
-/tmp/pet-album/pet-album --photos-dir data/photos --db-path data/pet-album.db
+
+# サービスにデプロイ (バイナリパスは target/release/pet-album)
+sudo systemctl stop pet-album.service
+sudo cp /tmp/pet-album/pet-album target/release/pet-album
+sudo systemctl start pet-album.service
 ```
+
+**注意**: `target/release/pet-album` が正しいデプロイ先。プロジェクトルートの `pet-album` ではない。
+実行中のバイナリは上書きできない (Text file busy) ため、先に stop が必要。
 
 ワークフロー: `.github/workflows/build-pet-album.yml`
 
