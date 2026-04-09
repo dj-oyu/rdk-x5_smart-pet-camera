@@ -15,6 +15,9 @@ Environment=HTTP_ONLY_PORT=8082
 Environment=JPEG_QUALITY=65
 Environment=LOG_LEVEL=info
 
+# Wait up to 30s for capture to create MJPEG SHM before starting
+ExecStartPre=/bin/sh -c 'for i in $(seq 30); do [ -e /dev/shm/pet_camera_mjpeg_zc ] && exit 0; sleep 1; done; echo "Timeout waiting for pet_camera_mjpeg_zc"; exit 1'
+
 ExecStart=/bin/sh -c 'TLS_ARGS=""; \
   [ -n "$${PET_CAMERA_TLS_CERT}" ] && TLS_ARGS="-tls-cert $${PET_CAMERA_TLS_CERT} -tls-key $${PET_CAMERA_TLS_KEY}"; \
   HTTP_ONLY_ARGS=""; \
