@@ -78,8 +78,6 @@ export function EventDetail({ event, petNames, onClose, onUpdated, initialPanel 
     for (let i = 0; i < 4; i++) {
       const canvas = canvasRefs.current[i];
       if (!canvas) continue;
-      // Restore ESRGAN cache if available, otherwise draw raw crop
-      if (s.restoreCachedUpscale(i, canvas)) continue;
       const p = PANELS[i];
       canvas.width = p.w;
       canvas.height = p.h;
@@ -245,6 +243,7 @@ export function EventDetail({ event, petNames, onClose, onUpdated, initialPanel 
     resetZoom();
     s.viewMode.value = "comic";
     s.pinnedDetId.value = null;
+    s.resetUpscaleState();
   }
 
   // --- Zoom ---
