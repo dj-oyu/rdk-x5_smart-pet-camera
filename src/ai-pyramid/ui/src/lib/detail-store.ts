@@ -221,6 +221,19 @@ export function createDetailStore(event: EventSummary, initPanel: number | null)
     }
   }
 
+  /** Restore cached ESRGAN pixels to a canvas. Returns true if cache hit. */
+  function restoreCachedUpscale(idx: number, canvas: HTMLCanvasElement | null): boolean {
+    if (!canvas) return false;
+    const level = upscaleState.peek()[idx];
+    if (!level || level === "raw") return false;
+    const cached = upscaleCache[`${idx}-${level}`];
+    if (!cached) return false;
+    canvas.width = cached.width;
+    canvas.height = cached.height;
+    canvas.getContext("2d")?.putImageData(cached, 0, 0);
+    return true;
+  }
+
   // --- Cleanup ---
   function dispose(): void {
     fetchCancel.abort();
@@ -236,6 +249,6 @@ export function createDetailStore(event: EventSummary, initPanel: number | null)
     upscaleState, hdLoading,
     editingId, editing, formPetId, formStatus, formBehavior,
     comicImage, copied, visibleDets,
-    upscalePanel, toggleUpscale, dispose, event,
+    upscalePanel, toggleUpscale, restoreCachedUpscale, dispose, event,
   };
 }
