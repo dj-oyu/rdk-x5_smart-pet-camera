@@ -153,6 +153,24 @@ export function createDetailStore(event: EventSummary, initPanel: number | null)
     const isHD = modelName === "general_plus";
     enqueue(async () => {
       try {
+        const canvas = canvasRefs[idx];
+        if (!canvas) return;
+
+        // Instant restore from cache (avoids full TF.js inference)
+        const cachedLevel = isHD ? "hd" : "fast";
+        const cached = upscaleCache[`${idx}-${cachedLevel}`];
+        if (cached) {
+          canvas.width = cached.width;
+          canvas.height = cached.height;
+          canvas.getContext("2d")?.putImageData(cached, 0, 0);
+          upscaleState.value = { ...upscaleState.peek(), [idx]: cachedLevel };
+          const next = (idx + 1) % 4;
+          if (!upscaleState.peek()[next] && !sig.aborted) {
+            upscalePanel(next, "general_fast", canvasRefs, hdProgressEl);
+          }
+          return;
+        }
+
         await abortable(ensureTF(), sig, "ensureTF");
         const model = await abortable(loadModel(modelName), sig, `loadModel(${modelName})`);
         if (!comicImage.peek()) return;
@@ -161,8 +179,6 @@ export function createDetailStore(event: EventSummary, initPanel: number | null)
         const p = PANELS[idx];
         src.width = p.w; src.height = p.h;
         src.getContext("2d")!.drawImage(comicImage.peek()!, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
-        const canvas = canvasRefs[idx];
-        if (!canvas) return;
 
         if (isHD) hdLoading.value = true;
         const completed = await upscaleTiled(src, canvas, model, sig, (d, t) => {
@@ -221,17 +237,9 @@ export function createDetailStore(event: EventSummary, initPanel: number | null)
     }
   }
 
-  /** Restore cached ESRGAN pixels to a canvas. Returns true if cache hit. */
-  function restoreCachedUpscale(idx: number, canvas: HTMLCanvasElement | null): boolean {
-    if (!canvas) return false;
-    const level = upscaleState.peek()[idx];
-    if (!level || level === "raw") return false;
-    const cached = upscaleCache[`${idx}-${level}`];
-    if (!cached) return false;
-    canvas.width = cached.width;
-    canvas.height = cached.height;
-    canvas.getContext("2d")?.putImageData(cached, 0, 0);
-    return true;
+  /** Clear upscale state so auto-upscale re-triggers (cache is preserved). */
+  function resetUpscaleState(): void {
+    upscaleState.value = {};
   }
 
   // --- Cleanup ---
@@ -249,6 +257,6 @@ export function createDetailStore(event: EventSummary, initPanel: number | null)
     upscaleState, hdLoading,
     editingId, editing, formPetId, formStatus, formBehavior,
     comicImage, copied, visibleDets,
-    upscalePanel, toggleUpscale, restoreCachedUpscale, dispose, event,
+    upscalePanel, toggleUpscale, resetUpscaleState, dispose, event,
   };
 }
