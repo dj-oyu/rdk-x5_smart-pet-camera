@@ -151,26 +151,27 @@ export function createDetailStore(event: EventSummary, initPanel: number | null)
     const ctrl = upscaleCancel.reset();
     const sig = ctrl.signal;
     const isHD = modelName === "general_plus";
+
+    // Synchronous cache restore — bypasses enqueue so blocked tiles don't delay it
+    const cachedLevel = isHD ? "hd" : "fast";
+    const cached = upscaleCache[`${idx}-${cachedLevel}`];
+    if (cached) {
+      const canvas = canvasRefs[idx];
+      if (canvas) {
+        canvas.width = cached.width;
+        canvas.height = cached.height;
+        canvas.getContext("2d")?.putImageData(cached, 0, 0);
+        upscaleState.value = { ...upscaleState.peek(), [idx]: cachedLevel };
+        const next = (idx + 1) % 4;
+        if (!upscaleState.peek()[next]) {
+          upscalePanel(next, "general_fast", canvasRefs, hdProgressEl);
+        }
+        return;
+      }
+    }
+
     enqueue(async () => {
       try {
-        const canvas = canvasRefs[idx];
-        if (!canvas) return;
-
-        // Instant restore from cache (avoids full TF.js inference)
-        const cachedLevel = isHD ? "hd" : "fast";
-        const cached = upscaleCache[`${idx}-${cachedLevel}`];
-        if (cached) {
-          canvas.width = cached.width;
-          canvas.height = cached.height;
-          canvas.getContext("2d")?.putImageData(cached, 0, 0);
-          upscaleState.value = { ...upscaleState.peek(), [idx]: cachedLevel };
-          const next = (idx + 1) % 4;
-          if (!upscaleState.peek()[next] && !sig.aborted) {
-            upscalePanel(next, "general_fast", canvasRefs, hdProgressEl);
-          }
-          return;
-        }
-
         await abortable(ensureTF(), sig, "ensureTF");
         const model = await abortable(loadModel(modelName), sig, `loadModel(${modelName})`);
         if (!comicImage.peek()) return;
@@ -179,6 +180,8 @@ export function createDetailStore(event: EventSummary, initPanel: number | null)
         const p = PANELS[idx];
         src.width = p.w; src.height = p.h;
         src.getContext("2d")!.drawImage(comicImage.peek()!, p.x, p.y, p.w, p.h, 0, 0, p.w, p.h);
+        const canvas = canvasRefs[idx];
+        if (!canvas) return;
 
         if (isHD) hdLoading.value = true;
         const completed = await upscaleTiled(src, canvas, model, sig, (d, t) => {
