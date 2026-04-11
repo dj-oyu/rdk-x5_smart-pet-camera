@@ -658,7 +658,7 @@ async fn handle_backfill(State(state): State<AppState>) -> impl IntoResponse {
 
             // Detect: prefer local (level2), fallback to remote (level1)
             let dets = if let Some(ref ld) = local {
-                let _permit = context.npu_semaphore().acquire().await;
+                let _permit = context.yolo_semaphore().acquire().await;
                 ld.detect_comic(&photos_dir, &photo.source_filename).await
             } else if let Some(ref rc) = remote {
                 rc.detect(&photo.source_filename).await
@@ -760,7 +760,7 @@ async fn handle_detect_now(
     let photos_dir = state.photos_dir.clone();
     let commands = state.commands();
     let sse_tx = state.event_tx.clone();
-    let npu_semaphore = state.context.npu_semaphore().clone();
+    let yolo_semaphore = state.context.yolo_semaphore().clone();
 
     // Channel for streaming partial detections
     let (det_tx, mut det_rx) = tokio::sync::mpsc::channel::<crate::db::DetectionInput>(64);
@@ -782,7 +782,7 @@ async fn handle_detect_now(
         }
     });
 
-    let _permit = npu_semaphore.acquire().await;
+    let _permit = yolo_semaphore.acquire().await;
 
     // Run streaming detection
     let result = local
@@ -1073,7 +1073,7 @@ async fn handle_daily_summary(
 
     let vlm_config = state.context.vlm_config();
     let vlm_client = crate::vlm::VlmClient::new(vlm_config);
-    let _permit = state.context.npu_semaphore().acquire().await.unwrap();
+    let _permit = state.context.vlm_semaphore().acquire().await.unwrap();
     match vlm_client
         .summarize_day(&captions, random_photo.as_deref())
         .await
