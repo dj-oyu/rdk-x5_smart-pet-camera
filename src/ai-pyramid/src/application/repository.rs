@@ -68,8 +68,10 @@ impl PhotoStoreRepository {
         }
     }
 
-    pub fn shared(store: PhotoStore) -> SharedEventRepository {
-        Arc::new(Self::new(store))
+    pub fn shared(store: PhotoStore) -> (SharedEventRepository, Database) {
+        let repo = Self::new(store);
+        let db = repo.db.clone();
+        (Arc::new(repo), db)
     }
 }
 

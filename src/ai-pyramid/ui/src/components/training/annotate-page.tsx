@@ -1,0 +1,254 @@
+import { useSignal, useComputed } from "@preact/signals";
+import { useEffect } from "preact/hooks";
+import {
+  syncFrames,
+  fetchFrames,
+  fetchTrainingStats,
+  updateFrameStatus,
+  type TrainingFrame,
+  type TrainingStats,
+} from "../../lib/training-api";
+import { AnnotateCanvas } from "./annotate-canvas";
+
+type StatusFilter = "all" | "pending" | "approved" | "rejected";
+
+export function AnnotatePage() {
+  const frames = useSignal<TrainingFrame[]>([]);
+  const total = useSignal(0);
+  const stats = useSignal<TrainingStats | null>(null);
+  const loading = useSignal(false);
+  const syncing = useSignal(false);
+  const filter = useSignal<StatusFilter>("pending");
+  const offset = useSignal(0);
+  const selectedFrame = useSignal<TrainingFrame | null>(null);
+  const limit = 48;
+
+  const loadFrames = async () => {
+    loading.value = true;
+    try {
+      const statusParam = filter.value === "all" ? undefined : filter.value;
+      const data = await fetchFrames(statusParam, limit, offset.value);
+      frames.value = data.frames;
+      total.value = data.total;
+    } finally {
+      loading.value = false;
+    }
+  };
+
+  const loadStats = async () => {
+    try {
+      stats.value = await fetchTrainingStats();
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    loadFrames();
+    loadStats();
+  }, []);
+
+  useEffect(() => {
+    loadFrames();
+  }, [filter.value, offset.value]);
+
+  const handleSync = async () => {
+    syncing.value = true;
+    try {
+      const result = await syncFrames();
+      alert(`Synced: ${result.synced} frames (${result.total_remote} remote)`);
+      await loadFrames();
+      await loadStats();
+    } catch (e) {
+      alert(`Sync failed: ${e}`);
+    } finally {
+      syncing.value = false;
+    }
+  };
+
+  const handleStatusChange = async (frame: TrainingFrame, status: "approved" | "rejected") => {
+    try {
+      await updateFrameStatus(frame.id, status);
+      // Update local state
+      frames.value = frames.value.map((f) =>
+        f.id === frame.id ? { ...f, status } : f,
+      );
+      loadStats();
+    } catch (e) {
+      alert(`Failed: ${e}`);
+    }
+  };
+
+  const handleFrameClick = (frame: TrainingFrame) => {
+    selectedFrame.value = frame;
+  };
+
+  const handleAnnotateDone = () => {
+    selectedFrame.value = null;
+    loadFrames();
+    loadStats();
+  };
+
+  const pageCount = useComputed(() => Math.ceil(total.value / limit));
+  const currentPage = useComputed(() => Math.floor(offset.value / limit) + 1);
+
+  // If a frame is selected, show annotation canvas
+  if (selectedFrame.value) {
+    return (
+      <AnnotateCanvas
+        frame={selectedFrame.value}
+        onDone={handleAnnotateDone}
+        onStatusChange={handleStatusChange}
+      />
+    );
+  }
+
+  return (
+    <div class="training-page">
+      <header class="training-header">
+        <h1>Training Dataset</h1>
+        <button
+          class="btn-sync"
+          onClick={handleSync}
+          disabled={syncing.value}
+        >
+          {syncing.value ? "Syncing..." : "Sync from RDK X5"}
+        </button>
+      </header>
+
+      {stats.value && (
+        <div class="training-stats">
+          <span class="stat">Total: {stats.value.total}</span>
+          <span class="stat stat-pending">Pending: {stats.value.pending}</span>
+          <span class="stat stat-approved">Approved: {stats.value.approved}</span>
+          <span class="stat stat-rejected">Rejected: {stats.value.rejected}</span>
+          <span class="stat">Annotations: {stats.value.total_annotations}</span>
+          {stats.value.class_counts.map((c) => (
+            <span class="stat stat-class" key={c.class_label}>
+              {c.class_label}: {c.count}
+            </span>
+          ))}
+        </div>
+      )}
+
+      <div class="training-filters">
+        {(["all", "pending", "approved", "rejected"] as StatusFilter[]).map(
+          (s) => (
+            <button
+              key={s}
+              class={`filter-btn ${filter.value === s ? "active" : ""}`}
+              onClick={() => {
+                filter.value = s;
+                offset.value = 0;
+              }}
+            >
+              {s}
+            </button>
+          ),
+        )}
+      </div>
+
+      {loading.value ? (
+        <p class="loading-msg">Loading...</p>
+      ) : frames.value.length === 0 ? (
+        <p class="empty-msg">
+          No frames found. Click "Sync from RDK X5" to import.
+        </p>
+      ) : (
+        <>
+          <div class="frame-grid">
+            {frames.value.map((frame) => (
+              <FrameCard
+                key={frame.id}
+                frame={frame}
+                onClick={() => handleFrameClick(frame)}
+                onApprove={() => handleStatusChange(frame, "approved")}
+                onReject={() => handleStatusChange(frame, "rejected")}
+              />
+            ))}
+          </div>
+          {pageCount.value > 1 && (
+            <div class="training-pagination">
+              <button
+                disabled={offset.value === 0}
+                onClick={() => (offset.value = Math.max(0, offset.value - limit))}
+              >
+                Prev
+              </button>
+              <span>
+                {currentPage.value} / {pageCount.value}
+              </span>
+              <button
+                disabled={offset.value + limit >= total.value}
+                onClick={() => (offset.value = offset.value + limit)}
+              >
+                Next
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function FrameCard({
+  frame,
+  onClick,
+  onApprove,
+  onReject,
+}: {
+  frame: TrainingFrame;
+  onClick: () => void;
+  onApprove: () => void;
+  onReject: () => void;
+}) {
+  const statusClass =
+    frame.status === "approved"
+      ? "card-approved"
+      : frame.status === "rejected"
+        ? "card-rejected"
+        : "";
+
+  return (
+    <div class={`frame-card ${statusClass}`}>
+      <div class="frame-thumb" onClick={onClick}>
+        <img
+          src={`/api/training/frames/${frame.id}/image`}
+          alt={frame.filename}
+          loading="lazy"
+        />
+        {frame.annotation_count > 0 && (
+          <span class="ann-badge">{frame.annotation_count}</span>
+        )}
+      </div>
+      <div class="frame-info">
+        <span class="frame-name" title={frame.filename}>
+          {frame.filename.replace(/_\d+x\d+\.nv12$/, "")}
+        </span>
+        <div class="frame-actions">
+          <button
+            class="btn-approve"
+            onClick={(e) => {
+              e.stopPropagation();
+              onApprove();
+            }}
+            title="Approve"
+          >
+            O
+          </button>
+          <button
+            class="btn-reject"
+            onClick={(e) => {
+              e.stopPropagation();
+              onReject();
+            }}
+            title="Reject"
+          >
+            X
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -97,7 +97,7 @@ pub struct PhotoFilter {
 }
 
 pub struct PhotoStore {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 impl PhotoStore {
@@ -192,6 +192,9 @@ impl PhotoStore {
             CREATE INDEX IF NOT EXISTS idx_edit_history_created
                 ON edit_history(created_at);",
         )?;
+
+        // Training dataset tables
+        self.migrate_training()?;
 
         Ok(())
     }

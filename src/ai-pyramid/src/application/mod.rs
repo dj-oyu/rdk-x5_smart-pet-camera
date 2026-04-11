@@ -1,6 +1,6 @@
 mod commands;
 mod context;
-mod db_thread;
+pub mod db_thread;
 mod event;
 mod model;
 mod queries;
@@ -36,7 +36,7 @@ mod tests {
     fn test_context() -> AppContext {
         let store = PhotoStore::open_in_memory().unwrap();
         store.migrate().unwrap();
-        let repository = PhotoStoreRepository::shared(store);
+        let (repository, _db) = PhotoStoreRepository::shared(store);
         let (event_tx, _) = broadcast::channel(16);
         AppContext::new(
             repository,

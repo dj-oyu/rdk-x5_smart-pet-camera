@@ -5,4 +5,5 @@ pub mod ingest;
 pub mod mcp;
 pub mod night_assist;
 pub mod server;
+pub mod training;
 pub mod vlm;

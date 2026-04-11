@@ -303,7 +303,7 @@ mod tests {
     fn test_state() -> McpState {
         let store = PhotoStore::open_in_memory().unwrap();
         store.migrate().unwrap();
-        let repository = PhotoStoreRepository::shared(store);
+        let (repository, _db) = PhotoStoreRepository::shared(store);
         let td = tempfile::tempdir().unwrap();
         let photos_dir = td.path().to_path_buf();
         std::mem::forget(td);

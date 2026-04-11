@@ -2,18 +2,21 @@ use crate::application::AppResult;
 use crate::db::{
     BboxSummary, Detection, DetectionInput, EditHistoryEntry, Photo, PhotoFilter, PhotoStore, Stats,
 };
+use crate::training::db::{
+    AnnotationInput, ExportEntry, TrainingAnnotation, TrainingFrame, TrainingStats,
+};
 use chrono::NaiveDateTime;
 use std::sync::mpsc;
 use std::thread;
 use tokio::sync::oneshot;
 
 #[derive(Clone)]
-pub(crate) struct Database {
+pub struct Database {
     tx: mpsc::Sender<DbCommand>,
 }
 
 impl Database {
-    pub(crate) fn new(store: PhotoStore) -> Self {
+    pub fn new(store: PhotoStore) -> Self {
         let (tx, rx) = mpsc::channel();
         thread::Builder::new()
             .name("photo-db".into())
@@ -22,7 +25,7 @@ impl Database {
         Self { tx }
     }
 
-    pub(crate) async fn request<T, F>(&self, build: F) -> AppResult<T>
+    pub async fn request<T, F>(&self, build: F) -> AppResult<T>
     where
         T: Send + 'static,
         F: FnOnce(oneshot::Sender<AppResult<T>>) -> DbCommand,
@@ -37,7 +40,7 @@ impl Database {
     }
 }
 
-pub(crate) enum DbCommand {
+pub enum DbCommand {
     InsertPhoto {
         filename: String,
         captured_at: NaiveDateTime,
@@ -135,6 +138,48 @@ pub(crate) enum DbCommand {
     GetBboxesForPhotos {
         photo_ids: Vec<i64>,
         reply: oneshot::Sender<AppResult<std::collections::HashMap<i64, Vec<BboxSummary>>>>,
+    },
+    // ── Training ─────────────────────────────────────────────
+    TrainingUpsertFrame {
+        filename: String,
+        width: i32,
+        height: i32,
+        captured_at: Option<String>,
+        reply: oneshot::Sender<AppResult<i64>>,
+    },
+    TrainingListFrames {
+        status: Option<String>,
+        limit: i64,
+        offset: i64,
+        reply: oneshot::Sender<AppResult<(Vec<TrainingFrame>, i64)>>,
+    },
+    TrainingGetFrame {
+        id: i64,
+        reply: oneshot::Sender<AppResult<Option<TrainingFrame>>>,
+    },
+    TrainingUpdateStatus {
+        id: i64,
+        status: String,
+        reply: oneshot::Sender<AppResult<usize>>,
+    },
+    TrainingListAnnotations {
+        frame_id: i64,
+        reply: oneshot::Sender<AppResult<Vec<TrainingAnnotation>>>,
+    },
+    TrainingReplaceAnnotations {
+        frame_id: i64,
+        annotations: Vec<AnnotationInput>,
+        reply: oneshot::Sender<AppResult<()>>,
+    },
+    TrainingDeleteAnnotation {
+        id: i64,
+        reply: oneshot::Sender<AppResult<usize>>,
+    },
+    TrainingStats {
+        reply: oneshot::Sender<AppResult<TrainingStats>>,
+    },
+    TrainingExport {
+        reply: oneshot::Sender<AppResult<Vec<ExportEntry>>>,
     },
 }
 
@@ -235,6 +280,50 @@ fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
             }
             DbCommand::GetBboxesForPhotos { photo_ids, reply } => {
                 send_reply(reply, store.get_bboxes_for_photos(&photo_ids))
+            }
+            // ── Training ─────────────────────────────────────────
+            DbCommand::TrainingUpsertFrame {
+                filename,
+                width,
+                height,
+                captured_at,
+                reply,
+            } => send_reply(
+                reply,
+                store.upsert_training_frame(&filename, width, height, captured_at.as_deref()),
+            ),
+            DbCommand::TrainingListFrames {
+                status,
+                limit,
+                offset,
+                reply,
+            } => send_reply(
+                reply,
+                store.list_training_frames(status.as_deref(), limit, offset),
+            ),
+            DbCommand::TrainingGetFrame { id, reply } => {
+                send_reply(reply, store.get_training_frame(id))
+            }
+            DbCommand::TrainingUpdateStatus { id, status, reply } => {
+                send_reply(reply, store.update_training_frame_status(id, &status))
+            }
+            DbCommand::TrainingListAnnotations { frame_id, reply } => {
+                send_reply(reply, store.list_training_annotations(frame_id))
+            }
+            DbCommand::TrainingReplaceAnnotations {
+                frame_id,
+                annotations,
+                reply,
+            } => send_reply(
+                reply,
+                store.replace_training_annotations(frame_id, &annotations),
+            ),
+            DbCommand::TrainingDeleteAnnotation { id, reply } => {
+                send_reply(reply, store.delete_training_annotation(id))
+            }
+            DbCommand::TrainingStats { reply } => send_reply(reply, store.training_stats()),
+            DbCommand::TrainingExport { reply } => {
+                send_reply(reply, store.export_training_dataset())
             }
         }
     }

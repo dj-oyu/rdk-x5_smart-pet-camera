@@ -87,7 +87,7 @@ async fn main() {
 
     let store = PhotoStore::open(&args.db_path).expect("failed to open database");
     store.migrate().expect("failed to migrate database");
-    let repository = PhotoStoreRepository::shared(store);
+    let (repository, db_handle) = PhotoStoreRepository::shared(store);
 
     info!("Database: {}", args.db_path);
     info!("Photos dir: {}", args.photos_dir.display());
@@ -215,6 +215,27 @@ async fn main() {
         info!("Night assist enabled: rdk-x5 at {h} (via ax_yolo_daemon)");
     }
 
+    // Training annotation subsystem
+    let training_ssh_host = std::env::var("TRAINING_SSH_HOST").unwrap_or_else(|_| "rdk-x5".into());
+    let training_remote_dir = std::env::var("TRAINING_REMOTE_DIR")
+        .unwrap_or_else(|_| "/tmp/night_collect/feeding".into());
+    let training_cache_dir = args
+        .photos_dir
+        .parent()
+        .unwrap_or(&args.photos_dir)
+        .join("training");
+    info!(
+        "Training: ssh={training_ssh_host} remote={training_remote_dir} cache={}",
+        training_cache_dir.display()
+    );
+    let training_state = pet_album::training::api::TrainingState {
+        db: db_handle,
+        ssh_host: training_ssh_host,
+        remote_dir: training_remote_dir,
+        cache_dir: training_cache_dir,
+    };
+    let training_router = pet_album::training::api::router(training_state);
+
     let app_state = server::AppState::new(
         app_context,
         args.photos_dir,
@@ -225,7 +246,7 @@ async fn main() {
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         night_assist_host,
     );
-    let app = server::router(app_state);
+    let app = server::router(app_state).merge(training_router);
 
     match tls {
         Some((cert, key)) => {
