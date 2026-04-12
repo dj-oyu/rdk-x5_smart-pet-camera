@@ -140,7 +140,8 @@ pub async fn fetch_and_convert_frame(
         return Err(format!("scp error: {stderr}"));
     }
 
-    // Convert NV12 → JPEG via ffmpeg (output to temp path)
+    // Convert NV12 → JPEG via ffmpeg (output to temp path).
+    // -f mjpeg is required because the temp filename ends in .tmp, not .jpg.
     let ffmpeg_out = Command::new("ffmpeg")
         .args([
             "-y",
@@ -156,6 +157,8 @@ pub async fn fetch_and_convert_frame(
             "1",
             "-q:v",
             "2",
+            "-f",
+            "mjpeg",
             jpeg_tmp.to_str().unwrap(),
         ])
         .output()
