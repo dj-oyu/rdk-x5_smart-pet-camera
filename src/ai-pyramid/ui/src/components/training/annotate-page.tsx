@@ -1,5 +1,5 @@
 import { useSignal, useComputed } from "@preact/signals";
-import { useEffect } from "preact/hooks";
+import { useEffect, useRef } from "preact/hooks";
 import {
   syncFrames,
   fetchFrames,
@@ -21,7 +21,7 @@ export function AnnotatePage() {
   const filter = useSignal<StatusFilter>("pending");
   const offset = useSignal(0);
   const selectedFrame = useSignal<TrainingFrame | null>(null);
-  const limit = 48;
+  const limit = 20;
 
   const loadFrames = async () => {
     loading.value = true;
@@ -192,6 +192,8 @@ export function AnnotatePage() {
   );
 }
 
+const THUMB_CACHE_KEY = (id: number) => `thumb_v1_${id}`;
+
 function FrameCard({
   frame,
   onClick,
@@ -210,14 +212,60 @@ function FrameCard({
         ? "card-rejected"
         : "";
 
+  // Check localStorage cache first, then lazy-fetch when visible
+  const imgSrc = useSignal<string | null>(
+    localStorage.getItem(THUMB_CACHE_KEY(frame.id)),
+  );
+  const thumbRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (imgSrc.value) return; // already cached
+    const el = thumbRef.current;
+    if (!el) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries[0].isIntersecting) return;
+        observer.disconnect();
+        fetch(`/api/training/frames/${frame.id}/image`)
+          .then((r) => (r.ok ? r.blob() : Promise.reject(r.status)))
+          .then(
+            (blob) =>
+              new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(reader.result as string);
+                reader.onerror = reject;
+                reader.readAsDataURL(blob);
+              }),
+          )
+          .then((dataUrl) => {
+            try {
+              localStorage.setItem(THUMB_CACHE_KEY(frame.id), dataUrl);
+            } catch {
+              // localStorage quota exceeded — display without caching
+            }
+            imgSrc.value = dataUrl;
+          })
+          .catch(() => {
+            imgSrc.value = "error";
+          });
+      },
+      { rootMargin: "120px" },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [frame.id]);
+
   return (
     <div class={`frame-card ${statusClass}`}>
-      <div class="frame-thumb" onClick={onClick}>
-        <img
-          src={`/api/training/frames/${frame.id}/image`}
-          alt={frame.filename}
-          loading="lazy"
-        />
+      <div class="frame-thumb" ref={thumbRef} onClick={onClick}>
+        {imgSrc.value && imgSrc.value !== "error" ? (
+          <img src={imgSrc.value} alt={frame.filename} />
+        ) : imgSrc.value === "error" ? (
+          <div class="thumb-placeholder thumb-error">!</div>
+        ) : (
+          <div class="thumb-placeholder" />
+        )}
         {frame.annotation_count > 0 && (
           <span class="ann-badge">{frame.annotation_count}</span>
         )}
