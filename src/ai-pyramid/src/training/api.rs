@@ -358,17 +358,32 @@ async fn handle_export(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    // Build YOLO format output
+    // Build sorted class list first — needed for numeric index assignment.
+    // YOLO label format: "<class_index> x_center y_center width height"
+    let classes: Vec<String> = dataset
+        .iter()
+        .flat_map(|(_, _, _, anns)| anns.iter().map(|a| a.class_label.clone()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let class_index: std::collections::HashMap<&str, usize> = classes
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.as_str(), i))
+        .collect();
+
     let mut files = Vec::new();
     for (filename, _w, _h, annotations) in &dataset {
         let label_filename = filename.replace(".nv12", ".txt");
         let lines: Vec<String> = annotations
             .iter()
-            .map(|a| {
-                format!(
-                    "{} {:.6} {:.6} {:.6} {:.6}",
-                    a.class_label, a.x_center, a.y_center, a.width, a.height
-                )
+            .filter_map(|a| {
+                class_index.get(a.class_label.as_str()).map(|&idx| {
+                    format!(
+                        "{} {:.6} {:.6} {:.6} {:.6}",
+                        idx, a.x_center, a.y_center, a.width, a.height
+                    )
+                })
             })
             .collect();
         files.push(serde_json::json!({
@@ -377,15 +392,6 @@ async fn handle_export(
             "labels": lines,
         }));
     }
-
-    // Collect unique classes for classes.txt
-    let mut classes: Vec<String> = dataset
-        .iter()
-        .flat_map(|(_, _, _, anns)| anns.iter().map(|a| a.class_label.clone()))
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    classes.sort();
 
     Ok(Json(serde_json::json!({
         "total_frames": dataset.len(),

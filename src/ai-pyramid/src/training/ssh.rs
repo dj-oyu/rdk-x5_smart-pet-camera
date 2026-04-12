@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::process::Command;
 use tracing::{debug, warn};
+
+static FETCH_NONCE: AtomicU64 = AtomicU64::new(0);
 
 /// Parsed frame info from remote filename like `feeding_00013775_1280x720.nv12`
 #[derive(Debug, Clone)]
@@ -93,7 +96,12 @@ pub async fn fetch_and_convert_frame(
         .map_err(|e| format!("failed to create cache dir: {e}"))?;
 
     let remote_path = format!("{remote_dir}/{filename}");
-    let nv12_tmp = cache_dir.join(filename);
+    // Unique per-request suffix prevents concurrent fetches of the same frame
+    // from colliding on the same temp path.
+    let nonce = FETCH_NONCE.fetch_add(1, Ordering::Relaxed);
+    let nv12_tmp = cache_dir.join(format!("{filename}.{nonce}.tmp"));
+    // Write JPEG to a unique temp path; atomically rename into place on success.
+    let jpeg_tmp = cache_dir.join(format!("{jpeg_name}.{nonce}.tmp"));
 
     // SCP the NV12 file
     let scp_out = Command::new("scp")
@@ -106,11 +114,12 @@ pub async fn fetch_and_convert_frame(
         .map_err(|e| format!("scp failed: {e}"))?;
 
     if !scp_out.status.success() {
+        let _ = tokio::fs::remove_file(&nv12_tmp).await;
         let stderr = String::from_utf8_lossy(&scp_out.stderr);
         return Err(format!("scp error: {stderr}"));
     }
 
-    // Convert NV12 → JPEG via ffmpeg
+    // Convert NV12 → JPEG via ffmpeg (output to temp path)
     let ffmpeg_out = Command::new("ffmpeg")
         .args([
             "-y",
@@ -126,7 +135,7 @@ pub async fn fetch_and_convert_frame(
             "1",
             "-q:v",
             "2",
-            jpeg_path.to_str().unwrap(),
+            jpeg_tmp.to_str().unwrap(),
         ])
         .output()
         .await
@@ -136,9 +145,15 @@ pub async fn fetch_and_convert_frame(
     let _ = tokio::fs::remove_file(&nv12_tmp).await;
 
     if !ffmpeg_out.status.success() {
+        let _ = tokio::fs::remove_file(&jpeg_tmp).await;
         let stderr = String::from_utf8_lossy(&ffmpeg_out.stderr);
         return Err(format!("ffmpeg convert error: {stderr}"));
     }
+
+    // Atomic rename: last writer wins, result is always a valid JPEG
+    tokio::fs::rename(&jpeg_tmp, &jpeg_path)
+        .await
+        .map_err(|e| format!("rename jpeg into cache: {e}"))?;
 
     debug!("converted {filename} → {jpeg_name}");
     Ok(jpeg_path)

@@ -267,14 +267,24 @@ impl PhotoStore {
         frame_id: i64,
         annotations: &[AnnotationInput],
     ) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "DELETE FROM training_annotations WHERE frame_id = ?1",
-            params![frame_id],
-        )?;
-        for ann in annotations {
-            self.insert_training_annotation(frame_id, ann)?;
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<()> {
+            self.conn.execute(
+                "DELETE FROM training_annotations WHERE frame_id = ?1",
+                params![frame_id],
+            )?;
+            for ann in annotations {
+                self.insert_training_annotation(frame_id, ann)?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.conn.execute_batch("COMMIT"),
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
         }
-        Ok(())
     }
 
     // ── Stats ────────────────────────────────────────────────────

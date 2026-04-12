@@ -12,12 +12,10 @@ pub struct AppContext {
     base_url: Option<String>,
     is_tls: bool,
     vlm_config: VlmConfig,
-    /// Serializes VLM (axllm) requests. axllm handles one request at a time.
-    vlm_semaphore: Arc<Semaphore>,
-    /// Serializes YOLO daemon requests from pet-album side.
-    /// Daemon has its own internal mutex, but this prevents pet-album from
-    /// sending overlapping CMD_LOAD/CMD_DETECT sequences (2-model pipeline).
-    yolo_semaphore: Arc<Semaphore>,
+    /// Single NPU gate shared between VLM (axllm) and YOLO daemon.
+    /// Concurrent NPU access from two processes causes SEGV on AX650.
+    /// Both vlm_semaphore() and yolo_semaphore() return this same permit.
+    npu_semaphore: Arc<Semaphore>,
 }
 
 impl AppContext {
@@ -36,8 +34,7 @@ impl AppContext {
             base_url,
             is_tls,
             vlm_config,
-            vlm_semaphore: Arc::new(Semaphore::new(1)),
-            yolo_semaphore: Arc::new(Semaphore::new(1)),
+            npu_semaphore: Arc::new(Semaphore::new(1)),
         }
     }
 
@@ -74,11 +71,11 @@ impl AppContext {
     }
 
     pub fn vlm_semaphore(&self) -> &Arc<Semaphore> {
-        &self.vlm_semaphore
+        &self.npu_semaphore
     }
 
     pub fn yolo_semaphore(&self) -> &Arc<Semaphore> {
-        &self.yolo_semaphore
+        &self.npu_semaphore
     }
 
     /// Notify listeners that detections were added for a photo.
