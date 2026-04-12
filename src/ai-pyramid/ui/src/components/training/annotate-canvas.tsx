@@ -1,5 +1,5 @@
-import { useSignal } from "@preact/signals";
-import { useEffect, useRef } from "preact/hooks";
+import { useSignal, useSignalEffect } from "@preact/signals";
+import { useRef } from "preact/hooks";
 import {
   fetchFrame,
   frameImageUrl,
@@ -33,9 +33,10 @@ export function AnnotateCanvas({
   const saving = useSignal(false);
   const dirty = useSignal(false);
   const imgLoaded = useSignal(false);
+  const canvasSize = useSignal({ w: 0, h: 0 });
 
-  // Load existing annotations
-  useEffect(() => {
+  // Load existing annotations — frame.id is a prop (not a signal), runs once
+  useSignalEffect(() => {
     fetchFrame(frame.id).then((data) => {
       bboxes.value = data.annotations.map((a: TrainingAnnotation) => ({
         class_label: a.class_label,
@@ -46,23 +47,17 @@ export function AnnotateCanvas({
         id: a.id,
       }));
     });
-  }, [frame.id]);
+  });
 
-  // Load image
-  useEffect(() => {
+  // Load image — frame.id is a prop, runs once
+  useSignalEffect(() => {
     const img = new Image();
     img.onload = () => {
       imgRef.current = img;
       imgLoaded.value = true;
-      redraw();
     };
     img.src = frameImageUrl(frame.id);
-  }, [frame.id]);
-
-  // Redraw when bboxes or drawing state changes
-  useEffect(() => {
-    if (imgLoaded.value) redraw();
-  }, [bboxes.value, drawEnd.value, selectedIdx.value, imgLoaded.value]);
+  });
 
   const getCanvasScale = () => {
     const canvas = canvasRef.current;
@@ -263,15 +258,17 @@ export function AnnotateCanvas({
     }
   };
 
-  useEffect(() => {
+  // Keydown listener — no signal reads in setup, runs once
+  useSignalEffect(() => {
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  });
 
   // Resize canvas to fill container.
   // Multiply by devicePixelRatio so the buffer matches physical pixels;
   // CSS flex:1 keeps the display size at CSS pixels → sharp on HiDPI.
-  useEffect(() => {
+  // Writes canvasSize only — no signal reads here, runs once.
+  useSignalEffect(() => {
     const resize = () => {
       const canvas = canvasRef.current;
       if (!canvas) return;
@@ -280,12 +277,19 @@ export function AnnotateCanvas({
       const dpr = window.devicePixelRatio || 1;
       canvas.width = parent.clientWidth * dpr;
       canvas.height = parent.clientHeight * dpr;
-      redraw();
+      canvasSize.value = { w: canvas.width, h: canvas.height };
     };
     resize();
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
-  }, []);
+  });
+
+  // Redraw — reads canvasSize (resize), imgLoaded, and all signals touched
+  // inside redraw() (bboxes, drawEnd, selectedIdx, drawing, drawStart).
+  useSignalEffect(() => {
+    canvasSize.value; // subscribe to resize
+    if (imgLoaded.value) redraw();
+  });
 
   return (
     <div class="annotate-view">
