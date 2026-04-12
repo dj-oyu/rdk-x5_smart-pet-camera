@@ -51,12 +51,56 @@ mizu 系はカメラノイズが高め（水面の微細な揺れの可能性も
 
 ---
 
+## 実装済み: フレームキャプチャ機能
+
+### 設計方針
+
+- net値が閾値を超えたROIのフレームをグレースケールPNGで保存
+- NIRカメラは実質グレースケール映像 → 1チャンネルPNGで1/3の容量
+- ROIごとに30秒のクールダウン（3分の食事セッションで約6枚）
+- DBの `captures` テーブルで時刻・セッション・net値・ファイルパスを管理
+- 後からの照合: `captures` と `diff_log` を `ts BETWEEN d.ts-15 AND d.ts+15` のウィンドウジョインで紐づけ
+
+### 定数 (scripts/test_roi_monitor.py)
+
+```python
+CAPTURE_THRESH   = 5.0   # net値がこれを超えたらキャプチャ (最初の録画後にチューニング)
+CAPTURE_COOLDOWN = 30.0  # ROIごとの保存間隔(秒)
+CAPTURES_DIR     = REPO_ROOT / "scripts" / "captures"
+```
+
+### DBスキーマ全体
+
+```sql
+rois        (id, label, points)               -- ROI定義 (JSON廃止、DB管理)
+baseline    (roi_id, base)                    -- 最新ベースライン
+sessions    (id, start_ts, stop_ts, stop_at) -- 録画セッション
+diff_log    (ts, session_id, label, raw, lighting)  -- 生スコア時系列
+baseline_log(ts, session_id, label, base)    -- ベースライン変化ログ(疎)
+captures    (ts, session_id, label, net, path)      -- キャプチャ記録
+```
+
+- `diff_log.net` は保存しない（`raw - baseline` で導出可能）
+- `baseline_log` は照明変化検知時のみ記録（疎）
+- `sessions.stop_ts IS NULL` = 録画中
+
+### ファイル配置
+
+```
+scripts/roi_monitor.db      -- 永続DB (gitignore)
+scripts/captures/           -- PNGキャプチャ置き場 (gitignore)
+  kari1_1744567890.123.png  -- ファイル名: {label}_{ts}.png
+```
+
+---
+
 ## 次のアクション
 
 1. **IRライト（850nm）設置** → 夜カメラで猫が映るようになる
 2. **録画を回して訪問データ収集** → 食事/飲水イベントの差分プロファイルを把握
-3. **閾値決定** → net値の静止フロアと訪問ピークの差から設定
-4. **JSONイベントログ実装** → 元々の目標（スキーマは `CLAUDE.md` Future Tasks に記載）
+3. **CAPTURE_THRESH チューニング** → 静止フロア(net≈2〜3)とピークの差を見て5.0を調整
+4. **分析スクリプト作成** → diff_log の時系列グラフ + captures マーカーを matplotlib で可視化
+5. **JSONイベントログ実装** → 元々の目標（スキーマは `CLAUDE.md` Future Tasks に記載）
 
 ---
 
