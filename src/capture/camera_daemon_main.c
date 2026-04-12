@@ -183,6 +183,7 @@ int main(int argc, char* argv[]) {
         camera_indices[0] = single_camera;
     }
 
+    bool any_failed = false;
     for (int i = 0; i < num_cameras; i++) {
         int cam = camera_indices[i];
         LOG_INFO("Main", "Creating pipeline for camera %d (%dx%d@%dfps)", cam, output_width,
@@ -192,7 +193,7 @@ int main(int argc, char* argv[]) {
                                   output_width, output_height, fps, bitrate, &g_active_camera);
         if (ret != 0) {
             LOG_ERROR("Main", "Failed to create pipeline for camera %d: %d", cam, ret);
-            // Continue with remaining cameras
+            any_failed = true;
             continue;
         }
 
@@ -200,8 +201,21 @@ int main(int argc, char* argv[]) {
         if (ret != 0) {
             LOG_ERROR("Main", "Failed to start pipeline for camera %d: %d", cam, ret);
             pipeline_destroy(&g_pipelines[cam]);
+            any_failed = true;
             continue;
         }
+    }
+
+    // In dual-camera mode, all pipelines must succeed.
+    // Exit so systemd (Restart=on-failure) retries — VIO init failures are often transient.
+    if (any_failed && single_camera < 0) {
+        LOG_ERROR("Main", "One or more pipelines failed in dual-camera mode, exiting for restart");
+        for (int i = 0; i < num_cameras; i++) {
+            pipeline_stop(&g_pipelines[camera_indices[i]]);
+            pipeline_destroy(&g_pipelines[camera_indices[i]]);
+        }
+        shm_detection_destroy(detection_shm);
+        return 1;
     }
 
     // TCP relay for night-assist: stream NIGHT camera H.265 to ai-pyramid (port 9265)

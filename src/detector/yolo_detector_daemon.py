@@ -463,14 +463,15 @@ class YoloDetectorDaemon:
         self.night_fp_classes = {DetectionClass.CHAIR}
 
         # Night frame collection for future fine-tuning
-        self.night_collect_dir = Path("/tmp/night_collect")
+        _night_collect_base = Path(os.environ.get("NIGHT_COLLECT_DIR", "/tmp/night_collect"))
+        self.night_collect_dir = _night_collect_base
         self.night_collect_count: int = 0
         self.night_collect_max: int = 500  # Max frames to collect per session
         self.night_collect_interval: int = 150  # Collect every N frames during motion
 
         # Feeding zone motion detection state (ROI 0 = tight 480x480 crop)
-        self.feeding_collect_dir = Path("/tmp/night_collect/feeding")
-        self.feeding_events_path = Path("/tmp/feeding_events.jsonl")
+        self.feeding_collect_dir = _night_collect_base / "feeding"
+        self.feeding_events_path = _night_collect_base / "feeding_events.jsonl"
         self.FEEDING_MOTION_THRESH: float = 0.008  # nz_ratio threshold (validated)
         self.FEEDING_QUIET_GAP: int = 15  # frames of quiet before event ends
         self.FEEDING_SAVE_INTERVAL: int = 30  # save full frame every N motion frames
