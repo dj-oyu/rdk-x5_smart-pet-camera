@@ -268,15 +268,18 @@ export function AnnotateCanvas({
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  // Resize canvas to fill container
+  // Resize canvas to fill container.
+  // Multiply by devicePixelRatio so the buffer matches physical pixels;
+  // CSS flex:1 keeps the display size at CSS pixels → sharp on HiDPI.
   useEffect(() => {
     const resize = () => {
       const canvas = canvasRef.current;
       if (!canvas) return;
       const parent = canvas.parentElement;
       if (!parent) return;
-      canvas.width = parent.clientWidth;
-      canvas.height = parent.clientHeight;
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = parent.clientWidth * dpr;
+      canvas.height = parent.clientHeight * dpr;
       redraw();
     };
     resize();
