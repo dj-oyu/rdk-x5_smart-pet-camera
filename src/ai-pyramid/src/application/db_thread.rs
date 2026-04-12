@@ -175,6 +175,9 @@ pub enum DbCommand {
         id: i64,
         reply: oneshot::Sender<AppResult<usize>>,
     },
+    TrainingDeleteRejected {
+        reply: oneshot::Sender<AppResult<Vec<String>>>,
+    },
     TrainingStats {
         reply: oneshot::Sender<AppResult<TrainingStats>>,
     },
@@ -320,6 +323,9 @@ fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
             ),
             DbCommand::TrainingDeleteAnnotation { id, reply } => {
                 send_reply(reply, store.delete_training_annotation(id))
+            }
+            DbCommand::TrainingDeleteRejected { reply } => {
+                send_reply(reply, store.delete_rejected_frames())
             }
             DbCommand::TrainingStats { reply } => send_reply(reply, store.training_stats()),
             DbCommand::TrainingExport { reply } => {

@@ -41,6 +41,7 @@ pub fn router(state: TrainingState) -> Router {
             "/api/training/annotations/{id}",
             delete(handle_delete_annotation),
         )
+        .route("/api/training/cleanup", post(handle_cleanup))
         .route("/api/training/stats", get(handle_stats))
         .route("/api/training/export", get(handle_export))
         .route("/api/training/classes", get(handle_classes))
@@ -344,6 +345,67 @@ async fn handle_delete_annotation(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+// ── Cleanup: delete all rejected frames ──────────────────────────
+
+#[derive(Deserialize)]
+struct CleanupRequest {
+    /// Also delete the original NV12 file on rdk-x5 (default: true).
+    #[serde(default = "default_true")]
+    delete_remote: bool,
+}
+fn default_true() -> bool {
+    true
+}
+
+async fn handle_cleanup(
+    State(state): State<Arc<TrainingState>>,
+    Json(body): Json<CleanupRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // 1. Single DB transaction: collect filenames then delete all rejected rows.
+    //    Annotations are removed via ON DELETE CASCADE.
+    let filenames = state
+        .db
+        .request(
+            move |reply| crate::application::db_thread::DbCommand::TrainingDeleteRejected { reply },
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let total = filenames.len();
+
+    // 2. Remove local JPEG caches in parallel (best-effort).
+    let cache_futs = filenames.iter().map(|f| {
+        let path = state.cache_dir.join(f.replace(".nv12", ".jpg"));
+        tokio::fs::remove_file(path)
+    });
+    futures_util::future::join_all(cache_futs).await;
+
+    // 3. Delete remote NV12 files in a single batched SSH command (chunked).
+    let remote_errors = if body.delete_remote && !filenames.is_empty() {
+        ssh::delete_remote_frames(
+            &state.ssh_host,
+            &state.remote_dir,
+            &filenames,
+            state.ssh_key.as_deref(),
+        )
+        .await
+    } else {
+        vec![]
+    };
+    let remote_deleted = if body.delete_remote {
+        total - remote_errors.len()
+    } else {
+        0
+    };
+
+    info!("training cleanup: deleted {total} rejected frames, {remote_deleted} remote files");
+    Ok(Json(serde_json::json!({
+        "deleted": total,
+        "remote_deleted": remote_deleted,
+        "remote_errors": remote_errors,
+    })))
 }
 
 // ── Stats ────────────────────────────────────────────────────────

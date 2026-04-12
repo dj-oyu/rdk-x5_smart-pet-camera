@@ -101,3 +101,17 @@ export async function fetchTrainingStats(): Promise<TrainingStats> {
   if (!r.ok) throw new Error(`fetch stats failed: ${r.status}`);
   return r.json();
 }
+
+export async function cleanupRejected(deleteRemote: boolean): Promise<{
+  deleted: number;
+  remote_deleted: number;
+  remote_errors: string[];
+}> {
+  const r = await fetch("/api/training/cleanup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ delete_remote: deleteRemote }),
+  });
+  if (!r.ok) throw new Error(`cleanup failed: ${r.status}`);
+  return r.json();
+}

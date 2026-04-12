@@ -287,6 +287,34 @@ impl PhotoStore {
         }
     }
 
+    /// Delete all rejected frames in one transaction.
+    /// Returns the filenames of deleted frames (for cache + remote cleanup by the caller).
+    /// Annotations are removed automatically via ON DELETE CASCADE.
+    pub fn delete_rejected_frames(&self) -> rusqlite::Result<Vec<String>> {
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<Vec<String>> {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT filename FROM training_frames WHERE status = 'rejected'")?;
+            let filenames: Vec<String> = stmt
+                .query_map([], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            self.conn
+                .execute("DELETE FROM training_frames WHERE status = 'rejected'", [])?;
+            Ok(filenames)
+        })();
+        match result {
+            Ok(filenames) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(filenames)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
     // ── Stats ────────────────────────────────────────────────────
 
     pub fn training_stats(&self) -> rusqlite::Result<TrainingStats> {

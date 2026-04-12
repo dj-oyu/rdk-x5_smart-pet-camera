@@ -49,6 +49,103 @@
   cursor: not-allowed;
 }
 
+.btn-cleanup {
+  padding: 8px 14px;
+  background: #4a2020;
+  color: #ffb3b3;
+  border: 1px solid #7a3030;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+.btn-cleanup:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.btn-cleanup:not(:disabled):hover {
+  background: #6a2828;
+}
+
+/* ── Cleanup confirmation modal ─────────────────────────────── */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal-box {
+  background: #1e1e30;
+  border: 1px solid #555;
+  border-radius: 10px;
+  padding: 24px 28px;
+  width: 380px;
+  max-width: 90vw;
+  color: #e0e0e0;
+}
+
+.modal-title {
+  margin: 0 0 12px;
+  font-size: 1.1rem;
+}
+
+.modal-body {
+  margin: 0 0 14px;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.modal-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.88rem;
+  cursor: pointer;
+  margin-bottom: 14px;
+}
+
+.modal-warning {
+  font-size: 0.8rem;
+  color: #ef9a9a;
+  margin: 0 0 20px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.btn-modal-cancel {
+  padding: 7px 16px;
+  background: #333;
+  color: #ccc;
+  border: 1px solid #555;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.btn-modal-cancel:hover {
+  background: #444;
+}
+
+.btn-modal-delete {
+  padding: 7px 16px;
+  background: #b71c1c;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 700;
+}
+.btn-modal-delete:hover {
+  background: #d32f2f;
+}
+
 .training-stats {
   display: flex;
   gap: 12px;

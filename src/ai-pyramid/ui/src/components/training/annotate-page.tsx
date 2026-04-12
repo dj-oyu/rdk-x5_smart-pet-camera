@@ -5,6 +5,7 @@ import {
   fetchFrames,
   fetchTrainingStats,
   updateFrameStatus,
+  cleanupRejected,
   type TrainingFrame,
   type TrainingStats,
 } from "../../lib/training-api";
@@ -21,6 +22,7 @@ export function AnnotatePage() {
   const filter = useSignal<StatusFilter>("pending");
   const offset = useSignal(0);
   const selectedFrame = useSignal<TrainingFrame | null>(null);
+  const showCleanup = useSignal(false);
   const limit = 20;
 
   const loadFrames = async () => {
@@ -108,6 +110,18 @@ export function AnnotatePage() {
       <header class="training-header">
         <h1>Training Dataset</h1>
         <button
+          class="btn-cleanup"
+          onClick={() => (showCleanup.value = true)}
+          disabled={!stats.value || stats.value.rejected === 0}
+          title={
+            stats.value && stats.value.rejected > 0
+              ? `${stats.value.rejected} rejected frames`
+              : "No rejected frames"
+          }
+        >
+          Cleanup ({stats.value?.rejected ?? 0} rejected)
+        </button>
+        <button
           class="btn-sync"
           onClick={handleSync}
           disabled={syncing.value}
@@ -147,6 +161,35 @@ export function AnnotatePage() {
           ),
         )}
       </div>
+
+      {showCleanup.value && stats.value && (
+        <CleanupModal
+          rejectedCount={stats.value.rejected}
+          onConfirm={async (deleteRemote) => {
+            showCleanup.value = false;
+            try {
+              const result = await cleanupRejected(deleteRemote);
+              const msg = [
+                `Deleted ${result.deleted} frames from local DB.`,
+                deleteRemote
+                  ? `${result.remote_deleted} files removed from RDK X5.`
+                  : "Remote files kept.",
+                result.remote_errors.length > 0
+                  ? `Errors: ${result.remote_errors.join("; ")}`
+                  : "",
+              ]
+                .filter(Boolean)
+                .join("\n");
+              alert(msg);
+              await loadFrames();
+              await loadStats();
+            } catch (e) {
+              alert(`Cleanup failed: ${e}`);
+            }
+          }}
+          onCancel={() => (showCleanup.value = false)}
+        />
+      )}
 
       {loading.value ? (
         <p class="loading-msg">Loading...</p>
@@ -294,6 +337,52 @@ function FrameCard({
             title="Reject"
           >
             X
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CleanupModal({
+  rejectedCount,
+  onConfirm,
+  onCancel,
+}: {
+  rejectedCount: number;
+  onConfirm: (deleteRemote: boolean) => void;
+  onCancel: () => void;
+}) {
+  const deleteRemote = useSignal(true);
+
+  return (
+    <div class="modal-overlay" onClick={onCancel}>
+      <div class="modal-box" onClick={(e) => e.stopPropagation()}>
+        <h3 class="modal-title">Cleanup Rejected Frames</h3>
+        <p class="modal-body">
+          <strong>{rejectedCount} rejected frames</strong> will be permanently
+          deleted from the local database and cache.
+        </p>
+        <label class="modal-checkbox">
+          <input
+            type="checkbox"
+            checked={deleteRemote.value}
+            onChange={(e) =>
+              (deleteRemote.value = (e.target as HTMLInputElement).checked)
+            }
+          />
+          Also delete original NV12 files from RDK X5
+        </label>
+        <p class="modal-warning">This action cannot be undone.</p>
+        <div class="modal-actions">
+          <button class="btn-modal-cancel" onClick={onCancel}>
+            Cancel
+          </button>
+          <button
+            class="btn-modal-delete"
+            onClick={() => onConfirm(deleteRemote.value)}
+          >
+            Delete {rejectedCount} frames
           </button>
         </div>
       </div>
