@@ -8,9 +8,14 @@ import { FilterBar } from "./components/filter-bar";
 import { Pagination } from "./components/pagination";
 import { SearchBar } from "./components/search-bar";
 import { StatsStrip } from "./components/stats-strip";
+import { AnnotatePage } from "./components/training/annotate-page";
 import { AppStore, embed } from "./lib/store";
 
 export function App() {
+  // Route: /app/annotate → training annotation UI
+  if (window.location.pathname.startsWith("/app/annotate")) {
+    return <AnnotatePage />;
+  }
   const store = useModel(AppStore);
 
   if (embed.embedded) {
@@ -73,6 +78,7 @@ export function App() {
           />
           <DailySummary />
           <BackfillButton />
+          <a href="/app/annotate" class="sidebar-link">Training Annotator</a>
         </aside>
         <div class="standalone-main">
           <StatsStrip stats={store.stats.value} />

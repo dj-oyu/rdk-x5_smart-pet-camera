@@ -11,7 +11,7 @@ Environment=AX_YOLO_DAEMON_SOCKET=/run/ax_yolo_daemon.sock
 Environment=AX_YOLO_MODEL_DIR=__MODEL_DIR__
 ExecStart=/opt/smart-pet-camera/build/ax_yolo_daemon \
   --model yolo26l
-Restart=always
+Restart=on-failure
 RestartSec=3
 WatchdogSec=30
 
