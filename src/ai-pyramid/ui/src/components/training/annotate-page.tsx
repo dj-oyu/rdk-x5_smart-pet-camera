@@ -154,6 +154,7 @@ export function AnnotatePage() {
   if (selectedFrame.value) {
     return (
       <AnnotateCanvas
+        key={selectedFrame.value.id}
         frame={selectedFrame.value}
         onDone={handleAnnotateDone}
         onStatusChange={handleStatusChange}
