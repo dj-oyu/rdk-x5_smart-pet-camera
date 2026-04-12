@@ -383,7 +383,7 @@ async fn handle_cleanup(
     futures_util::future::join_all(cache_futs).await;
 
     // 3. Delete remote NV12 files in a single batched SSH command (chunked).
-    let remote_errors = if body.delete_remote && !filenames.is_empty() {
+    let (remote_deleted, remote_errors) = if body.delete_remote && !filenames.is_empty() {
         ssh::delete_remote_frames(
             &state.ssh_host,
             &state.remote_dir,
@@ -392,12 +392,7 @@ async fn handle_cleanup(
         )
         .await
     } else {
-        vec![]
-    };
-    let remote_deleted = if body.delete_remote {
-        total - remote_errors.len()
-    } else {
-        0
+        (0, vec![])
     };
 
     info!("training cleanup: deleted {total} rejected frames, {remote_deleted} remote files");
