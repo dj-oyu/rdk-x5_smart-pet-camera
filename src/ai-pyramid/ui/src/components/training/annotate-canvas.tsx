@@ -17,10 +17,20 @@ export function AnnotateCanvas({
   frame,
   onDone,
   onStatusChange,
+  onNext,
+  onPrev,
+  frameIndex,
+  frameTotal,
+  navigating = false,
 }: {
   frame: TrainingFrame;
   onDone: () => void;
   onStatusChange: (frame: TrainingFrame, status: "approved" | "rejected") => void;
+  onNext?: () => void;
+  onPrev?: () => void;
+  frameIndex?: number;
+  frameTotal?: number;
+  navigating?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -255,6 +265,12 @@ export function AnnotateCanvas({
     } else if (e.key === "s" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       handleSave();
+    } else if (e.key === "ArrowRight" && !e.ctrlKey && !e.metaKey && !drawing.value) {
+      e.preventDefault();
+      onNext?.();
+    } else if (e.key === "ArrowLeft" && !e.ctrlKey && !e.metaKey && !drawing.value) {
+      e.preventDefault();
+      onPrev?.();
     }
   };
 
@@ -297,6 +313,29 @@ export function AnnotateCanvas({
         <button class="btn-back" onClick={onDone}>
           Back
         </button>
+        <div class="nav-btns">
+          <button
+            class="btn-nav"
+            onClick={onPrev}
+            disabled={!onPrev || navigating}
+            title="Previous frame (←)"
+          >
+            ←
+          </button>
+          {frameIndex != null && frameTotal != null && (
+            <span class="nav-counter">
+              {frameIndex} / {frameTotal}
+            </span>
+          )}
+          <button
+            class="btn-nav"
+            onClick={onNext}
+            disabled={!onNext || navigating}
+            title="Next frame (→)"
+          >
+            →
+          </button>
+        </div>
         <span class="annotate-filename">{frame.filename}</span>
         <div class="class-selector">
           {DEFAULT_CLASSES.map((cls) => (
@@ -389,6 +428,7 @@ export function AnnotateCanvas({
           <p>Click bbox: select</p>
           <p>Delete/BS: remove selected</p>
           <p>Ctrl+S: save</p>
+          <p>← →: prev / next</p>
           <p>Esc: back</p>
         </div>
       </div>

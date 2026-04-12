@@ -51,6 +51,8 @@ export function AnnotatePage() {
   }, []);
 
   useEffect(() => {
+    // Skip reload while in annotation view — navigation manages frames directly.
+    if (selectedFrame.value) return;
     loadFrames();
   }, [filter.value, offset.value]);
 
@@ -91,6 +93,60 @@ export function AnnotatePage() {
     loadStats();
   };
 
+  // Navigate to prev/next frame. Cross-page: fetch adjacent page without
+  // triggering the filter/offset useEffect (guard below skips reload while
+  // selectedFrame is set).
+  const navigating = useSignal(false);
+
+  const loadPageAndSelect = async (newOffset: number, pickLast: boolean) => {
+    navigating.value = true;
+    try {
+      const statusParam = filter.value === "all" ? undefined : filter.value;
+      const data = await fetchFrames(statusParam, limit, newOffset);
+      offset.value = newOffset;
+      frames.value = data.frames;
+      total.value = data.total;
+      if (data.frames.length > 0) {
+        selectedFrame.value = pickLast
+          ? data.frames[data.frames.length - 1]
+          : data.frames[0];
+      }
+    } finally {
+      navigating.value = false;
+    }
+  };
+
+  const handleAnnotateNext = async () => {
+    const idx = frames.value.findIndex((f) => f.id === selectedFrame.value?.id);
+    if (idx < frames.value.length - 1) {
+      selectedFrame.value = frames.value[idx + 1];
+    } else if (offset.value + limit < total.value) {
+      await loadPageAndSelect(offset.value + limit, false);
+    }
+  };
+
+  const handleAnnotatePrev = async () => {
+    const idx = frames.value.findIndex((f) => f.id === selectedFrame.value?.id);
+    if (idx > 0) {
+      selectedFrame.value = frames.value[idx - 1];
+    } else if (offset.value > 0) {
+      await loadPageAndSelect(offset.value - limit, true);
+    }
+  };
+
+  const selectedFrameIdx = useComputed(() =>
+    frames.value.findIndex((f) => f.id === selectedFrame.value?.id),
+  );
+  const frameIndex = useComputed(() => offset.value + selectedFrameIdx.value + 1);
+  const hasNext = useComputed(
+    () =>
+      selectedFrameIdx.value < frames.value.length - 1 ||
+      offset.value + limit < total.value,
+  );
+  const hasPrev = useComputed(
+    () => selectedFrameIdx.value > 0 || offset.value > 0,
+  );
+
   const pageCount = useComputed(() => Math.ceil(total.value / limit));
   const currentPage = useComputed(() => Math.floor(offset.value / limit) + 1);
 
@@ -101,6 +157,11 @@ export function AnnotatePage() {
         frame={selectedFrame.value}
         onDone={handleAnnotateDone}
         onStatusChange={handleStatusChange}
+        onNext={hasNext.value ? handleAnnotateNext : undefined}
+        onPrev={hasPrev.value ? handleAnnotatePrev : undefined}
+        frameIndex={frameIndex.value}
+        frameTotal={total.value}
+        navigating={navigating.value}
       />
     );
   }

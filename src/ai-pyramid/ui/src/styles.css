@@ -325,6 +325,39 @@
   cursor: pointer;
 }
 
+.nav-btns {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.btn-nav {
+  width: 30px;
+  height: 28px;
+  background: #2a2a3e;
+  color: #ccc;
+  border: 1px solid #555;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+.btn-nav:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.btn-nav:not(:disabled):hover {
+  background: #3a3a50;
+}
+
+.nav-counter {
+  font-size: 0.78rem;
+  color: #888;
+  min-width: 52px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
 .annotate-filename {
   font-size: 0.8rem;
   color: #888;
