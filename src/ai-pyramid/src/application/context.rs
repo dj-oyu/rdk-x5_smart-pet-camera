@@ -12,8 +12,9 @@ pub struct AppContext {
     base_url: Option<String>,
     is_tls: bool,
     vlm_config: VlmConfig,
-    /// Serializes all NPU access (VLM via axllm + YOLO via ax_yolo_daemon).
-    /// NPU is an exclusive resource — concurrent access from 2 processes causes SEGV.
+    /// Single NPU gate shared between VLM (axllm) and YOLO daemon.
+    /// Concurrent NPU access from two processes causes SEGV on AX650.
+    /// Both vlm_semaphore() and yolo_semaphore() return this same permit.
     npu_semaphore: Arc<Semaphore>,
 }
 
@@ -69,7 +70,11 @@ impl AppContext {
         self.vlm_config.clone()
     }
 
-    pub fn npu_semaphore(&self) -> &Arc<Semaphore> {
+    pub fn vlm_semaphore(&self) -> &Arc<Semaphore> {
+        &self.npu_semaphore
+    }
+
+    pub fn yolo_semaphore(&self) -> &Arc<Semaphore> {
         &self.npu_semaphore
     }
 
