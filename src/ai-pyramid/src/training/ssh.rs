@@ -185,15 +185,17 @@ pub async fn fetch_and_convert_frame(
 
 /// Delete multiple NV12 files on the remote host in batch via SSH.
 /// Files are sent in chunks of `CHUNK` to avoid command-line length limits.
-/// Returns a list of per-chunk error strings (empty = all succeeded).
+/// Returns `(deleted_count, errors)` where deleted_count is the number of
+/// successfully deleted files and errors is a list of per-chunk error strings.
 pub async fn delete_remote_frames(
     ssh_host: &str,
     remote_dir: &str,
     filenames: &[String],
     ssh_key: Option<&str>,
-) -> Vec<String> {
+) -> (usize, Vec<String>) {
     const CHUNK: usize = 50;
     let mut errors = Vec::new();
+    let mut deleted = 0usize;
 
     for chunk in filenames.chunks(CHUNK) {
         let paths: Vec<String> = chunk.iter().map(|f| format!("{remote_dir}/{f}")).collect();
@@ -211,11 +213,14 @@ pub async fn delete_remote_frames(
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 errors.push(format!("ssh rm error ({} files): {stderr}", chunk.len()));
             }
-            Ok(_) => debug!("deleted {} remote files on {ssh_host}", chunk.len()),
+            Ok(_) => {
+                deleted += chunk.len();
+                debug!("deleted {} remote files on {ssh_host}", chunk.len());
+            }
         }
     }
 
-    errors
+    (deleted, errors)
 }
 
 /// Fetch companion JSON metadata via SSH cat.
