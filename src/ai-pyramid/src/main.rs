@@ -216,16 +216,22 @@ async fn main() {
     }
 
     // Training annotation subsystem
-    let training_ssh_host = std::env::var("TRAINING_SSH_HOST").unwrap_or_else(|_| "rdk-x5".into());
+    // Reuse PET_CAMERA_HOST (rdk-x5 tailscale hostname) for SSH.
+    // Prepend "sunrise@" since that's the rdk-x5 login user.
+    let training_ssh_host = std::env::var("PET_CAMERA_HOST")
+        .map(|h| format!("sunrise@{h}"))
+        .unwrap_or_else(|_| "rdk-x5".into());
     let training_remote_dir = std::env::var("TRAINING_REMOTE_DIR")
         .unwrap_or_else(|_| "/tmp/night_collect/feeding".into());
+    let training_ssh_key = std::env::var("TRAINING_SSH_KEY").ok();
     let training_cache_dir = args
         .photos_dir
         .parent()
         .unwrap_or(&args.photos_dir)
         .join("training");
     info!(
-        "Training: ssh={training_ssh_host} remote={training_remote_dir} cache={}",
+        "Training: ssh={training_ssh_host} remote={training_remote_dir} key={} cache={}",
+        training_ssh_key.as_deref().unwrap_or("(default)"),
         training_cache_dir.display()
     );
     let training_state = pet_album::training::api::TrainingState {
@@ -233,6 +239,7 @@ async fn main() {
         ssh_host: training_ssh_host,
         remote_dir: training_remote_dir,
         cache_dir: training_cache_dir,
+        ssh_key: training_ssh_key,
     };
     let training_router = pet_album::training::api::router(training_state);
 

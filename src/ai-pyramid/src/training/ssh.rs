@@ -5,6 +5,23 @@ use tracing::{debug, warn};
 
 static FETCH_NONCE: AtomicU64 = AtomicU64::new(0);
 
+/// Common SSH options: accept new host keys on first connect, optionally use
+/// a specific identity file so the service can authenticate regardless of
+/// which OS user it runs as.
+fn ssh_opts(ssh_key: Option<&str>) -> Vec<String> {
+    let mut opts = vec![
+        "-o".into(),
+        "StrictHostKeyChecking=accept-new".into(),
+        "-o".into(),
+        "BatchMode=yes".into(),
+    ];
+    if let Some(key) = ssh_key {
+        opts.push("-i".into());
+        opts.push(key.into());
+    }
+    opts
+}
+
 /// Parsed frame info from remote filename like `feeding_00013775_1280x720.nv12`
 #[derive(Debug, Clone)]
 pub struct RemoteFrame {
@@ -27,8 +44,10 @@ fn parse_frame_filename(filename: &str) -> Option<(i32, i32)> {
 pub async fn list_remote_frames(
     ssh_host: &str,
     remote_dir: &str,
+    ssh_key: Option<&str>,
 ) -> Result<Vec<RemoteFrame>, String> {
     let output = Command::new("ssh")
+        .args(ssh_opts(ssh_key))
         .args([ssh_host, "ls", remote_dir])
         .output()
         .await
@@ -81,6 +100,7 @@ pub async fn fetch_and_convert_frame(
     width: i32,
     height: i32,
     cache_dir: &Path,
+    ssh_key: Option<&str>,
 ) -> Result<PathBuf, String> {
     let jpeg_name = filename.replace(".nv12", ".jpg");
     let jpeg_path = cache_dir.join(&jpeg_name);
@@ -105,6 +125,7 @@ pub async fn fetch_and_convert_frame(
 
     // SCP the NV12 file
     let scp_out = Command::new("scp")
+        .args(ssh_opts(ssh_key))
         .args([
             &format!("{ssh_host}:{remote_path}"),
             nv12_tmp.to_str().unwrap(),
@@ -164,9 +185,11 @@ pub async fn fetch_frame_metadata(
     ssh_host: &str,
     remote_dir: &str,
     json_filename: &str,
+    ssh_key: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let remote_path = format!("{remote_dir}/{json_filename}");
     let output = Command::new("ssh")
+        .args(ssh_opts(ssh_key))
         .args([ssh_host, "cat", &remote_path])
         .output()
         .await

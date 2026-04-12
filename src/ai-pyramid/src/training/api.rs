@@ -17,6 +17,10 @@ pub struct TrainingState {
     pub ssh_host: String,
     pub remote_dir: String,
     pub cache_dir: PathBuf,
+    /// Path to SSH identity file (e.g. /home/admin-user/.ssh/id_ed25519).
+    /// When set, passed as `-i <key>` to ssh/scp. Required when the service
+    /// runs as a user (e.g. root) that has no key for the remote host.
+    pub ssh_key: Option<String>,
 }
 
 pub fn router(state: TrainingState) -> Router {
@@ -48,15 +52,23 @@ pub fn router(state: TrainingState) -> Router {
 async fn handle_sync(
     State(state): State<Arc<TrainingState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let frames = ssh::list_remote_frames(&state.ssh_host, &state.remote_dir)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+    let frames =
+        ssh::list_remote_frames(&state.ssh_host, &state.remote_dir, state.ssh_key.as_deref())
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
 
     let mut added = 0i64;
     for frame in &frames {
         let captured_at = if let Some(ref json_name) = frame.json_filename {
             // Try to extract timestamp from JSON
-            match ssh::fetch_frame_metadata(&state.ssh_host, &state.remote_dir, json_name).await {
+            match ssh::fetch_frame_metadata(
+                &state.ssh_host,
+                &state.remote_dir,
+                json_name,
+                state.ssh_key.as_deref(),
+            )
+            .await
+            {
                 Ok(meta) => meta
                     .get("timestamp")
                     .and_then(|v| v.as_f64())
@@ -233,6 +245,7 @@ async fn handle_frame_image(
         frame.width,
         frame.height,
         &state.cache_dir,
+        state.ssh_key.as_deref(),
     )
     .await
     .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
