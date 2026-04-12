@@ -187,3 +187,9 @@ deploy/*/sudoers-*
 !deploy/*/sudoers-*.example
 deploy/*/*.service
 !deploy/*/*.service.example
+
+# ROI monitor: runtime DB and captures
+scripts/roi_monitor.db
+scripts/roi_monitor.db-shm
+scripts/roi_monitor.db-wal
+scripts/captures/

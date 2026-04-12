@@ -1,0 +1,50 @@
+{
+  "timestamp": "2026-04-12 22:57:14",
+  "stage1": {
+    "blur": 5,
+    "ksize": 3,
+    "clip_limit": 4.0,
+    "boost": 3.0
+  },
+  "params": {
+    "hough": {
+      "min_r": 13,
+      "max_r": 30,
+      "dp": 1,
+      "p1": 116,
+      "p2": 40
+    },
+    "contour": {
+      "min_area": 500,
+      "max_area": 700,
+      "ellipse_ratio": 1.8
+    }
+  },
+  "confirmed": [
+    {
+      "cx": 194,
+      "cy": 206,
+      "r": 16,
+      "method": "hough"
+    },
+    {
+      "cx": 186,
+      "cy": 234,
+      "r": 16,
+      "method": "hough"
+    },
+    {
+      "cx": 122,
+      "cy": 290,
+      "r": 19,
+      "method": "hough"
+    },
+    {
+      "cx": 100,
+      "cy": 310,
+      "r": 23,
+      "method": "hough"
+    }
+  ],
+  "count": 4
+}
