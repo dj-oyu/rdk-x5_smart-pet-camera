@@ -6,8 +6,14 @@ import {
   fetchTrainingStats,
   updateFrameStatus,
   cleanupRejected,
+  setBgRef,
+  fetchBgStatus,
+  buildBgModel,
+  scorePendingFrames,
+  bulkRejectByScore,
   type TrainingFrame,
   type TrainingStats,
+  type BgStatus,
 } from "../../lib/training-api";
 import { AnnotateCanvas } from "./annotate-canvas";
 
@@ -17,12 +23,14 @@ export function AnnotatePage() {
   const frames = useSignal<TrainingFrame[]>([]);
   const total = useSignal(0);
   const stats = useSignal<TrainingStats | null>(null);
+  const bgStatus = useSignal<BgStatus | null>(null);
   const loading = useSignal(false);
   const syncing = useSignal(false);
   const filter = useSignal<StatusFilter>("pending");
   const offset = useSignal(0);
   const selectedFrame = useSignal<TrainingFrame | null>(null);
   const showCleanup = useSignal(false);
+  const showBgPanel = useSignal(false);
   const limit = 20;
 
   const loadFrames = async () => {
@@ -45,9 +53,18 @@ export function AnnotatePage() {
     }
   };
 
+  const loadBgStatus = async () => {
+    try {
+      bgStatus.value = await fetchBgStatus();
+    } catch {
+      // ignore
+    }
+  };
+
   useEffect(() => {
     loadFrames();
     loadStats();
+    loadBgStatus();
   }, []);
 
   useEffect(() => {
@@ -73,11 +90,21 @@ export function AnnotatePage() {
   const handleStatusChange = async (frame: TrainingFrame, status: "approved" | "rejected") => {
     try {
       await updateFrameStatus(frame.id, status);
-      // Update local state
-      frames.value = frames.value.map((f) =>
-        f.id === frame.id ? { ...f, status } : f,
-      );
+      frames.value = frames.value.map((f) => (f.id === frame.id ? { ...f, status } : f));
       loadStats();
+    } catch (e) {
+      alert(`Failed: ${e}`);
+    }
+  };
+
+  const handleToggleBgRef = async (frame: TrainingFrame) => {
+    const newVal = !frame.is_bg_ref;
+    try {
+      await setBgRef(frame.id, newVal);
+      frames.value = frames.value.map((f) =>
+        f.id === frame.id ? { ...f, is_bg_ref: newVal } : f,
+      );
+      loadBgStatus();
     } catch (e) {
       alert(`Failed: ${e}`);
     }
@@ -172,6 +199,19 @@ export function AnnotatePage() {
       <header class="training-header">
         <h1>Training Dataset</h1>
         <button
+          class={`btn-bg-model ${bgStatus.value?.stale ? "stale" : ""}`}
+          onClick={() => (showBgPanel.value = !showBgPanel.value)}
+          title="Background model for empty-frame detection"
+        >
+          BG Model
+          {bgStatus.value && (
+            <span class="bg-ref-count">
+              ({bgStatus.value.bg_ref_count} refs
+              {bgStatus.value.stale ? " !" : ""})
+            </span>
+          )}
+        </button>
+        <button
           class="btn-cleanup"
           onClick={() => (showCleanup.value = true)}
           disabled={!stats.value || stats.value.rejected === 0}
@@ -183,11 +223,7 @@ export function AnnotatePage() {
         >
           Cleanup ({stats.value?.rejected ?? 0} rejected)
         </button>
-        <button
-          class="btn-sync"
-          onClick={handleSync}
-          disabled={syncing.value}
-        >
+        <button class="btn-sync" onClick={handleSync} disabled={syncing.value}>
           {syncing.value ? "Syncing..." : "Sync from RDK X5"}
         </button>
       </header>
@@ -223,6 +259,18 @@ export function AnnotatePage() {
           ),
         )}
       </div>
+
+      {showBgPanel.value && bgStatus.value && (
+        <BgModelPanel
+          status={bgStatus.value}
+          onClose={() => (showBgPanel.value = false)}
+          onUpdated={() => {
+            loadBgStatus();
+            loadFrames();
+            loadStats();
+          }}
+        />
+      )}
 
       {showCleanup.value && stats.value && (
         <CleanupModal
@@ -269,6 +317,7 @@ export function AnnotatePage() {
                 onClick={() => handleFrameClick(frame)}
                 onApprove={() => handleStatusChange(frame, "approved")}
                 onReject={() => handleStatusChange(frame, "rejected")}
+                onToggleBgRef={() => handleToggleBgRef(frame)}
               />
             ))}
           </div>
@@ -304,11 +353,13 @@ function FrameCard({
   onClick,
   onApprove,
   onReject,
+  onToggleBgRef,
 }: {
   frame: TrainingFrame;
   onClick: () => void;
   onApprove: () => void;
   onReject: () => void;
+  onToggleBgRef: () => void;
 }) {
   const statusClass =
     frame.status === "approved"
@@ -362,7 +413,7 @@ function FrameCard({
   }, [frame.id]);
 
   return (
-    <div class={`frame-card ${statusClass}`}>
+    <div class={`frame-card ${statusClass} ${frame.is_bg_ref ? "card-bg-ref" : ""}`}>
       <div class="frame-thumb" ref={thumbRef} onClick={onClick}>
         {imgSrc.value && imgSrc.value !== "error" ? (
           <img src={imgSrc.value} alt={frame.filename} />
@@ -374,12 +425,30 @@ function FrameCard({
         {frame.annotation_count > 0 && (
           <span class="ann-badge">{frame.annotation_count}</span>
         )}
+        {frame.bg_score !== null && frame.bg_score !== undefined && (
+          <span
+            class={`bg-score-badge ${frame.bg_score <= 5 ? "score-empty" : frame.bg_score >= 30 ? "score-occupied" : "score-mid"}`}
+            title={`Background score: ${frame.bg_score.toFixed(1)}%`}
+          >
+            {frame.bg_score.toFixed(0)}%
+          </span>
+        )}
       </div>
       <div class="frame-info">
         <span class="frame-name" title={frame.filename}>
           {frame.filename.replace(/_\d+x\d+\.nv12$/, "")}
         </span>
         <div class="frame-actions">
+          <button
+            class={`btn-bg-ref ${frame.is_bg_ref ? "active" : ""}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleBgRef();
+            }}
+            title={frame.is_bg_ref ? "Remove background reference" : "Mark as background reference"}
+          >
+            ◆
+          </button>
           <button
             class="btn-approve"
             onClick={(e) => {
@@ -402,6 +471,136 @@ function FrameCard({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function BgModelPanel({
+  status,
+  onClose,
+  onUpdated,
+}: {
+  status: BgStatus;
+  onClose: () => void;
+  onUpdated: () => void;
+}) {
+  const building = useSignal(false);
+  const scoring = useSignal(false);
+  const rejecting = useSignal(false);
+  const threshold = useSignal(5);
+  const lastResult = useSignal<string | null>(null);
+
+  const handleBuild = async () => {
+    building.value = true;
+    lastResult.value = null;
+    try {
+      const r = await buildBgModel();
+      lastResult.value = `Model built from ${r.frame_count} frames (${r.width}x${r.height})${r.fetched_from_remote > 0 ? `, fetched ${r.fetched_from_remote} from RDK X5` : ""}.`;
+      onUpdated();
+    } catch (e) {
+      lastResult.value = `Build failed: ${e}`;
+    } finally {
+      building.value = false;
+    }
+  };
+
+  const handleScore = async () => {
+    scoring.value = true;
+    lastResult.value = null;
+    try {
+      const r = await scorePendingFrames();
+      lastResult.value = `Scored ${r.scored} frames. ${r.skipped_not_cached > 0 ? `${r.skipped_not_cached} skipped (not cached — view them first).` : ""}`;
+      onUpdated();
+    } catch (e) {
+      lastResult.value = `Score failed: ${e}`;
+    } finally {
+      scoring.value = false;
+    }
+  };
+
+  const handleReject = async () => {
+    rejecting.value = true;
+    lastResult.value = null;
+    try {
+      const r = await bulkRejectByScore(threshold.value);
+      lastResult.value = `Rejected ${r.rejected} frames with score ≤ ${threshold.value}%.`;
+      onUpdated();
+    } catch (e) {
+      lastResult.value = `Reject failed: ${e}`;
+    } finally {
+      rejecting.value = false;
+    }
+  };
+
+  const canBuild = status.bg_ref_count >= status.min_refs_required;
+  const canScore = status.model_exists;
+
+  return (
+    <div class="bg-panel">
+      <div class="bg-panel-header">
+        <h3>Background Model</h3>
+        <button class="btn-close" onClick={onClose}>
+          ✕
+        </button>
+      </div>
+
+      <div class="bg-panel-status">
+        <div class="bg-stat">
+          <span class="bg-stat-label">Reference frames</span>
+          <span class="bg-stat-value">
+            {status.bg_ref_count}
+            {status.bg_ref_count < status.min_refs_required && (
+              <span class="bg-warn"> (need {status.min_refs_required}+)</span>
+            )}
+          </span>
+        </div>
+        <div class="bg-stat">
+          <span class="bg-stat-label">Model</span>
+          <span class="bg-stat-value">
+            {status.model_exists
+              ? `${status.model_frame_count} frames, ${status.model_width}x${status.model_height}${status.stale ? " (stale)" : ""}`
+              : "not built"}
+          </span>
+        </div>
+      </div>
+
+      <p class="bg-panel-help">
+        Mark empty frames with ◆, then build the model. Score pending frames, then bulk-reject
+        low-scoring ones.
+      </p>
+
+      <div class="bg-panel-actions">
+        <button class="btn-bg-build" onClick={handleBuild} disabled={building.value || !canBuild}>
+          {building.value ? "Building..." : "1. Build Model"}
+        </button>
+        <button class="btn-bg-score" onClick={handleScore} disabled={scoring.value || !canScore}>
+          {scoring.value ? "Scoring..." : "2. Score Pending"}
+        </button>
+      </div>
+
+      <div class="bg-panel-reject">
+        <label class="bg-threshold-label">
+          Reject if score ≤
+          <input
+            type="range"
+            min={1}
+            max={20}
+            value={threshold.value}
+            onInput={(e) => (threshold.value = Number((e.target as HTMLInputElement).value))}
+            class="bg-threshold-slider"
+          />
+          <span class="bg-threshold-val">{threshold.value}%</span>
+        </label>
+        <button
+          class="btn-bg-reject"
+          onClick={handleReject}
+          disabled={rejecting.value || !canScore}
+        >
+          {rejecting.value ? "Rejecting..." : "3. Bulk Reject"}
+        </button>
+      </div>
+
+      {lastResult.value && <p class="bg-result">{lastResult.value}</p>}
     </div>
   );
 }
