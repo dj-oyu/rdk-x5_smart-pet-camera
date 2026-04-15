@@ -184,6 +184,26 @@ pub enum DbCommand {
     TrainingExport {
         reply: oneshot::Sender<AppResult<Vec<ExportEntry>>>,
     },
+    // ── Background model ─────────────────────────────────────
+    TrainingSetBgRef {
+        id: i64,
+        is_bg_ref: bool,
+        reply: oneshot::Sender<AppResult<usize>>,
+    },
+    TrainingListBgRefFrames {
+        reply: oneshot::Sender<AppResult<Vec<(i64, String)>>>,
+    },
+    TrainingBgRefCount {
+        reply: oneshot::Sender<AppResult<i64>>,
+    },
+    TrainingBulkUpdateBgScores {
+        scores: Vec<(i64, f64)>,
+        reply: oneshot::Sender<AppResult<usize>>,
+    },
+    TrainingBulkRejectByScore {
+        threshold: f64,
+        reply: oneshot::Sender<AppResult<usize>>,
+    },
 }
 
 fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
@@ -330,6 +350,22 @@ fn run_database_loop(store: PhotoStore, rx: mpsc::Receiver<DbCommand>) {
             DbCommand::TrainingStats { reply } => send_reply(reply, store.training_stats()),
             DbCommand::TrainingExport { reply } => {
                 send_reply(reply, store.export_training_dataset())
+            }
+            // ── Background model ─────────────────────────────────────
+            DbCommand::TrainingSetBgRef {
+                id,
+                is_bg_ref,
+                reply,
+            } => send_reply(reply, store.set_bg_ref(id, is_bg_ref)),
+            DbCommand::TrainingListBgRefFrames { reply } => {
+                send_reply(reply, store.list_bg_ref_frames())
+            }
+            DbCommand::TrainingBgRefCount { reply } => send_reply(reply, store.bg_ref_count()),
+            DbCommand::TrainingBulkUpdateBgScores { scores, reply } => {
+                send_reply(reply, store.bulk_update_bg_scores(&scores))
+            }
+            DbCommand::TrainingBulkRejectByScore { threshold, reply } => {
+                send_reply(reply, store.bulk_reject_by_score(threshold))
             }
         }
     }

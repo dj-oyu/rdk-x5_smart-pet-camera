@@ -16,6 +16,10 @@ pub struct TrainingFrame {
     pub source: String,
     pub annotation_count: i64,
     pub created_at: String,
+    /// Whether this frame is used as a background reference for scoring.
+    pub is_bg_ref: bool,
+    /// Background model score (% of outlier pixels). None = not yet scored.
+    pub bg_score: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,6 +94,15 @@ impl PhotoStore {
             CREATE INDEX IF NOT EXISTS idx_training_annotations_frame
                 ON training_annotations(frame_id);",
         )?;
+        // Additive migrations — silently ignored if columns already exist.
+        let _ = self.conn.execute_batch(
+            "ALTER TABLE training_frames ADD COLUMN is_bg_ref INTEGER NOT NULL DEFAULT 0;
+             CREATE INDEX IF NOT EXISTS idx_training_frames_bg_ref
+                 ON training_frames(is_bg_ref);",
+        );
+        let _ = self
+            .conn
+            .execute_batch("ALTER TABLE training_frames ADD COLUMN bg_score REAL;");
         Ok(())
     }
 
@@ -144,7 +157,8 @@ impl PhotoStore {
         let sql = format!(
             "SELECT f.id, f.filename, f.width, f.height, f.captured_at, f.status,
                     f.source, f.created_at,
-                    (SELECT COUNT(*) FROM training_annotations a WHERE a.frame_id = f.id)
+                    (SELECT COUNT(*) FROM training_annotations a WHERE a.frame_id = f.id),
+                    f.is_bg_ref, f.bg_score
              FROM training_frames f
              {where_clause}
              ORDER BY f.filename ASC
@@ -162,6 +176,8 @@ impl PhotoStore {
                 source: r.get(6)?,
                 created_at: r.get(7)?,
                 annotation_count: r.get(8)?,
+                is_bg_ref: r.get::<_, i32>(9)? != 0,
+                bg_score: r.get(10)?,
             })
         };
 
@@ -183,7 +199,8 @@ impl PhotoStore {
             .query_row(
                 "SELECT f.id, f.filename, f.width, f.height, f.captured_at, f.status,
                         f.source, f.created_at,
-                        (SELECT COUNT(*) FROM training_annotations a WHERE a.frame_id = f.id)
+                        (SELECT COUNT(*) FROM training_annotations a WHERE a.frame_id = f.id),
+                        f.is_bg_ref, f.bg_score
                  FROM training_frames f WHERE f.id = ?1",
                 params![id],
                 |r| {
@@ -197,6 +214,8 @@ impl PhotoStore {
                         source: r.get(6)?,
                         created_at: r.get(7)?,
                         annotation_count: r.get(8)?,
+                        is_bg_ref: r.get::<_, i32>(9)? != 0,
+                        bg_score: r.get(10)?,
                     })
                 },
             )
@@ -288,19 +307,23 @@ impl PhotoStore {
     }
 
     /// Delete all rejected frames in one transaction.
+    /// Frames with `is_bg_ref = 1` are skipped — they must be de-referenced
+    /// before cleanup can remove them.
     /// Returns the filenames of deleted frames (for cache + remote cleanup by the caller).
     /// Annotations are removed automatically via ON DELETE CASCADE.
     pub fn delete_rejected_frames(&self) -> rusqlite::Result<Vec<String>> {
         self.conn.execute_batch("BEGIN")?;
         let result = (|| -> rusqlite::Result<Vec<String>> {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT filename FROM training_frames WHERE status = 'rejected'")?;
+            let mut stmt = self.conn.prepare(
+                "SELECT filename FROM training_frames WHERE status = 'rejected' AND is_bg_ref = 0",
+            )?;
             let filenames: Vec<String> = stmt
                 .query_map([], |r| r.get(0))?
                 .collect::<Result<_, _>>()?;
-            self.conn
-                .execute("DELETE FROM training_frames WHERE status = 'rejected'", [])?;
+            self.conn.execute(
+                "DELETE FROM training_frames WHERE status = 'rejected' AND is_bg_ref = 0",
+                [],
+            )?;
             Ok(filenames)
         })();
         match result {
@@ -313,6 +336,71 @@ impl PhotoStore {
                 Err(e)
             }
         }
+    }
+
+    // ── Background model ─────────────────────────────────────────────────
+
+    pub fn set_bg_ref(&self, id: i64, is_bg_ref: bool) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE training_frames SET is_bg_ref = ?1 WHERE id = ?2",
+            params![is_bg_ref as i32, id],
+        )
+    }
+
+    /// Returns (id, filename) pairs for all frames marked as background references.
+    pub fn list_bg_ref_frames(&self) -> rusqlite::Result<Vec<(i64, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, filename FROM training_frames WHERE is_bg_ref = 1 ORDER BY filename",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// Count of bg_ref frames.
+    pub fn bg_ref_count(&self) -> rusqlite::Result<i64> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM training_frames WHERE is_bg_ref = 1",
+            [],
+            |r| r.get(0),
+        )
+    }
+
+    /// Bulk-update bg_score for a list of (id, score) pairs.
+    pub fn bulk_update_bg_scores(&self, scores: &[(i64, f64)]) -> rusqlite::Result<usize> {
+        if scores.is_empty() {
+            return Ok(0);
+        }
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| -> rusqlite::Result<usize> {
+            let mut count = 0;
+            for (id, score) in scores {
+                count += self.conn.execute(
+                    "UPDATE training_frames SET bg_score = ?1 WHERE id = ?2",
+                    params![score, id],
+                )?;
+            }
+            Ok(count)
+        })();
+        match result {
+            Ok(n) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(n)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Set status = 'rejected' for all pending frames with bg_score <= threshold.
+    /// Returns the number of frames rejected.
+    pub fn bulk_reject_by_score(&self, threshold: f64) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE training_frames SET status = 'rejected'
+             WHERE status = 'pending' AND bg_score IS NOT NULL AND bg_score <= ?1",
+            params![threshold],
+        )
     }
 
     // ── Stats ────────────────────────────────────────────────────
