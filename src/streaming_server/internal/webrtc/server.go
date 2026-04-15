@@ -4,29 +4,31 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"sync"
 	"time"
 
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/logger"
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/pkg/types"
+	"github.com/pion/rtp"
+	"github.com/pion/rtp/codecs"
 	"github.com/pion/webrtc/v4"
-	"github.com/pion/webrtc/v4/pkg/media"
 )
 
 const (
 	// Video clock rate (90kHz standard for RTP video)
 	videoClockRate = 90000
+	// RTP MTU for UDP-safe fragmentation
+	rtpMTU = 1200
 )
 
 // Client represents a connected WebRTC client
 type Client struct {
-	id            string
-	peerConn      *webrtc.PeerConnection
-	videoTrack    *webrtc.TrackLocalStaticSample
-	frameChan     chan *types.VideoFrame
-	closeChan     chan struct{}
-	framesSent    uint64
-	framesDropped uint64
+	id         string
+	peerConn   *webrtc.PeerConnection
+	videoTrack *webrtc.TrackLocalStaticRTP
+	framesSent uint64
+	seq        uint16
 }
 
 // Server manages WebRTC connections
@@ -37,6 +39,9 @@ type Server struct {
 	config     webrtc.Configuration
 	maxClients int
 	api        *webrtc.API
+	// payloader is stateless; shared across clients to parse NAL units once per frame.
+	payloader codecs.H265Payloader
+	frameNum  uint64
 }
 
 // NewServer creates a new WebRTC server
@@ -115,8 +120,8 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to create peer connection: %w", err)
 	}
 
-	// Create H.265 video track
-	videoTrack, err := webrtc.NewTrackLocalStaticSample(
+	// Create H.265 video track (raw RTP; server pre-packetizes once per frame)
+	videoTrack, err := webrtc.NewTrackLocalStaticRTP(
 		webrtc.RTPCodecCapability{
 			MimeType:  webrtc.MimeTypeH265,
 			ClockRate: videoClockRate,
@@ -146,13 +151,12 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 		}
 	}()
 
-	// Create client
+	// Create client. RTP sequence starts at a random value (RFC 3550).
 	client := &Client{
 		id:         generateClientID(),
 		peerConn:   peerConn,
 		videoTrack: videoTrack,
-		frameChan:  make(chan *types.VideoFrame, 30), // Buffer 1 second worth
-		closeChan:  make(chan struct{}),
+		seq:        uint16(rand.Uint32()),
 	}
 
 	// Handle ICE connection state changes
@@ -212,8 +216,6 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 	s.clients[client.id] = client
 	s.clientsMu.Unlock()
 
-	// Frame sending is done synchronously in SendFrame (zero-copy safety)
-
 	logger.Info("WebRTC", "Client %s connected", client.id)
 
 	// Get the complete local description (with ICE candidates)
@@ -231,8 +233,9 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 	return answerJSON, nil
 }
 
-// SendFrame sends a frame to all connected clients in parallel.
-// Blocks until all WriteSample calls complete (frame.Data must stay valid).
+// SendFrame payloads the H.265 access unit once and fans the resulting RTP
+// payloads out to every connected client. Blocks until all WriteRTP calls
+// complete so frame.Data (backed by the VPU SHM buffer) stays valid.
 func (s *Server) SendFrame(frame *types.VideoFrame) {
 	s.clientsMu.RLock()
 	s.clientsBuf = s.clientsBuf[:0]
@@ -246,62 +249,43 @@ func (s *Server) SendFrame(frame *types.VideoFrame) {
 		return
 	}
 
+	// NAL parsing + FU fragmentation happens once; payload bytes are shared.
+	payloads := s.payloader.Payload(rtpMTU, frame.Data)
+	if len(payloads) == 0 {
+		return
+	}
+
+	ts := uint32(s.frameNum * (videoClockRate / 30))
+	s.frameNum++
+	last := len(payloads) - 1
+
 	var wg sync.WaitGroup
 	for _, client := range clients {
 		wg.Add(1)
 		go func(c *Client) {
 			defer wg.Done()
-			if err := c.videoTrack.WriteSample(media.Sample{
-				Data:     frame.Data,
-				Duration: time.Second / 30,
-			}); err != nil {
-				if err != io.ErrClosedPipe {
-					logger.Warn("WebRTC", "Error writing sample for client %s: %v", c.id, err)
+			for i, payload := range payloads {
+				pkt := rtp.Packet{
+					Header: rtp.Header{
+						Version:        2,
+						Marker:         i == last,
+						SequenceNumber: c.seq,
+						Timestamp:      ts,
+					},
+					Payload: payload,
 				}
-				return
+				c.seq++
+				if err := c.videoTrack.WriteRTP(&pkt); err != nil {
+					if err != io.ErrClosedPipe {
+						logger.Warn("WebRTC", "Error writing RTP for client %s: %v", c.id, err)
+					}
+					return
+				}
 			}
 			c.framesSent++
 		}(client)
 	}
 	wg.Wait()
-}
-
-// sendFrames sends frames to a specific client
-func (s *Server) sendFrames(client *Client) {
-	for {
-		select {
-		case <-client.closeChan:
-			return
-
-		case frame, ok := <-client.frameChan:
-			if !ok {
-				// Channel closed
-				return
-			}
-			// Calculate timestamp (assuming 30fps)
-			// timestamp = frame_num * (clock_rate / fps)
-			timestamp := frame.FrameNumber * (videoClockRate / 30)
-
-			// Write H.264 sample to track
-			if err := client.videoTrack.WriteSample(media.Sample{
-				Data:     frame.Data,
-				Duration: time.Second / 30,
-			}); err != nil {
-				if err != io.ErrClosedPipe {
-					logger.Warn("WebRTC", "Error writing sample for client %s: %v", client.id, err)
-				}
-				return
-			}
-
-			// Log every 30 frames to track frame_number
-			if frame.FrameNumber%30 == 0 {
-				logger.Debug("WebRTC", "Sent H.265 frame#%d to client %s (timestamp=%d)",
-					frame.FrameNumber, client.id, timestamp)
-			}
-
-			_ = timestamp // Timestamp is handled by pion internally
-		}
-	}
 }
 
 // RemoveClient removes a client by ID
@@ -314,15 +298,11 @@ func (s *Server) RemoveClient(clientID string) {
 		return
 	}
 
-	// Close client
-	close(client.closeChan)
-	close(client.frameChan)
 	client.peerConn.Close()
-
 	delete(s.clients, clientID)
 
-	logger.Info("WebRTC", "Client %s disconnected (sent: %d, dropped: %d)",
-		clientID, client.framesSent, client.framesDropped)
+	logger.Info("WebRTC", "Client %s disconnected (sent: %d)",
+		clientID, client.framesSent)
 }
 
 // GetClientCount returns the number of connected clients
@@ -340,8 +320,7 @@ func (s *Server) GetClientStats() map[string]map[string]uint64 {
 	stats := make(map[string]map[string]uint64)
 	for id, client := range s.clients {
 		stats[id] = map[string]uint64{
-			"frames_sent":    client.framesSent,
-			"frames_dropped": client.framesDropped,
+			"frames_sent": client.framesSent,
 		}
 	}
 	return stats
