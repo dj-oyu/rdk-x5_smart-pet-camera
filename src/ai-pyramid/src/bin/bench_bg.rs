@@ -82,10 +82,7 @@ fn main() {
     let score_paths = &paths[ref_count..];
     let score_pool_len = score_paths.len();
 
-    println!(
-        "jpeg_dir   : {}",
-        jpeg_dir.display()
-    );
+    println!("jpeg_dir   : {}", jpeg_dir.display());
     println!("total jpegs: {}", paths.len());
     println!("ref frames : {ref_count}");
     println!("score pool : {score_pool_len}");
@@ -143,7 +140,11 @@ fn main() {
 
     println!();
     println!("score_frame timing ({iterations} iterations):");
-    println!("  mean  : {:>8.1} µs  ({:.1} ms)", mean_us, mean_us / 1000.0);
+    println!(
+        "  mean  : {:>8.1} µs  ({:.1} ms)",
+        mean_us,
+        mean_us / 1000.0
+    );
     println!("  min   : {:>8.1} µs", min_us);
     println!("  p50   : {:>8.1} µs", p50);
     println!("  p95   : {:>8.1} µs", p95);
