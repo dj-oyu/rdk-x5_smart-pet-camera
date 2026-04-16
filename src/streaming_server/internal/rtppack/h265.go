@@ -99,7 +99,7 @@ func fragmentFU(packets [][]byte, nalu []byte, seq uint16, ts uint32, ssrc uint3
 // writeRTPHeader writes a minimal RTP header (V=2, no CSRC, no extensions).
 func writeRTPHeader(buf []byte, seq uint16, ts uint32, ssrc uint32, marker bool) {
 	buf[0] = 0x80 // V=2
-	buf[1] = 96   // PT=96 (dynamic, H.265)
+	buf[1] = 96   // PT default — overridden by caller if needed
 	if marker {
 		buf[1] |= 0x80
 	}

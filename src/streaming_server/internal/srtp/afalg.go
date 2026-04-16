@@ -181,6 +181,73 @@ func (h *afalgHMAC) Close() error {
 	return syscall.Close(h.parentFD)
 }
 
+// ----- AF_ALG batch ECB for CTR keystream generation -----
+
+// afalgBatchBlock implements batch AES-ECB encryption: encrypts multiple
+// 16-byte blocks in a single send+recv syscall pair. This generates
+// CTR keystream much faster than per-block Encrypt() calls.
+type afalgBatchBlock struct {
+	parentFD int
+	opFD     int
+}
+
+func newAFALGBatchBlock(key []byte) (*afalgBatchBlock, error) {
+	fd, err := syscall.Socket(afALG, syscall.SOCK_SEQPACKET, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	sa := sockaddrALG{Family: afALG}
+	copy(sa.Type[:], "skcipher")
+	copy(sa.Name[:], "ecb(aes)")
+
+	_, _, errno := syscall.Syscall(syscall.SYS_BIND, uintptr(fd),
+		uintptr(unsafe.Pointer(&sa)), unsafe.Sizeof(sa))
+	if errno != 0 {
+		syscall.Close(fd)
+		return nil, fmt.Errorf("af_alg bind batch: %v", errno)
+	}
+
+	err = syscall.SetsockoptString(fd, solALG, algSetKey, string(key))
+	if err != nil {
+		syscall.Close(fd)
+		return nil, err
+	}
+
+	opfd, _, err := syscall.Accept(fd)
+	if err != nil {
+		syscall.Close(fd)
+		return nil, err
+	}
+
+	return &afalgBatchBlock{parentFD: fd, opFD: opfd}, nil
+}
+
+// EncryptBlocks encrypts multiple 16-byte blocks in one syscall.
+// Input must be a multiple of 16 bytes.
+func (b *afalgBatchBlock) EncryptBlocks(dst, src []byte) {
+	syscall.Write(b.opFD, src)
+	syscall.Read(b.opFD, dst)
+}
+
+func (b *afalgBatchBlock) Close() error {
+	syscall.Close(b.opFD)
+	return syscall.Close(b.parentFD)
+}
+
+// NewAESBatchBlock creates an AF_ALG batch ECB encryptor for CTR keystream.
+// Returns nil if AF_ALG is not available.
+func NewAESBatchBlock(key []byte) *afalgBatchBlock {
+	if !afalgAvailable() {
+		return nil
+	}
+	b, err := newAFALGBatchBlock(key)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
 // ----- Factory functions with automatic fallback -----
 
 // NewAESBlock creates an AES cipher.Block using AF_ALG if available,

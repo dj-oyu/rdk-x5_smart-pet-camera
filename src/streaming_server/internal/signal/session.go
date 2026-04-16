@@ -14,16 +14,17 @@ import (
 
 // Session represents a single WebRTC client connection.
 type Session struct {
-	id         string
-	udpConn    *net.UDPConn
-	remoteAddr *net.UDPAddr
-	iceLite    *ICELite
-	srtpCtx    *srtp.Context
-	ssrc       uint32
-	seq        uint16
-	mu         sync.Mutex
-	closed     bool
-	framesSent uint64
+	id          string
+	udpConn     *net.UDPConn
+	remoteAddr  *net.UDPAddr
+	iceLite     *ICELite
+	srtpCtx     *srtp.Context
+	ssrc        uint32
+	seq         uint16
+	payloadType uint8 // H.265 PT from SDP negotiation
+	mu          sync.Mutex
+	closed      bool
+	framesSent  uint64
 }
 
 // Server manages multiple WebRTC sessions.
@@ -73,6 +74,7 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("signal: parse sdp: %w", err)
 	}
+	logger.Info("Signal", "Offer: PT=%d, MID=%s, ufrag=%s", offer.PayloadType, offer.MID, offer.ICEUfrag)
 
 	// Check client limit
 	s.mu.RLock()
@@ -106,10 +108,11 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 
 	// Create session
 	sess := &Session{
-		id:      fmt.Sprintf("ws-%d", port),
-		udpConn: udpConn,
-		iceLite: NewICELite(localUfrag, localPwd, offer.ICEUfrag, offer.ICEPwd),
-		ssrc:    0x12345678, // Fixed SSRC for simplicity
+		id:          fmt.Sprintf("ws-%d", port),
+		udpConn:     udpConn,
+		iceLite:     NewICELite(localUfrag, localPwd, offer.ICEUfrag, offer.ICEPwd),
+		ssrc:        0x12345678,
+		payloadType: uint8(offer.PayloadType),
 	}
 
 	s.mu.Lock()
@@ -250,16 +253,24 @@ func (s *Server) SendFrame(rtpPackets [][]byte) {
 		conn := sess.udpConn
 		sess.mu.Unlock()
 
+		pt := sess.payloadType
 		for _, pkt := range rtpPackets {
 			if len(pkt) < 12 {
 				continue
 			}
-			// Extract seq and ssrc from RTP header
-			seq := uint16(pkt[2])<<8 | uint16(pkt[3])
-			ssrc := uint32(pkt[8])<<24 | uint32(pkt[9])<<16 | uint32(pkt[10])<<8 | uint32(pkt[11])
 
-			encrypted := make([]byte, len(pkt)+srtp.AuthTagLen)
-			encrypted, err := srtpCtx.EncryptRTP(encrypted, pkt, 12, seq, ssrc)
+			// Copy packet so we can safely overwrite the PT for this client.
+			// EncryptRTP also copies into dst, but HMAC authenticates the header
+			// including PT, so the header must have the correct PT before encryption.
+			buf := make([]byte, len(pkt))
+			copy(buf, pkt)
+			buf[1] = (buf[1] & 0x80) | (pt & 0x7F)
+
+			seq := uint16(buf[2])<<8 | uint16(buf[3])
+			ssrc := uint32(buf[8])<<24 | uint32(buf[9])<<16 | uint32(buf[10])<<8 | uint32(buf[11])
+
+			encrypted := make([]byte, len(buf)+srtp.AuthTagLen)
+			encrypted, err := srtpCtx.EncryptRTP(encrypted, buf, 12, seq, ssrc)
 			if err != nil {
 				continue
 			}

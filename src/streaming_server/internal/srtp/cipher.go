@@ -18,9 +18,10 @@ const AuthTagLen = 10
 
 // Cipher performs SRTP encrypt/decrypt for a single direction (local or remote).
 type Cipher struct {
-	srtpBlock cipher.Block // AES block cipher for CTR keystream
-	srtpSalt  []byte       // 14-byte session salt
-	srtpAuth  hash.Hash    // HMAC-SHA1 keyed with session auth key
+	srtpBlock cipher.Block      // AES block cipher (fallback for CTR)
+	srtpBatch *afalgBatchBlock  // AF_ALG batch ECB (fast CTR keystream)
+	srtpSalt  []byte            // 14-byte session salt
+	srtpAuth  hash.Hash         // HMAC-SHA1 keyed with session auth key
 }
 
 // NewCipher creates an SRTP cipher from pre-derived session keys.
@@ -34,8 +35,12 @@ func NewCipher(sessionKey, sessionSalt, sessionAuthKey []byte) (*Cipher, error) 
 		CloseIfNeeded(block)
 		return nil, err
 	}
+	// Try to create AF_ALG batch ECB for fast CTR keystream generation
+	batch := NewAESBatchBlock(sessionKey)
+
 	return &Cipher{
 		srtpBlock: block,
+		srtpBatch: batch,
 		srtpSalt:  sessionSalt,
 		srtpAuth:  auth,
 	}, nil
@@ -45,6 +50,9 @@ func NewCipher(sessionKey, sessionSalt, sessionAuthKey []byte) (*Cipher, error) 
 func (c *Cipher) Close() {
 	CloseIfNeeded(c.srtpBlock)
 	CloseIfNeeded(c.srtpAuth)
+	if c.srtpBatch != nil {
+		c.srtpBatch.Close()
+	}
 }
 
 // EncryptRTP encrypts an RTP packet in-place and appends the authentication tag.
@@ -67,7 +75,11 @@ func (c *Cipher) EncryptRTP(dst []byte, rtpPacket []byte, headerLen int, seq uin
 
 	// Encrypt payload with AES-CTR
 	counter := GenerateCounter(seq, roc, ssrc, c.srtpSalt)
-	xorBytesCTR(c.srtpBlock, counter[:], dst[headerLen:headerLen+payloadLen], rtpPacket[headerLen:])
+	if c.srtpBatch != nil {
+		xorBytesCTRBatch(c.srtpBatch, counter[:], dst[headerLen:headerLen+payloadLen], rtpPacket[headerLen:])
+	} else {
+		xorBytesCTR(c.srtpBlock, counter[:], dst[headerLen:headerLen+payloadLen], rtpPacket[headerLen:])
+	}
 
 	// Generate authentication tag: HMAC-SHA1(header || encrypted_payload || ROC)
 	c.srtpAuth.Reset()
@@ -85,7 +97,29 @@ func (c *Cipher) EncryptRTP(dst []byte, rtpPacket []byte, headerLen int, seq uin
 
 // ----- AES-CTR XOR (same algorithm as pion/srtp crypto.go) -----
 
-// xorBytesCTR encrypts src into dst using AES-CTR with the given IV.
+// xorBytesCTRBatch uses AF_ALG batch ECB to generate CTR keystream in one syscall.
+func xorBytesCTRBatch(batch *afalgBatchBlock, iv []byte, dst, src []byte) {
+	bs := 16
+	nBlocks := (len(src) + bs - 1) / bs
+
+	// Build counter blocks
+	counters := make([]byte, nBlocks*bs)
+	ctr := make([]byte, bs)
+	copy(ctr, iv)
+	for i := 0; i < nBlocks; i++ {
+		copy(counters[i*bs:], ctr)
+		incrementCTR(ctr)
+	}
+
+	// Encrypt all counter blocks in one syscall → keystream
+	keystream := make([]byte, nBlocks*bs)
+	batch.EncryptBlocks(keystream, counters)
+
+	// XOR keystream with plaintext
+	subtle.XORBytes(dst[:len(src)], src, keystream[:len(src)])
+}
+
+// xorBytesCTR encrypts src into dst using AES-CTR with the given IV (software fallback).
 func xorBytesCTR(block cipher.Block, iv []byte, dst, src []byte) {
 	bs := block.BlockSize()
 	ctr := make([]byte, bs)
