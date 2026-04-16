@@ -9,6 +9,7 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"hash"
+	"os"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -194,7 +195,7 @@ type afalgBatchBlock struct {
 func newAFALGBatchBlock(key []byte) (*afalgBatchBlock, error) {
 	fd, err := syscall.Socket(afALG, syscall.SOCK_SEQPACKET, 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("socket: %w", err)
 	}
 
 	sa := sockaddrALG{Family: afALG}
@@ -205,19 +206,33 @@ func newAFALGBatchBlock(key []byte) (*afalgBatchBlock, error) {
 		uintptr(unsafe.Pointer(&sa)), unsafe.Sizeof(sa))
 	if errno != 0 {
 		syscall.Close(fd)
-		return nil, fmt.Errorf("af_alg bind batch: %v", errno)
+		return nil, fmt.Errorf("bind: %v", errno)
 	}
 
 	err = syscall.SetsockoptString(fd, solALG, algSetKey, string(key))
 	if err != nil {
 		syscall.Close(fd)
-		return nil, err
+		return nil, fmt.Errorf("setkey: %w", err)
 	}
 
 	opfd, _, err := syscall.Accept(fd)
 	if err != nil {
 		syscall.Close(fd)
-		return nil, err
+		return nil, fmt.Errorf("accept: %w", err)
+	}
+
+	// Test that the socket works: encrypt one block
+	test := make([]byte, 16)
+	if _, err := syscall.Write(opfd, test); err != nil {
+		syscall.Close(opfd)
+		syscall.Close(fd)
+		return nil, fmt.Errorf("test write: %w", err)
+	}
+	result := make([]byte, 16)
+	if _, err := syscall.Read(opfd, result); err != nil {
+		syscall.Close(opfd)
+		syscall.Close(fd)
+		return nil, fmt.Errorf("test read: %w", err)
 	}
 
 	return &afalgBatchBlock{parentFD: fd, opFD: opfd}, nil
@@ -225,9 +240,23 @@ func newAFALGBatchBlock(key []byte) (*afalgBatchBlock, error) {
 
 // EncryptBlocks encrypts multiple 16-byte blocks in one syscall.
 // Input must be a multiple of 16 bytes.
-func (b *afalgBatchBlock) EncryptBlocks(dst, src []byte) {
-	syscall.Write(b.opFD, src)
-	syscall.Read(b.opFD, dst)
+// Re-accepts the operation fd for each call — AF_ALG skcipher sessions
+// are single-use (one send→recv pair per accept).
+func (b *afalgBatchBlock) EncryptBlocks(dst, src []byte) error {
+	// Close previous op fd and get a fresh one
+	syscall.Close(b.opFD)
+	var err error
+	b.opFD, _, err = syscall.Accept(b.parentFD)
+	if err != nil {
+		return err
+	}
+	if _, err := syscall.Write(b.opFD, src); err != nil {
+		return err
+	}
+	if _, err := syscall.Read(b.opFD, dst); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (b *afalgBatchBlock) Close() error {
@@ -239,10 +268,12 @@ func (b *afalgBatchBlock) Close() error {
 // Returns nil if AF_ALG is not available.
 func NewAESBatchBlock(key []byte) *afalgBatchBlock {
 	if !afalgAvailable() {
+		fmt.Fprintf(os.Stderr, "[srtp] AF_ALG not available\n")
 		return nil
 	}
 	b, err := newAFALGBatchBlock(key)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[srtp] AF_ALG batch block error: %v\n", err)
 		return nil
 	}
 	return b
