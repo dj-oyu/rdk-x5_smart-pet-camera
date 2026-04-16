@@ -9,11 +9,11 @@ Type=simple
 WorkingDirectory=/opt/smart-pet-camera
 EnvironmentFile=-/opt/smart-pet-camera/.env
 
-Environment=MONITOR_HOST=0.0.0.0
-Environment=MONITOR_PORT=8080
-Environment=HTTP_ONLY_PORT=8082
-Environment=JPEG_QUALITY=65
-Environment=LOG_LEVEL=info
+Environment=PET_CAMERA_MONITOR_HOST=0.0.0.0
+Environment=PET_CAMERA_PORT=8080
+Environment=PET_CAMERA_HTTP_ONLY_PORT=8082
+Environment=PET_CAMERA_JPEG_QUALITY=65
+Environment=PET_CAMERA_LOG_LEVEL=info
 
 # Wait up to 30s for capture to create MJPEG SHM before starting
 ExecStartPre=/bin/sh -c 'for i in $(seq 30); do [ -e /dev/shm/pet_camera_mjpeg_zc ] && exit 0; sleep 1; done; echo "Timeout waiting for pet_camera_mjpeg_zc"; exit 1'
@@ -21,17 +21,17 @@ ExecStartPre=/bin/sh -c 'for i in $(seq 30); do [ -e /dev/shm/pet_camera_mjpeg_z
 ExecStart=/bin/sh -c 'TLS_ARGS=""; \
   [ -n "$${PET_CAMERA_TLS_CERT}" ] && TLS_ARGS="-tls-cert $${PET_CAMERA_TLS_CERT} -tls-key $${PET_CAMERA_TLS_KEY}"; \
   HTTP_ONLY_ARGS=""; \
-  [ -n "$${HTTP_ONLY_PORT}" ] && HTTP_ONLY_ARGS="-http-only $${MONITOR_HOST}:$${HTTP_ONLY_PORT}"; \
+  [ -n "$${PET_CAMERA_HTTP_ONLY_PORT}" ] && HTTP_ONLY_ARGS="-http-only $${PET_CAMERA_MONITOR_HOST}:$${PET_CAMERA_HTTP_ONLY_PORT}"; \
   exec build/web_monitor \
-    -http "$${MONITOR_HOST}:$${MONITOR_PORT}" \
+    -http "$${PET_CAMERA_MONITOR_HOST}:$${PET_CAMERA_PORT}" \
     -assets src/web \
     -assets-build build/web \
     -frame-shm /pet_camera_mjpeg_zc \
     -detection-shm /pet_camera_detections \
     -webrtc-base "http://localhost:$${PET_CAMERA_STREAMING_PORT:-8081}" \
     -fps 30 \
-    -jpeg-quality "$${JPEG_QUALITY}" \
-    -log-level "$${LOG_LEVEL}" \
+    -jpeg-quality "$${PET_CAMERA_JPEG_QUALITY}" \
+    -log-level "$${PET_CAMERA_LOG_LEVEL}" \
     $${TLS_ARGS} $${HTTP_ONLY_ARGS}'
 
 Restart=on-failure

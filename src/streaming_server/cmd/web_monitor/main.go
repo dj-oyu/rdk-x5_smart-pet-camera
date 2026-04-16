@@ -36,6 +36,11 @@ func main() {
 	flag.StringVar(&cfg.TLSKeyFile, "tls-key", "", "TLS private key file")
 	flag.Parse()
 
+	// Override recording path from env (matches systemd RECORDING_PATH)
+	if v := os.Getenv("RECORDING_PATH"); v != "" {
+		cfg.RecordingOutputPath = v
+	}
+
 	// Override detect port from env if not set via flag
 	if v := os.Getenv("PET_CAMERA_DETECT_PORT"); v != "" {
 		cfg.DetectPort = v
