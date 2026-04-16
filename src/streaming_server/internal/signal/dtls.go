@@ -1,6 +1,7 @@
 package signal
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -69,6 +70,13 @@ func HandshakeDTLS(conn net.PacketConn, remoteAddr net.Addr, config *DTLSConfig)
 
 	dtlsConn, err := dtls.Server(conn, remoteAddr, dtlsConfig)
 	if err != nil {
+		return nil, fmt.Errorf("dtls: create conn failed: %w", err)
+	}
+
+	// dtls.Server() returns immediately; handshake runs on first Read/Write.
+	// We must explicitly trigger it and wait for completion.
+	if err := dtlsConn.HandshakeContext(context.Background()); err != nil {
+		dtlsConn.Close()
 		return nil, fmt.Errorf("dtls: handshake failed: %w", err)
 	}
 
