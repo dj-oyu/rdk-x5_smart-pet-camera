@@ -780,8 +780,7 @@ fn rgb_to_nv12(rgb: &image::RgbImage, w: u32, h: u32) -> Vec<u8> {
             let g = src[src_idx + 1] as i32;
             let b = src[src_idx + 2] as i32;
             let uv_idx = row / 2 * w + col;
-            uv_plane[uv_idx] =
-                ((-38 * r - 74 * g + 112 * b + 128) / 256 + 128).clamp(0, 255) as u8;
+            uv_plane[uv_idx] = ((-38 * r - 74 * g + 112 * b + 128) / 256 + 128).clamp(0, 255) as u8;
             uv_plane[uv_idx + 1] =
                 ((112 * r - 94 * g - 18 * b + 128) / 256 + 128).clamp(0, 255) as u8;
         }

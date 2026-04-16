@@ -55,7 +55,14 @@ pub struct BackgroundModel {
 impl BackgroundModel {
     fn new(width: u32, height: u32, frame_count: u32, mean: Vec<f32>, std: Vec<f32>) -> Self {
         let threshold = std.iter().map(|&s| (SIGMA * s).max(ABS_FLOOR)).collect();
-        Self { width, height, frame_count, mean, std, threshold }
+        Self {
+            width,
+            height,
+            frame_count,
+            mean,
+            std,
+            threshold,
+        }
     }
 }
 
@@ -151,9 +158,13 @@ pub fn score_frame(model: &BackgroundModel, jpeg_path: &Path) -> Result<f32, Str
     // a simple abs-diff + compare — no multiply or max per pixel.
     // Raw slices + branchless count enable NEON auto-vectorization with
     // target-cpu=cortex-a55.
-    for i in 0..n_pixels {
-        let diff = (gray_bytes[i] as f32 - model.mean[i]).abs();
-        outliers += (diff > model.threshold[i]) as usize;
+    for ((&pixel, &mean), &threshold) in gray_bytes
+        .iter()
+        .zip(model.mean.iter())
+        .zip(model.threshold.iter())
+    {
+        let diff = (pixel as f32 - mean).abs();
+        outliers += (diff > threshold) as usize;
     }
 
     Ok(outliers as f32 / n_pixels as f32 * 100.0)
