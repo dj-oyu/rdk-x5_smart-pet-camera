@@ -9,18 +9,17 @@ Type=simple
 WorkingDirectory=/opt/smart-pet-camera
 EnvironmentFile=-/opt/smart-pet-camera/.env
 
-Environment=YOLO_MODEL=v26n
-Environment=YOLO_SCORE_THRESHOLD=0.6
-Environment=YOLO_NMS_THRESHOLD=0.7
-Environment=LOG_LEVEL=info
-Environment=NIGHT_COLLECT_DIR=/mnt/petcam-data/night_collect
+Environment=PET_CAMERA_YOLO_MODEL=v26n
+Environment=PET_CAMERA_YOLO_SCORE_THRESHOLD=0.6
+Environment=PET_CAMERA_YOLO_NMS_THRESHOLD=0.7
+Environment=PET_CAMERA_LOG_LEVEL=info
 
-ExecStartPre=/bin/mkdir -p /mnt/petcam-data/night_collect/feeding
+ExecStartPre=/bin/mkdir -p ${NIGHT_COLLECT_DIR}/feeding
 ExecStart=/bin/sh -c 'exec /home/sunrise/.local/bin/uv run src/detector/yolo_detector_daemon.py \
-  --model-path "$(scripts/resolve-model.sh ${YOLO_MODEL})" \
-  --score-threshold ${YOLO_SCORE_THRESHOLD} \
-  --nms-threshold ${YOLO_NMS_THRESHOLD} \
-  --log-level ${LOG_LEVEL}'
+  --model-path "$(scripts/resolve-model.sh ${PET_CAMERA_YOLO_MODEL})" \
+  --score-threshold ${PET_CAMERA_YOLO_SCORE_THRESHOLD} \
+  --nms-threshold ${PET_CAMERA_YOLO_NMS_THRESHOLD} \
+  --log-level ${PET_CAMERA_LOG_LEVEL}'
 
 # SHM not ready yet → crash → auto-restart
 Restart=on-failure

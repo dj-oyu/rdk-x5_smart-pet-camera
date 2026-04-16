@@ -9,7 +9,6 @@ PartOf=pet-camera.target
 Type=simple
 WorkingDirectory=/opt/smart-pet-camera
 EnvironmentFile=-/opt/smart-pet-camera/.env
-Environment=RECORDING_PATH=/mnt/petcam-data/recordings
 ExecStart=/opt/smart-pet-camera/scripts/sync-comics.sh
 Restart=always
 RestartSec=5

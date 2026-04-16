@@ -9,24 +9,23 @@ Type=simple
 WorkingDirectory=/opt/smart-pet-camera
 EnvironmentFile=-/opt/smart-pet-camera/.env
 
-Environment=STREAMING_HOST=0.0.0.0
-Environment=STREAMING_PORT=8081
-Environment=METRICS_PORT=9090
-Environment=PPROF_PORT=6060
-Environment=STREAMING_MAX_CLIENTS=10
-Environment=STREAMING_SHM=/pet_camera_h265_zc
-Environment=RECORDING_PATH=/mnt/petcam-data/recordings
-Environment=LOG_LEVEL=info
+Environment=PET_CAMERA_STREAMING_HOST=0.0.0.0
+Environment=PET_CAMERA_STREAMING_PORT=8081
+Environment=PET_CAMERA_METRICS_PORT=9090
+Environment=PET_CAMERA_PPROF_PORT=6060
+Environment=PET_CAMERA_MAX_CLIENTS=10
+Environment=PET_CAMERA_STREAMING_SHM=/pet_camera_h265_zc
+Environment=PET_CAMERA_LOG_LEVEL=info
 
 ExecStartPre=/bin/mkdir -p ${RECORDING_PATH}
 ExecStart=/opt/smart-pet-camera/build/streaming-server \
-  -shm "${STREAMING_SHM}" \
-  -http "${STREAMING_HOST}:${STREAMING_PORT}" \
-  -metrics ":${METRICS_PORT}" \
-  -pprof ":${PPROF_PORT}" \
+  -shm "${PET_CAMERA_STREAMING_SHM}" \
+  -http "${PET_CAMERA_STREAMING_HOST}:${PET_CAMERA_STREAMING_PORT}" \
+  -metrics ":${PET_CAMERA_METRICS_PORT}" \
+  -pprof ":${PET_CAMERA_PPROF_PORT}" \
   -record-path "${RECORDING_PATH}" \
-  -max-clients "${STREAMING_MAX_CLIENTS}" \
-  -log-level "${LOG_LEVEL}"
+  -max-clients "${PET_CAMERA_MAX_CLIENTS}" \
+  -log-level "${PET_CAMERA_LOG_LEVEL}"
 
 Restart=on-failure
 RestartSec=3
