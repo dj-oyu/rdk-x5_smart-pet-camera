@@ -4,12 +4,21 @@ import "time"
 
 // VideoFrame represents a complete video frame with metadata
 type VideoFrame struct {
-	Data        []byte    // Raw video data (NAL units)
-	Timestamp   time.Time // Frame capture timestamp
-	FrameNumber uint64    // Sequential frame number
-	IsIDR       bool      // True if this frame contains an IDR
-	Width       int       // Frame width
-	Height      int       // Frame height
+	Data        []byte     // Raw video data (NAL units)
+	Timestamp   time.Time  // Frame capture timestamp
+	FrameNumber uint64     // Sequential frame number
+	IsIDR       bool       // True if this frame contains an IDR
+	Width       int        // Frame width
+	Height      int        // Frame height
+	NALUs       []NALBound // NAL unit boundaries (set by Processor.Process)
+}
+
+// NALBound describes the location of a NAL unit within VideoFrame.Data.
+// Offset points to the first byte of the NAL header (after the start code).
+type NALBound struct {
+	Offset int   // Byte offset in Data (start of NAL header, after start code)
+	Length int   // NAL unit length (including 2-byte header)
+	Type   uint8 // H.265 NAL unit type
 }
 
 // NALUnit represents a single NAL unit
