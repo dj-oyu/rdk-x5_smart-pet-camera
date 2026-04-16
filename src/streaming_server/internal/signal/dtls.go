@@ -63,6 +63,10 @@ func HandshakeDTLS(conn net.PacketConn, remoteAddr net.Addr, config *DTLSConfig)
 		InsecureSkipVerify: true, // Browser cert is not pre-known
 	}
 
+	// pion/dtls manages its own timeouts internally via SetReadDeadline.
+	// Ensure no residual deadline from ICE phase.
+	conn.SetReadDeadline(time.Time{})
+
 	dtlsConn, err := dtls.Server(conn, remoteAddr, dtlsConfig)
 	if err != nil {
 		return nil, fmt.Errorf("dtls: handshake failed: %w", err)

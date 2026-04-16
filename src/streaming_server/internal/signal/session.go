@@ -150,8 +150,9 @@ func (s *Server) runSession(sess *Session) {
 	logger.Info("Signal", "Session %s: ICE connected from %s", sess.id, remoteAddr)
 
 	// Phase 2: DTLS handshake
-	// Create a packet conn adapter for pion/dtls (reads only DTLS packets)
+	// Create a packet conn adapter for pion/dtls (filters STUN, passes DTLS)
 	dtlsAdapter := newDTLSPacketConn(sess.udpConn, sess.iceLite, remoteAddr)
+	logger.Info("Signal", "Session %s: starting DTLS handshake...", sess.id)
 	dtlsSess, err := HandshakeDTLS(dtlsAdapter, remoteAddr, s.dtlsConfig)
 	if err != nil {
 		logger.Warn("Signal", "Session %s: DTLS handshake failed: %v", sess.id, err)
@@ -374,10 +375,12 @@ func (d *dtlsPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 			}
 			continue
 		}
-		// DTLS packets start with 0x14-0x19 (content types)
-		if n > 0 && b[0] >= 0x14 && b[0] <= 0x19 {
+		// DTLS packets: content types 20-63 (RFC 4347)
+		// 20=ChangeCipherSpec, 21=Alert, 22=Handshake, 23=ApplicationData
+		if n > 0 && b[0] >= 20 && b[0] <= 63 {
 			return n, addr, nil
 		}
+		logger.Debug("Signal", "DTLS adapter: skipping packet type 0x%02x len=%d from %s", b[0], n, addr)
 		// Other packets (RTP/RTCP from browser): ignore
 	}
 }
