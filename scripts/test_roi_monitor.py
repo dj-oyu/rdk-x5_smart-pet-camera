@@ -4,7 +4,7 @@ ROI差分モニター
 
 - カメラ映像上で4点クリックしてポリゴンROIを定義
 - 各ROI内のフレーム差分をリアルタイム計測・表示
-- 差分履歴をCSVに記録（後段の行動検知分析用）
+- 差分履歴をSQLite DBに記録（後段の行動検知分析用）
 
 Usage:
     sudo uv run scripts/test_roi_monitor.py [--port 8083]

@@ -35,8 +35,7 @@
 - 4点ポリゴンROI手動設定済み: `scripts/bowl_rois.json`
 - ROI構成: kari1 / kari2 / mizu1 / mizu2
 - フレーム差分 + ベースライン補正でリアルタイム計測動作中
-- CSV録画機能あり → `scripts/roi_diff_YYYYMMDD_HHMMSS.csv`
-  - カラム: `timestamp, {label}_raw, {label}_net` (全ROI分)
+- 差分履歴は `roi_monitor.db` の `diff_log` テーブルに記録（CSV出力は廃止済み）
 
 ### 差分スコアの現状値（夜カメラ・静止時）
 
