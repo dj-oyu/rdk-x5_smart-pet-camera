@@ -143,16 +143,16 @@ if self.night_roi_mode and self._quiet_frames >= self.IDLE_TIER1_FRAMES:
 
 ## キーメトリクス（現在）
 
-| シナリオ | CPU使用率 |
-|---------|----------|
-| streaming-server アクティブ（WebRTC 2クライアント） | ~56%（実測 2026-04-16） |
-| streaming-server アクティブ（WebRTC 1クライアント） | ~40% |
-| streaming-server アイドル（クライアント0） | ~0.7% |
-| detector 夜間 idle（T2スロットリング） | ~25% |
-| detector 夜間 active（motion/YOLO） | ~180% |
-| detector 昼間（YOLO常時実行） | ~40% |
+| シナリオ | CPU使用率 (pion) | CPU使用率 (自前WebRTC) |
+|---------|-----------------|---------------------|
+| streaming-server アクティブ（2クライアント） | ~52% | **~12%** |
+| streaming-server アクティブ（1クライアント） | ~40% | **~8%** (推定) |
+| streaming-server アイドル（クライアント0） | ~0.7% | **~1%** |
+| detector 夜間 idle（T2スロットリング） | ~25% | ~25% |
+| detector 夜間 active（motion/YOLO） | ~180% | ~180% |
+| detector 昼間（YOLO常時実行） | ~40% | ~40% |
 
-[注記] CPU使用率はクライアント数にほぼ比例してスケールする（SRTP暗号化がクライアントごとに必要なため）。
+**自前 WebRTC 実装（2026-04-16）**: pion/webrtc を排除し、SDP/ICE-lite/DTLS(pion/dtls)/SRTP(AF_ALG) を自前実装。SRTP 暗号化を OP-TEE ハードウェア暗号エンジンにオフロードし、CPU 使用率を 77% 削減。
 
 ---
 
