@@ -1,7 +1,7 @@
 package srtp
 
 import (
-	"crypto/cipher"
+	"crypto/aes"
 	"fmt"
 	"sync"
 )
@@ -24,12 +24,13 @@ type ssrcState struct {
 // NewContext creates a new SRTP context from master key and salt.
 // Derives session keys internally using AES-CM PRF (RFC 3711).
 func NewContext(masterKey, masterSalt []byte) (*Context, error) {
-	// Create AES block for key derivation (can use software AES — cold path)
-	kdfBlock, err := NewAESBlock(masterKey)
+	// Use software AES for key derivation (cold path, called once per session).
+	// AF_ALG ECB skcipher does not reliably support repeated single-block
+	// Encrypt calls on the same operation fd.
+	kdfBlock, err := aes.NewCipher(masterKey)
 	if err != nil {
 		return nil, fmt.Errorf("srtp: kdf block: %w", err)
 	}
-	defer CloseIfNeeded(kdfBlock)
 
 	keyLen := len(masterKey) // 16 for AES-128
 
@@ -148,12 +149,10 @@ func FromKeyMaterial(keyMaterial []byte, keyLen, saltLen int, isClient bool) (*C
 
 // DeriveSessionKeys is exposed for testing: derives all session keys from master key/salt.
 func DeriveSessionKeys(masterKey, masterSalt []byte) (sessionKey, sessionSalt, sessionAuthKey []byte, err error) {
-	block, err := cipher.Block(nil), error(nil)
-	block, err = NewAESBlock(masterKey)
+	block, err := aes.NewCipher(masterKey)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	defer CloseIfNeeded(block)
 
 	keyLen := len(masterKey)
 	sessionKey, err = AesCmKeyDerivation(block, LabelSRTPEncryption, masterSalt, keyLen)

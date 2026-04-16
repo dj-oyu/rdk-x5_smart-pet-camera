@@ -362,4 +362,4 @@ Go (pion/srtp)
 
 **最大リスク: 2-1a (hbn_vflow移行)** — カメラパイプライン全面改修。必ず libspcdev版を並行維持し、ビルドフラグで切り替え可能にすること。
 
-**3-1/3-2 (SRTP HWオフロード)**: 効果は大きい (-35pt CPU) が pion/srtp フォークの保守負担も大きい。クライアント3台以上でCPU飽和する場合に検討。
+**3-1/3-2 (SRTP HWオフロード)**: AF_ALG 実装は完了・動作検証済みだが、TE ドライバの syscall overhead により production ではソフトウェア暗号の方が高速 (12% vs 47%)。詳細は `docs/optee-afalg-findings.md` を参照。pion 依存排除による自前 SRTP (ソフトウェア) が現時点の最適解。

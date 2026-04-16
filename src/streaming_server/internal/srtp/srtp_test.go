@@ -111,7 +111,6 @@ func TestXorBytesCTR_RFC3711(t *testing.T) {
 }
 
 // TestEncryptRTP tests full SRTP encryption with pion/srtp test data.
-// Test vector from pion/srtp srtp_cipher_test.go (AES-128-CM-HMAC-SHA1-80).
 func TestEncryptRTP(t *testing.T) {
 	masterKey := mustHex("E1F97A0D3E018BE0D64FA32C06DE4139")
 	masterSalt := mustHex("0EC675AD498AFEEBB6960B3AABE6")
@@ -122,13 +121,12 @@ func TestEncryptRTP(t *testing.T) {
 	}
 	defer ctx.Close()
 
-	// Decrypted RTP packet from pion test data
 	decryptedPacket := mustHex(
-		"800F1234DECAFBAD" + // RTP header (V=2, PT=15, SEQ=0x1234, TS=0xDECAFBAD)
-			"DEADBEEF" + // SSRC=0xDEADBEEF
-			"ABABABABABABABABABABABABABABABAB") // 15 bytes payload
+		"800F1234DECAFBAD" +
+			"DEADBEEF" +
+			"ABABABABABABABABABABABABABABABAB")
 
-	headerLen := 12 // Fixed RTP header (no CSRC, no extensions)
+	headerLen := 12
 	seq := uint16(0x1234)
 	ssrc := uint32(0xDEADBEEF)
 
@@ -138,17 +136,12 @@ func TestEncryptRTP(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Verify header is unchanged
 	if !bytes.Equal(encrypted[:headerLen], decryptedPacket[:headerLen]) {
 		t.Error("header was modified during encryption")
 	}
-
-	// Verify payload is different (encrypted)
 	if bytes.Equal(encrypted[headerLen:headerLen+15], decryptedPacket[headerLen:]) {
 		t.Error("payload was not encrypted")
 	}
-
-	// Verify total length = original + auth tag
 	if len(encrypted) != len(decryptedPacket)+AuthTagLen {
 		t.Errorf("length: got %d, want %d", len(encrypted), len(decryptedPacket)+AuthTagLen)
 	}
@@ -177,36 +170,46 @@ func TestNewContext_DeriveKeys(t *testing.T) {
 	}
 }
 
-// TestAFALGvsGoCrypto verifies AF_ALG produces the same results as Go crypto.
-func TestAFALGvsGoCrypto(t *testing.T) {
-	key := mustHex("2B7E151628AED2A6ABF7158809CF4F3C")
+// TestAFALGBatchECB verifies AF_ALG batch ECB produces the same CTR keystream
+// as Go software AES. This is a reference test for the AF_ALG implementation
+// (afalg.go), not used in the production SRTP hot path.
+func TestAFALGBatchECB(t *testing.T) {
+	sessionKey := mustHex("2B7E151628AED2A6ABF7158809CF4F3C")
+	iv := mustHex("F0F1F2F3F4F5F6F7F8F9FAFBFCFD0000")
 
-	// Go software AES
-	goBlock, err := aes.NewCipher(key)
+	goBlock, err := aes.NewCipher(sessionKey)
 	if err != nil {
 		t.Fatal(err)
 	}
+	zeros := make([]byte, 48)
+	goDst := make([]byte, 48)
+	xorBytesCTR(goBlock, iv, goDst, zeros)
 
-	// AF_ALG AES (may fallback to Go on non-AF_ALG systems)
-	afBlock, err := NewAESBlock(key)
-	if err != nil {
-		t.Fatal(err)
+	batch := NewAESBatchBlock(sessionKey)
+	if batch == nil {
+		t.Skip("AF_ALG batch ECB not available")
 	}
-	defer CloseIfNeeded(afBlock)
+	defer batch.Close()
 
-	plaintext := mustHex("6BC1BEE22E409F96E93D7E117393172A") // AES test vector
-
-	goDst := make([]byte, 16)
-	afDst := make([]byte, 16)
-
-	goBlock.Encrypt(goDst, plaintext)
-	afBlock.Encrypt(afDst, plaintext)
-
-	if !bytes.Equal(goDst, afDst) {
-		t.Errorf("AF_ALG mismatch:\n  Go:    %x\n  AF_ALG: %x", goDst, afDst)
+	// Build counter blocks and encrypt via AF_ALG
+	bs := 16
+	nBlocks := len(zeros) / bs
+	counters := make([]byte, nBlocks*bs)
+	ctr := make([]byte, bs)
+	copy(ctr, iv)
+	for i := 0; i < nBlocks; i++ {
+		copy(counters[i*bs:], ctr)
+		incrementCTR(ctr)
+	}
+	keystream := make([]byte, nBlocks*bs)
+	if err := batch.EncryptBlocks(keystream, counters); err != nil {
+		t.Fatal("AF_ALG batch ECB failed:", err)
 	}
 
-	t.Logf("AES encrypt: %x (AF_ALG available: %v)", afDst, afalgAvailable())
+	if !bytes.Equal(goDst, keystream) {
+		t.Errorf("AF_ALG batch ECB mismatch:\n  Go:     %x\n  AF_ALG: %x", goDst, keystream)
+	}
+	t.Logf("AF_ALG batch ECB: OK (available: %v)", afalgAvailable())
 }
 
 // BenchmarkEncryptRTP benchmarks SRTP encryption for a typical H.265 frame.
@@ -220,10 +223,9 @@ func BenchmarkEncryptRTP(b *testing.B) {
 	}
 	defer ctx.Close()
 
-	// Typical SRTP packet: 12-byte header + 1188-byte payload (MTU 1200)
 	packet := make([]byte, 1200)
-	packet[0] = 0x80 // V=2
-	packet[1] = 0x60 // PT=96 (H.265)
+	packet[0] = 0x80
+	packet[1] = 0x60
 	dst := make([]byte, 1200+AuthTagLen)
 
 	b.ResetTimer()
