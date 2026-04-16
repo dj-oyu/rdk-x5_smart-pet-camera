@@ -99,10 +99,10 @@ build_album() {
   echo "[build] album (downloading GitHub artifact)..."
   rm -rf /tmp/pet-album-dl
   gh run download --name pet-album-aarch64 --dir /tmp/pet-album-dl
-  mkdir -p "${AI_PYRAMID_DIR}/target/release"
-  cp /tmp/pet-album-dl/pet-album "${AI_PYRAMID_DIR}/target/release/pet-album"
-  chmod +x "${AI_PYRAMID_DIR}/target/release/pet-album"
-  echo "[build] album done ($(stat --printf='%s' "${AI_PYRAMID_DIR}/target/release/pet-album" | numfmt --to=iec))"
+  mkdir -p "${BUILD_DIR}"
+  cp /tmp/pet-album-dl/pet-album "${BUILD_DIR}/pet-album"
+  chmod +x "${BUILD_DIR}/pet-album"
+  echo "[build] album done ($(stat --printf='%s' "${BUILD_DIR}/pet-album" | numfmt --to=iec))"
   restart_service pet-album.service
 }
 

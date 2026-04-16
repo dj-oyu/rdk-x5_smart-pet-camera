@@ -14,7 +14,7 @@ Environment=PET_ALBUM_VLM_URL=http://localhost:8000
 Environment=PET_ALBUM_VLM_MODEL=__VLM_MODEL_NAME__
 
 ExecStartPre=/bin/mkdir -p ${PET_ALBUM_PHOTOS_DIR}
-ExecStart=/opt/smart-pet-camera/src/ai-pyramid/target/release/pet-album \
+ExecStart=/opt/smart-pet-camera/build/pet-album \
   --photos-dir "${PET_ALBUM_PHOTOS_DIR}" \
   --db-path "${PET_ALBUM_DB_PATH}" \
   --vlm-url "${PET_ALBUM_VLM_URL}" \
