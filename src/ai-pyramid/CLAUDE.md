@@ -16,9 +16,10 @@ GitHub Actions で自動ビルド (`src/ai-pyramid/**` 変更時)。実機より
 ```bash
 gh run download --name pet-album-aarch64 --dir /tmp/pet-album
 sudo systemctl stop pet-album.service
-sudo cp /tmp/pet-album/pet-album target/release/pet-album
+sudo install -m 755 /tmp/pet-album/pet-album /opt/smart-pet-camera/build/pet-album
 sudo systemctl start pet-album.service
 ```
+デプロイ先は `build/pet-album` (cargo 管理外)。`target/release/` は `cargo clean` で消えるので避ける。
 
 ## PR後のワークフロー
 ai-pyramid配下の変更をマージしたら、必ず以下を実行:
