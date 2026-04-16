@@ -47,6 +47,16 @@ pub struct BackgroundModel {
     pub mean: Vec<f32>,
     /// Per-pixel std intensity.
     pub std: Vec<f32>,
+    /// Precomputed per-pixel threshold: `max(SIGMA * std, ABS_FLOOR)`.
+    /// Not persisted; computed from `std` on construction.
+    pub(crate) threshold: Vec<f32>,
+}
+
+impl BackgroundModel {
+    fn new(width: u32, height: u32, frame_count: u32, mean: Vec<f32>, std: Vec<f32>) -> Self {
+        let threshold = std.iter().map(|&s| (SIGMA * s).max(ABS_FLOOR)).collect();
+        Self { width, height, frame_count, mean, std, threshold }
+    }
 }
 
 // ── Construction ──────────────────────────────────────────────────────────
@@ -110,13 +120,7 @@ pub fn build_model(jpeg_paths: &[PathBuf]) -> Result<BackgroundModel, String> {
         *s = (*s / n as f32).sqrt();
     }
 
-    Ok(BackgroundModel {
-        width,
-        height,
-        frame_count: n as u32,
-        mean,
-        std,
-    })
+    Ok(BackgroundModel::new(width, height, n as u32, mean, std))
 }
 
 // ── Scoring ───────────────────────────────────────────────────────────────
@@ -139,16 +143,17 @@ pub fn score_frame(model: &BackgroundModel, jpeg_path: &Path) -> Result<f32, Str
     }
 
     let gray = img.into_luma8();
+    let gray_bytes = gray.as_raw();
     let n_pixels = (model.width * model.height) as usize;
     let mut outliers: usize = 0;
 
-    for (i, pixel) in gray.pixels().enumerate() {
-        let v = pixel[0] as f32;
-        let diff = (v - model.mean[i]).abs();
-        let threshold = (SIGMA * model.std[i]).max(ABS_FLOOR);
-        if diff > threshold {
-            outliers += 1;
-        }
+    // Threshold is precomputed in BackgroundModel::new(), so the inner loop is
+    // a simple abs-diff + compare — no multiply or max per pixel.
+    // Raw slices + branchless count enable NEON auto-vectorization with
+    // target-cpu=cortex-a55.
+    for i in 0..n_pixels {
+        let diff = (gray_bytes[i] as f32 - model.mean[i]).abs();
+        outliers += (diff > model.threshold[i]) as usize;
     }
 
     Ok(outliers as f32 / n_pixels as f32 * 100.0)
@@ -215,13 +220,7 @@ pub fn load_model(path: &Path) -> Result<BackgroundModel, String> {
         .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
         .collect();
 
-    Ok(BackgroundModel {
-        width,
-        height,
-        frame_count,
-        mean,
-        std,
-    })
+    Ok(BackgroundModel::new(width, height, frame_count, mean, std))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -243,13 +242,13 @@ mod tests {
     #[test]
     fn roundtrip_model() {
         let n: usize = 4; // 2x2
-        let model = BackgroundModel {
-            width: 2,
-            height: 2,
-            frame_count: 5,
-            mean: vec![100.0, 110.0, 90.0, 80.0],
-            std: vec![1.0, 2.0, 3.0, 4.0],
-        };
+        let model = BackgroundModel::new(
+            2,
+            2,
+            5,
+            vec![100.0, 110.0, 90.0, 80.0],
+            vec![1.0, 2.0, 3.0, 4.0],
+        );
         let tmp = std::env::temp_dir().join("test_bg_model.bin");
         save_model(&model, &tmp).unwrap();
         let loaded = load_model(&tmp).unwrap();

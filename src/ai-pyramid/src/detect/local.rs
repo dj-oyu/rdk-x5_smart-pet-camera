@@ -755,28 +755,35 @@ fn raw_dets_to_inputs(
 }
 
 /// Convert RGB image to NV12 (Y plane + interleaved UV plane).
+///
+/// Uses raw byte slice access (`as_raw`) instead of `get_pixel` to enable
+/// LLVM auto-vectorization when compiled with `target-cpu=cortex-a55`.
 fn rgb_to_nv12(rgb: &image::RgbImage, w: u32, h: u32) -> Vec<u8> {
-    let mut nv12 = vec![0u8; (w * h * 3 / 2) as usize];
-    let (y_plane, uv_plane) = nv12.split_at_mut((w * h) as usize);
+    let (w, h) = (w as usize, h as usize);
+    let mut nv12 = vec![0u8; w * h * 3 / 2];
+    let (y_plane, uv_plane) = nv12.split_at_mut(w * h);
+    let src = rgb.as_raw(); // flat RGB: [R0,G0,B0, R1,G1,B1, ...]
 
     // Y plane
-    for row in 0..h {
-        for col in 0..w {
-            let p = rgb.get_pixel(col, row).0;
-            let y = (66 * p[0] as i32 + 129 * p[1] as i32 + 25 * p[2] as i32 + 128) / 256 + 16;
-            y_plane[(row * w + col) as usize] = y.clamp(0, 255) as u8;
-        }
+    for i in 0..w * h {
+        let r = src[i * 3] as i32;
+        let g = src[i * 3 + 1] as i32;
+        let b = src[i * 3 + 2] as i32;
+        y_plane[i] = ((66 * r + 129 * g + 25 * b + 128) / 256 + 16).clamp(0, 255) as u8;
     }
 
-    // UV plane (subsampled 2×2)
+    // UV plane (subsampled 2×2, top-left pixel of each 2×2 block)
     for row in (0..h).step_by(2) {
         for col in (0..w).step_by(2) {
-            let p = rgb.get_pixel(col, row).0;
-            let u = (-38 * p[0] as i32 - 74 * p[1] as i32 + 112 * p[2] as i32 + 128) / 256 + 128;
-            let v = (112 * p[0] as i32 - 94 * p[1] as i32 - 18 * p[2] as i32 + 128) / 256 + 128;
-            let uv_idx = (row / 2 * w + col) as usize;
-            uv_plane[uv_idx] = u.clamp(0, 255) as u8;
-            uv_plane[uv_idx + 1] = v.clamp(0, 255) as u8;
+            let src_idx = (row * w + col) * 3;
+            let r = src[src_idx] as i32;
+            let g = src[src_idx + 1] as i32;
+            let b = src[src_idx + 2] as i32;
+            let uv_idx = row / 2 * w + col;
+            uv_plane[uv_idx] =
+                ((-38 * r - 74 * g + 112 * b + 128) / 256 + 128).clamp(0, 255) as u8;
+            uv_plane[uv_idx + 1] =
+                ((112 * r - 94 * g - 18 * b + 128) / 256 + 128).clamp(0, 255) as u8;
         }
     }
 
