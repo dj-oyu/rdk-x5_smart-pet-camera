@@ -35,6 +35,7 @@
 | `src/ai-pyramid/docs/detections-integration.md` | YOLO detection → ai-pyramid 連携仕様 |
 | `hardware-specs.md` | GPU/VPU/BPU specs, nano2D/VSE/hbn_vflow benchmarks |
 | `hw-offload-roadmap.md` | H.265移行 + HWオフロード実装計画 |
+| `optee-afalg-findings.md` | OP-TEE AF_ALG TE driver issues, workarounds, perf analysis |
 | `axmodel-conversion-guide.md` | Pulsar2 axmodel変換手順書 (Qwen3-VL/Qwen3.5) |
 | `logging_system.md` | Logging architecture |
 | `text-rendering-design.md` | Text overlay/rendering on video |
