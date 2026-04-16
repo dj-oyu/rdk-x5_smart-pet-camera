@@ -10,7 +10,7 @@ import (
 	"net/http"
 	_ "net/http/pprof" // Enable pprof
 	"os"
-	"os/signal"
+	ossignal "os/signal"
 	"sync"
 	"syscall"
 	"time"
@@ -19,8 +19,9 @@ import (
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/logger"
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/metrics"
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/recorder"
+	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/rtppack"
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/shm"
-	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/webrtc"
+	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/signal"
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/pkg/types"
 )
 
@@ -32,7 +33,6 @@ var (
 	pprofAddr   = flag.String("pprof", ":6060", "pprof server address")
 	recordPath  = flag.String("record-path", "./recordings", "Recording output path")
 	maxClients  = flag.Int("max-clients", 10, "Maximum WebRTC clients")
-	stunServers = flag.String("stun", "stun:stun.l.google.com:19302", "STUN server URLs (comma-separated)")
 	logLevel    = flag.String("log-level", "info", "Log level (debug, info, warn, error, silent)")
 	logColor    = flag.Bool("log-color", true, "Enable colored log output")
 )
@@ -45,7 +45,7 @@ type Server struct {
 	metrics    *metrics.Metrics
 	shmReader  *shm.Reader
 	processor  *codec.Processor
-	webrtc     *webrtc.Server
+	signal     *signal.Server
 	recorder   *recorder.Recorder
 	httpServer *http.Server
 
@@ -89,7 +89,7 @@ func main() {
 
 	// Wait for shutdown signal
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	ossignal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 
 	log.Println("Shutting down...")
@@ -119,9 +119,13 @@ func NewServer() (*Server, error) {
 	// Create H.264 processor
 	processor := codec.NewProcessor()
 
-	// Create WebRTC server
-	stunURLs := []string{*stunServers}
-	webrtcSrv := webrtc.NewServer(stunURLs, *maxClients)
+	// Create signal server (self-contained WebRTC: SDP + ICE-lite + DTLS + SRTP)
+	signalSrv, err := signal.NewServer(*maxClients)
+	if err != nil {
+		cancel()
+		reader.Close()
+		return nil, fmt.Errorf("failed to create signal server: %w", err)
+	}
 
 	// Create recorder
 	rec := recorder.NewRecorder(*recordPath)
@@ -139,7 +143,7 @@ func NewServer() (*Server, error) {
 		metrics:      m,
 		shmReader:    reader,
 		processor:    processor,
-		webrtc:       webrtcSrv,
+		signal:       signalSrv,
 		recorder:     rec,
 		httpServer:   httpServer,
 		recorderChan: make(chan *types.VideoFrame, 60),
@@ -221,18 +225,22 @@ func (s *Server) Start() error {
 func (s *Server) readFrames() {
 	defer s.wg.Done()
 
-	// Stage 2: async WebRTC sender.
-	// Buffer of 1 so the producer can hand off a frame and immediately loop
-	// back to read the next one without waiting for all WebRTC clients.
+	// Stage 2: async sender using self-contained WebRTC (signal package).
+	// Replaces pion's SendFrame with our own RTP packetization + SRTP encryption.
 	sendCh := make(chan *types.VideoFrame, 1)
 	var sendWg sync.WaitGroup
 	sendWg.Add(1)
+	var rtpSeq uint16
+	var rtpSSRC uint32 = 0x12345678
 	go func() {
 		defer sendWg.Done()
 		for frame := range sendCh {
-			s.webrtc.SendFrame(frame)
+			ts := uint32(frame.FrameNumber * 3000) // 90kHz / 30fps = 3000 ticks
+			packets, nextSeq := rtppack.PacketizeH265(frame, rtpSSRC, rtpSeq, ts, 1200)
+			rtpSeq = nextSeq
+			s.signal.SendFrame(packets)
 			s.metrics.WebRTCFramesSent.Add(1)
-			// Return the SHM read buffer to pool now that the sender is done with it.
+			// Return the SHM read buffer to pool
 			buf := frame.Data
 			s.shmBufPool.Put(&buf)
 		}
@@ -262,7 +270,7 @@ func (s *Server) readFrames() {
 		}
 
 		// Skip reading if no clients and not recording.
-		if s.webrtc.GetClientCount() == 0 && !s.recorder.IsRecording() {
+		if s.signal.GetClientCount() == 0 && !s.recorder.IsRecording() {
 			lastVer = s.shmReader.Version()
 			continue
 		}
@@ -428,7 +436,7 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	answerJSON, err := s.webrtc.HandleOffer(offerJSON)
+	answerJSON, err := s.signal.HandleOffer(offerJSON)
 	if err != nil {
 		log.Printf("[HTTP] WebRTC offer error: %v", err)
 		http.Error(w, fmt.Sprintf("Failed to handle offer: %v", err), http.StatusInternalServerError)
@@ -489,7 +497,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":         "ok",
-		"webrtc_clients": s.webrtc.GetClientCount(),
+		"webrtc_clients": s.signal.GetClientCount(),
 		"recording":      s.recorder.IsRecording(),
 		"has_headers":    s.processor.HasHeaders(),
 	})
@@ -499,7 +507,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleClientCount(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"count": s.webrtc.GetClientCount(),
+		"count": s.signal.GetClientCount(),
 	})
 }
 
@@ -518,7 +526,7 @@ func (s *Server) Shutdown() error {
 
 	// Close components
 	s.recorder.Close()
-	s.webrtc.Close()
+	s.signal.Close()
 	s.shmReader.Close()
 
 	// Shutdown HTTP server

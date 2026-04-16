@@ -42,6 +42,9 @@ func (p *Processor) Process(frame *types.VideoFrame) error {
 		return nil
 	}
 
+	// Reset NAL bounds (reuse backing array to avoid allocation)
+	frame.NALUs = frame.NALUs[:0]
+
 	offset := 0
 	for offset < len(data) {
 		// BCE-friendly start code detection: bytes.Equal with a single slice creation
@@ -72,6 +75,13 @@ func (p *Processor) Process(frame *types.VideoFrame) error {
 		if nalEnd == -1 {
 			nalEnd = len(data)
 		}
+
+		// Record NAL boundary for RTP packetization
+		frame.NALUs = append(frame.NALUs, types.NALBound{
+			Offset: nalHeaderOffset,
+			Length: nalEnd - nalHeaderOffset,
+			Type:   nalType,
+		})
 
 		// Only copy for VPS/SPS/PPS (rare - typically once per GOP)
 		switch nalType {
