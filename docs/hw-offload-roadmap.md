@@ -293,6 +293,56 @@ Consumer: share_id → hb_mem_import → 同一物理メモリにアクセス
 
 ---
 
+## SRTP 暗号 HW オフロード（OP-TEE）
+
+### 調査結果（2026-04-16）
+
+RDK X5 は OP-TEE (ARM TrustZone) ベースのハードウェア暗号エンジンを搭載。
+ARMv8 暗号拡張命令 (AES-NI相当) は非搭載だが、Secure World 内で暗号処理を実行する TE ドライバがカーネル Crypto API に登録されている。
+
+**登録済み TE ドライバ** (priority=400、全44種):
+
+| アルゴリズム | ドライバ名 | SRTP で使用 |
+|---|---|---|
+| `ctr(aes)` | `ctr-aes-te` | AES-128-CTR 暗号化 |
+| `hmac(sha1)` | `hmac-sha1-te` | SRTP 認証タグ |
+| `gcm(aes)` | `gcm-aes-te` | (参考: DTLS) |
+
+**アクセス方法**: AF_ALG ソケット (ユーザー空間) または `/dev/tee0` (OP-TEE direct call)
+
+### ベンチマーク（AF_ALG、1200 byte パケット）
+
+| 操作 | AF_ALG (TE) | Go ソフトウェア (pprof推定) | 比率 |
+|---|---|---|---|
+| AES-128-CTR | 13,355 ops/sec (75 µs) | — | — |
+| HMAC-SHA1 | 4,610 ops/sec (217 µs) | — | — |
+| **合計/パケット** | **~292 µs** | **~2,259 µs** | **7.7x** |
+
+**効果見込み**: 180 pkt/s × 292 µs = 52.5 ms/s ≈ CPU ~5%（現在 ~40% → **-35pt**）
+
+### 統合パス
+
+```
+Go (pion/srtp)
+  └── cipher.Block interface
+       └── crypto/aes.newCipher()  ← 現在: ソフトウェア encryptBlockGeneric
+                                    ↓ 差し替え
+       └── afalg.NewCipher()       ← AF_ALG socket → ctr-aes-te → OP-TEE Secure World
+```
+
+**必要な作業**:
+1. Go で `cipher.Block` を AF_ALG syscall で実装（`skcipher` bind + send/recv）
+2. Go で `hash.Hash` を AF_ALG syscall で実装（`hash` bind + send/recv）
+3. pion/srtp をフォークし、`srtpCipherAesCmHmacSha1` の暗号プリミティブ生成を差し替え
+4. AF_ALG ソケットのプール管理（パケットごとの socket 生成を回避）
+
+**リスク**:
+- pion/srtp フォークの保守コスト（upstream 追従）
+- OP-TEE コンテキストスイッチ (Normal→Secure World) のレイテンシが小パケットで不利な可能性
+- AF_ALG のソケット操作による syscall オーバーヘッド（send + recv = 2 syscall/op）
+
+---
+
 ## 実装順序とリスク管理
 
 各ステップは独立してロールバック可能。
@@ -307,5 +357,9 @@ Consumer: share_id → hb_mem_import → 同一物理メモリにアクセス
 | 2-2a | nano2Dレターボックス | 2-1a | 低 | CPUレターボックスにフォールバック |
 | 2-2b | VSE夜間ROI | 2-1a | 低 | Python crop にフォールバック |
 | 2-2c | encoder phys_addr | 2-1a | 中 | memcpy にフォールバック |
+| 3-1 | SRTP AF_ALG cipher.Block実装 | なし | 中 | Go crypto/aes にフォールバック |
+| 3-2 | pion/srtp フォーク + 暗号差し替え | 3-1 | 高 | upstream pion/srtp に戻す |
 
 **最大リスク: 2-1a (hbn_vflow移行)** — カメラパイプライン全面改修。必ず libspcdev版を並行維持し、ビルドフラグで切り替え可能にすること。
+
+**3-1/3-2 (SRTP HWオフロード)**: 効果は大きい (-35pt CPU) が pion/srtp フォークの保守負担も大きい。クライアント3台以上でCPU飽和する場合に検討。

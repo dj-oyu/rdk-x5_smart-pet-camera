@@ -10,6 +10,7 @@ import (
 
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/logger"
 	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/pkg/types"
+	"github.com/pion/interceptor"
 	"github.com/pion/rtp"
 	"github.com/pion/rtp/codecs"
 	"github.com/pion/webrtc/v4"
@@ -81,10 +82,20 @@ func NewServer(stunServers []string, maxClients int) *Server {
 		logger.Error("WebRTC", "Failed to register codecs: %v", err)
 	}
 
+	// Minimal interceptor chain for send-only H.265 streaming.
+	// Default interceptors (NACK, TWCC, Stats, Receiver Report) add per-packet
+	// overhead that dominates CPU on this SoC (no AES-NI). We register only the
+	// Sender Report interceptor — required by WebRTC spec for receiver RTCP sync.
+	interceptorRegistry := &interceptor.Registry{}
+	if err := webrtc.ConfigureRTCPReports(interceptorRegistry); err != nil {
+		logger.Error("WebRTC", "Failed to configure RTCP reports: %v", err)
+	}
+
 	// Create API with optimized settings
 	api := webrtc.NewAPI(
 		webrtc.WithSettingEngine(settingsEngine),
 		webrtc.WithMediaEngine(mediaEngine),
+		webrtc.WithInterceptorRegistry(interceptorRegistry),
 	)
 
 	return &Server{
