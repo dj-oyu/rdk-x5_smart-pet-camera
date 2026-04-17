@@ -15,7 +15,7 @@ const (
 
 	stunAttrMappedAddress    = 0x0001
 	stunAttrXORMappedAddress = 0x0020
-	stunAttrUsername          = 0x0006
+	stunAttrUsername         = 0x0006
 	stunAttrMessageIntegrity = 0x0008
 	stunAttrFingerprint      = 0x8028
 	stunAttrUseCandidate     = 0x0025
@@ -30,8 +30,8 @@ const (
 // ICELite handles ICE-lite connectivity checks on a UDP socket.
 // It responds to STUN Binding Requests with Binding Responses.
 type ICELite struct {
-	localUfrag string
-	localPwd   string
+	localUfrag  string
+	localPwd    string
 	remoteUfrag string
 	remotePwd   string
 }
