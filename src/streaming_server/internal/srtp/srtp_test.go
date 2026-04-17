@@ -73,7 +73,7 @@ func TestGenerateCounter(t *testing.T) {
 	}
 	t.Logf("sessionSalt: %x", sessionSalt)
 
-	seq := uint16(0x804E)      // 32846
+	seq := uint16(0x804E) // 32846
 	roc := uint32(0)
 	ssrc := uint32(0xF7B4DFDE) // 4160032510
 

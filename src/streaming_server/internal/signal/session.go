@@ -410,8 +410,8 @@ func (d *dtlsPacketConn) LocalAddr() net.Addr {
 }
 
 func (d *dtlsPacketConn) SetDeadline(t time.Time) error      { return d.conn.SetDeadline(t) }
-func (d *dtlsPacketConn) SetReadDeadline(t time.Time) error   { return d.conn.SetReadDeadline(t) }
-func (d *dtlsPacketConn) SetWriteDeadline(t time.Time) error  { return d.conn.SetWriteDeadline(t) }
+func (d *dtlsPacketConn) SetReadDeadline(t time.Time) error  { return d.conn.SetReadDeadline(t) }
+func (d *dtlsPacketConn) SetWriteDeadline(t time.Time) error { return d.conn.SetWriteDeadline(t) }
 
 // Ensure dtlsPacketConn satisfies net.PacketConn
 var _ net.PacketConn = (*dtlsPacketConn)(nil)
