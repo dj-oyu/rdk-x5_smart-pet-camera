@@ -308,9 +308,7 @@ func (s *Server) Close() error {
 	for id, sess := range s.sessions {
 		sess.mu.Lock()
 		sess.closed = true
-		if sess.srtpCtx != nil {
-			sess.srtpCtx.Close()
-		}
+		// srtpCtx is immutable software crypto — no Close needed, GC reclaims.
 		sess.udpConn.Close()
 		sess.mu.Unlock()
 		delete(s.sessions, id)
@@ -325,9 +323,7 @@ func (s *Server) removeSession(id string) {
 	if sess, ok := s.sessions[id]; ok {
 		sess.mu.Lock()
 		sess.closed = true
-		if sess.srtpCtx != nil {
-			sess.srtpCtx.Close()
-		}
+		// srtpCtx is immutable software crypto — no Close needed, GC reclaims.
 		sess.udpConn.Close()
 		sess.mu.Unlock()
 		delete(s.sessions, id)

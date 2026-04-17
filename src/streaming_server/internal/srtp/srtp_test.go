@@ -119,7 +119,6 @@ func TestEncryptRTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ctx.Close()
 
 	decryptedPacket := mustHex(
 		"800F1234DECAFBAD" +
@@ -221,7 +220,6 @@ func BenchmarkEncryptRTP(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer ctx.Close()
 
 	packet := make([]byte, 1200)
 	packet[0] = 0x80
