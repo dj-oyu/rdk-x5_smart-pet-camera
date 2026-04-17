@@ -74,13 +74,13 @@ func ParseOffer(sdp string) (*Offer, error) {
 
 // AnswerParams holds local parameters for generating an SDP answer.
 type AnswerParams struct {
-	ICEUfrag       string
-	ICEPwd         string
+	ICEUfrag        string
+	ICEPwd          string
 	DTLSFingerprint string // "XX:XX:XX:..." sha-256 hex
-	CandidateIP    net.IP
-	CandidatePort  int
-	PayloadType    int
-	MID            string
+	CandidateIP     net.IP
+	CandidatePort   int
+	PayloadType     int
+	MID             string
 }
 
 // GenerateAnswer creates an SDP answer string for send-only H.265 video.

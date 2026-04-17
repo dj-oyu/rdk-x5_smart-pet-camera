@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash"
+	"sync"
 )
 
 var (
@@ -21,38 +22,53 @@ const AuthTagLen = 10
 
 // Cipher performs SRTP encrypt/decrypt for a single direction (local or remote).
 //
+// The exported surface is immutable after construction: all fields are set
+// once in NewCipher and never written again. EncryptRTP is safe for
+// concurrent use — the internal authPool amortizes HMAC instance creation
+// without exposing shared mutable state.
+//
 // Uses software AES-CTR + HMAC-SHA1 (Go crypto). AF_ALG (OP-TEE) was
 // implemented and verified correct, but TE context-switch overhead makes
 // it slower than software for per-packet SRTP. See docs/optee-afalg-findings.md.
 type Cipher struct {
-	srtpBlock cipher.Block // AES block cipher for CTR keystream
-	srtpSalt  []byte       // 14-byte session salt
-	srtpAuth  hash.Hash    // HMAC-SHA1 keyed with session auth key
+	srtpBlock cipher.Block // AES block cipher for CTR keystream (stateless, concurrent-safe)
+	srtpSalt  []byte       // 14-byte session salt (immutable)
+	authPool  sync.Pool    // pool of keyed HMAC-SHA1 hashes
 }
 
 // NewCipher creates an SRTP cipher from pre-derived session keys.
+//
+// Returned *Cipher is safe for concurrent use. The session keys are captured
+// once; callers may discard their references after construction.
 func NewCipher(sessionKey, sessionSalt, sessionAuthKey []byte) (*Cipher, error) {
 	block, err := aes.NewCipher(sessionKey)
 	if err != nil {
 		return nil, err
 	}
 
-	auth := hmac.New(sha1.New, sessionAuthKey)
+	// Defensive copy of the auth key: the pool factory captures it and
+	// callers may mutate or reuse the input slice after this returns.
+	keyCopy := make([]byte, len(sessionAuthKey))
+	copy(keyCopy, sessionAuthKey)
 
-	return &Cipher{
+	c := &Cipher{
 		srtpBlock: block,
 		srtpSalt:  sessionSalt,
-		srtpAuth:  auth,
-	}, nil
+	}
+	c.authPool.New = func() interface{} {
+		return hmac.New(sha1.New, keyCopy)
+	}
+
+	return c, nil
 }
 
-// Close is a no-op for software crypto (no OS resources to release).
-func (c *Cipher) Close() {}
-
-// EncryptRTP encrypts an RTP packet in-place and appends the authentication tag.
-// Input: dst must have room for len(rtpPacket) + AuthTagLen bytes.
+// EncryptRTP encrypts an RTP packet and appends the authentication tag.
+// Input: dst must have room for len(rtpPacket) + AuthTagLen bytes; a new
+// slice is allocated if capacity is insufficient.
 // rtpPacket = [RTP header (headerLen bytes)] [payload].
 // Output: [RTP header] [encrypted payload] [auth tag (10 bytes)].
+//
+// Safe for concurrent use.
 func (c *Cipher) EncryptRTP(dst []byte, rtpPacket []byte, headerLen int, seq uint16, roc uint32, ssrc uint32) ([]byte, error) {
 	payloadLen := len(rtpPacket) - headerLen
 	totalLen := len(rtpPacket) + AuthTagLen
@@ -71,13 +87,17 @@ func (c *Cipher) EncryptRTP(dst []byte, rtpPacket []byte, headerLen int, seq uin
 	counter := GenerateCounter(seq, roc, ssrc, c.srtpSalt)
 	xorBytesCTR(c.srtpBlock, counter[:], dst[headerLen:headerLen+payloadLen], rtpPacket[headerLen:])
 
-	// Generate authentication tag: HMAC-SHA1(header || encrypted_payload || ROC)
-	c.srtpAuth.Reset()
-	c.srtpAuth.Write(dst[:headerLen+payloadLen])
+	// Generate authentication tag: HMAC-SHA1(header || encrypted_payload || ROC).
+	// Pool an already-keyed HMAC so repeated calls avoid hmac.New allocations
+	// and use the stdlib's marshaled-state fast path in Reset().
+	auth := c.authPool.Get().(hash.Hash)
+	auth.Reset()
+	auth.Write(dst[:headerLen+payloadLen])
 	var rocBuf [4]byte
 	binary.BigEndian.PutUint32(rocBuf[:], roc)
-	c.srtpAuth.Write(rocBuf[:])
-	tag := c.srtpAuth.Sum(nil)
+	auth.Write(rocBuf[:])
+	tag := auth.Sum(nil)
+	c.authPool.Put(auth)
 
 	// Append truncated tag
 	copy(dst[headerLen+payloadLen:], tag[:AuthTagLen])

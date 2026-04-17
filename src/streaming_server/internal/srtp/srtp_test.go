@@ -73,7 +73,7 @@ func TestGenerateCounter(t *testing.T) {
 	}
 	t.Logf("sessionSalt: %x", sessionSalt)
 
-	seq := uint16(0x804E)      // 32846
+	seq := uint16(0x804E) // 32846
 	roc := uint32(0)
 	ssrc := uint32(0xF7B4DFDE) // 4160032510
 
@@ -119,7 +119,6 @@ func TestEncryptRTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ctx.Close()
 
 	decryptedPacket := mustHex(
 		"800F1234DECAFBAD" +
@@ -221,7 +220,6 @@ func BenchmarkEncryptRTP(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer ctx.Close()
 
 	packet := make([]byte, 1200)
 	packet[0] = 0x80

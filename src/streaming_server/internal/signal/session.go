@@ -308,9 +308,7 @@ func (s *Server) Close() error {
 	for id, sess := range s.sessions {
 		sess.mu.Lock()
 		sess.closed = true
-		if sess.srtpCtx != nil {
-			sess.srtpCtx.Close()
-		}
+		// srtpCtx is immutable software crypto — no Close needed, GC reclaims.
 		sess.udpConn.Close()
 		sess.mu.Unlock()
 		delete(s.sessions, id)
@@ -325,9 +323,7 @@ func (s *Server) removeSession(id string) {
 	if sess, ok := s.sessions[id]; ok {
 		sess.mu.Lock()
 		sess.closed = true
-		if sess.srtpCtx != nil {
-			sess.srtpCtx.Close()
-		}
+		// srtpCtx is immutable software crypto — no Close needed, GC reclaims.
 		sess.udpConn.Close()
 		sess.mu.Unlock()
 		delete(s.sessions, id)
@@ -414,8 +410,8 @@ func (d *dtlsPacketConn) LocalAddr() net.Addr {
 }
 
 func (d *dtlsPacketConn) SetDeadline(t time.Time) error      { return d.conn.SetDeadline(t) }
-func (d *dtlsPacketConn) SetReadDeadline(t time.Time) error   { return d.conn.SetReadDeadline(t) }
-func (d *dtlsPacketConn) SetWriteDeadline(t time.Time) error  { return d.conn.SetWriteDeadline(t) }
+func (d *dtlsPacketConn) SetReadDeadline(t time.Time) error  { return d.conn.SetReadDeadline(t) }
+func (d *dtlsPacketConn) SetWriteDeadline(t time.Time) error { return d.conn.SetWriteDeadline(t) }
 
 // Ensure dtlsPacketConn satisfies net.PacketConn
 var _ net.PacketConn = (*dtlsPacketConn)(nil)
