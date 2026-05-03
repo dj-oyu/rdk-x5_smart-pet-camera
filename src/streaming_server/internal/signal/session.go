@@ -29,13 +29,13 @@ type Session struct {
 
 // Server manages multiple WebRTC sessions.
 type Server struct {
-	mu         sync.RWMutex
-	sessions   map[string]*Session
-	dtlsConfig *DTLSConfig
-	maxClients int
-	listenIP   net.IP
-	basePort   int // Starting UDP port for allocation
-	nextPort   int
+	mu           sync.RWMutex
+	sessions     map[string]*Session
+	dtlsConfig   *DTLSConfig
+	maxClients   int
+	candidateIPs []net.IP // all non-loopback IPv4 addresses to advertise
+	basePort     int      // Starting UDP port for allocation
+	nextPort     int
 }
 
 // NewServer creates a new signaling server.
@@ -45,16 +45,13 @@ func NewServer(maxClients int) (*Server, error) {
 		return nil, err
 	}
 
-	// Find local IP
-	ip := getLocalIP()
-
 	return &Server{
-		sessions:   make(map[string]*Session),
-		dtlsConfig: dtlsConfig,
-		maxClients: maxClients,
-		listenIP:   ip,
-		basePort:   20000,
-		nextPort:   20000,
+		sessions:     make(map[string]*Session),
+		dtlsConfig:   dtlsConfig,
+		maxClients:   maxClients,
+		candidateIPs: getLocalIPs(),
+		basePort:     20000,
+		nextPort:     20000,
 	}, nil
 }
 
@@ -84,9 +81,10 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 	}
 	s.mu.RUnlock()
 
-	// Allocate UDP port
+	// Allocate UDP port. Bind to 0.0.0.0 so STUN can arrive on any
+	// interface — we advertise multiple host candidates below.
 	port := s.allocatePort()
-	udpAddr := &net.UDPAddr{IP: s.listenIP, Port: port}
+	udpAddr := &net.UDPAddr{IP: net.IPv4zero, Port: port}
 	udpConn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
 		return nil, fmt.Errorf("signal: listen udp %d: %w", port, err)
@@ -96,14 +94,17 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 	localUfrag, localPwd := GenerateICECredentials()
 
 	// Generate SDP answer
+	const sessSSRC uint32 = 0x12345678
 	answerSDP := GenerateAnswer(&AnswerParams{
 		ICEUfrag:        localUfrag,
 		ICEPwd:          localPwd,
 		DTLSFingerprint: s.dtlsConfig.Fingerprint,
-		CandidateIP:     s.listenIP,
+		CandidateIPs:    s.candidateIPs,
 		CandidatePort:   port,
 		PayloadType:     offer.PayloadType,
 		MID:             offer.MID,
+		FmtpLine:        offer.FmtpLine,
+		SSRC:            sessSSRC,
 	})
 
 	// Create session
@@ -111,7 +112,7 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 		id:          fmt.Sprintf("ws-%d", port),
 		udpConn:     udpConn,
 		iceLite:     NewICELite(localUfrag, localPwd, offer.ICEUfrag, offer.ICEPwd),
-		ssrc:        0x12345678,
+		ssrc:        sessSSRC,
 		payloadType: uint8(offer.PayloadType),
 	}
 
@@ -342,17 +343,26 @@ func (s *Server) allocatePort() int {
 	return port
 }
 
-func getLocalIP() net.IP {
-	// Prefer non-loopback IPv4
+// getLocalIPs returns every non-loopback IPv4 address on the host.
+// Each becomes an ICE host candidate so the browser can reach the
+// server via whichever interface it is connected through (LAN, VPN, ...).
+// Falls back to 127.0.0.1 only if no other addresses exist.
+func getLocalIPs() []net.IP {
 	addrs, _ := net.InterfaceAddrs()
+	var ips []net.IP
 	for _, addr := range addrs {
-		if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
-			if ip4 := ipNet.IP.To4(); ip4 != nil {
-				return ip4
-			}
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok || ipNet.IP.IsLoopback() {
+			continue
+		}
+		if ip4 := ipNet.IP.To4(); ip4 != nil {
+			ips = append(ips, ip4)
 		}
 	}
-	return net.IPv4(127, 0, 0, 1)
+	if len(ips) == 0 {
+		ips = append(ips, net.IPv4(127, 0, 0, 1))
+	}
+	return ips
 }
 
 // ----- DTLS packet conn adapter -----
