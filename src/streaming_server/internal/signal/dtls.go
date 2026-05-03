@@ -21,8 +21,8 @@ import (
 
 // DTLSConfig holds DTLS configuration for the server.
 type DTLSConfig struct {
-	Certificate   tls.Certificate
-	Fingerprint   string // SHA-256 fingerprint "XX:XX:XX:..."
+	Certificate tls.Certificate
+	Fingerprint string // SHA-256 fingerprint "XX:XX:XX:..."
 }
 
 // NewDTLSConfig generates a self-signed ECDSA certificate for DTLS.
@@ -55,8 +55,8 @@ type DTLSSession struct {
 // The conn should already be multiplexed (STUN/DTLS/SRTP demuxed).
 func HandshakeDTLS(conn net.PacketConn, remoteAddr net.Addr, config *DTLSConfig) (*DTLSSession, error) {
 	dtlsConfig := &dtls.Config{
-		Certificates:          []tls.Certificate{config.Certificate},
-		ExtendedMasterSecret:  dtls.RequireExtendedMasterSecret,
+		Certificates:         []tls.Certificate{config.Certificate},
+		ExtendedMasterSecret: dtls.RequireExtendedMasterSecret,
 		SRTPProtectionProfiles: []dtls.SRTPProtectionProfile{
 			dtls.SRTP_AES128_CM_HMAC_SHA1_80,
 		},
@@ -87,7 +87,7 @@ func HandshakeDTLS(conn net.PacketConn, remoteAddr net.Addr, config *DTLSConfig)
 // Returns the raw keying material (RFC 5764).
 // For AES128_CM_HMAC_SHA1_80: keyLen=16, saltLen=14.
 func (s *DTLSSession) ExportSRTPKeys() (keyMaterial []byte, err error) {
-	keyLen := 16 // AES-128
+	keyLen := 16  // AES-128
 	saltLen := 14 // AES-CM
 
 	// Total: clientWriteKey(16) + serverWriteKey(16) + clientWriteSalt(14) + serverWriteSalt(14) = 60

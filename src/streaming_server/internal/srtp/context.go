@@ -7,11 +7,17 @@ import (
 )
 
 // Context manages SRTP session state for one direction (send or receive).
+//
+// The cipher field is set once in NewContext and never mutated for the
+// lifetime of the Context — treat it as immutable. The mutex protects only
+// the per-SSRC ROC tracking map, which is the sole mutable state.
+//
+// EncryptRTP is safe for concurrent use.
 type Context struct {
-	mu     sync.Mutex
-	cipher *Cipher
+	cipher *Cipher // immutable after construction
 
-	// ROC tracking per SSRC
+	// ROC tracking per SSRC (guarded by mu)
+	mu         sync.Mutex
 	ssrcStates map[uint32]*ssrcState
 }
 
@@ -62,25 +68,15 @@ func NewContext(masterKey, masterSalt []byte) (*Context, error) {
 	}, nil
 }
 
-// Close releases resources.
-func (ctx *Context) Close() {
-	ctx.mu.Lock()
-	defer ctx.mu.Unlock()
-	if ctx.cipher != nil {
-		ctx.cipher.Close()
-		ctx.cipher = nil
-	}
-}
-
-// EncryptRTP encrypts an RTP packet. Thread-safe.
+// EncryptRTP encrypts an RTP packet. Safe for concurrent use.
 // Returns the encrypted packet with authentication tag appended.
 func (ctx *Context) EncryptRTP(dst, rtpPacket []byte, headerLen int, seq uint16, ssrc uint32) ([]byte, error) {
 	ctx.mu.Lock()
 	roc := ctx.updateROC(ssrc, seq)
-	c := ctx.cipher
 	ctx.mu.Unlock()
 
-	return c.EncryptRTP(dst, rtpPacket, headerLen, seq, roc, ssrc)
+	// ctx.cipher is immutable after construction — no lock needed.
+	return ctx.cipher.EncryptRTP(dst, rtpPacket, headerLen, seq, roc, ssrc)
 }
 
 // updateROC updates the Rollover Counter for the given SSRC.

@@ -53,7 +53,7 @@ func fragmentFU(packets [][]byte, nalu []byte, seq uint16, ts uint32, ssrc uint3
 	// H.265 NAL header: 2 bytes
 	// FU PayloadHdr: same F/LayerID/TID but Type=49
 	payloadHdr0 := (nalu[0] & 0x81) | (h265TypeFU << 1) // F, LayerID; Type=49
-	payloadHdr1 := nalu[1]                                // TID
+	payloadHdr1 := nalu[1]                              // TID
 	nalType := (nalu[0] >> 1) & 0x3F
 
 	// FU data = NALU data without the 2-byte NAL header

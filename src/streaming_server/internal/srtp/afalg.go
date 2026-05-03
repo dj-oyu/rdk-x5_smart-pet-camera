@@ -144,9 +144,9 @@ func (b *afalgBlock) Close() error {
 
 // afalgHMAC implements hash.Hash using AF_ALG hash("hmac(sha1)").
 type afalgHMAC struct {
-	parentFD int    // bind fd (kept for Reset → re-accept)
-	opFD     int    // current operation fd
-	size     int    // digest size (20 for SHA1)
+	parentFD int // bind fd (kept for Reset → re-accept)
+	opFD     int // current operation fd
+	size     int // digest size (20 for SHA1)
 	written  bool
 }
 
@@ -356,4 +356,3 @@ func CloseIfNeeded(c interface{}) {
 		cl.Close()
 	}
 }
-
