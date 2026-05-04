@@ -1,10 +1,12 @@
 # WebRTC ICE-full + srflx 復元 設計ドキュメント
 
 ## ステータス
-ドラフト / 設計レビュー前
+ドラフト / **検証フェーズ** (実装前)
 
 ブランチ: `feat/webrtc-ice-full-restoration`
 関連: PR #209 (multi-IP host candidate 化)
+
+> **進行ポリシー**: 仮説先行で実装に入らず、本ドキュメントの「§ 11 検証フェーズ」に挙げた項目を計測 → 結果を「§ 12 計測結果」に追記 → §2の設計を確定/修正 → 実装着手、の順で進める。
 
 ## 1. 背景
 
@@ -85,17 +87,45 @@ ICE-lite 化は意図せずではなく **明確なメリット** ももたら�
 | streaming-server `internal/signal/ice.go` | ICE-full: browser candidate に向けた binding request、候補ペアチェック、USE-CANDIDATE 処理 |
 | browser側 | **変更なし** (現状の `iceServers: [{urls: 'stun:stun.l.google.com:19302'}]` のまま) |
 
-### 2.2 切替レイテンシを維持する設計
+### 2.2 srflx 取得は lazy + 4h cache (定期ポーリングはしない)
 
-ICE-full 化の主なコストは **srflx gather 1往復(~50-200ms)** だが、以下で吸収する:
+ICE-full 化の主なコストは **srflx gather 1往復(~50-200ms)**。これを per-session に毎回払うのは切替レイテンシを劣化させるので、以下の lazy キャッシュ方式で吸収する。
 
-- **srflx は起動時1回だけ gather してキャッシュ**: 家の WAN IP:port は session 毎に変わらない
-- 別 goroutine で **STUN keepalive を定期送信** (typ. 30〜60s ごと) → NAT mapping 維持 + WAN IP 変化検知
-- per-session の SDP answer はキャッシュ済み srflx をそのまま埋め込むだけ → answer 生成レイテンシは **現状と同等**
+- 起動時に **NAT 種別を判定** (§ 2.3 のフローを 1 回実行)
+- 結果として `(wan_ip, nat_type, port_preserved)` を **4h cache**
+- per-session: cache hit なら srflx candidate = `(cached_wan_ip, session_socket_port)` をそのまま SDP に埋める。STUN は叩かない
+- cache 期限切れ (4h) でアクセスがあった場合: その session は host のみで先行発行 (待たない)、background で再判定 → cache 更新
+- ICE 失敗フィードバックがあれば cache を invalidate して次回 force re-gather (WAN IP 変化への追従)
+
+> **NAT mapping の寿命とは別問題**: セッション中は ICE/RTP の通信で mapping が自然延命する。セッション終了後は mapping が期限切れしても、次セッションで socket を bind し直して STUN を投げれば新しい mapping が即作られる。**定期 keepalive は不要**。
 
 ICE-full の connectivity check (server→browser candidate への STUN binding) は per-session 発生するが、典型的に <100ms で完了し、ユーザ体感としては気付かない。
 
-### 2.3 Cloudflare TURN サーバが不要な理由
+### 2.3 NAT 種別自動検出 (起動時に1回)
+
+ユーザが手で「自宅ルータが symmetric NAT でないことを確認」する代わりに、**サーバ起動時に自動検出**する。検出ロジック:
+
+```
+単一 UDP socket bind on internal_port_X
+  ├→ STUN to server A (e.g. stun.l.google.com:19302) → mapped (wan_A, port_A)
+  └→ STUN to server B (e.g. stun.cloudflare.com:3478) → mapped (wan_B, port_B)
+
+  Case 1: wan_A==wan_B && port_A==port_B && port_A==internal_port_X
+          ⇒ EIM (cone NAT) + port preservation
+          ⇒ fast mode: WAN IP を 4h cache、per-session STUN 不要
+  Case 2: wan_A==wan_B && port_A==port_B && port_A != internal_port_X
+          ⇒ EIM だが port preservation なし
+          ⇒ medium mode: per-session で STUN を1回叩いて mapped_port を取得 (cache は WAN IP のみ)
+  Case 3: wan_A != wan_B || port_A != port_B
+          ⇒ Endpoint-Dependent Mapping (Symmetric NAT)
+          ⇒ srflx を出さず host のみで動作 (= 現在の挙動と同等、リモートは諦め)
+  Case 4: STUN タイムアウト/エラー
+          ⇒ srflx を出さず host のみで動作 (= 現在の挙動)
+```
+
+> RFC 5780 (NAT Behavior Discovery) は単一サーバで `CHANGE-REQUEST` を使ってやれるが、Google STUN は対応していないので **異なる宛先 STUN サーバ 2 つ** を用いた classic 方式で判定する。
+
+### 2.4 Cloudflare TURN サーバが不要な理由
 
 検討段階では Cloudflare TURN を使う案を出したが、**pion 時代に動いていた = STUN だけで足りていた = TURN 不要** という事実が立証された。
 
@@ -107,36 +137,38 @@ ICE-full の connectivity check (server→browser candidate への STUN binding)
 
 → **Cloudflare アカウント、API token、credential 発行エンドポイントなど、外部サービスに関する作業は一切不要。**
 
-### 2.4 接続シーケンス
+### 2.5 接続シーケンス
 
 ```mermaid
 sequenceDiagram
     participant B as browser (iPhone Safari)
-    participant GS as Google STUN
+    participant SA as STUN server A
+    participant SB as STUN server B
     participant S as streaming-server (Go)
     participant W as web_monitor
 
-    Note over S: 起動時 (1回)
-    S->>GS: STUN binding request
-    GS-->>S: XOR-MAPPED-ADDRESS = wan_ip:port
-    Note over S: srflx をキャッシュ
+    Note over S: 起動時 (1回、§2.3 NAT判定)
+    par
+      S->>SA: STUN binding
+      SA-->>S: mapped (wan_A, port_A)
+    and
+      S->>SB: STUN binding
+      SB-->>S: mapped (wan_B, port_B)
+    end
+    Note over S: NAT 種別判定 → mode 確定 → cache (4h)
 
-    Note over S,GS: keepalive (30-60s ごと)
-    S->>GS: STUN binding (NAT mapping 維持)
-    GS-->>S: 応答
-
-    Note over B,S: signaling
+    Note over B,S: signaling (cache hit のとき STUN は叩かない)
     B->>W: POST /api/webrtc/offer
     W->>S: forward
-    Note over S: SDP answer に host + srflx を埋め込み
-    S-->>W: answer (a=ice-lite なし、ICE-full)
+    Note over S: SDP answer に host + (cached) srflx を埋め込み
+    S-->>W: answer (ICE-full, a=ice-lite なし)
     W-->>B: answer
 
     Note over B,S: ICE
     par browser → server
         B->>S: STUN binding to host candidate (192.168.1.33)
         Note right of B: 直接届かなければ捨てられる
-        B->>S: STUN binding to srflx candidate (wan_ip)
+        B->>S: STUN binding to srflx candidate (wan_ip:port)
         Note right of B: 家庭NATを抜けて到達
         S-->>B: STUN response
     and server → browser
@@ -150,12 +182,13 @@ sequenceDiagram
 ## 3. スコープ
 
 ### in scope
+- **検証フェーズ**: NAT/IPv6/UPnP 等の事前計測 (§ 11)
 - パブリック STUN client 実装 (`stun:stun.l.google.com:19302` 等)
-- 起動時 srflx gather + キャッシュ + 定期 keepalive
+- 起動時 NAT 種別自動検出 + lazy 4h cache (定期 keepalive は **しない**)
 - SDP answer に srflx candidate を追加、`a=ice-lite` を削除
 - ICE-full 化 (binding request 発信、候補ペア状態管理、USE-CANDIDATE 処理)
-- 切替レイテンシ維持 (起動時 gather 戦略の徹底)
-- 既存 LAN 動作の保持
+- 切替レイテンシ維持 (cache hit 時は STUN を叩かない)
+- 既存 LAN 動作の保持 (Symmetric NAT 検出時は host のみで現状互換)
 - 自動・手動テスト
 
 ### out of scope
@@ -167,43 +200,50 @@ sequenceDiagram
 ## 4. 役割分担
 
 ### user (人間) のタスク
-- [ ] 自宅ルータが symmetric NAT でないことを確認 (pion 時代に動いていたので OK の見込み)
+- [ ] § 11 検証フェーズの実機計測 (iPhone を LTE に切ってテスト等、Claude 単独不可なもの)
 - [ ] LAN 動作のリグレッション確認 (Safari/Chrome 両方)
 - [ ] モバイル回線 (LTE) 実機テスト (Safari iPhone)
 - [ ] 切替速度の体感確認 (現状と比べて遅くなっていないか)
 
-外部サービス契約・API token 管理などのタスクは **不要** (Cloudflare TURN を使わないため)。
+NAT 種別の事前確認は不要 (起動時自動検出)。外部サービス契約・API token 管理も不要 (Cloudflare TURN を使わないため)。
 
 ### Claude (作業) のタスク
+
+#### 検証フェーズ (§ 11、実装前)
+- [ ] `scripts/diag/` 配下に検証用ツール群を整備 (詳細は § 11)
+- [ ] 計測結果を § 12 に集約、設計確定/修正の根拠とする
+
+#### 実装フェーズ (検証結果で設計確定後)
 - [ ] `internal/signal/stun_client.go` 新規: STUN binding request 送信/応答パース、XOR-MAPPED-ADDRESS 抽出
-- [ ] `cmd/server/main.go`: 起動時 srflx gather、結果を `signal.Server` に渡す
-- [ ] `internal/signal/session.go`: srflx をフィールドに保持、`AnswerParams.CandidateIPs` に host + srflx を結合
-- [ ] STUN keepalive ループ (goroutine、定期送信、WAN IP 変化検知でキャッシュ更新)
+- [ ] `internal/signal/nat_probe.go` 新規: 起動時 NAT 種別自動検出 (§ 2.3 のロジック)
+- [ ] `cmd/server/main.go`: 起動時 NAT probe 実行、結果を `signal.Server` に渡す
+- [ ] `internal/signal/session.go`: srflx (cached) をフィールドに保持、`AnswerParams.CandidateIPs` に host + srflx を結合
 - [ ] `internal/signal/ice.go` 拡張: ICE-full、binding request 発信、候補ペア状態機械、USE-CANDIDATE
 - [ ] `internal/signal/sdp.go`: `a=ice-lite` を削除、srflx candidate (`typ srflx raddr ... rport ...`) 出力
-- [ ] テスト: `stun_client_test.go`, `ice_test.go` 新規/拡張
-- [ ] 診断スクリプト: `scripts/diag/check-srflx.sh` (起動時 srflx を表示)
+- [ ] テスト: `stun_client_test.go`, `nat_probe_test.go`, `ice_test.go` 新規/拡張
 - [ ] `docs/streaming-server.md` 更新 (リモート視聴節を追加)
 
 ## 5. 設定 (環境変数)
 
 ```ini
 # /etc/systemd/system/pet-camera-streaming.service
-PET_CAMERA_PUBLIC_STUN=stun:stun.l.google.com:19302   # srflx gather 用 (空なら ICE-lite + host のみ = 既存挙動)
-PET_CAMERA_STUN_KEEPALIVE_SEC=45                       # keepalive 周期
+PET_CAMERA_PUBLIC_STUN_PRIMARY=stun:stun.l.google.com:19302    # NAT probe 用 (空なら ICE-lite + host のみ = 既存挙動)
+PET_CAMERA_PUBLIC_STUN_SECONDARY=stun:stun.cloudflare.com:3478 # EIM 検出用 (異なる宛先サーバ、空なら NAT probe を諦め host のみ)
+PET_CAMERA_NAT_PROBE_CACHE_HOURS=4                              # cache TTL
 ```
 
-`PET_CAMERA_PUBLIC_STUN=` (空) で従来の ICE-lite + host のみに戻せる。問題発生時の即時フォールバック手段。
+`PET_CAMERA_PUBLIC_STUN_PRIMARY=` (空) で従来の ICE-lite + host のみに戻せる。問題発生時の即時フォールバック手段。
 
 ## 6. リスクと検討事項
 
 | リスク | 影響度 | 対応 |
 |---|---|---|
-| ICE-full 化で既存 LAN 動作にリグレッション | 高 | 段階デプロイ、`PET_CAMERA_PUBLIC_STUN=` 空でフォールバック可能に |
-| srflx gather 失敗時の挙動 | 中 | 起動時失敗 → ICE-lite + host のみで起動継続、warn ログ |
-| WAN IP が変わる ISP (動的IP) | 中 | keepalive で検知、キャッシュ更新、次セッションから新 srflx |
-| 自宅 ISP が CGNAT (PPPoE二重NAT) | 低 | pion 時代に動いていたので発生していない見込み。発生時は TURN client 検討 (別 PR) |
-| STUN keepalive の余分なトラフィック | 低 | 数十秒に1回 70 byte 程度。無視できる |
+| ICE-full 化で既存 LAN 動作にリグレッション | 高 | 段階デプロイ、`PET_CAMERA_PUBLIC_STUN_PRIMARY=` 空でフォールバック可能に |
+| NAT probe 失敗 / Symmetric NAT 検出 | 中 | srflx を出さず host のみで動作 (= 現在の挙動と同等)。warn ログのみ |
+| WAN IP が動的 IP で変わる | 中 | ICE 失敗フィードバックで cache invalidate → 次回 force re-probe |
+| Cone NAT だが port preservation なし | 中 | NAT probe で検出、medium mode (per-session STUN) にフォールバック |
+| 公開IP UDP 露出のセキュリティ | 中 | DTLS-SRTP 暗号化 + ICE ufrag/pwd 認証 + ランダムポート。実害ほぼ無し |
+| 仮説検証なしで実装するリスク | 高 | § 11 検証フェーズで先に計測、失敗仮説を早期に潰す |
 
 ## 7. 段階リリース計画
 
@@ -245,4 +285,139 @@ PET_CAMERA_STUN_KEEPALIVE_SEC=45                       # keepalive 周期
 ## 10. 次アクション
 
 - ユーザ: 設計レビュー → 承認
-- Claude: Phase 1 (STUN client + srflx gather) から実装開始
+- Claude: § 11 検証フェーズの診断スクリプト整備 → 実機計測 → § 12 に結果集約 → § 2 設計確定 → 実装着手
+
+## 11. 検証フェーズ
+
+設計の前提仮説を実機で潰してから実装に入る。検証スクリプト群は `scripts/diag/` に置く。優先度順:
+
+### 11.A NAT 挙動 / WAN IP (必須)
+
+**目的**: § 2.3 の NAT 種別自動検出が成立するか、4h cache 戦略の前提が満たされるかを確認。
+
+| 項目 | 手段 | 受入基準 |
+|---|---|---|
+| WAN IP 値 | 自前 STUN client → Google STUN | 公開IPv4が返ること |
+| ポート保存 | STUN 応答の mapped port を内部 port と比較 | `mapped == internal` (or 規則的に外れ) |
+| EIM 判定 | 異なる 2 STUN サーバに同 socket から投げて mapped 比較 | 同一なら EIM、不一致なら symmetric |
+| NAT mapping timeout 実測 | STUN で穴を開け、N秒後に外部から UDP を投げて到達するか確認 | 30 秒・1分・5分・30分 で測定 → どこまで生きるか分かる |
+
+**スクリプト**: `scripts/diag/nat_probe.go` (Go の小スクリプト、stunclient 的な機能)
+
+### 11.B iPhone Safari over LTE の E2E 仮説検証 (必須)
+
+**目的**: 「WAN IP candidate なら iPhone Safari は STUN を投げる」仮説を実装前に確かめる。失敗するなら設計の根本見直し。
+
+**手順**:
+1. 検証用ブランチで一時パッチ: NAT probe で取った WAN IP:port を srflx として SDP answer に焼き込む (ICE-lite のままで OK)
+2. 実機にデプロイ
+3. iPhone を Tailscale OFF + LTE に切ってアクセス (WebRTC が動くか観察)
+4. デバイス側で `tcpdump -i any 'udp portrange 20000-20020'` を回し、iPhone から STUN が届いているかを確認
+5. 結果を3パターンで記録:
+   - 通った → 設計確定、実装フェーズへ
+   - STUN 届かない → Safari は WAN IP も filter している可能性、別仮説 (e.g. ポート開放、Tailscale ICE-full、IPv6) を試す
+   - STUN 届くが ICE 通らない → DTLS or codec 問題、別軸の調査
+
+**スクリプト**: `scripts/diag/inject_srflx_patch.sh` + 実機 tcpdump 観測
+
+### 11.C Cone NAT の細分判定 (必須)
+
+**目的**: full-cone / address-restricted-cone / port-restricted-cone を識別。ICE-full 必須かどうかが変わる。
+
+**手段**: RFC 5780 風の filter test (パブリック側からの送信元 IP/port を変えた binding を発生させる)。pion/stun の `nat-discovery` を参考実装にする。
+
+### 11.D IPv6 経路の可能性 (調査価値高)
+
+**目的**: グローバル IPv6 が両端で使えれば NAT 問題が消えて設計が大幅簡略化。
+
+| 項目 | 手段 | メモ |
+|---|---|---|
+| 実機の IPv6 | `ip -6 addr show` | グローバル prefix (2400:: 等) があるか |
+| 実機の IPv6 到達確認 | `curl -6 https://ifconfig.io` | 出力されるなら IPv6 で公開到達 |
+| iPhone LTE の IPv6 | Safari で `https://test-ipv6.com` | 24/24 ならフル IPv6 |
+| AAAA レコード | `dig AAAA rdk-x5.tail848eb5.ts.net` | Tailscale は IPv6 配布する |
+
+**当たれば**: SDP に `c=IN IP6 <addr>` + `a=candidate ... <ipv6_addr> ... typ host` で srflx 不要。本設計の大半が不要になる。
+
+### 11.E UPnP-IGD / NAT-PMP / PCP 対応確認 (補助)
+
+**目的**: ルータが対応していれば「明示的にポート開ける」 → STUN 不要、最も確実。
+
+**手段**:
+```bash
+sudo apt install miniupnpc        # for UPnP
+upnpc -s                          # UPnP デバイス検出
+upnpc -r 20000 UDP                # 試しに穴開け
+natpmpc -a 0 0 udp 3600           # NAT-PMP
+```
+
+**当たれば**: 起動時にルータに穴を要求 → 確定的なポート → srflx より確実 (ただしルータ設定で UPnP が無効化されているケース多い)。
+
+### 11.F Tailscale 経由の ICE-full 再試行 (B/D が両方失敗時)
+
+**目的**: 「Safari は CGNAT 候補に STUN を投げない」仮説を、サーバ側からも binding を打つ ICE-full で再検証。サーバが先に Tailscale 候補に投げれば、Safari 側も応答ハンドシェイクで動く可能性が残っている。
+
+**手段**: 検証用パッチで Tailscale 候補に向けて先行 STUN binding を発信、iPhone Safari 側の挙動を観測。
+
+### 11.G DTLS / SRTP over the 実経路 (実装ディテール)
+
+LTE 経由の RTT・jitter・loss を計測。NACK interceptor 再導入の判断材料。
+
+| 項目 | 手段 |
+|---|---|
+| RTT | `iperf3 -u -c <peer> -t 30` |
+| Loss | iperf3 出力 |
+| MTU | `ping -M do -s 1472 <peer>` 等で Path MTU |
+| DTLS 安定性 | 実 WebRTC セッションを長時間 (1h) 流して切断率観測 |
+
+### 11.H 検証実行順序
+
+1. **D (IPv6)** を最初に — 当たれば全部スキップできる
+2. **B (E2E with hardcoded WAN srflx)** を次に — 理論検証、これで通れば残りはコード化
+3. **A + C (NAT 詳細)** を並行 — fast/medium/slow path の判定に必要
+4. **E (UPnP)** は補助
+5. **F (Tailscale ICE-full)** は B と D が両方失敗したら
+
+## 12. 計測結果
+
+(検証フェーズ実行後に追記)
+
+### 12.A NAT 挙動 / WAN IP
+
+- WAN IP: TBD
+- ポート保存: TBD
+- EIM: TBD
+- NAT mapping timeout: TBD
+
+### 12.B iPhone Safari over LTE E2E
+
+- 結果: TBD
+
+### 12.C Cone NAT サブタイプ
+
+- 結果: TBD
+
+### 12.D IPv6
+
+- 実機 IPv6: TBD
+- iPhone LTE IPv6: TBD
+- 採用判断: TBD
+
+### 12.E UPnP / NAT-PMP / PCP
+
+- ルータ対応: TBD
+- 採用判断: TBD
+
+### 12.F Tailscale 経由 ICE-full
+
+- 結果: TBD
+
+### 12.G 実経路の品質
+
+- RTT: TBD / Loss: TBD / MTU: TBD
+
+### 結論 (検証完了後に書く)
+
+- 採用する経路: TBD
+- 設計確定版の主要パラメータ: TBD
+- 不要になった項目: TBD
