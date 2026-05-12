@@ -475,7 +475,7 @@ async fn handle_prefetch(
          concurrency={PREFETCH_CONCURRENCY}, limit={limit}"
     );
 
-    let results: Vec<(String, Result<PathBuf, String>)> = stream::iter(to_fetch.into_iter())
+    let results: Vec<(String, Result<PathBuf, String>)> = stream::iter(to_fetch)
         .map(|f| {
             let state = state.clone();
             async move {
