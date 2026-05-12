@@ -38,9 +38,9 @@ fi
 
 echo "[install] Installing ${TARGET} services from ${DEPLOY_DIR}/"
 
-# Copy all .service and .target files
+# Copy all .service, .target and .timer files
 UNITS=()
-for f in "${DEPLOY_DIR}"/*.service "${DEPLOY_DIR}"/*.target; do
+for f in "${DEPLOY_DIR}"/*.service "${DEPLOY_DIR}"/*.target "${DEPLOY_DIR}"/*.timer; do
   [[ -f "${f}" ]] || continue
   unit="$(basename "${f}")"
   cp -v "${f}" "${SYSTEMD_DIR}/${unit}"
