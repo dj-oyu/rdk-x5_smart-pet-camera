@@ -7,6 +7,7 @@ Wants=pet-camera-detector.service
 Wants=pet-camera-monitor.service
 Wants=pet-camera-streaming.service
 Wants=comic-sync.service
+Wants=pet-camera-night-gc.timer
 
 [Install]
 WantedBy=multi-user.target

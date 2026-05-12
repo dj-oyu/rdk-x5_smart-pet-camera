@@ -1,0 +1,18 @@
+[Unit]
+Description=GC night_collect feeding frames
+PartOf=pet-camera.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/smart-pet-camera
+EnvironmentFile=-/opt/smart-pet-camera/.env
+
+ExecStart=/usr/bin/python3 /opt/smart-pet-camera/scripts/night_collect_gc.py \
+  --dir ${NIGHT_COLLECT_DIR}/feeding \
+  --max-age-days 7 \
+  --max-files 5000 \
+  --min-age-seconds 60 \
+  --log-json
+
+Nice=10
+IOSchedulingClass=idle
