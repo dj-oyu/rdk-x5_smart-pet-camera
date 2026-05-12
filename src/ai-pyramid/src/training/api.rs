@@ -6,6 +6,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Json};
 use axum::routing::{delete, get, post, put};
+use futures_util::stream::{self, StreamExt};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -42,6 +43,7 @@ pub fn router(state: TrainingState) -> Router {
             delete(handle_delete_annotation),
         )
         .route("/api/training/cleanup", post(handle_cleanup))
+        .route("/api/training/prefetch", post(handle_prefetch))
         .route("/api/training/stats", get(handle_stats))
         .route("/api/training/export", get(handle_export))
         .route("/api/training/classes", get(handle_classes))
@@ -406,6 +408,120 @@ async fn handle_cleanup(
         "deleted": total,
         "remote_deleted": remote_deleted,
         "remote_errors": remote_errors,
+    })))
+}
+
+// ── Prefetch: SCP+convert every non-rejected frame missing local JPEG ──
+//
+// rdk-x5 NV12 originals are GC'd weekly with a 7-day age cutoff
+// (`scripts/night_collect_gc.py`). Anything we want to keep past that
+// window must live in the local JPEG cache. This endpoint walks the DB,
+// finds rows whose JPEG is not yet on disk, and bulk-fetches them.
+//
+// Concurrency is bounded (`PREFETCH_CONCURRENCY`) so the rdk-x5 sshd
+// isn't flooded.
+const PREFETCH_CONCURRENCY: usize = 4;
+const PREFETCH_DEFAULT_LIMIT: usize = 5000;
+
+#[derive(Deserialize)]
+struct PrefetchQuery {
+    /// Cap on number of frames to fetch in this call. Defaults to 5000
+    /// (matches the rdk-x5 GC `--max-files` so one call preserves a
+    /// whole post-GC cycle).
+    limit: Option<usize>,
+}
+
+async fn handle_prefetch(
+    State(state): State<Arc<TrainingState>>,
+    Query(q): Query<PrefetchQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let limit = q.limit.unwrap_or(PREFETCH_DEFAULT_LIMIT);
+
+    // Pull every frame regardless of status, then filter in Rust:
+    //   keep status != "rejected" AND no cached JPEG yet.
+    let (frames, _total) = state
+        .db
+        .request(
+            move |reply| crate::application::db_thread::DbCommand::TrainingListFrames {
+                status: None,
+                limit: 100_000,
+                offset: 0,
+                reply,
+            },
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let mut to_fetch = Vec::new();
+    let mut already_cached = 0usize;
+    for f in frames {
+        if f.status == "rejected" {
+            continue;
+        }
+        let jpeg = state.cache_dir.join(f.filename.replace(".nv12", ".jpg"));
+        if jpeg.exists() {
+            already_cached += 1;
+            continue;
+        }
+        to_fetch.push(f);
+        if to_fetch.len() >= limit {
+            break;
+        }
+    }
+
+    let candidates = to_fetch.len();
+    info!(
+        "prefetch start: {candidates} candidates ({already_cached} already cached), \
+         concurrency={PREFETCH_CONCURRENCY}, limit={limit}"
+    );
+
+    let results: Vec<(String, Result<PathBuf, String>)> = stream::iter(to_fetch.into_iter())
+        .map(|f| {
+            let state = state.clone();
+            async move {
+                let r = ssh::fetch_and_convert_frame(
+                    &state.ssh_host,
+                    &state.remote_dir,
+                    &f.filename,
+                    f.width,
+                    f.height,
+                    &state.cache_dir,
+                    state.ssh_key.as_deref(),
+                )
+                .await;
+                (f.filename, r)
+            }
+        })
+        .buffer_unordered(PREFETCH_CONCURRENCY)
+        .collect()
+        .await;
+
+    let mut fetched = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+    for (filename, r) in results {
+        match r {
+            Ok(_) => fetched += 1,
+            Err(e) => {
+                let msg = format!("{filename}: {e}");
+                warn!("prefetch failed: {msg}");
+                errors.push(msg);
+            }
+        }
+    }
+
+    info!(
+        "prefetch complete: {fetched}/{candidates} fetched ({} errors)",
+        errors.len()
+    );
+
+    // Cap error_details to keep response bounded if the remote is down.
+    let error_sample: Vec<&String> = errors.iter().take(10).collect();
+    Ok(Json(serde_json::json!({
+        "candidates": candidates,
+        "already_cached": already_cached,
+        "fetched": fetched,
+        "errors": errors.len(),
+        "error_sample": error_sample,
     })))
 }
 
