@@ -52,8 +52,8 @@ pub fn parse_vlm_response(raw: &str) -> Result<VlmResponse, String> {
     // behavior enum value (e.g. `"behavior": eating}`). Re-quote known enum
     // values and retry once before giving up.
     let mut fixed = json_str.to_string();
+    let needle = r#""behavior":"#;
     for v in BEHAVIOR_ENUM {
-        let needle = format!(r#""behavior":"#);
         // simple regex-free: replace `"behavior": eating}` / `"behavior":eating` / `"behavior": eating,`
         for sep in [" ", ""] {
             for tail in ["}", ",", " "] {
