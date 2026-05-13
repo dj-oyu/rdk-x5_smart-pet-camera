@@ -4,13 +4,33 @@ use std::io::Cursor;
 use std::path::Path;
 use std::time::Duration;
 
-const VLM_PROMPT: &str = r#"Analyze this photo of a pet camera feed. Respond with valid JSON only, no markdown.
-{"is_valid": true if a cat is clearly visible else false,
- "caption": "one sentence describing the cat's appearance and action",
- "behavior": one of "eating","drinking","sleeping","playing","resting","moving","grooming","other"}"#;
+const VLM_SYSTEM_PROMPT: &str = "You are a pet camera observer. Output one JSON object with exactly three keys: \
+cat, caption, behavior. \
+cat: true ONLY if a real cat (domestic feline) is clearly visible; \
+false if the frame shows a dog, person, object, empty room, or no cat. \
+caption: one detailed English sentence (15-25 words) describing the main subject and surroundings. \
+behavior: one of EXACTLY these eight values: eating, drinking, sleeping, playing, resting, moving, grooming, other. \
+If cat is false, behavior MUST be \"other\". \
+CRITICAL: Every string value MUST be in double quotes. No bbox. No arrays. No markdown.";
+
+const VLM_PROMPT: &str = "/no_think\n\
+Examples:\n\
+{\"cat\": true, \"caption\": \"A black-and-white tabby cat sleeps curled up on a beige sofa beside a folded blanket near a sunlit window.\", \"behavior\": \"sleeping\"}\n\
+{\"cat\": false, \"caption\": \"A golden retriever stands on grass in a sunny park; no cat is present.\", \"behavior\": \"other\"}\n\
+{\"cat\": false, \"caption\": \"Empty living room with a couch and TV; no animal visible.\", \"behavior\": \"other\"}\n\
+{\"cat\": true, \"caption\": \"A calico cat crouches on a tile floor lapping water from a stainless steel bowl beside an open closet door.\", \"behavior\": \"drinking\"}\n\n\
+Output JSON for this frame (remember: cat only true for cats, behavior must be one of the eight allowed values, all strings in double quotes):";
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct VlmResponse {
+    // JSON key from Qwen3.5 is "cat"; legacy/alternate spellings accepted for forward compat.
+    #[serde(
+        rename = "cat",
+        alias = "is_valid",
+        alias = "isvalid",
+        alias = "cat_visible",
+        alias = "catvisible"
+    )]
     pub is_valid: bool,
     #[serde(default)]
     pub caption: String,
@@ -18,20 +38,71 @@ pub struct VlmResponse {
     pub behavior: String,
 }
 
-pub fn parse_vlm_response(raw: &str) -> Result<VlmResponse, String> {
-    let text = raw.trim();
-    // Strip markdown fences if present
-    let json_str = if text.starts_with("```") {
-        let inner = text
-            .strip_prefix("```json")
-            .or_else(|| text.strip_prefix("```"))
-            .unwrap_or(text);
-        inner.strip_suffix("```").unwrap_or(inner).trim()
-    } else {
-        text
-    };
+const BEHAVIOR_ENUM: [&str; 8] = [
+    "eating", "drinking", "sleeping", "playing", "resting", "moving", "grooming", "other",
+];
 
-    serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {e}, raw: {raw}"))
+pub fn parse_vlm_response(raw: &str) -> Result<VlmResponse, String> {
+    let json_str = extract_json_object(raw)
+        .ok_or_else(|| format!("JSON parse error: no JSON object found, raw: {raw}"))?;
+    if let Ok(resp) = serde_json::from_str::<VlmResponse>(json_str) {
+        return Ok(resp);
+    }
+    // Lenient fallback: Qwen3.5-2B occasionally drops the closing quote on the
+    // behavior enum value (e.g. `"behavior": eating}`). Re-quote known enum
+    // values and retry once before giving up.
+    let mut fixed = json_str.to_string();
+    for v in BEHAVIOR_ENUM {
+        let needle = format!(r#""behavior":"#);
+        // simple regex-free: replace `"behavior": eating}` / `"behavior":eating` / `"behavior": eating,`
+        for sep in [" ", ""] {
+            for tail in ["}", ",", " "] {
+                let from = format!("{needle}{sep}{v}{tail}");
+                let to = format!("{needle}{sep}\"{v}\"{tail}");
+                fixed = fixed.replace(&from, &to);
+            }
+        }
+    }
+    serde_json::from_str(&fixed).map_err(|e| format!("JSON parse error: {e}, raw: {raw}"))
+}
+
+fn extract_json_object(raw: &str) -> Option<&str> {
+    let bytes = raw.as_bytes();
+    let mut depth = 0i32;
+    let mut start: Option<usize> = None;
+    let mut in_string = false;
+    let mut escape = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => {
+                if depth == 0 {
+                    start = Some(i);
+                }
+                depth += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                if depth == 0
+                    && let Some(s) = start
+                {
+                    return Some(&raw[s..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 const DAY_SUMMARY_PROMPT: &str = "Summarize this cat's day based on these timestamped observations. Describe activity patterns and notable moments in 2-3 sentences. Respond in plain Japanese text, no JSON.";
@@ -138,17 +209,25 @@ impl VlmClient {
 
         let request = ChatRequest {
             model: self.config.model.clone(),
-            messages: vec![Message {
-                role: "user".into(),
-                content: vec![
-                    ContentPart::ImageUrl {
-                        image_url: ImageUrlData { url: data_url },
-                    },
-                    ContentPart::Text {
-                        text: VLM_PROMPT.into(),
-                    },
-                ],
-            }],
+            messages: vec![
+                Message {
+                    role: "system".into(),
+                    content: vec![ContentPart::Text {
+                        text: VLM_SYSTEM_PROMPT.into(),
+                    }],
+                },
+                Message {
+                    role: "user".into(),
+                    content: vec![
+                        ContentPart::ImageUrl {
+                            image_url: ImageUrlData { url: data_url },
+                        },
+                        ContentPart::Text {
+                            text: VLM_PROMPT.into(),
+                        },
+                    ],
+                },
+            ],
             max_tokens: self.config.max_tokens,
             temperature: 0.1,
         };
@@ -194,7 +273,10 @@ impl VlmClient {
     }
 
     /// Analyze with detection context injected into the prompt.
-    /// Detection descriptions like "cat (81%), bowl (50%)" help ground the VLM output.
+    /// The detection list is appended as a hint; the strict JSON schema and
+    /// few-shot examples come from VLM_SYSTEM_PROMPT / VLM_PROMPT so the
+    /// model does not drift into bbox/grounding mode when given confidence-style
+    /// detection text (a known Qwen3.5 failure mode).
     pub async fn analyze_with_detections(
         &self,
         jpeg_path: &Path,
@@ -202,24 +284,29 @@ impl VlmClient {
     ) -> Result<VlmResponse, String> {
         let data_url = encode_resized_jpeg(jpeg_path, 384, 384)?;
 
-        let prompt = format!(
-            "Analyze this photo of a pet camera feed.\nDetected objects: {detection_context}\nUse these detections as reference. Respond with valid JSON only, no markdown.\n\
-             {{\"is_valid\": true if a cat is clearly visible else false,\n\
-             \"caption\": \"one sentence describing the cat's appearance and action\",\n\
-             \"behavior\": one of \"eating\",\"drinking\",\"sleeping\",\"playing\",\"resting\",\"moving\",\"grooming\",\"other\"}}"
+        let user_text = format!(
+            "{VLM_PROMPT}\n(YOLO hints — informational only, do not echo: {detection_context})"
         );
 
         let request = ChatRequest {
             model: self.config.model.clone(),
-            messages: vec![Message {
-                role: "user".into(),
-                content: vec![
-                    ContentPart::ImageUrl {
-                        image_url: ImageUrlData { url: data_url },
-                    },
-                    ContentPart::Text { text: prompt },
-                ],
-            }],
+            messages: vec![
+                Message {
+                    role: "system".into(),
+                    content: vec![ContentPart::Text {
+                        text: VLM_SYSTEM_PROMPT.into(),
+                    }],
+                },
+                Message {
+                    role: "user".into(),
+                    content: vec![
+                        ContentPart::ImageUrl {
+                            image_url: ImageUrlData { url: data_url },
+                        },
+                        ContentPart::Text { text: user_text },
+                    ],
+                },
+            ],
             max_tokens: self.config.max_tokens,
             temperature: 0.1,
         };
@@ -356,6 +443,22 @@ mod tests {
     fn parse_invalid_json() {
         let raw = "not json at all";
         assert!(parse_vlm_response(raw).is_err());
+    }
+
+    #[test]
+    fn parse_with_think_wrapper() {
+        let raw = "<think>\n\n</think>\n\n{\"is_valid\": true, \"caption\": \"cat eating\", \"behavior\": \"eating\"}";
+        let resp = parse_vlm_response(raw).unwrap();
+        assert!(resp.is_valid);
+        assert_eq!(resp.behavior, "eating");
+    }
+
+    #[test]
+    fn parse_with_think_and_fences() {
+        let raw = "<think>\nThinking...\n</think>\n\n```json\n{\"is_valid\": false, \"caption\": \"no cat\", \"behavior\": \"other\"}\n```";
+        let resp = parse_vlm_response(raw).unwrap();
+        assert!(!resp.is_valid);
+        assert_eq!(resp.behavior, "other");
     }
 
     #[test]
