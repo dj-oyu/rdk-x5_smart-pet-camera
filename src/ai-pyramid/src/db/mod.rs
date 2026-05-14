@@ -716,10 +716,15 @@ impl PhotoStore {
         Ok(behaviors)
     }
 
-    /// Return captions for valid photos on a given date (YYYY-MM-DD).
+    /// Return captions for valid photos on a given date (YYYY-MM-DD), each
+    /// prefixed with `HH:MM ` so the consumer (`VlmClient::summarize_day`)
+    /// can include a timeline without re-querying.
     pub fn captions_for_date(&self, date: &str) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT caption FROM photos WHERE is_valid = 1 AND caption IS NOT NULL AND captured_at LIKE ? || '%' ORDER BY captured_at ASC LIMIT 200",
+            "SELECT substr(captured_at, 12, 5) || ' ' || caption \
+             FROM photos \
+             WHERE is_valid = 1 AND caption IS NOT NULL AND captured_at LIKE ? || '%' \
+             ORDER BY captured_at ASC LIMIT 200",
         )?;
         let captions = stmt
             .query_map(params![date], |row| row.get(0))?
