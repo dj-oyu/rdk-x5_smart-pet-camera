@@ -121,4 +121,3 @@ func formatFingerprint(hash []byte) string {
 	}
 	return strings.ToUpper(strings.Join(parts, ":"))
 }
-

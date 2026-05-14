@@ -16,19 +16,19 @@ import (
 
 // Session represents a single WebRTC client connection.
 type Session struct {
-	id              string
-	udpConn         *net.UDPConn
-	remoteAddr      *net.UDPAddr
-	iceLite         *ICELite
-	srtpCtx         *srtp.Context
-	ssrc            uint32
-	seq             uint16
-	payloadType     uint8 // H.265 PT from SDP negotiation
-	mu              sync.Mutex
-	closed          bool
-	framesSent      uint64
-	enableICEFull   bool
-	peerCandidates  []OfferCandidate
+	id             string
+	udpConn        *net.UDPConn
+	remoteAddr     *net.UDPAddr
+	iceLite        *ICELite
+	srtpCtx        *srtp.Context
+	ssrc           uint32
+	seq            uint16
+	payloadType    uint8 // H.265 PT from SDP negotiation
+	mu             sync.Mutex
+	closed         bool
+	framesSent     uint64
+	enableICEFull  bool
+	peerCandidates []OfferCandidate
 	// conn pins the source IP for outgoing v6 packets so it matches the
 	// host candidate we advertised (see sessionconn.go). Always set; v4-
 	// only or no-v6-candidate sessions still go through it as a plain

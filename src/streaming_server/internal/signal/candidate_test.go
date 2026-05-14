@@ -11,7 +11,7 @@ func TestParseOfferCandidates_HostOnly(t *testing.T) {
 		"m=video 9 UDP/TLS/RTP/SAVPF 35",
 		"a=candidate:1 1 udp 2113937151 192.168.1.10 50000 typ host",
 		"a=candidate:2 1 udp 1677729535 203.0.113.45 60000 typ srflx raddr 192.168.1.10 rport 50000",
-		"a=candidate:3 2 udp 2113937150 192.168.1.10 50001 typ host", // RTCP — drop
+		"a=candidate:3 2 udp 2113937150 192.168.1.10 50001 typ host",            // RTCP — drop
 		"a=candidate:4 1 tcp 1518280447 192.168.1.10 9 typ host tcptype active", // TCP — drop
 		"",
 	}, "\r\n")

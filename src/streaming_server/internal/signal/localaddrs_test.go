@@ -104,12 +104,12 @@ fe80000000000000fe796d6c3a2e3971 0a 40 20 80 tailscale0
 
 func TestIsULA(t *testing.T) {
 	cases := map[string]bool{
-		"fd00::1":           true,  // ULA
-		"fc00::1":           true,  // ULA
-		"fe80::1":           false, // link-local
-		"2001:db8::1":       false, // doc range, GUA
+		"fd00::1":            true,  // ULA
+		"fc00::1":            true,  // ULA
+		"fe80::1":            false, // link-local
+		"2001:db8::1":        false, // doc range, GUA
 		"240d:f:dd4:d800::1": false, // KDDI au GUA
-		"192.168.1.1":       false, // not v6
+		"192.168.1.1":        false, // not v6
 	}
 	for s, want := range cases {
 		ip := net.ParseIP(s)
