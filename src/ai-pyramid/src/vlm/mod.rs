@@ -141,15 +141,18 @@ impl Default for VlmConfig {
 
 /// Optional configuration for swapping the active axllm-serve model during a
 /// single inference call. The AX650 NPU is exclusive (one axllm process at a
-/// time, see `docs/ai-pyramid` notes), so the swap stops the primary unit,
-/// starts the secondary, runs inference against `secondary_model`, then
-/// restores the primary unit. Used by daily summary so we can borrow Gemma's
-/// clean Japanese while keeping Qwen as the captioning workhorse.
+/// time, see `docs/ai-pyramid` notes), so the swap stops the vision unit,
+/// starts the text unit, runs inference against `text_model`, then restores
+/// the vision unit. Used by daily summary so we can borrow Gemma's clean
+/// Japanese while keeping Qwen as the captioning workhorse.
+/// `vision_*` names the multimodal model that serves per-photo captioning
+/// the rest of the day; `text_*` names the text-only model invoked once for
+/// the daily summary.
 #[derive(Debug, Clone)]
 pub struct VlmSwapConfig {
-    pub primary_unit: String,
-    pub secondary_unit: String,
-    pub secondary_model: String,
+    pub vision_unit: String,
+    pub text_unit: String,
+    pub text_model: String,
     pub ready_timeout: Duration,
     pub poll_interval: Duration,
 }
@@ -456,10 +459,10 @@ impl VlmClient {
             .unwrap_or_default())
     }
 
-    /// Run `summarize_day` against the secondary axllm model named in `swap`,
+    /// Run `summarize_day` against the text-only axllm model named in `swap`,
     /// stopping/starting the systemd units so only one axllm process talks to
-    /// the NPU at a time (AX650 exclusivity). The primary unit is always
-    /// restored before returning, even when the secondary path fails.
+    /// the NPU at a time (AX650 exclusivity). The vision unit is always
+    /// restored before returning, even when the text-model path fails.
     ///
     /// Callers MUST hold the NPU semaphore for the entire call — otherwise
     /// the per-photo watcher would issue YOLO/VLM requests against an axllm
@@ -471,20 +474,20 @@ impl VlmClient {
         photo_path: Option<&Path>,
     ) -> Result<String, String> {
         info!(
-            unit = swap.primary_unit.as_str(),
-            "vlm swap: stopping primary"
+            unit = swap.vision_unit.as_str(),
+            "vlm swap: stopping vision model"
         );
-        systemctl(&["stop", &swap.primary_unit]).await?;
+        systemctl(&["stop", &swap.vision_unit]).await?;
 
-        let result = self.run_on_secondary(swap, captions, photo_path).await;
+        let result = self.run_on_text_model(swap, captions, photo_path).await;
 
         info!(
-            unit = swap.primary_unit.as_str(),
-            "vlm swap: restoring primary"
+            unit = swap.vision_unit.as_str(),
+            "vlm swap: restoring vision model"
         );
-        let start_result = systemctl(&["start", &swap.primary_unit]).await;
+        let start_result = systemctl(&["start", &swap.vision_unit]).await;
         if let Err(ref e) = start_result {
-            warn!(error = %e, "vlm swap: failed to start primary unit");
+            warn!(error = %e, "vlm swap: failed to start vision unit");
         }
         let wait_result = wait_for_model(
             &self.http,
@@ -495,7 +498,7 @@ impl VlmClient {
         )
         .await;
         if let Err(ref e) = wait_result {
-            warn!(error = %e, model = self.config.model.as_str(), "vlm swap: primary not ready after restore");
+            warn!(error = %e, model = self.config.model.as_str(), "vlm swap: vision model not ready after restore");
         }
 
         // If both restore steps fail, per-photo captioning is now broken until
@@ -504,7 +507,7 @@ impl VlmClient {
         // out on slow load) so we still return the summary in that case.
         if start_result.is_err() && wait_result.is_err() {
             return Err(format!(
-                "primary axllm did not recover after swap; per-photo captioning is offline. start: {} / wait: {}",
+                "vision axllm did not recover after swap; per-photo captioning is offline. start: {} / wait: {}",
                 start_result.err().unwrap_or_default(),
                 wait_result.err().unwrap_or_default(),
             ));
@@ -513,43 +516,43 @@ impl VlmClient {
         result
     }
 
-    async fn run_on_secondary(
+    async fn run_on_text_model(
         &self,
         swap: &VlmSwapConfig,
         captions: &[String],
         photo_path: Option<&Path>,
     ) -> Result<String, String> {
         info!(
-            unit = swap.secondary_unit.as_str(),
-            "vlm swap: starting secondary"
+            unit = swap.text_unit.as_str(),
+            "vlm swap: starting text model"
         );
-        systemctl(&["start", &swap.secondary_unit]).await?;
+        systemctl(&["start", &swap.text_unit]).await?;
         wait_for_model(
             &self.http,
             &self.config.base_url,
-            &swap.secondary_model,
+            &swap.text_model,
             swap.ready_timeout,
             swap.poll_interval,
         )
         .await?;
 
-        let secondary_client = VlmClient {
+        let text_client = VlmClient {
             config: VlmConfig {
-                model: swap.secondary_model.clone(),
+                model: swap.text_model.clone(),
                 ..self.config.clone()
             },
             http: self.http.clone(),
         };
-        let summary_result = secondary_client.summarize_day(captions, photo_path).await;
+        let summary_result = text_client.summarize_day(captions, photo_path).await;
 
-        // Stop secondary regardless of summary outcome so the primary can take
-        // back the NPU. We never want both axllm units running.
+        // Stop the text model regardless of summary outcome so the vision
+        // model can take back the NPU. We never want both axllm units running.
         info!(
-            unit = swap.secondary_unit.as_str(),
-            "vlm swap: stopping secondary"
+            unit = swap.text_unit.as_str(),
+            "vlm swap: stopping text model"
         );
-        if let Err(e) = systemctl(&["stop", &swap.secondary_unit]).await {
-            warn!(error = %e, "vlm swap: failed to stop secondary unit");
+        if let Err(e) = systemctl(&["stop", &swap.text_unit]).await {
+            warn!(error = %e, "vlm swap: failed to stop text unit");
         }
 
         summary_result

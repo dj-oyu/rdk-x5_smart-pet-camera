@@ -44,22 +44,22 @@ struct Args {
     #[arg(long, default_value_t = 128)]
     vlm_max_tokens: u32,
 
-    /// Systemd unit name of the primary axllm-serve instance (the one serving
-    /// per-photo captioning). When `--vlm-swap-secondary-unit` is also set,
-    /// daily summary will stop this unit, swap to the secondary, run the
-    /// summary, then restart this unit.
-    #[arg(long, env = "PET_ALBUM_VLM_SWAP_PRIMARY_UNIT")]
-    vlm_swap_primary_unit: Option<String>,
+    /// Systemd unit name of the vision (multimodal) axllm-serve instance —
+    /// the one serving per-photo captioning. When `--vlm-swap-text-unit` is
+    /// also set, daily summary will stop this unit, swap to the text-only
+    /// model, run the summary, then restart this unit.
+    #[arg(long, env = "PET_ALBUM_VLM_SWAP_VISION_UNIT")]
+    vlm_swap_vision_unit: Option<String>,
 
-    /// Systemd unit name of the secondary axllm-serve instance used only for
-    /// daily summary. Must serve `--vlm-swap-secondary-model`.
-    #[arg(long, env = "PET_ALBUM_VLM_SWAP_SECONDARY_UNIT")]
-    vlm_swap_secondary_unit: Option<String>,
+    /// Systemd unit name of the text-only axllm-serve instance used only for
+    /// daily summary. Must serve `--vlm-swap-text-model`.
+    #[arg(long, env = "PET_ALBUM_VLM_SWAP_TEXT_UNIT")]
+    vlm_swap_text_unit: Option<String>,
 
-    /// Model id reported by the secondary axllm-serve via /v1/models. Used to
+    /// Model id reported by the text-only axllm-serve via /v1/models. Used to
     /// poll for readiness and as the `model` field in the daily summary call.
-    #[arg(long, env = "PET_ALBUM_VLM_SWAP_SECONDARY_MODEL")]
-    vlm_swap_secondary_model: Option<String>,
+    #[arg(long, env = "PET_ALBUM_VLM_SWAP_TEXT_MODEL")]
+    vlm_swap_text_model: Option<String>,
 
     /// Timeout (seconds) for waiting for either model's /v1/models to report
     /// readiness after a systemctl start. Default 90s (3-cycle test observed
@@ -149,19 +149,19 @@ async fn main() {
     }
 
     let vlm_swap_config = match (
-        args.vlm_swap_primary_unit.as_deref(),
-        args.vlm_swap_secondary_unit.as_deref(),
-        args.vlm_swap_secondary_model.as_deref(),
+        args.vlm_swap_vision_unit.as_deref(),
+        args.vlm_swap_text_unit.as_deref(),
+        args.vlm_swap_text_model.as_deref(),
     ) {
-        (Some(primary), Some(secondary), Some(model)) => {
+        (Some(vision), Some(text), Some(model)) => {
             info!(
-                primary,
-                secondary, model, "VLM hot-swap enabled for daily summary"
+                vision,
+                text, model, "VLM hot-swap enabled for daily summary"
             );
             Some(VlmSwapConfig {
-                primary_unit: primary.to_string(),
-                secondary_unit: secondary.to_string(),
-                secondary_model: model.to_string(),
+                vision_unit: vision.to_string(),
+                text_unit: text.to_string(),
+                text_model: model.to_string(),
                 ready_timeout: Duration::from_secs(args.vlm_swap_ready_timeout_secs),
                 poll_interval: Duration::from_secs(2),
             })
@@ -169,7 +169,7 @@ async fn main() {
         (None, None, None) => None,
         _ => {
             tracing::warn!(
-                "vlm_swap_* args are incomplete; daily summary will fall back to the primary model"
+                "vlm_swap_* args are incomplete; daily summary will fall back to the vision model"
             );
             None
         }
