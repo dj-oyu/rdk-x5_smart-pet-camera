@@ -379,8 +379,15 @@ PET_CAMERA_ENABLE_ICE_FULL=true|false          # default true (false で従来�
 - LAN/Tailscale のリグレッション確認
 - 切替レイテンシ計測 (現状比で悪化していないこと)
 
-### 7.5 Phase E — 仕上げ
+### 7.5 Phase E — 仕上げ + リファクタ
 
+機能フェーズが全て収束した後に、コード整理だけを切り出して 1 phase に分離する。挙動変更とリファクタを混ぜないことで diff レビューが容易になる。
+
+- **E.0 リファクタ専用パス** (挙動変更なし)
+  - ハードコード文字列の iota enum 化 (例: candidate type は b7af183 で先行実施)
+  - unexported field と命名整理、TODO 解消、dead code 削除
+  - Phase A の Debug log のうち恒久不要なものを削除
+  - 既存テストはそのまま green を維持
 - ドキュメント更新 (`docs/streaming-server.md` にリモート視聴節追加)
 - systemd unit (`scripts/pet-camera-streaming.service`) の env var 設定
 - 24h 長時間稼働確認

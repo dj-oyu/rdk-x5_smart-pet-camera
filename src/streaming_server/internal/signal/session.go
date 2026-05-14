@@ -71,7 +71,7 @@ func NewServer(cfg Config) (*Server, error) {
 		sessions:     make(map[string]*Session),
 		dtlsConfig:   dtlsConfig,
 		cfg:          cfg,
-		candidateIPs: getLocalIPs(),
+		candidateIPs: getLocalCandidateAddrs(cfg.EnableIPv6Candidates),
 		basePort:     20000,
 		nextPort:     20000,
 	}, nil
@@ -106,10 +106,12 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 	}
 	s.mu.RUnlock()
 
-	// Allocate UDP port. Bind to 0.0.0.0 so STUN can arrive on any
-	// interface — we advertise multiple host candidates below.
+	// Allocate UDP port. Bind to the IPv6 wildcard [::] with the "udp"
+	// network so the socket accepts both v4 (via v4-mapped-v6) and v6
+	// traffic on Linux (default IPV6_V6ONLY=0). We then advertise host
+	// candidates for every interface address below.
 	port := s.allocatePort()
-	udpAddr := &net.UDPAddr{IP: net.IPv4zero, Port: port}
+	udpAddr := &net.UDPAddr{IP: net.IPv6zero, Port: port}
 	udpConn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
 		return nil, fmt.Errorf("signal: listen udp %d: %w", port, err)
@@ -472,28 +474,6 @@ func (s *Server) allocatePort() int {
 		s.nextPort = s.basePort
 	}
 	return port
-}
-
-// getLocalIPs returns every non-loopback IPv4 address on the host.
-// Each becomes an ICE host candidate so the browser can reach the
-// server via whichever interface it is connected through (LAN, VPN, ...).
-// Falls back to 127.0.0.1 only if no other addresses exist.
-func getLocalIPs() []net.IP {
-	addrs, _ := net.InterfaceAddrs()
-	var ips []net.IP
-	for _, addr := range addrs {
-		ipNet, ok := addr.(*net.IPNet)
-		if !ok || ipNet.IP.IsLoopback() {
-			continue
-		}
-		if ip4 := ipNet.IP.To4(); ip4 != nil {
-			ips = append(ips, ip4)
-		}
-	}
-	if len(ips) == 0 {
-		ips = append(ips, net.IPv4(127, 0, 0, 1))
-	}
-	return ips
 }
 
 // ----- DTLS packet conn adapter -----

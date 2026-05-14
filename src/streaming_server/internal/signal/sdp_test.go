@@ -121,6 +121,49 @@ func TestParseOfferCapturesFmtpLine(t *testing.T) {
 	}
 }
 
+func TestGenerateAnswerEmitsIPv6Connection(t *testing.T) {
+	v6 := net.ParseIP("240d:f:dd4:d800:a4e3:36ff:fea9:bcc6")
+	v4 := net.ParseIP("192.168.1.10").To4()
+	answer := GenerateAnswer(&AnswerParams{
+		ICEUfrag:        "abcd",
+		ICEPwd:          "0123456789abcdef012345",
+		DTLSFingerprint: "AA:BB",
+		CandidateIPs:    []net.IP{v6, v4},
+		CandidatePort:   20000,
+		PayloadType:     35,
+		MID:             "0",
+	})
+	// Primary is the first IP (v6) → c= must declare IP6.
+	if !strings.Contains(answer, "c=IN IP6 240d:f:dd4:d800:a4e3:36ff:fea9:bcc6\r\n") {
+		t.Errorf("c= line should declare v6 primary:\n%s", answer)
+	}
+	if !strings.Contains(answer, "a=rtcp:20000 IN IP6 ") {
+		t.Errorf("a=rtcp should match c= address family:\n%s", answer)
+	}
+	// Both candidates must appear; v6 first so it gets higher priority.
+	if !strings.Contains(answer, "a=candidate:1 1 udp ") || !strings.Contains(answer, "240d:f:dd4:d800:a4e3:36ff:fea9:bcc6 20000 typ host") {
+		t.Errorf("v6 host candidate missing:\n%s", answer)
+	}
+	if !strings.Contains(answer, "192.168.1.10 20000 typ host") {
+		t.Errorf("v4 host candidate missing:\n%s", answer)
+	}
+}
+
+func TestGenerateAnswerV4OnlyKeepsIP4(t *testing.T) {
+	answer := GenerateAnswer(&AnswerParams{
+		ICEUfrag:        "abcd",
+		ICEPwd:          "0123456789abcdef012345",
+		DTLSFingerprint: "AA:BB",
+		CandidateIPs:    []net.IP{net.ParseIP("192.168.1.10").To4()},
+		CandidatePort:   20000,
+		PayloadType:     35,
+		MID:             "0",
+	})
+	if !strings.Contains(answer, "c=IN IP4 192.168.1.10\r\n") {
+		t.Errorf("v4-only path should keep c=IN IP4:\n%s", answer)
+	}
+}
+
 func TestGenerateAnswerICEFullOmitsICELite(t *testing.T) {
 	answer := GenerateAnswer(&AnswerParams{
 		ICEUfrag:        "abcd",

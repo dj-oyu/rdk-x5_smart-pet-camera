@@ -115,7 +115,16 @@ func GenerateAnswer(p *AnswerParams) string {
 	if len(p.CandidateIPs) == 0 {
 		p.CandidateIPs = []net.IP{net.IPv4(127, 0, 0, 1)}
 	}
-	primaryIP := p.CandidateIPs[0].String()
+	primary := p.CandidateIPs[0]
+	primaryIP := primary.String()
+	// SDP RFC 4566: "c=IN <addrtype> ..." selects the address family of
+	// the *default* address — must match `primary`. The actual per-pair
+	// candidates each carry their own IP, so this only affects what a
+	// non-ICE peer would do; modern browsers honour candidates first.
+	connAddrType := "IP4"
+	if primary.To4() == nil {
+		connAddrType = "IP6"
+	}
 
 	streamID := p.StreamID
 	if streamID == "" {
@@ -141,8 +150,8 @@ func GenerateAnswer(p *AnswerParams) string {
 	// Media section. The c=/a=rtcp= lines are session defaults overridden
 	// by individual ICE candidates, so the first IP is fine.
 	sb.WriteString(fmt.Sprintf("m=video %d UDP/TLS/RTP/SAVPF %d\r\n", p.CandidatePort, p.PayloadType))
-	sb.WriteString(fmt.Sprintf("c=IN IP4 %s\r\n", primaryIP))
-	sb.WriteString(fmt.Sprintf("a=rtcp:%d IN IP4 %s\r\n", p.CandidatePort, primaryIP))
+	sb.WriteString(fmt.Sprintf("c=IN %s %s\r\n", connAddrType, primaryIP))
+	sb.WriteString(fmt.Sprintf("a=rtcp:%d IN %s %s\r\n", p.CandidatePort, connAddrType, primaryIP))
 
 	// ICE
 	sb.WriteString(fmt.Sprintf("a=ice-ufrag:%s\r\n", p.ICEUfrag))
