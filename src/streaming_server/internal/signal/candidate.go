@@ -7,16 +7,67 @@ import (
 	"strings"
 )
 
+// CandidateType is the ICE candidate type defined by RFC 8445 §5.1.1.
+// We carry it as an iota enum instead of a raw SDP token so type-vs-state
+// branches don't depend on string spelling.
+type CandidateType int
+
+const (
+	// CandidateUnknown is the zero value for unrecognised SDP tokens; a
+	// candidate with this type is dropped before it reaches ICE.
+	CandidateUnknown CandidateType = iota
+	CandidateHost
+	CandidateServerReflexive // SDP token: srflx
+	CandidatePeerReflexive   // SDP token: prflx
+	CandidateRelayed         // SDP token: relay
+)
+
+// String returns the SDP wire token. Used both for log output and to emit
+// `a=candidate ... typ <x> ...` lines if/when the server starts producing
+// non-host candidates (Phase D srflx etc.).
+func (t CandidateType) String() string {
+	switch t {
+	case CandidateHost:
+		return "host"
+	case CandidateServerReflexive:
+		return "srflx"
+	case CandidatePeerReflexive:
+		return "prflx"
+	case CandidateRelayed:
+		return "relay"
+	default:
+		return "unknown"
+	}
+}
+
+// parseCandidateType maps the wire token to its enum. Unknown tokens
+// resolve to CandidateUnknown — callers should treat that as "skip".
+func parseCandidateType(s string) CandidateType {
+	switch s {
+	case "host":
+		return CandidateHost
+	case "srflx":
+		return CandidateServerReflexive
+	case "prflx":
+		return CandidatePeerReflexive
+	case "relay":
+		return CandidateRelayed
+	default:
+		return CandidateUnknown
+	}
+}
+
 // OfferCandidate represents one ICE candidate line parsed from the peer's offer.
 // Format (RFC 8839 §5.1): "candidate:<foundation> <component> <proto> <priority> <ip> <port> typ <type> ..."
 type OfferCandidate struct {
 	Foundation string
 	Component  int    // 1=RTP, 2=RTCP (we only use 1, BUNDLE/rtcp-mux)
-	Protocol   string // "udp" or "tcp"
-	Priority   uint32
-	IP         net.IP
-	Port       int
-	Type       string // "host", "srflx", "prflx", "relay"
+	Protocol   string // "udp" or "tcp" — only "udp" is forwarded; kept as
+	// string because the value is also echoed verbatim into SDP.
+	Priority uint32
+	IP       net.IP
+	Port     int
+	Type     CandidateType
 }
 
 // parseOfferCandidates extracts all "a=candidate:" lines from the SDP.
@@ -69,6 +120,10 @@ func parseCandidateBody(body string) (OfferCandidate, error) {
 	if fields[6] != "typ" {
 		return OfferCandidate{}, fmt.Errorf("candidate: expected 'typ' got %q", fields[6])
 	}
+	t := parseCandidateType(fields[7])
+	if t == CandidateUnknown {
+		return OfferCandidate{}, fmt.Errorf("candidate: unknown type %q", fields[7])
+	}
 	return OfferCandidate{
 		Foundation: fields[0],
 		Component:  component,
@@ -76,7 +131,7 @@ func parseCandidateBody(body string) (OfferCandidate, error) {
 		Priority:   uint32(priority),
 		IP:         ip,
 		Port:       port,
-		Type:       fields[7],
+		Type:       t,
 	}, nil
 }
 

@@ -82,7 +82,7 @@ func TestICEFull_OutgoingCheckUnblocksWaitForICE(t *testing.T) {
 			Priority:   2113937151,
 			IP:         browserAddr.IP,
 			Port:       browserAddr.Port,
-			Type:       "host",
+			Type:       CandidateHost,
 		}},
 		pendingChecks: make(map[string][12]byte),
 	}
@@ -128,7 +128,7 @@ func TestICEFull_DisabledKeepsICELiteBehaviour(t *testing.T) {
 		enableICEFull: false,
 		peerCandidates: []OfferCandidate{{
 			Foundation: "1", Component: 1, Protocol: "udp",
-			Priority: 1, IP: net.IPv4(127, 0, 0, 1), Port: 1, Type: "host",
+			Priority: 1, IP: net.IPv4(127, 0, 0, 1), Port: 1, Type: CandidateHost,
 		}},
 		pendingChecks: make(map[string][12]byte),
 	}

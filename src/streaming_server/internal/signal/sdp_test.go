@@ -175,7 +175,7 @@ func TestParseOfferCapturesCandidateLines(t *testing.T) {
 	if len(offer.Candidates) != 2 {
 		t.Fatalf("expected 2 candidates parsed, got %d", len(offer.Candidates))
 	}
-	if offer.Candidates[1].Type != "srflx" {
+	if offer.Candidates[1].Type != CandidateServerReflexive {
 		t.Errorf("second candidate should be srflx, got %s", offer.Candidates[1].Type)
 	}
 }

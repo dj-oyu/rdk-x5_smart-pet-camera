@@ -21,10 +21,10 @@ func TestParseOfferCandidates_HostOnly(t *testing.T) {
 		t.Fatalf("expected 2 UDP component-1 candidates, got %d: %+v", len(got), got)
 	}
 
-	if got[0].Foundation != "1" || got[0].Type != "host" || got[0].IP.String() != "192.168.1.10" || got[0].Port != 50000 {
+	if got[0].Foundation != "1" || got[0].Type != CandidateHost || got[0].IP.String() != "192.168.1.10" || got[0].Port != 50000 {
 		t.Errorf("first candidate mismatched: %+v", got[0])
 	}
-	if got[1].Type != "srflx" || got[1].IP.String() != "203.0.113.45" || got[1].Port != 60000 {
+	if got[1].Type != CandidateServerReflexive || got[1].IP.String() != "203.0.113.45" || got[1].Port != 60000 {
 		t.Errorf("second candidate mismatched: %+v", got[1])
 	}
 	if got[0].Priority != 2113937151 {
