@@ -29,10 +29,11 @@ type Session struct {
 	framesSent      uint64
 	enableICEFull   bool
 	peerCandidates  []OfferCandidate
-	// v6Pin pins the source IP for outgoing v6 packets so it matches the
-	// host candidate we advertised (see v6pin.go). nil when no v6
-	// candidate is advertised.
-	v6Pin *v6SourcePinner
+	// conn pins the source IP for outgoing v6 packets so it matches the
+	// host candidate we advertised (see sessionconn.go). Always set; v4-
+	// only or no-v6-candidate sessions still go through it as a plain
+	// passthrough.
+	conn *sessionConn
 	// pendingChecks maps "<ip>:<port>" → the most recent transaction id we
 	// sent that peer. Used to validate STUN binding responses arriving on
 	// the same socket. Guarded by mu — single writer (iceCheckLoop), single
@@ -40,14 +41,10 @@ type Session struct {
 	pendingChecks map[string][12]byte
 }
 
-// writeTo sends b to dst using the v6 source pinner when dst is v6 and a
-// pinner is configured; otherwise falls back to the plain UDP write.
-// Returns the underlying byte count and error.
+// writeTo sends b to dst via the session's sessionConn (source-pinned
+// for v6, plain *net.UDPConn for v4).
 func (sess *Session) writeTo(b []byte, dst *net.UDPAddr) (int, error) {
-	if sess.v6Pin != nil && dst != nil && dst.IP.To4() == nil {
-		return sess.v6Pin.WriteToUDP(b, dst)
-	}
-	return sess.udpConn.WriteToUDP(b, dst)
+	return sess.conn.WriteToUDP(b, dst)
 }
 
 // Config controls feature flags for the signaling server. Defaults preserve
@@ -149,18 +146,18 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 		ICEFull:         s.cfg.EnableICEFull,
 	})
 
-	// Create session. v6Pin is set when we advertise at least one v6
-	// candidate; it forces v6 packets to use that IP as source so the
-	// outgoing 5-tuple matches what we promised in the SDP.
+	// Create session. conn pins the v6 source when we advertise at least
+	// one v6 candidate; for v4 dsts and v4-only sessions it passes the
+	// write straight through to udpConn.
 	sess := &Session{
 		id:             fmt.Sprintf("ws-%d", port),
 		udpConn:        udpConn,
+		conn:           newSessionConn(udpConn, firstV6(s.candidateIPs)),
 		iceLite:        NewICELite(localUfrag, localPwd, offer.ICEUfrag, offer.ICEPwd),
 		ssrc:           sessSSRC,
 		payloadType:    uint8(offer.PayloadType),
 		enableICEFull:  s.cfg.EnableICEFull,
 		peerCandidates: offer.Candidates,
-		v6Pin:          newV6SourcePinner(udpConn, firstV6(s.candidateIPs)),
 		pendingChecks:  make(map[string][12]byte),
 	}
 
@@ -216,11 +213,10 @@ func (s *Server) runSession(sess *Session) {
 	sess.mu.Unlock()
 	logger.Info("Signal", "Session %s: ICE connected from %s", sess.id, remoteAddr)
 
-	// Phase 2: DTLS handshake
-	// Create a packet conn adapter for pion/dtls (filters STUN, passes DTLS).
-	// Pass the session's v6 pinner so DTLS handshake/data packets use the
-	// SDP-advertised v6 source rather than whatever the kernel picks.
-	dtlsAdapter := newDTLSPacketConn(sess.udpConn, sess.iceLite, remoteAddr, sess.v6Pin)
+	// Phase 2: DTLS handshake. The adapter shares sess.conn so DTLS
+	// packets carry the same source IP as the host candidate we
+	// advertised (see sessionconn.go).
+	dtlsAdapter := newDTLSPacketConn(sess.udpConn, sess.conn, sess.iceLite, remoteAddr)
 	logger.Info("Signal", "Session %s: starting DTLS handshake...", sess.id)
 	dtlsSess, err := HandshakeDTLS(dtlsAdapter, remoteAddr, s.dtlsConfig)
 	if err != nil {
@@ -498,26 +494,19 @@ func (s *Server) allocatePort() int {
 
 // dtlsPacketConn filters STUN packets out and passes only DTLS to pion/dtls.
 type dtlsPacketConn struct {
-	conn       *net.UDPConn
+	udp        *net.UDPConn // for reads only; writes go through sc
+	sc         *sessionConn // shared with the parent Session
 	iceLite    *ICELite
 	remoteAddr *net.UDPAddr
-	v6Pin      *v6SourcePinner // nil when no v6 source needs pinning
 }
 
-func newDTLSPacketConn(conn *net.UDPConn, iceLite *ICELite, remoteAddr *net.UDPAddr, v6Pin *v6SourcePinner) *dtlsPacketConn {
-	return &dtlsPacketConn{conn: conn, iceLite: iceLite, remoteAddr: remoteAddr, v6Pin: v6Pin}
-}
-
-func (d *dtlsPacketConn) writeTo(b []byte, dst *net.UDPAddr) (int, error) {
-	if d.v6Pin != nil && dst != nil && dst.IP.To4() == nil {
-		return d.v6Pin.WriteToUDP(b, dst)
-	}
-	return d.conn.WriteToUDP(b, dst)
+func newDTLSPacketConn(udp *net.UDPConn, sc *sessionConn, iceLite *ICELite, remoteAddr *net.UDPAddr) *dtlsPacketConn {
+	return &dtlsPacketConn{udp: udp, sc: sc, iceLite: iceLite, remoteAddr: remoteAddr}
 }
 
 func (d *dtlsPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	for {
-		n, addr, err := d.conn.ReadFromUDP(b)
+		n, addr, err := d.udp.ReadFromUDP(b)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -525,7 +514,7 @@ func (d *dtlsPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 		if IsSTUN(b[:n]) {
 			resp := d.iceLite.HandleSTUN(b[:n], addr)
 			if resp != nil {
-				d.writeTo(resp, addr)
+				d.sc.WriteToUDP(resp, addr)
 			}
 			continue
 		}
@@ -544,7 +533,7 @@ func (d *dtlsPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	if !ok {
 		udpAddr = d.remoteAddr
 	}
-	return d.writeTo(b, udpAddr)
+	return d.sc.WriteToUDP(b, udpAddr)
 }
 
 func (d *dtlsPacketConn) Close() error {
@@ -553,12 +542,12 @@ func (d *dtlsPacketConn) Close() error {
 }
 
 func (d *dtlsPacketConn) LocalAddr() net.Addr {
-	return d.conn.LocalAddr()
+	return d.udp.LocalAddr()
 }
 
-func (d *dtlsPacketConn) SetDeadline(t time.Time) error      { return d.conn.SetDeadline(t) }
-func (d *dtlsPacketConn) SetReadDeadline(t time.Time) error  { return d.conn.SetReadDeadline(t) }
-func (d *dtlsPacketConn) SetWriteDeadline(t time.Time) error { return d.conn.SetWriteDeadline(t) }
+func (d *dtlsPacketConn) SetDeadline(t time.Time) error      { return d.udp.SetDeadline(t) }
+func (d *dtlsPacketConn) SetReadDeadline(t time.Time) error  { return d.udp.SetReadDeadline(t) }
+func (d *dtlsPacketConn) SetWriteDeadline(t time.Time) error { return d.udp.SetWriteDeadline(t) }
 
 // Ensure dtlsPacketConn satisfies net.PacketConn
 var _ net.PacketConn = (*dtlsPacketConn)(nil)

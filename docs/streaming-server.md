@@ -240,40 +240,68 @@ Prometheus形式メトリクス（30+ metrics）。atomic操作によるスレ�
 
 ## WebRTC設計
 
-### pion/webrtc v4 による H.265 passthrough
+### 自前 WebRTC スタックによる H.265 passthrough
 
-- H.265 NAL units を直接RTPパケットとして送信（デコード不要）
-- `TrackLocalStaticSample.WriteSample()` で H.265 データを直接渡せる
-- goroutineによる自然な並行処理
-- iPhone Safari、Chrome で H.265 WebRTC 再生確認済み
+pion/webrtc を排除し、SDP / ICE / DTLS / SRTP を自前実装している (pion/dtls のみ残置)。
+
+- H.265 NAL units を直接 RTP パケットとして送信（デコード不要）
+- VPS/SPS/PPS をキャッシュして mid-stream クライアント join を許容
+- クライアントごとに PT を再ネゴ (Safari PT=35, Chrome PT=49)
+- iPhone Safari、Chrome で H.265 WebRTC 再生確認済み (LAN / Wi-Fi / 5G LTE)
+
+### モバイル接続経路 (5G/LTE)
+
+MAP-E ISP 環境下では v4 のポート開放が使えず、外部から直接の inbound v4 が
+通らない。サーバ側で 2 経路を並行運用することで iPhone Safari over LTE まで
+含めて再生可能にしている。設計詳細は `docs/webrtc-ice-full-restoration.md` 参照。
+
+| 経路 | 仕組み | env var |
+|---|---|---|
+| **IPv6 直通** | KDDI au の v6 GUA を SDP host candidate として advertise。MAP-E トンネル外の素 v6 で iPhone 5G と直結。NAT 越え不要、最速 (DTLS ready ~100ms)。`IPV6_PKTINFO` で source IP を mngtmpaddr に固定 (kernel 既定の RFC 4941 temp に上書きされると DTLS reject されるため)。 | `PET_CAMERA_ENABLE_IPV6_CANDIDATES=1` |
+| **ICE-full + prflx** | Server から iPhone の candidate に STUN binding request を投げて MAP-E NAT 内側から穴を開け、peer-reflexive で v4 経路を確立。iPhone は Google STUN で取った自前 srflx を candidate として送ってくる。 | `PET_CAMERA_ENABLE_ICE_FULL=1` |
+
+両方とも default ON。ブラウザの ICE が priority で v6 を選び、v6 不通環境では
+ICE-full + prflx に自動フォールバック。LAN 同一セグメントでは host candidate
+(192.168.x.x) が最速で勝つ。
+
+#### 制約と運用上の注意
+
+- HTTPS signaling 自体は Tailscale 経由前提 (pet-camera は public v4 を持たない)。
+  WebRTC media は Tailscale を通らず v6 直通 / 5G srflx 経路を取りうる。
+- v6 host candidate には kernel から得た mngtmpaddr の SLAAC アドレスを使う。
+  RFC 4941 temporary / deprecated は `/proc/net/if_inet6` のフラグで弾く
+  (rotate されると進行中セッションが切れる)。
+- Phase A 着地時点のオリジナル設計では Phase D (server-side srflx via STUN
+  client) も計画していたが、iPhone Safari が自前 srflx を offer に積むため
+  prflx-only で目的を達成できると判明、未実装。
 
 ### ブラウザクライアント実装
 
+`src/web/src/hooks/useWebRTC.ts` を参照。シグナリングは HTTP one-shot (trickle
+ICE チャンネルなし) のため、offer POST 前に `iceGatheringState === 'complete'`
+を待ち、`pc.localDescription.sdp` を送る必要がある — これを怠ると Safari over
+5G で candidate 0 個の offer が飛び、ICE が確立しない。
+
 ```javascript
-class WebRTCVideoClient {
-    constructor(videoElement, signalingUrl = null) {
-        this.signalingUrl = signalingUrl || window.location.origin;
-    }
-
-    async start() {
-        this.pc = new RTCPeerConnection({
-            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-        });
-        this.pc.ontrack = (event) => {
-            this.videoElement.srcObject = event.streams[0];
-        };
-        const offer = await this.pc.createOffer({ offerToReceiveVideo: true });
-        await this.pc.setLocalDescription(offer);
-
-        const response = await fetch(`${this.signalingUrl}/api/webrtc/offer`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sdp: offer.sdp, type: offer.type })
-        });
-        const answer = await response.json();
-        await this.pc.setRemoteDescription(new RTCSessionDescription(answer));
-    }
+const offer = await pc.createOffer();
+await pc.setLocalDescription(offer);
+if (pc.iceGatheringState !== 'complete') {
+  await new Promise(resolve => {
+    const handler = () => {
+      if (pc.iceGatheringState === 'complete') {
+        pc.removeEventListener('icegatheringstatechange', handler);
+        resolve();
+      }
+    };
+    pc.addEventListener('icegatheringstatechange', handler);
+  });
 }
+const r = await fetch('/api/webrtc/offer', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ sdp: pc.localDescription.sdp, type: offer.type }),
+});
+await pc.setRemoteDescription(await r.json());
 ```
 
 ---

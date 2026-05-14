@@ -146,6 +146,7 @@ func newTestSession(t *testing.T, masterKey, masterSalt []byte) (*Server, *Sessi
 	sess := &Session{
 		id:          "test-" + localConn.LocalAddr().String(),
 		udpConn:     localConn,
+		conn:        newSessionConn(localConn, nil),
 		remoteAddr:  remoteAddr,
 		srtpCtx:     srtpCtx,
 		ssrc:        0x12345678,

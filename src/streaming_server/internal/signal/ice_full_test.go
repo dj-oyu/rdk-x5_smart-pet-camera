@@ -73,6 +73,7 @@ func TestICEFull_OutgoingCheckUnblocksWaitForICE(t *testing.T) {
 	sess := &Session{
 		id:            "test-icefull",
 		udpConn:       srvConn,
+		conn:          newSessionConn(srvConn, nil),
 		iceLite:       NewICELite(localUfrag, remotePwd, remoteUfrag, remotePwd),
 		enableICEFull: true,
 		peerCandidates: []OfferCandidate{{
@@ -124,6 +125,7 @@ func TestICEFull_DisabledKeepsICELiteBehaviour(t *testing.T) {
 	sess := &Session{
 		id:            "test-icelite",
 		udpConn:       srvConn,
+		conn:          newSessionConn(srvConn, nil),
 		iceLite:       NewICELite("u1", "p1", "u2", "p2"),
 		enableICEFull: false,
 		peerCandidates: []OfferCandidate{{

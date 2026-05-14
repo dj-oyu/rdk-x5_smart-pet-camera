@@ -2,15 +2,11 @@ package signal
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
-	"math/big"
 	"net"
 	"strings"
 	"time"
@@ -74,8 +70,12 @@ func HandshakeDTLS(conn net.PacketConn, remoteAddr net.Addr, config *DTLSConfig)
 	}
 
 	// dtls.Server() returns immediately; handshake runs on first Read/Write.
-	// We must explicitly trigger it and wait for completion.
-	if err := dtlsConn.HandshakeContext(context.Background()); err != nil {
+	// Bounded by 15s — pion/dtls does not enforce its own ceiling, so a
+	// silent stall (e.g. source-IP mismatch on the v6 path before Phase B
+	// fix landed) would leak this goroutine forever on context.Background.
+	hctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := dtlsConn.HandshakeContext(hctx); err != nil {
 		dtlsConn.Close()
 		return nil, fmt.Errorf("dtls: handshake failed: %w", err)
 	}
@@ -122,26 +122,3 @@ func formatFingerprint(hash []byte) string {
 	return strings.ToUpper(strings.Join(parts, ":"))
 }
 
-// generateSelfSignedCert is a fallback if pion/dtls selfsign is unavailable.
-func generateSelfSignedCert() (tls.Certificate, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-
-	template := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		NotBefore:    time.Now(),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-
-	return tls.Certificate{
-		Certificate: [][]byte{certDER},
-		PrivateKey:  key,
-	}, nil
-}
