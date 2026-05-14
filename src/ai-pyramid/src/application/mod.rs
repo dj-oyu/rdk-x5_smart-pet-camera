@@ -45,6 +45,7 @@ mod tests {
             None,
             false,
             crate::vlm::VlmConfig::default(),
+            None,
         )
     }
 

@@ -2,7 +2,9 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::process::Command;
+use tracing::{info, warn};
 
 const VLM_SYSTEM_PROMPT: &str = "You are a pet camera observer. Output one JSON object with exactly three keys: \
 cat, caption, behavior. \
@@ -105,7 +107,18 @@ fn extract_json_object(raw: &str) -> Option<&str> {
     None
 }
 
-const DAY_SUMMARY_PROMPT: &str = "Summarize this cat's day based on these timestamped observations. Describe activity patterns and notable moments in 2-3 sentences. Respond in plain Japanese text, no JSON.";
+const DAY_SUMMARY_SYSTEM: &str = "あなたはペットカメラの観察記録を要約するアシスタントです。\
+ユーザーから、1日分の猫の観察記録（時刻付き、英語の短文）が渡されます。\
+次の規則に厳密に従って、自然な日本語で要約してください。\n\
+1. 出力は日本語の文 2 文のみ。箇条書き・見出し・記号・コードブロック・JSON は禁止。\n\
+2. 中国語・英語・ローマ字を混ぜない。\n\
+3. 観察記録にない時刻・行動・場所・人物・猫の名前を作らない。\n\
+4. 観察が 1〜2 件のときは、パターンや傾向ではなくその場面だけを淡々と書く。\n\
+5. 猫は「猫」と呼ぶ。";
+
+const DAY_SUMMARY_USER_SUFFIX: &str = "上記の観察のみに基づき、日本語で 2 文だけ要約してください。";
+
+const DAY_SUMMARY_OBS_LIMIT: usize = 25;
 
 #[derive(Debug, Clone)]
 pub struct VlmConfig {
@@ -124,6 +137,21 @@ impl Default for VlmConfig {
             timeout: Duration::from_secs(30),
         }
     }
+}
+
+/// Optional configuration for swapping the active axllm-serve model during a
+/// single inference call. The AX650 NPU is exclusive (one axllm process at a
+/// time, see `docs/ai-pyramid` notes), so the swap stops the primary unit,
+/// starts the secondary, runs inference against `secondary_model`, then
+/// restores the primary unit. Used by daily summary so we can borrow Gemma's
+/// clean Japanese while keeping Qwen as the captioning workhorse.
+#[derive(Debug, Clone)]
+pub struct VlmSwapConfig {
+    pub primary_unit: String,
+    pub secondary_unit: String,
+    pub secondary_model: String,
+    pub ready_timeout: Duration,
+    pub poll_interval: Duration,
 }
 
 pub struct VlmClient {
@@ -348,37 +376,56 @@ impl VlmClient {
     }
 
     /// Summarize a day's observations, optionally with a representative photo.
+    ///
+    /// Captions should already be prefixed with `HH:MM` (see
+    /// `PhotoStore::captions_for_date`); we forward them verbatim so the model
+    /// sees the timeline that the system prompt's "observations only" rule
+    /// refers to.
     pub async fn summarize_day(
         &self,
         captions: &[String],
         photo_path: Option<&Path>,
     ) -> Result<String, String> {
-        // Limit to most recent 50 captions to stay within 3,584 token context
-        let recent: &[String] = if captions.len() > 50 {
-            &captions[captions.len() - 50..]
+        let recent: &[String] = if captions.len() > DAY_SUMMARY_OBS_LIMIT {
+            &captions[captions.len() - DAY_SUMMARY_OBS_LIMIT..]
         } else {
             captions
         };
-        let observations = recent.join("\n- ");
-        let user_text = format!("Observations:\n- {observations}\n\n{DAY_SUMMARY_PROMPT}");
+        let n = recent.len();
+        let observations = recent
+            .iter()
+            .map(|c| format!("- {c}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let user_text = format!(
+            "観察件数: {n}\n観察記録:\n{observations}\n\n{DAY_SUMMARY_USER_SUFFIX}"
+        );
 
-        let mut content = Vec::new();
+        let mut user_content = Vec::new();
         if let Some(path) = photo_path
             && let Ok(data_url) = encode_resized_jpeg(path, 384, 384)
         {
-            content.push(ContentPart::ImageUrl {
+            user_content.push(ContentPart::ImageUrl {
                 image_url: ImageUrlData { url: data_url },
             });
         }
-        content.push(ContentPart::Text { text: user_text });
+        user_content.push(ContentPart::Text { text: user_text });
 
         let request = ChatRequest {
             model: self.config.model.clone(),
-            messages: vec![Message {
-                role: "user".into(),
-                content,
-            }],
-            max_tokens: 256,
+            messages: vec![
+                Message {
+                    role: "system".into(),
+                    content: vec![ContentPart::Text {
+                        text: DAY_SUMMARY_SYSTEM.into(),
+                    }],
+                },
+                Message {
+                    role: "user".into(),
+                    content: user_content,
+                },
+            ],
+            max_tokens: self.config.max_tokens,
             temperature: 0.3,
         };
 
@@ -405,9 +452,189 @@ impl VlmClient {
         Ok(chat_resp
             .choices
             .first()
-            .map(|c| c.message.content.trim().to_string())
+            .map(|c| strip_think(&c.message.content))
             .unwrap_or_default())
     }
+
+    /// Run `summarize_day` against the secondary axllm model named in `swap`,
+    /// stopping/starting the systemd units so only one axllm process talks to
+    /// the NPU at a time (AX650 exclusivity). The primary unit is always
+    /// restored before returning, even when the secondary path fails.
+    ///
+    /// Callers MUST hold the NPU semaphore for the entire call — otherwise
+    /// the per-photo watcher would issue YOLO/VLM requests against an axllm
+    /// service that is mid-swap.
+    pub async fn summarize_day_with_swap(
+        &self,
+        swap: &VlmSwapConfig,
+        captions: &[String],
+        photo_path: Option<&Path>,
+    ) -> Result<String, String> {
+        info!(
+            unit = swap.primary_unit.as_str(),
+            "vlm swap: stopping primary"
+        );
+        systemctl(&["stop", &swap.primary_unit]).await?;
+
+        let result = self.run_on_secondary(swap, captions, photo_path).await;
+
+        info!(
+            unit = swap.primary_unit.as_str(),
+            "vlm swap: restoring primary"
+        );
+        let start_result = systemctl(&["start", &swap.primary_unit]).await;
+        if let Err(ref e) = start_result {
+            warn!(error = %e, "vlm swap: failed to start primary unit");
+        }
+        let wait_result = wait_for_model(
+            &self.http,
+            &self.config.base_url,
+            &self.config.model,
+            swap.ready_timeout,
+            swap.poll_interval,
+        )
+        .await;
+        if let Err(ref e) = wait_result {
+            warn!(error = %e, model = self.config.model.as_str(), "vlm swap: primary not ready after restore");
+        }
+
+        // If both restore steps fail, per-photo captioning is now broken until
+        // someone intervenes — surface that instead of silently returning the
+        // summary. A single failure may be transient (start raced, wait timed
+        // out on slow load) so we still return the summary in that case.
+        if start_result.is_err() && wait_result.is_err() {
+            return Err(format!(
+                "primary axllm did not recover after swap; per-photo captioning is offline. start: {} / wait: {}",
+                start_result.err().unwrap_or_default(),
+                wait_result.err().unwrap_or_default(),
+            ));
+        }
+
+        result
+    }
+
+    async fn run_on_secondary(
+        &self,
+        swap: &VlmSwapConfig,
+        captions: &[String],
+        photo_path: Option<&Path>,
+    ) -> Result<String, String> {
+        info!(
+            unit = swap.secondary_unit.as_str(),
+            "vlm swap: starting secondary"
+        );
+        systemctl(&["start", &swap.secondary_unit]).await?;
+        wait_for_model(
+            &self.http,
+            &self.config.base_url,
+            &swap.secondary_model,
+            swap.ready_timeout,
+            swap.poll_interval,
+        )
+        .await?;
+
+        let secondary_client = VlmClient {
+            config: VlmConfig {
+                model: swap.secondary_model.clone(),
+                ..self.config.clone()
+            },
+            http: self.http.clone(),
+        };
+        let summary_result = secondary_client.summarize_day(captions, photo_path).await;
+
+        // Stop secondary regardless of summary outcome so the primary can take
+        // back the NPU. We never want both axllm units running.
+        info!(
+            unit = swap.secondary_unit.as_str(),
+            "vlm swap: stopping secondary"
+        );
+        if let Err(e) = systemctl(&["stop", &swap.secondary_unit]).await {
+            warn!(error = %e, "vlm swap: failed to stop secondary unit");
+        }
+
+        summary_result
+    }
+}
+
+/// Run `systemctl <args...>` as the current user. pet-album is deployed as a
+/// root unit, so no sudo is required; the binary just needs PATH to include
+/// /usr/bin (which it does under systemd).
+async fn systemctl(args: &[&str]) -> Result<(), String> {
+    let output = Command::new("systemctl")
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| format!("systemctl {args:?} spawn failed: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "systemctl {args:?} exited {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Poll `<base_url>/v1/models` until an entry whose `id` equals `model_id`
+/// appears, or the timeout elapses.
+async fn wait_for_model(
+    http: &reqwest::Client,
+    base_url: &str,
+    model_id: &str,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<(), String> {
+    let url = format!("{base_url}/v1/models");
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(resp) = http.get(&url).send().await
+            && resp.status().is_success()
+            && let Ok(body) = resp.json::<ModelsResponse>().await
+            && body.data.iter().any(|m| m.id == model_id)
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "model {model_id} not ready within {:?} via {url}",
+                timeout
+            ));
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
+#[derive(Deserialize)]
+struct ModelsResponse {
+    data: Vec<ModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct ModelEntry {
+    id: String,
+}
+
+/// Remove `<think>...</think>` blocks (Qwen3.5 reasoning models leak these
+/// into the assistant message when prompts don't fully suppress them).
+fn strip_think(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<think>") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("</think>") {
+            Some(end) => {
+                rest = &rest[start + end + "</think>".len()..];
+            }
+            None => {
+                // Unterminated think block — drop everything after the opener.
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_string()
 }
 
 #[cfg(test)]
@@ -467,6 +694,33 @@ mod tests {
             "  \n  {\"is_valid\": true, \"caption\": \"cat\", \"behavior\": \"eating\"}  \n  ";
         let resp = parse_vlm_response(raw).unwrap();
         assert!(resp.is_valid);
+    }
+
+    #[test]
+    fn strip_think_removes_well_formed_block() {
+        let raw = "<think>internal reasoning</think>\n猫はテーブルで食事をしていました。";
+        assert_eq!(strip_think(raw), "猫はテーブルで食事をしていました。");
+    }
+
+    #[test]
+    fn strip_think_handles_unterminated_block() {
+        // If the assistant produces an opening <think> but the response gets
+        // truncated before the closer, drop everything after the opener so we
+        // never surface raw reasoning to the user.
+        let raw = "前置き<think>unterminated reasoning that never closes";
+        assert_eq!(strip_think(raw), "前置き");
+    }
+
+    #[test]
+    fn strip_think_passes_through_clean_text() {
+        let raw = "猫は窓辺で日向ぼっこをしていました。";
+        assert_eq!(strip_think(raw), "猫は窓辺で日向ぼっこをしていました。");
+    }
+
+    #[test]
+    fn strip_think_handles_multiple_blocks() {
+        let raw = "<think>a</think>あ<think>b</think>い";
+        assert_eq!(strip_think(raw), "あい");
     }
 
     #[tokio::test]

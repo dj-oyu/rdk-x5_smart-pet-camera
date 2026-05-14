@@ -4,7 +4,7 @@ use pet_album::db::PhotoStore;
 use pet_album::detect::{DetectClient, DetectConfig};
 use pet_album::ingest::watcher::PhotoWatcher;
 use pet_album::server;
-use pet_album::vlm::VlmConfig;
+use pet_album::vlm::{VlmConfig, VlmSwapConfig};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -43,6 +43,33 @@ struct Args {
 
     #[arg(long, default_value_t = 128)]
     vlm_max_tokens: u32,
+
+    /// Systemd unit name of the primary axllm-serve instance (the one serving
+    /// per-photo captioning). When `--vlm-swap-secondary-unit` is also set,
+    /// daily summary will stop this unit, swap to the secondary, run the
+    /// summary, then restart this unit.
+    #[arg(long, env = "PET_ALBUM_VLM_SWAP_PRIMARY_UNIT")]
+    vlm_swap_primary_unit: Option<String>,
+
+    /// Systemd unit name of the secondary axllm-serve instance used only for
+    /// daily summary. Must serve `--vlm-swap-secondary-model`.
+    #[arg(long, env = "PET_ALBUM_VLM_SWAP_SECONDARY_UNIT")]
+    vlm_swap_secondary_unit: Option<String>,
+
+    /// Model id reported by the secondary axllm-serve via /v1/models. Used to
+    /// poll for readiness and as the `model` field in the daily summary call.
+    #[arg(long, env = "PET_ALBUM_VLM_SWAP_SECONDARY_MODEL")]
+    vlm_swap_secondary_model: Option<String>,
+
+    /// Timeout (seconds) for waiting for either model's /v1/models to report
+    /// readiness after a systemctl start. Default 90s (3-cycle test observed
+    /// 16-44s in practice).
+    #[arg(
+        long,
+        env = "PET_ALBUM_VLM_SWAP_READY_TIMEOUT_SECS",
+        default_value_t = 90
+    )]
+    vlm_swap_ready_timeout_secs: u64,
 
     /// Disable night assist (supplementary YOLO for rdk-x5 night camera)
     #[arg(long)]
@@ -121,6 +148,33 @@ async fn main() {
         info!("PUBLIC_URL: {url}");
     }
 
+    let vlm_swap_config = match (
+        args.vlm_swap_primary_unit.as_deref(),
+        args.vlm_swap_secondary_unit.as_deref(),
+        args.vlm_swap_secondary_model.as_deref(),
+    ) {
+        (Some(primary), Some(secondary), Some(model)) => {
+            info!(
+                primary,
+                secondary, model, "VLM hot-swap enabled for daily summary"
+            );
+            Some(VlmSwapConfig {
+                primary_unit: primary.to_string(),
+                secondary_unit: secondary.to_string(),
+                secondary_model: model.to_string(),
+                ready_timeout: Duration::from_secs(args.vlm_swap_ready_timeout_secs),
+                poll_interval: Duration::from_secs(2),
+            })
+        }
+        (None, None, None) => None,
+        _ => {
+            tracing::warn!(
+                "vlm_swap_* args are incomplete; daily summary will fall back to the primary model"
+            );
+            None
+        }
+    };
+
     let app_context = AppContext::new(
         repository,
         args.photos_dir.clone(),
@@ -128,6 +182,7 @@ async fn main() {
         base_url,
         tls.is_some(),
         vlm_config.clone(),
+        vlm_swap_config,
     );
 
     // Bridge PetEvent → PhotoEvent for SSE

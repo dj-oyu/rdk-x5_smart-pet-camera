@@ -1074,10 +1074,19 @@ async fn handle_daily_summary(
     let vlm_config = state.context.vlm_config();
     let vlm_client = crate::vlm::VlmClient::new(vlm_config);
     let _permit = state.context.vlm_semaphore().acquire().await.unwrap();
-    match vlm_client
-        .summarize_day(&captions, random_photo.as_deref())
-        .await
-    {
+    let summary_result = match state.context.vlm_swap_config() {
+        Some(swap) => {
+            vlm_client
+                .summarize_day_with_swap(swap, &captions, random_photo.as_deref())
+                .await
+        }
+        None => {
+            vlm_client
+                .summarize_day(&captions, random_photo.as_deref())
+                .await
+        }
+    };
+    match summary_result {
         Ok(summary) => {
             let resp = DailySummaryResponse {
                 date: date.clone(),
@@ -1265,6 +1274,7 @@ mod tests {
             None,
             false,
             crate::vlm::VlmConfig::default(),
+            None,
         );
         AppState::new(
             context,
