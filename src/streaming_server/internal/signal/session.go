@@ -29,11 +29,25 @@ type Session struct {
 	framesSent      uint64
 	enableICEFull   bool
 	peerCandidates  []OfferCandidate
+	// v6Pin pins the source IP for outgoing v6 packets so it matches the
+	// host candidate we advertised (see v6pin.go). nil when no v6
+	// candidate is advertised.
+	v6Pin *v6SourcePinner
 	// pendingChecks maps "<ip>:<port>" → the most recent transaction id we
 	// sent that peer. Used to validate STUN binding responses arriving on
 	// the same socket. Guarded by mu — single writer (iceCheckLoop), single
 	// reader (waitForICE).
 	pendingChecks map[string][12]byte
+}
+
+// writeTo sends b to dst using the v6 source pinner when dst is v6 and a
+// pinner is configured; otherwise falls back to the plain UDP write.
+// Returns the underlying byte count and error.
+func (sess *Session) writeTo(b []byte, dst *net.UDPAddr) (int, error) {
+	if sess.v6Pin != nil && dst != nil && dst.IP.To4() == nil {
+		return sess.v6Pin.WriteToUDP(b, dst)
+	}
+	return sess.udpConn.WriteToUDP(b, dst)
 }
 
 // Config controls feature flags for the signaling server. Defaults preserve
@@ -135,7 +149,9 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 		ICEFull:         s.cfg.EnableICEFull,
 	})
 
-	// Create session
+	// Create session. v6Pin is set when we advertise at least one v6
+	// candidate; it forces v6 packets to use that IP as source so the
+	// outgoing 5-tuple matches what we promised in the SDP.
 	sess := &Session{
 		id:             fmt.Sprintf("ws-%d", port),
 		udpConn:        udpConn,
@@ -144,6 +160,7 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 		payloadType:    uint8(offer.PayloadType),
 		enableICEFull:  s.cfg.EnableICEFull,
 		peerCandidates: offer.Candidates,
+		v6Pin:          newV6SourcePinner(udpConn, firstV6(s.candidateIPs)),
 		pendingChecks:  make(map[string][12]byte),
 	}
 
@@ -200,8 +217,10 @@ func (s *Server) runSession(sess *Session) {
 	logger.Info("Signal", "Session %s: ICE connected from %s", sess.id, remoteAddr)
 
 	// Phase 2: DTLS handshake
-	// Create a packet conn adapter for pion/dtls (filters STUN, passes DTLS)
-	dtlsAdapter := newDTLSPacketConn(sess.udpConn, sess.iceLite, remoteAddr)
+	// Create a packet conn adapter for pion/dtls (filters STUN, passes DTLS).
+	// Pass the session's v6 pinner so DTLS handshake/data packets use the
+	// SDP-advertised v6 source rather than whatever the kernel picks.
+	dtlsAdapter := newDTLSPacketConn(sess.udpConn, sess.iceLite, remoteAddr, sess.v6Pin)
 	logger.Info("Signal", "Session %s: starting DTLS handshake...", sess.id)
 	dtlsSess, err := HandshakeDTLS(dtlsAdapter, remoteAddr, s.dtlsConfig)
 	if err != nil {
@@ -244,7 +263,7 @@ func (s *Server) runSession(sess *Session) {
 		if IsSTUN(buf[:n]) {
 			resp := sess.iceLite.HandleSTUN(buf[:n], addr)
 			if resp != nil {
-				sess.udpConn.WriteToUDP(resp, addr)
+				sess.writeTo(resp, addr)
 			}
 		}
 		// Ignore RTCP or other packets
@@ -283,7 +302,7 @@ func (s *Server) waitForICE(ctx context.Context, sess *Session) (*net.UDPAddr, e
 		logger.Debug("Signal", "Session %s: STUN %d bytes from %s", sess.id, n, addr)
 		// Inbound request: respond and treat as success.
 		if resp := sess.iceLite.HandleSTUN(buf[:n], addr); resp != nil {
-			sess.udpConn.WriteToUDP(resp, addr)
+			sess.writeTo(resp, addr)
 			return addr, nil
 		}
 		// Inbound response: only meaningful in ICE-full mode.
@@ -334,7 +353,7 @@ func (s *Server) iceCheckLoop(ctx context.Context, sess *Session) {
 			sess.mu.Lock()
 			sess.pendingChecks[addr.String()] = txn
 			sess.mu.Unlock()
-			n, err := sess.udpConn.WriteToUDP(req, addr)
+			n, err := sess.writeTo(req, addr)
 			if err != nil {
 				logger.Warn("Signal", "Session %s: ICE check #%d → %s FAILED: %v", sess.id, attempt, addr, err)
 			} else {
@@ -384,7 +403,6 @@ func (s *Server) SendFrame(rtpPackets [][]byte) {
 		}
 		srtpCtx := sess.srtpCtx
 		remoteAddr := sess.remoteAddr
-		conn := sess.udpConn
 		sess.mu.Unlock()
 
 		pt := sess.payloadType
@@ -409,7 +427,7 @@ func (s *Server) SendFrame(rtpPackets [][]byte) {
 				continue
 			}
 
-			conn.WriteToUDP(encrypted, remoteAddr)
+			sess.writeTo(encrypted, remoteAddr)
 		}
 
 		sess.mu.Lock()
@@ -483,10 +501,18 @@ type dtlsPacketConn struct {
 	conn       *net.UDPConn
 	iceLite    *ICELite
 	remoteAddr *net.UDPAddr
+	v6Pin      *v6SourcePinner // nil when no v6 source needs pinning
 }
 
-func newDTLSPacketConn(conn *net.UDPConn, iceLite *ICELite, remoteAddr *net.UDPAddr) *dtlsPacketConn {
-	return &dtlsPacketConn{conn: conn, iceLite: iceLite, remoteAddr: remoteAddr}
+func newDTLSPacketConn(conn *net.UDPConn, iceLite *ICELite, remoteAddr *net.UDPAddr, v6Pin *v6SourcePinner) *dtlsPacketConn {
+	return &dtlsPacketConn{conn: conn, iceLite: iceLite, remoteAddr: remoteAddr, v6Pin: v6Pin}
+}
+
+func (d *dtlsPacketConn) writeTo(b []byte, dst *net.UDPAddr) (int, error) {
+	if d.v6Pin != nil && dst != nil && dst.IP.To4() == nil {
+		return d.v6Pin.WriteToUDP(b, dst)
+	}
+	return d.conn.WriteToUDP(b, dst)
 }
 
 func (d *dtlsPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
@@ -499,7 +525,7 @@ func (d *dtlsPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 		if IsSTUN(b[:n]) {
 			resp := d.iceLite.HandleSTUN(b[:n], addr)
 			if resp != nil {
-				d.conn.WriteToUDP(resp, addr)
+				d.writeTo(resp, addr)
 			}
 			continue
 		}
@@ -518,7 +544,7 @@ func (d *dtlsPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	if !ok {
 		udpAddr = d.remoteAddr
 	}
-	return d.conn.WriteToUDP(b, udpAddr)
+	return d.writeTo(b, udpAddr)
 }
 
 func (d *dtlsPacketConn) Close() error {
