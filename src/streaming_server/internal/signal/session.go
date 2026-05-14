@@ -93,7 +93,10 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("signal: parse sdp: %w", err)
 	}
-	logger.Info("Signal", "Offer: PT=%d, MID=%s, ufrag=%s", offer.PayloadType, offer.MID, offer.ICEUfrag)
+	logger.Info("Signal", "Offer: PT=%d, MID=%s, ufrag=%s, candidates=%d", offer.PayloadType, offer.MID, offer.ICEUfrag, len(offer.Candidates))
+	for i, c := range offer.Candidates {
+		logger.Info("Signal", "  offer.cand[%d]: %s %s:%d prio=%d found=%s", i, c.Type, c.IP, c.Port, c.Priority, c.Foundation)
+	}
 
 	// Check client limit
 	s.mu.RLock()
@@ -272,8 +275,10 @@ func (s *Server) waitForICE(ctx context.Context, sess *Session) (*net.UDPAddr, e
 		}
 
 		if !IsSTUN(buf[:n]) {
+			logger.Debug("Signal", "Session %s: non-STUN %d bytes from %s during ICE", sess.id, n, addr)
 			continue
 		}
+		logger.Debug("Signal", "Session %s: STUN %d bytes from %s", sess.id, n, addr)
 		// Inbound request: respond and treat as success.
 		if resp := sess.iceLite.HandleSTUN(buf[:n], addr); resp != nil {
 			sess.udpConn.WriteToUDP(resp, addr)
@@ -327,8 +332,11 @@ func (s *Server) iceCheckLoop(ctx context.Context, sess *Session) {
 			sess.mu.Lock()
 			sess.pendingChecks[addr.String()] = txn
 			sess.mu.Unlock()
-			if _, err := sess.udpConn.WriteToUDP(req, addr); err != nil {
-				logger.Debug("Signal", "Session %s: write ICE check to %s: %v", sess.id, addr, err)
+			n, err := sess.udpConn.WriteToUDP(req, addr)
+			if err != nil {
+				logger.Warn("Signal", "Session %s: ICE check #%d → %s FAILED: %v", sess.id, attempt, addr, err)
+			} else {
+				logger.Debug("Signal", "Session %s: ICE check #%d → %s sent (%d bytes)", sess.id, attempt, addr, n)
 			}
 		}
 		select {
