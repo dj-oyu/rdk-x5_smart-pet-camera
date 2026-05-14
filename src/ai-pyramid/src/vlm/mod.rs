@@ -400,9 +400,8 @@ impl VlmClient {
             .map(|c| format!("- {c}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let user_text = format!(
-            "観察件数: {n}\n観察記録:\n{observations}\n\n{DAY_SUMMARY_USER_SUFFIX}"
-        );
+        let user_text =
+            format!("観察件数: {n}\n観察記録:\n{observations}\n\n{DAY_SUMMARY_USER_SUFFIX}");
 
         let mut user_content = Vec::new();
         if let Some(path) = photo_path
