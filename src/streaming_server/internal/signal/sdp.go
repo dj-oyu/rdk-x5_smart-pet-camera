@@ -21,6 +21,7 @@ type Offer struct {
 	MID         string // media ID (e.g., "0" or "video")
 	PayloadType int    // dynamic PT for H.265
 	FmtpLine    string // raw "a=fmtp:<pt> ..." line for H.265, echoed back in answer
+	Candidates  []OfferCandidate
 }
 
 var (
@@ -83,6 +84,8 @@ func ParseOffer(sdp string) (*Offer, error) {
 		}
 	}
 
+	offer.Candidates = parseOfferCandidates(sdp)
+
 	return offer, nil
 }
 
@@ -100,6 +103,10 @@ type AnswerParams struct {
 	StreamID        string // msid stream identifier (e.g. "pet-camera")
 	TrackID         string // msid track identifier (e.g. "video0")
 	CNAME           string // RTCP CNAME for the SSRC
+	// ICEFull turns off the "a=ice-lite" attribute so the server acts as a
+	// full ICE agent that originates connectivity checks. Default false
+	// retains the long-standing ICE-lite passive behaviour.
+	ICEFull bool
 }
 
 // GenerateAnswer creates an SDP answer string for send-only H.265 video.
@@ -140,7 +147,9 @@ func GenerateAnswer(p *AnswerParams) string {
 	// ICE
 	sb.WriteString(fmt.Sprintf("a=ice-ufrag:%s\r\n", p.ICEUfrag))
 	sb.WriteString(fmt.Sprintf("a=ice-pwd:%s\r\n", p.ICEPwd))
-	sb.WriteString("a=ice-lite\r\n")
+	if !p.ICEFull {
+		sb.WriteString("a=ice-lite\r\n")
+	}
 	sb.WriteString("a=ice-options:trickle\r\n")
 
 	// DTLS

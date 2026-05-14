@@ -2,6 +2,8 @@ package signal
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -14,17 +16,34 @@ import (
 
 // Session represents a single WebRTC client connection.
 type Session struct {
-	id          string
-	udpConn     *net.UDPConn
-	remoteAddr  *net.UDPAddr
-	iceLite     *ICELite
-	srtpCtx     *srtp.Context
-	ssrc        uint32
-	seq         uint16
-	payloadType uint8 // H.265 PT from SDP negotiation
-	mu          sync.Mutex
-	closed      bool
-	framesSent  uint64
+	id              string
+	udpConn         *net.UDPConn
+	remoteAddr      *net.UDPAddr
+	iceLite         *ICELite
+	srtpCtx         *srtp.Context
+	ssrc            uint32
+	seq             uint16
+	payloadType     uint8 // H.265 PT from SDP negotiation
+	mu              sync.Mutex
+	closed          bool
+	framesSent      uint64
+	enableICEFull   bool
+	peerCandidates  []OfferCandidate
+	// pendingChecks maps "<ip>:<port>" → the most recent transaction id we
+	// sent that peer. Used to validate STUN binding responses arriving on
+	// the same socket. Guarded by mu — single writer (iceCheckLoop), single
+	// reader (waitForICE).
+	pendingChecks map[string][12]byte
+}
+
+// Config controls feature flags for the signaling server. Defaults preserve
+// the long-standing behaviour: ICE-lite (passive) with IPv4-only host
+// candidates. New paths are opt-in so a misconfigured rollout cannot
+// regress production streaming.
+type Config struct {
+	MaxClients           int
+	EnableICEFull        bool // Phase A: server originates STUN binding requests
+	EnableIPv6Candidates bool // Phase B (not yet wired): advertise v6 host candidates
 }
 
 // Server manages multiple WebRTC sessions.
@@ -32,14 +51,17 @@ type Server struct {
 	mu           sync.RWMutex
 	sessions     map[string]*Session
 	dtlsConfig   *DTLSConfig
-	maxClients   int
+	cfg          Config
 	candidateIPs []net.IP // all non-loopback IPv4 addresses to advertise
 	basePort     int      // Starting UDP port for allocation
 	nextPort     int
 }
 
-// NewServer creates a new signaling server.
-func NewServer(maxClients int) (*Server, error) {
+// NewServer creates a new signaling server with the given configuration.
+func NewServer(cfg Config) (*Server, error) {
+	if cfg.MaxClients <= 0 {
+		cfg.MaxClients = 10
+	}
 	dtlsConfig, err := NewDTLSConfig()
 	if err != nil {
 		return nil, err
@@ -48,7 +70,7 @@ func NewServer(maxClients int) (*Server, error) {
 	return &Server{
 		sessions:     make(map[string]*Session),
 		dtlsConfig:   dtlsConfig,
-		maxClients:   maxClients,
+		cfg:          cfg,
 		candidateIPs: getLocalIPs(),
 		basePort:     20000,
 		nextPort:     20000,
@@ -75,9 +97,9 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 
 	// Check client limit
 	s.mu.RLock()
-	if len(s.sessions) >= s.maxClients {
+	if len(s.sessions) >= s.cfg.MaxClients {
 		s.mu.RUnlock()
-		return nil, fmt.Errorf("signal: max clients reached (%d)", s.maxClients)
+		return nil, fmt.Errorf("signal: max clients reached (%d)", s.cfg.MaxClients)
 	}
 	s.mu.RUnlock()
 
@@ -105,15 +127,19 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 		MID:             offer.MID,
 		FmtpLine:        offer.FmtpLine,
 		SSRC:            sessSSRC,
+		ICEFull:         s.cfg.EnableICEFull,
 	})
 
 	// Create session
 	sess := &Session{
-		id:          fmt.Sprintf("ws-%d", port),
-		udpConn:     udpConn,
-		iceLite:     NewICELite(localUfrag, localPwd, offer.ICEUfrag, offer.ICEPwd),
-		ssrc:        sessSSRC,
-		payloadType: uint8(offer.PayloadType),
+		id:             fmt.Sprintf("ws-%d", port),
+		udpConn:        udpConn,
+		iceLite:        NewICELite(localUfrag, localPwd, offer.ICEUfrag, offer.ICEPwd),
+		ssrc:           sessSSRC,
+		payloadType:    uint8(offer.PayloadType),
+		enableICEFull:  s.cfg.EnableICEFull,
+		peerCandidates: offer.Candidates,
+		pendingChecks:  make(map[string][12]byte),
 	}
 
 	s.mu.Lock()
@@ -144,13 +170,28 @@ func (s *Server) runSession(sess *Session) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Phase 1: Wait for STUN binding requests (ICE connectivity check)
+	// Phase 1a: in ICE-full mode, fire outgoing STUN binding requests at
+	// every peer candidate. Two effects:
+	//   (1) On NATted servers (MAP-E) this opens a mapping the browser's
+	//       own checks can come back through.
+	//   (2) If the browser's reply reaches us, waitForICE accepts it as
+	//       success.
+	// In ICE-lite (default) mode this returns immediately.
+	checkCtx, cancelChecks := context.WithCancel(ctx)
+	defer cancelChecks()
+	go s.iceCheckLoop(checkCtx, sess)
+
+	// Phase 1b: Wait for STUN binding requests (ICE connectivity check)
+	// — or a valid binding response if iceCheckLoop is running.
 	remoteAddr, err := s.waitForICE(ctx, sess)
 	if err != nil {
 		logger.Warn("Signal", "Session %s: ICE failed: %v", sess.id, err)
 		return
 	}
+	cancelChecks() // ICE complete; stop sending checks before DTLS reads the socket.
+	sess.mu.Lock()
 	sess.remoteAddr = remoteAddr
+	sess.mu.Unlock()
 	logger.Info("Signal", "Session %s: ICE connected from %s", sess.id, remoteAddr)
 
 	// Phase 2: DTLS handshake
@@ -205,7 +246,13 @@ func (s *Server) runSession(sess *Session) {
 	}
 }
 
-// waitForICE waits for the first STUN binding request and responds.
+// waitForICE waits for either an inbound STUN binding request (and
+// responds), or a valid binding response to one of our outgoing checks
+// (ICE-full mode only). Either is enough to declare the path usable.
+//
+// Source-address policy: in both cases the returned UDPAddr is the
+// packet's source — that is the address DTLS can write back to (the
+// XOR-MAPPED address only tells us how the peer sees *us*).
 func (s *Server) waitForICE(ctx context.Context, sess *Session) (*net.UDPAddr, error) {
 	buf := make([]byte, 1500)
 	for {
@@ -224,14 +271,90 @@ func (s *Server) waitForICE(ctx context.Context, sess *Session) (*net.UDPAddr, e
 			return nil, err
 		}
 
-		if IsSTUN(buf[:n]) {
-			resp := sess.iceLite.HandleSTUN(buf[:n], addr)
-			if resp != nil {
-				sess.udpConn.WriteToUDP(resp, addr)
-				return addr, nil
+		if !IsSTUN(buf[:n]) {
+			continue
+		}
+		// Inbound request: respond and treat as success.
+		if resp := sess.iceLite.HandleSTUN(buf[:n], addr); resp != nil {
+			sess.udpConn.WriteToUDP(resp, addr)
+			return addr, nil
+		}
+		// Inbound response: only meaningful in ICE-full mode.
+		if sess.enableICEFull {
+			sess.mu.Lock()
+			txn, ok := sess.pendingChecks[addr.String()]
+			sess.mu.Unlock()
+			if ok {
+				if _, err := ValidateBindingResponse(buf[:n], txn, sess.iceLite.remotePwd); err == nil {
+					return addr, nil
+				}
+				logger.Debug("Signal", "Session %s: invalid binding response from %s: %v", sess.id, addr, err)
 			}
 		}
 	}
+}
+
+// iceCheckLoop sends periodic STUN binding requests to each peer
+// candidate while the session is in the ICE phase.
+//
+// Retransmit schedule follows RFC 5389 §7.2: start RTO=500ms, double on
+// every retransmission, give up after Rc=7 attempts (covers ~32s total
+// wait, but the session-level 30s context will cancel us first).
+func (s *Server) iceCheckLoop(ctx context.Context, sess *Session) {
+	if !sess.enableICEFull || len(sess.peerCandidates) == 0 {
+		return
+	}
+	rto := 500 * time.Millisecond
+	for attempt := 0; attempt < 7; attempt++ {
+		for _, c := range sess.peerCandidates {
+			sess.mu.Lock()
+			closed := sess.closed
+			connected := sess.remoteAddr != nil
+			sess.mu.Unlock()
+			if closed || connected {
+				return
+			}
+			addr := c.UDPAddr()
+			txn := NewTransactionID()
+			req := BuildBindingRequest(BindingRequest{
+				TxnID:       txn,
+				LocalUfrag:  sess.iceLite.localUfrag,
+				RemoteUfrag: sess.iceLite.remoteUfrag,
+				RemotePwd:   sess.iceLite.remotePwd,
+				Priority:    prflxPriority(uint16(attempt)),
+				Tiebreaker:  newTiebreaker(),
+			})
+			sess.mu.Lock()
+			sess.pendingChecks[addr.String()] = txn
+			sess.mu.Unlock()
+			if _, err := sess.udpConn.WriteToUDP(req, addr); err != nil {
+				logger.Debug("Signal", "Session %s: write ICE check to %s: %v", sess.id, addr, err)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(rto):
+		}
+		rto *= 2
+	}
+}
+
+// prflxPriority returns a recommended priority value for peer-reflexive
+// candidates per RFC 8445 §5.1.2: type-pref 110, local-pref 65535,
+// component 1 → (110 << 24) | (65535 << 8) | (256 - 1). The local-pref
+// is decreased by `bump` to avoid identical priorities across retries.
+func prflxPriority(bump uint16) uint32 {
+	const typePref uint32 = 110
+	localPref := uint32(65535) - uint32(bump)
+	return (typePref << 24) | (localPref << 8) | 255
+}
+
+// newTiebreaker returns a random 64-bit ICE tiebreaker.
+func newTiebreaker() uint64 {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return binary.BigEndian.Uint64(b[:])
 }
 
 // SendFrame sends SRTP-encrypted RTP packets to all connected sessions.
