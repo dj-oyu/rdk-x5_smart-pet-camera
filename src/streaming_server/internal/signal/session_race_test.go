@@ -146,6 +146,7 @@ func newTestSession(t *testing.T, masterKey, masterSalt []byte) (*Server, *Sessi
 	sess := &Session{
 		id:          "test-" + localConn.LocalAddr().String(),
 		udpConn:     localConn,
+		conn:        newSessionConn(localConn, nil),
 		remoteAddr:  remoteAddr,
 		srtpCtx:     srtpCtx,
 		ssrc:        0x12345678,
@@ -153,10 +154,10 @@ func newTestSession(t *testing.T, masterKey, masterSalt []byte) (*Server, *Sessi
 	}
 
 	srv := &Server{
-		sessions:   map[string]*Session{sess.id: sess},
-		maxClients: 1,
-		basePort:   20000,
-		nextPort:   20000,
+		sessions: map[string]*Session{sess.id: sess},
+		cfg:      Config{MaxClients: 1},
+		basePort: 20000,
+		nextPort: 20000,
 	}
 
 	cleanup := func() {

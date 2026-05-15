@@ -11,6 +11,7 @@ import (
 	_ "net/http/pprof" // Enable pprof
 	"os"
 	ossignal "os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -120,7 +121,11 @@ func NewServer() (*Server, error) {
 	processor := codec.NewProcessor()
 
 	// Create signal server (self-contained WebRTC: SDP + ICE-lite + DTLS + SRTP)
-	signalSrv, err := signal.NewServer(*maxClients)
+	signalSrv, err := signal.NewServer(signal.Config{
+		MaxClients:           *maxClients,
+		EnableICEFull:        envBool("PET_CAMERA_ENABLE_ICE_FULL"),
+		EnableIPv6Candidates: envBool("PET_CAMERA_ENABLE_IPV6_CANDIDATES"),
+	})
 	if err != nil {
 		cancel()
 		reader.Close()
@@ -509,6 +514,18 @@ func (s *Server) handleClientCount(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"count": s.signal.GetClientCount(),
 	})
+}
+
+// envBool returns true when the named env var is set to a truthy value
+// ("1", "true", "yes", case-insensitive). Empty or unset → false so the
+// server stays in its conservative default (ICE-lite, IPv4 only).
+func envBool(name string) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // Shutdown gracefully shuts down the server

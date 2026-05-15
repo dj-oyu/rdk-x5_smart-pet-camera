@@ -57,10 +57,33 @@ export function useWebRTC(
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
+      // Wait until ICE gathering finishes so the SDP we POST contains all
+      // host/srflx candidates inline. The server's /offer endpoint is
+      // one-shot — no trickle channel — and Safari over LTE takes longer
+      // than LAN to gather, so without this wait the offer goes out with
+      // zero candidates and ICE never converges.
+      if (pc.iceGatheringState !== 'complete') {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(() => {
+            pc.removeEventListener('icegatheringstatechange', handler);
+            resolve(); // proceed anyway — partial candidates beat hanging
+          }, 5000);
+          const handler = () => {
+            if (pc.iceGatheringState === 'complete') {
+              clearTimeout(timer);
+              pc.removeEventListener('icegatheringstatechange', handler);
+              resolve();
+            }
+          };
+          pc.addEventListener('icegatheringstatechange', handler);
+        });
+      }
+
+      const localSDP = pc.localDescription?.sdp ?? offer.sdp;
       const response = await fetch(`${window.location.origin}/api/webrtc/offer`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sdp: offer.sdp, type: offer.type }),
+        body: JSON.stringify({ sdp: localSDP, type: offer.type }),
       });
 
       if (!response.ok) {

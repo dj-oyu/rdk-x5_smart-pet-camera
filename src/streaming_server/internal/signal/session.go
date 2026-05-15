@@ -2,6 +2,8 @@ package signal
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -14,17 +16,45 @@ import (
 
 // Session represents a single WebRTC client connection.
 type Session struct {
-	id          string
-	udpConn     *net.UDPConn
-	remoteAddr  *net.UDPAddr
-	iceLite     *ICELite
-	srtpCtx     *srtp.Context
-	ssrc        uint32
-	seq         uint16
-	payloadType uint8 // H.265 PT from SDP negotiation
-	mu          sync.Mutex
-	closed      bool
-	framesSent  uint64
+	id             string
+	udpConn        *net.UDPConn
+	remoteAddr     *net.UDPAddr
+	iceLite        *ICELite
+	srtpCtx        *srtp.Context
+	ssrc           uint32
+	seq            uint16
+	payloadType    uint8 // H.265 PT from SDP negotiation
+	mu             sync.Mutex
+	closed         bool
+	framesSent     uint64
+	enableICEFull  bool
+	peerCandidates []OfferCandidate
+	// conn pins the source IP for outgoing v6 packets so it matches the
+	// host candidate we advertised (see sessionconn.go). Always set; v4-
+	// only or no-v6-candidate sessions still go through it as a plain
+	// passthrough.
+	conn *sessionConn
+	// pendingChecks maps "<ip>:<port>" → the most recent transaction id we
+	// sent that peer. Used to validate STUN binding responses arriving on
+	// the same socket. Guarded by mu — single writer (iceCheckLoop), single
+	// reader (waitForICE).
+	pendingChecks map[string][12]byte
+}
+
+// writeTo sends b to dst via the session's sessionConn (source-pinned
+// for v6, plain *net.UDPConn for v4).
+func (sess *Session) writeTo(b []byte, dst *net.UDPAddr) (int, error) {
+	return sess.conn.WriteToUDP(b, dst)
+}
+
+// Config controls feature flags for the signaling server. Defaults preserve
+// the long-standing behaviour: ICE-lite (passive) with IPv4-only host
+// candidates. New paths are opt-in so a misconfigured rollout cannot
+// regress production streaming.
+type Config struct {
+	MaxClients           int
+	EnableICEFull        bool // Phase A: server originates STUN binding requests
+	EnableIPv6Candidates bool // Phase B (not yet wired): advertise v6 host candidates
 }
 
 // Server manages multiple WebRTC sessions.
@@ -32,14 +62,17 @@ type Server struct {
 	mu           sync.RWMutex
 	sessions     map[string]*Session
 	dtlsConfig   *DTLSConfig
-	maxClients   int
+	cfg          Config
 	candidateIPs []net.IP // all non-loopback IPv4 addresses to advertise
 	basePort     int      // Starting UDP port for allocation
 	nextPort     int
 }
 
-// NewServer creates a new signaling server.
-func NewServer(maxClients int) (*Server, error) {
+// NewServer creates a new signaling server with the given configuration.
+func NewServer(cfg Config) (*Server, error) {
+	if cfg.MaxClients <= 0 {
+		cfg.MaxClients = 10
+	}
 	dtlsConfig, err := NewDTLSConfig()
 	if err != nil {
 		return nil, err
@@ -48,8 +81,8 @@ func NewServer(maxClients int) (*Server, error) {
 	return &Server{
 		sessions:     make(map[string]*Session),
 		dtlsConfig:   dtlsConfig,
-		maxClients:   maxClients,
-		candidateIPs: getLocalIPs(),
+		cfg:          cfg,
+		candidateIPs: getLocalCandidateAddrs(cfg.EnableIPv6Candidates),
 		basePort:     20000,
 		nextPort:     20000,
 	}, nil
@@ -71,20 +104,25 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("signal: parse sdp: %w", err)
 	}
-	logger.Info("Signal", "Offer: PT=%d, MID=%s, ufrag=%s", offer.PayloadType, offer.MID, offer.ICEUfrag)
+	logger.Info("Signal", "Offer: PT=%d, MID=%s, ufrag=%s, candidates=%d", offer.PayloadType, offer.MID, offer.ICEUfrag, len(offer.Candidates))
+	for i, c := range offer.Candidates {
+		logger.Info("Signal", "  offer.cand[%d]: %s %s:%d prio=%d found=%s", i, c.Type, c.IP, c.Port, c.Priority, c.Foundation)
+	}
 
 	// Check client limit
 	s.mu.RLock()
-	if len(s.sessions) >= s.maxClients {
+	if len(s.sessions) >= s.cfg.MaxClients {
 		s.mu.RUnlock()
-		return nil, fmt.Errorf("signal: max clients reached (%d)", s.maxClients)
+		return nil, fmt.Errorf("signal: max clients reached (%d)", s.cfg.MaxClients)
 	}
 	s.mu.RUnlock()
 
-	// Allocate UDP port. Bind to 0.0.0.0 so STUN can arrive on any
-	// interface — we advertise multiple host candidates below.
+	// Allocate UDP port. Bind to the IPv6 wildcard [::] with the "udp"
+	// network so the socket accepts both v4 (via v4-mapped-v6) and v6
+	// traffic on Linux (default IPV6_V6ONLY=0). We then advertise host
+	// candidates for every interface address below.
 	port := s.allocatePort()
-	udpAddr := &net.UDPAddr{IP: net.IPv4zero, Port: port}
+	udpAddr := &net.UDPAddr{IP: net.IPv6zero, Port: port}
 	udpConn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
 		return nil, fmt.Errorf("signal: listen udp %d: %w", port, err)
@@ -105,15 +143,22 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 		MID:             offer.MID,
 		FmtpLine:        offer.FmtpLine,
 		SSRC:            sessSSRC,
+		ICEFull:         s.cfg.EnableICEFull,
 	})
 
-	// Create session
+	// Create session. conn pins the v6 source when we advertise at least
+	// one v6 candidate; for v4 dsts and v4-only sessions it passes the
+	// write straight through to udpConn.
 	sess := &Session{
-		id:          fmt.Sprintf("ws-%d", port),
-		udpConn:     udpConn,
-		iceLite:     NewICELite(localUfrag, localPwd, offer.ICEUfrag, offer.ICEPwd),
-		ssrc:        sessSSRC,
-		payloadType: uint8(offer.PayloadType),
+		id:             fmt.Sprintf("ws-%d", port),
+		udpConn:        udpConn,
+		conn:           newSessionConn(udpConn, firstV6(s.candidateIPs)),
+		iceLite:        NewICELite(localUfrag, localPwd, offer.ICEUfrag, offer.ICEPwd),
+		ssrc:           sessSSRC,
+		payloadType:    uint8(offer.PayloadType),
+		enableICEFull:  s.cfg.EnableICEFull,
+		peerCandidates: offer.Candidates,
+		pendingChecks:  make(map[string][12]byte),
 	}
 
 	s.mu.Lock()
@@ -144,18 +189,34 @@ func (s *Server) runSession(sess *Session) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Phase 1: Wait for STUN binding requests (ICE connectivity check)
+	// Phase 1a: in ICE-full mode, fire outgoing STUN binding requests at
+	// every peer candidate. Two effects:
+	//   (1) On NATted servers (MAP-E) this opens a mapping the browser's
+	//       own checks can come back through.
+	//   (2) If the browser's reply reaches us, waitForICE accepts it as
+	//       success.
+	// In ICE-lite (default) mode this returns immediately.
+	checkCtx, cancelChecks := context.WithCancel(ctx)
+	defer cancelChecks()
+	go s.iceCheckLoop(checkCtx, sess)
+
+	// Phase 1b: Wait for STUN binding requests (ICE connectivity check)
+	// — or a valid binding response if iceCheckLoop is running.
 	remoteAddr, err := s.waitForICE(ctx, sess)
 	if err != nil {
 		logger.Warn("Signal", "Session %s: ICE failed: %v", sess.id, err)
 		return
 	}
+	cancelChecks() // ICE complete; stop sending checks before DTLS reads the socket.
+	sess.mu.Lock()
 	sess.remoteAddr = remoteAddr
+	sess.mu.Unlock()
 	logger.Info("Signal", "Session %s: ICE connected from %s", sess.id, remoteAddr)
 
-	// Phase 2: DTLS handshake
-	// Create a packet conn adapter for pion/dtls (filters STUN, passes DTLS)
-	dtlsAdapter := newDTLSPacketConn(sess.udpConn, sess.iceLite, remoteAddr)
+	// Phase 2: DTLS handshake. The adapter shares sess.conn so DTLS
+	// packets carry the same source IP as the host candidate we
+	// advertised (see sessionconn.go).
+	dtlsAdapter := newDTLSPacketConn(sess.udpConn, sess.conn, sess.iceLite, remoteAddr)
 	logger.Info("Signal", "Session %s: starting DTLS handshake...", sess.id)
 	dtlsSess, err := HandshakeDTLS(dtlsAdapter, remoteAddr, s.dtlsConfig)
 	if err != nil {
@@ -198,14 +259,20 @@ func (s *Server) runSession(sess *Session) {
 		if IsSTUN(buf[:n]) {
 			resp := sess.iceLite.HandleSTUN(buf[:n], addr)
 			if resp != nil {
-				sess.udpConn.WriteToUDP(resp, addr)
+				sess.writeTo(resp, addr)
 			}
 		}
 		// Ignore RTCP or other packets
 	}
 }
 
-// waitForICE waits for the first STUN binding request and responds.
+// waitForICE waits for either an inbound STUN binding request (and
+// responds), or a valid binding response to one of our outgoing checks
+// (ICE-full mode only). Either is enough to declare the path usable.
+//
+// Source-address policy: in both cases the returned UDPAddr is the
+// packet's source — that is the address DTLS can write back to (the
+// XOR-MAPPED address only tells us how the peer sees *us*).
 func (s *Server) waitForICE(ctx context.Context, sess *Session) (*net.UDPAddr, error) {
 	buf := make([]byte, 1500)
 	for {
@@ -224,14 +291,95 @@ func (s *Server) waitForICE(ctx context.Context, sess *Session) (*net.UDPAddr, e
 			return nil, err
 		}
 
-		if IsSTUN(buf[:n]) {
-			resp := sess.iceLite.HandleSTUN(buf[:n], addr)
-			if resp != nil {
-				sess.udpConn.WriteToUDP(resp, addr)
-				return addr, nil
+		if !IsSTUN(buf[:n]) {
+			logger.Debug("Signal", "Session %s: non-STUN %d bytes from %s during ICE", sess.id, n, addr)
+			continue
+		}
+		logger.Debug("Signal", "Session %s: STUN %d bytes from %s", sess.id, n, addr)
+		// Inbound request: respond and treat as success.
+		if resp := sess.iceLite.HandleSTUN(buf[:n], addr); resp != nil {
+			sess.writeTo(resp, addr)
+			return addr, nil
+		}
+		// Inbound response: only meaningful in ICE-full mode.
+		if sess.enableICEFull {
+			sess.mu.Lock()
+			txn, ok := sess.pendingChecks[addr.String()]
+			sess.mu.Unlock()
+			if ok {
+				if _, err := ValidateBindingResponse(buf[:n], txn, sess.iceLite.remotePwd); err == nil {
+					return addr, nil
+				}
+				logger.Debug("Signal", "Session %s: invalid binding response from %s: %v", sess.id, addr, err)
 			}
 		}
 	}
+}
+
+// iceCheckLoop sends periodic STUN binding requests to each peer
+// candidate while the session is in the ICE phase.
+//
+// Retransmit schedule follows RFC 5389 §7.2: start RTO=500ms, double on
+// every retransmission, give up after Rc=7 attempts (covers ~32s total
+// wait, but the session-level 30s context will cancel us first).
+func (s *Server) iceCheckLoop(ctx context.Context, sess *Session) {
+	if !sess.enableICEFull || len(sess.peerCandidates) == 0 {
+		return
+	}
+	rto := 500 * time.Millisecond
+	for attempt := 0; attempt < 7; attempt++ {
+		for _, c := range sess.peerCandidates {
+			sess.mu.Lock()
+			closed := sess.closed
+			connected := sess.remoteAddr != nil
+			sess.mu.Unlock()
+			if closed || connected {
+				return
+			}
+			addr := c.UDPAddr()
+			txn := NewTransactionID()
+			req := BuildBindingRequest(BindingRequest{
+				TxnID:       txn,
+				LocalUfrag:  sess.iceLite.localUfrag,
+				RemoteUfrag: sess.iceLite.remoteUfrag,
+				RemotePwd:   sess.iceLite.remotePwd,
+				Priority:    prflxPriority(uint16(attempt)),
+				Tiebreaker:  newTiebreaker(),
+			})
+			sess.mu.Lock()
+			sess.pendingChecks[addr.String()] = txn
+			sess.mu.Unlock()
+			n, err := sess.writeTo(req, addr)
+			if err != nil {
+				logger.Warn("Signal", "Session %s: ICE check #%d → %s FAILED: %v", sess.id, attempt, addr, err)
+			} else {
+				logger.Debug("Signal", "Session %s: ICE check #%d → %s sent (%d bytes)", sess.id, attempt, addr, n)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(rto):
+		}
+		rto *= 2
+	}
+}
+
+// prflxPriority returns a recommended priority value for peer-reflexive
+// candidates per RFC 8445 §5.1.2: type-pref 110, local-pref 65535,
+// component 1 → (110 << 24) | (65535 << 8) | (256 - 1). The local-pref
+// is decreased by `bump` to avoid identical priorities across retries.
+func prflxPriority(bump uint16) uint32 {
+	const typePref uint32 = 110
+	localPref := uint32(65535) - uint32(bump)
+	return (typePref << 24) | (localPref << 8) | 255
+}
+
+// newTiebreaker returns a random 64-bit ICE tiebreaker.
+func newTiebreaker() uint64 {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return binary.BigEndian.Uint64(b[:])
 }
 
 // SendFrame sends SRTP-encrypted RTP packets to all connected sessions.
@@ -251,7 +399,6 @@ func (s *Server) SendFrame(rtpPackets [][]byte) {
 		}
 		srtpCtx := sess.srtpCtx
 		remoteAddr := sess.remoteAddr
-		conn := sess.udpConn
 		sess.mu.Unlock()
 
 		pt := sess.payloadType
@@ -276,7 +423,7 @@ func (s *Server) SendFrame(rtpPackets [][]byte) {
 				continue
 			}
 
-			conn.WriteToUDP(encrypted, remoteAddr)
+			sess.writeTo(encrypted, remoteAddr)
 		}
 
 		sess.mu.Lock()
@@ -343,44 +490,23 @@ func (s *Server) allocatePort() int {
 	return port
 }
 
-// getLocalIPs returns every non-loopback IPv4 address on the host.
-// Each becomes an ICE host candidate so the browser can reach the
-// server via whichever interface it is connected through (LAN, VPN, ...).
-// Falls back to 127.0.0.1 only if no other addresses exist.
-func getLocalIPs() []net.IP {
-	addrs, _ := net.InterfaceAddrs()
-	var ips []net.IP
-	for _, addr := range addrs {
-		ipNet, ok := addr.(*net.IPNet)
-		if !ok || ipNet.IP.IsLoopback() {
-			continue
-		}
-		if ip4 := ipNet.IP.To4(); ip4 != nil {
-			ips = append(ips, ip4)
-		}
-	}
-	if len(ips) == 0 {
-		ips = append(ips, net.IPv4(127, 0, 0, 1))
-	}
-	return ips
-}
-
 // ----- DTLS packet conn adapter -----
 
 // dtlsPacketConn filters STUN packets out and passes only DTLS to pion/dtls.
 type dtlsPacketConn struct {
-	conn       *net.UDPConn
+	udp        *net.UDPConn // for reads only; writes go through sc
+	sc         *sessionConn // shared with the parent Session
 	iceLite    *ICELite
 	remoteAddr *net.UDPAddr
 }
 
-func newDTLSPacketConn(conn *net.UDPConn, iceLite *ICELite, remoteAddr *net.UDPAddr) *dtlsPacketConn {
-	return &dtlsPacketConn{conn: conn, iceLite: iceLite, remoteAddr: remoteAddr}
+func newDTLSPacketConn(udp *net.UDPConn, sc *sessionConn, iceLite *ICELite, remoteAddr *net.UDPAddr) *dtlsPacketConn {
+	return &dtlsPacketConn{udp: udp, sc: sc, iceLite: iceLite, remoteAddr: remoteAddr}
 }
 
 func (d *dtlsPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	for {
-		n, addr, err := d.conn.ReadFromUDP(b)
+		n, addr, err := d.udp.ReadFromUDP(b)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -388,7 +514,7 @@ func (d *dtlsPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 		if IsSTUN(b[:n]) {
 			resp := d.iceLite.HandleSTUN(b[:n], addr)
 			if resp != nil {
-				d.conn.WriteToUDP(resp, addr)
+				d.sc.WriteToUDP(resp, addr)
 			}
 			continue
 		}
@@ -407,7 +533,7 @@ func (d *dtlsPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	if !ok {
 		udpAddr = d.remoteAddr
 	}
-	return d.conn.WriteToUDP(b, udpAddr)
+	return d.sc.WriteToUDP(b, udpAddr)
 }
 
 func (d *dtlsPacketConn) Close() error {
@@ -416,12 +542,12 @@ func (d *dtlsPacketConn) Close() error {
 }
 
 func (d *dtlsPacketConn) LocalAddr() net.Addr {
-	return d.conn.LocalAddr()
+	return d.udp.LocalAddr()
 }
 
-func (d *dtlsPacketConn) SetDeadline(t time.Time) error      { return d.conn.SetDeadline(t) }
-func (d *dtlsPacketConn) SetReadDeadline(t time.Time) error  { return d.conn.SetReadDeadline(t) }
-func (d *dtlsPacketConn) SetWriteDeadline(t time.Time) error { return d.conn.SetWriteDeadline(t) }
+func (d *dtlsPacketConn) SetDeadline(t time.Time) error      { return d.udp.SetDeadline(t) }
+func (d *dtlsPacketConn) SetReadDeadline(t time.Time) error  { return d.udp.SetReadDeadline(t) }
+func (d *dtlsPacketConn) SetWriteDeadline(t time.Time) error { return d.udp.SetWriteDeadline(t) }
 
 // Ensure dtlsPacketConn satisfies net.PacketConn
 var _ net.PacketConn = (*dtlsPacketConn)(nil)
