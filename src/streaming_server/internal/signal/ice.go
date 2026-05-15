@@ -123,15 +123,18 @@ func (ice *ICELite) buildBindingResponse(txnID [12]byte, addr *net.UDPAddr) []by
 func buildXORMappedAddress(addr *net.UDPAddr, txnID [12]byte) []byte {
 	ip4 := addr.IP.To4()
 	if ip4 == nil {
-		// IPv6 - simplified, XOR with magic cookie + txn ID
-		buf := []byte{0, 0x02} // Family: IPv6
-		binary.BigEndian.AppendUint16(buf, uint16(addr.Port)^uint16(stunMagicCookie>>16))
+		// IPv6: family + xor-port + xor-address(16). XOR key for the address
+		// is magic-cookie || txn-id (RFC 5389 §15.2).
 		ip := addr.IP.To16()
-		xorKey := make([]byte, 16)
+		buf := make([]byte, 4+16)
+		buf[0] = 0
+		buf[1] = 0x02 // Family: IPv6
+		binary.BigEndian.PutUint16(buf[2:4], uint16(addr.Port)^uint16(stunMagicCookie>>16))
+		var xorKey [16]byte
 		binary.BigEndian.PutUint32(xorKey[0:4], stunMagicCookie)
 		copy(xorKey[4:], txnID[:])
-		for i := range ip {
-			buf = append(buf, ip[i]^xorKey[i])
+		for i := 0; i < 16; i++ {
+			buf[4+i] = ip[i] ^ xorKey[i]
 		}
 		return buf
 	}
