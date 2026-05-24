@@ -11,6 +11,7 @@ cat, caption, behavior. \
 cat: true ONLY if a real cat (domestic feline) is clearly visible; \
 false if the frame shows a dog, person, object, empty room, or no cat. \
 caption: one detailed English sentence (15-25 words) describing the main subject and surroundings. \
+Use only English letters, numbers, and standard punctuation — never Arabic, Chinese, or other non-Latin characters. \
 behavior: one of EXACTLY these eight values: eating, drinking, sleeping, playing, resting, moving, grooming, other. \
 If cat is false, behavior MUST be \"other\". \
 CRITICAL: Every string value MUST be in double quotes. No bbox. No arrays. No markdown.";
@@ -111,7 +112,7 @@ const DAY_SUMMARY_SYSTEM: &str = "あなたはペットカメラの観察記録�
 ユーザーから、1日分の猫の観察記録（時刻付き、英語の短文）が渡されます。\
 次の規則に厳密に従って、自然な日本語で要約してください。\n\
 1. 出力は日本語の文 2 文のみ。箇条書き・見出し・記号・コードブロック・JSON は禁止。\n\
-2. 中国語・英語・ローマ字を混ぜない。\n\
+2. 日本語のみで書く。中国語・英語・ローマ字・アラビア文字・その他の非日本語文字を混ぜない。\n\
 3. 観察記録にない時刻・行動・場所・人物・猫の名前を作らない。\n\
 4. 観察が 1〜2 件のときは、パターンや傾向ではなくその場面だけを淡々と書く。\n\
 5. 猫は「猫」と呼ぶ。";
@@ -290,7 +291,7 @@ impl VlmClient {
                         .map(|c| c.message.content.as_str())
                         .unwrap_or("");
 
-                    return parse_vlm_response(content);
+                    return parse_vlm_response(&strip_arabic(content));
                 }
                 Err(e) => {
                     last_err = format!("VLM request failed: {e}");
@@ -365,7 +366,7 @@ impl VlmClient {
                         .first()
                         .map(|c| c.message.content.as_str())
                         .unwrap_or("");
-                    return parse_vlm_response(content);
+                    return parse_vlm_response(&strip_arabic(content));
                 }
                 Err(e) => {
                     last_err = format!("VLM request failed: {e}");
@@ -454,7 +455,7 @@ impl VlmClient {
         Ok(chat_resp
             .choices
             .first()
-            .map(|c| strip_think(&c.message.content))
+            .map(|c| strip_arabic(&strip_think(&c.message.content)))
             .unwrap_or_default())
     }
 
@@ -615,6 +616,14 @@ struct ModelsResponse {
 #[derive(Deserialize)]
 struct ModelEntry {
     id: String,
+}
+
+/// Remove Arabic Unicode block characters (U+0600–U+06FF) injected by
+/// GPTQ Int4 token degradation in Qwen3.5-2B.
+fn strip_arabic(text: &str) -> String {
+    text.chars()
+        .filter(|&c| !('\u{0600}'..='\u{06FF}').contains(&c))
+        .collect()
 }
 
 /// Remove `<think>...</think>` blocks (Qwen3.5 reasoning models leak these
