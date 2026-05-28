@@ -121,6 +121,36 @@ func TestParseOfferCapturesFmtpLine(t *testing.T) {
 	}
 }
 
+func TestParseOfferLowercaseH265(t *testing.T) {
+	// Android/libwebrtc stacks send lowercase `h265/90000`. A non-96 PT (99)
+	// distinguishes a real case-insensitive match from the PT=96 fallback.
+	offerSDP := strings.Join([]string{
+		"v=0",
+		"o=- 1 2 IN IP4 0.0.0.0",
+		"s=-",
+		"t=0 0",
+		"a=group:BUNDLE 0",
+		"m=video 9 UDP/TLS/RTP/SAVPF 99",
+		"c=IN IP4 0.0.0.0",
+		"a=ice-ufrag:abcd",
+		"a=ice-pwd:0123456789abcdef012345",
+		"a=fingerprint:sha-256 AA:BB:CC:DD",
+		"a=setup:actpass",
+		"a=mid:0",
+		"a=rtpmap:99 h265/90000",
+		"a=sendrecv",
+		"",
+	}, "\r\n")
+
+	offer, err := ParseOffer(offerSDP)
+	if err != nil {
+		t.Fatalf("ParseOffer: %v", err)
+	}
+	if offer.PayloadType != 99 {
+		t.Errorf("PayloadType = %d, want 99 (lowercase h265 should match, not fall back to 96)", offer.PayloadType)
+	}
+}
+
 func TestGenerateAnswerEmitsIPv6Connection(t *testing.T) {
 	v6 := net.ParseIP("240d:f:dd4:d800:a4e3:36ff:fea9:bcc6")
 	v4 := net.ParseIP("192.168.1.10").To4()
@@ -137,8 +167,10 @@ func TestGenerateAnswerEmitsIPv6Connection(t *testing.T) {
 	if !strings.Contains(answer, "c=IN IP6 240d:f:dd4:d800:a4e3:36ff:fea9:bcc6\r\n") {
 		t.Errorf("c= line should declare v6 primary:\n%s", answer)
 	}
-	if !strings.Contains(answer, "a=rtcp:20000 IN IP6 ") {
-		t.Errorf("a=rtcp should match c= address family:\n%s", answer)
+	// RFC 5761 §5.1.3: with rtcp-mux the a=rtcp line is the fixed muxed
+	// placeholder regardless of the c= address family.
+	if !strings.Contains(answer, "a=rtcp:9 IN IP4 0.0.0.0\r\n") {
+		t.Errorf("a=rtcp should be the rtcp-mux placeholder:\n%s", answer)
 	}
 	// Both candidates must appear; v6 first so it gets higher priority.
 	if !strings.Contains(answer, "a=candidate:1 1 udp ") || !strings.Contains(answer, "240d:f:dd4:d800:a4e3:36ff:fea9:bcc6 20000 typ host") {

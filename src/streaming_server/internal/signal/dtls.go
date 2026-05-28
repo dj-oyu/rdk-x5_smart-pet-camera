@@ -49,7 +49,15 @@ type DTLSSession struct {
 
 // HandshakeDTLS performs DTLS handshake as server on the given packet connection.
 // The conn should already be multiplexed (STUN/DTLS/SRTP demuxed).
-func HandshakeDTLS(conn net.PacketConn, remoteAddr net.Addr, config *DTLSConfig) (*DTLSSession, error) {
+//
+// peerFingerprint は SDP offer の a=fingerprint で広告された SHA-256 値
+// ("XX:XX:..." colon-separated uppercase hex)。ハンドシェイク中、ピア証明書を
+// この値とピン留め照合し、不一致なら handshake を中断する (RFC 8122 §5)。
+// これにより、ICE/DTLS 経路上の MITM が別証明書をすり替える攻撃を防ぐ。
+// 照合は VerifyPeerCertificate コールバックで行う。証明書チェーン自体は
+// CA で検証できない自己署名なので InsecureSkipVerify は true のまま残すが、
+// fingerprint ピン留めが実質的な認証となる。
+func HandshakeDTLS(conn net.PacketConn, remoteAddr net.Addr, config *DTLSConfig, peerFingerprint string) (*DTLSSession, error) {
 	dtlsConfig := &dtls.Config{
 		Certificates:         []tls.Certificate{config.Certificate},
 		ExtendedMasterSecret: dtls.RequireExtendedMasterSecret,
@@ -57,7 +65,29 @@ func HandshakeDTLS(conn net.PacketConn, remoteAddr net.Addr, config *DTLSConfig)
 			dtls.SRTP_AES128_CM_HMAC_SHA1_80,
 		},
 		// We are server (passive in SDP setup)
-		InsecureSkipVerify: true, // Browser cert is not pre-known
+		InsecureSkipVerify: true, // Browser cert is not pre-known (self-signed)
+		// As DTLS server we must explicitly request the client (browser)
+		// certificate, otherwise VerifyPeerCertificate has nothing to pin.
+		// 既定の NoClientCert ではブラウザ証明書が送られず照合できないため、
+		// チェーン検証なしで証明書だけ要求する RequireAnyClientCert を使う。
+		ClientAuth: dtls.RequireAnyClientCert,
+		// Pin the peer certificate against the SDP-advertised fingerprint.
+		// InsecureSkipVerify=true でも本コールバックは呼ばれる
+		// (verifiedChains は nil になる)。RFC 8122 §5 の指紋照合。
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			if peerFingerprint == "" {
+				return fmt.Errorf("dtls: no peer fingerprint to verify against")
+			}
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("dtls: peer presented no certificate")
+			}
+			sum := sha256.Sum256(rawCerts[0])
+			got := formatFingerprint(sum[:]) // "XX:XX:..."
+			if !strings.EqualFold(got, peerFingerprint) {
+				return fmt.Errorf("dtls: peer fingerprint mismatch: got %s want %s", got, peerFingerprint)
+			}
+			return nil
+		},
 	}
 
 	// pion/dtls manages its own timeouts internally via SetReadDeadline.

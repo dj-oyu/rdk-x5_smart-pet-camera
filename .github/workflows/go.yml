@@ -44,9 +44,15 @@ jobs:
         with:
           go-version-file: src/streaming_server/go.mod
           cache-dependency-path: src/streaming_server/go.sum
+      # Pure-Go packages only. internal/shm + internal/webmonitor and the
+      # cmd/* binaries link vendor/hardware libs (-lhbmem -L/usr/hobot/lib,
+      # -lfreetype, -lNano2D, ...) that only exist on the RDK X5 board, so they
+      # cannot be built on a stock runner — they are validated on-device.
       - name: go vet (pure-Go packages)
+        env:
+          CGO_ENABLED: 0
         run: |
-          go vet ./internal/flaskcompat/... ./internal/logger/... ./internal/metrics/... ./internal/recorder/... ./pkg/...
+          go vet ./internal/codec/... ./internal/flaskcompat/... ./internal/logger/... ./internal/metrics/... ./internal/recorder/... ./internal/rtppack/... ./internal/signal/... ./internal/srtp/... ./pkg/...
 
   test:
     name: go test
@@ -60,6 +66,10 @@ jobs:
         with:
           go-version-file: src/streaming_server/go.mod
           cache-dependency-path: src/streaming_server/go.sum
-      - name: go test (pure-Go packages)
+      # -race needs the host C toolchain (CGO); the runner is amd64 so it links
+      # cleanly (unlike the aarch64 board, where the race runtime fails to
+      # link). None of these packages use cgo themselves, so no vendor libs are
+      # pulled. Scope excludes cmd/* + shm/webmonitor (board-only vendor libs).
+      - name: go test (pure-Go packages, race)
         run: |
-          go test ./internal/flaskcompat/... -v -count=1
+          go test -race -count=1 -v ./internal/codec/... ./internal/flaskcompat/... ./internal/rtppack/... ./internal/signal/... ./internal/srtp/...

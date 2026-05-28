@@ -140,6 +140,10 @@ func NewServer() (*Server, error) {
 	httpServer := &http.Server{
 		Addr:    *httpAddr,
 		Handler: mux,
+		// 低速クライアント/slowloris 対策のサーバレベルタイムアウト。
+		// Server-level timeouts guard against slow clients / slowloris.
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
 	}
 
 	srv := &Server{
@@ -237,10 +241,15 @@ func (s *Server) readFrames() {
 	sendWg.Add(1)
 	var rtpSeq uint16
 	var rtpSSRC uint32 = 0x12345678
+	// 動的フレームレートでも A/V がずれないよう、RTP タイムスタンプは
+	// FrameNumber ではなく 90kHz の壁時計から導出する。
+	// Derive the RTP timestamp from a wall-clock 90kHz reference so it
+	// stays correct under dynamic frame rate (no A/V skew).
+	streamStart := time.Now()
 	go func() {
 		defer sendWg.Done()
 		for frame := range sendCh {
-			ts := uint32(frame.FrameNumber * 3000) // 90kHz / 30fps = 3000 ticks
+			ts := uint32(time.Since(streamStart).Seconds() * 90000)
 			packets, nextSeq := rtppack.PacketizeH265(frame, rtpSSRC, rtpSeq, ts, 1200)
 			rtpSeq = nextSeq
 			s.signal.SendFrame(packets)
@@ -252,9 +261,18 @@ func (s *Server) readFrames() {
 	}()
 
 	// Ensure the sender goroutine is drained and exited before readFrames returns.
+	// シャットダウン時の drain 順序: sendCh を閉じ → 送信 goroutine を待ち →
+	// その後で recorderChan を閉じる。readFrames は recorderChan への唯一の
+	// 送信者なので、sendWg.Wait() 後に閉じれば取りこぼしなく安全に閉じられ、
+	// distributeRecorder がキュー済みフレームを最後まで range で処理できる。
+	// Drain order on shutdown: close sendCh → wait for the sender → only then
+	// close recorderChan. readFrames is the sole sender into recorderChan, so
+	// closing it after sendWg.Wait() guarantees no further sends and lets
+	// distributeRecorder range over every queued frame to completion.
 	defer func() {
 		close(sendCh)
 		sendWg.Wait()
+		close(s.recorderChan)
 	}()
 
 	// Measure camera frame interval and sync to frame boundary.
@@ -371,26 +389,29 @@ func (s *Server) readFrames() {
 func (s *Server) distributeRecorder() {
 	defer s.wg.Done()
 
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case frame := <-s.recorderChan:
-			// frame.Data is already copied by readFrames (VPU buffer is transient)
-			if s.recorder.SendFrame(frame) {
-				s.metrics.RecorderFramesSent.Add(1)
-			}
-			s.recorderBufPool.Put(&frame.Data) // return buffer to pool
+	// recorderChan を range して、閉じられるまで全フレームを drain する。
+	// ctx.Done() では抜けない — シャットダウン時もキュー済みの録画末尾
+	// (cap 60, 約2秒) を取りこぼさないため。チャネルは readFrames が
+	// 送信完了後に閉じる。
+	// Range over recorderChan and drain every frame until it is closed.
+	// We intentionally do NOT bail on ctx.Done() so that queued tail frames
+	// (cap 60, ~2s) survive shutdown; readFrames closes the channel once it
+	// has finished sending.
+	for frame := range s.recorderChan {
+		// frame.Data is already copied by readFrames (VPU buffer is transient)
+		if s.recorder.SendFrame(frame) {
+			s.metrics.RecorderFramesSent.Add(1)
+		}
+		s.recorderBufPool.Put(&frame.Data) // return buffer to pool
 
-			// Update recording metrics
-			status := s.recorder.GetStatus()
-			if status.Recording {
-				s.metrics.RecordingActive.Store(1)
-				s.metrics.RecordingBytes.Store(status.BytesWritten)
-				s.metrics.RecordingFrames.Store(status.FrameCount)
-			} else {
-				s.metrics.RecordingActive.Store(0)
-			}
+		// Update recording metrics
+		status := s.recorder.GetStatus()
+		if status.Recording {
+			s.metrics.RecordingActive.Store(1)
+			s.metrics.RecordingBytes.Store(status.BytesWritten)
+			s.metrics.RecordingFrames.Store(status.FrameCount)
+		} else {
+			s.metrics.RecordingActive.Store(0)
 		}
 	}
 }
@@ -435,6 +456,9 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// リクエストボディに上限を設けて OOM DoS を防ぐ (cap 64KiB)。
+	// Cap the request body to prevent an unbounded-read OOM DoS.
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	offerJSON, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
