@@ -507,9 +507,12 @@ func (s *Server) removeSession(id string) {
 		sess.closed = true
 		// srtpCtx is immutable software crypto — no Close needed, GC reclaims.
 		sess.udpConn.Close()
+		// framesSent は SendFrame が sess.mu 下でインクリメントするので、
+		// ログ用の読み取りもロック内で行う (race detector が検出した既存バグ)。
+		sent := sess.framesSent
 		sess.mu.Unlock()
 		delete(s.sessions, id)
-		logger.Info("Signal", "Session %s removed (sent: %d frames)", id, sess.framesSent)
+		logger.Info("Signal", "Session %s removed (sent: %d frames)", id, sent)
 	}
 }
 
