@@ -16,19 +16,23 @@ import (
 
 // Session represents a single WebRTC client connection.
 type Session struct {
-	id             string
-	udpConn        *net.UDPConn
-	remoteAddr     *net.UDPAddr
-	iceLite        *ICELite
-	srtpCtx        *srtp.Context
-	ssrc           uint32
-	seq            uint16
-	payloadType    uint8 // H.265 PT from SDP negotiation
-	mu             sync.Mutex
-	closed         bool
-	framesSent     uint64
-	enableICEFull  bool
-	peerCandidates []OfferCandidate
+	id          string
+	udpConn     *net.UDPConn
+	remoteAddr  *net.UDPAddr
+	iceLite     *ICELite
+	srtpCtx     *srtp.Context
+	ssrc        uint32
+	seq         uint16
+	payloadType uint8 // H.265 PT from SDP negotiation
+	// peerFingerprint は SDP offer の DTLS fingerprint。DTLS handshake 中に
+	// pin して MITM を防ぐ (SDP offer's DTLS fingerprint, pinned during the
+	// DTLS handshake).
+	peerFingerprint string
+	mu              sync.Mutex
+	closed          bool
+	framesSent      uint64
+	enableICEFull   bool
+	peerCandidates  []OfferCandidate
 	// conn pins the source IP for outgoing v6 packets so it matches the
 	// host candidate we advertised (see sessionconn.go). Always set; v4-
 	// only or no-v6-candidate sessions still go through it as a plain
@@ -131,8 +135,10 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 	// Generate ICE credentials
 	localUfrag, localPwd := GenerateICECredentials()
 
-	// Generate SDP answer
-	const sessSSRC uint32 = 0x12345678
+	// Generate SDP answer. 各セッションごとに一意な SSRC を採番する
+	// (per-session SSRC) — 全セッション共通の固定値だと RTCP feedback の
+	// ルーティングができないため。
+	sessSSRC := generateSSRC()
 	answerSDP := GenerateAnswer(&AnswerParams{
 		ICEUfrag:        localUfrag,
 		ICEPwd:          localPwd,
@@ -150,18 +156,27 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 	// one v6 candidate; for v4 dsts and v4-only sessions it passes the
 	// write straight through to udpConn.
 	sess := &Session{
-		id:             fmt.Sprintf("ws-%d", port),
-		udpConn:        udpConn,
-		conn:           newSessionConn(udpConn, firstV6(s.candidateIPs)),
-		iceLite:        NewICELite(localUfrag, localPwd, offer.ICEUfrag, offer.ICEPwd),
-		ssrc:           sessSSRC,
-		payloadType:    uint8(offer.PayloadType),
-		enableICEFull:  s.cfg.EnableICEFull,
-		peerCandidates: offer.Candidates,
-		pendingChecks:  make(map[string][12]byte),
+		id:              fmt.Sprintf("ws-%d", port),
+		udpConn:         udpConn,
+		conn:            newSessionConn(udpConn, firstV6(s.candidateIPs)),
+		iceLite:         NewICELite(localUfrag, localPwd, offer.ICEUfrag, offer.ICEPwd),
+		ssrc:            sessSSRC,
+		payloadType:     uint8(offer.PayloadType),
+		peerFingerprint: offer.Fingerprint,
+		enableICEFull:   s.cfg.EnableICEFull,
+		peerCandidates:  offer.Candidates,
+		pendingChecks:   make(map[string][12]byte),
 	}
 
+	// Re-check the client limit under the write lock. The RLock check above
+	// is an optimistic fast-reject; concurrent offers could still race past
+	// it (TOCTOU), so the authoritative limit is enforced here at insert time.
 	s.mu.Lock()
+	if len(s.sessions) >= s.cfg.MaxClients {
+		s.mu.Unlock()
+		udpConn.Close()
+		return nil, fmt.Errorf("signal: max clients reached (%d)", s.cfg.MaxClients)
+	}
 	s.sessions[sess.id] = sess
 	s.mu.Unlock()
 
@@ -218,7 +233,7 @@ func (s *Server) runSession(sess *Session) {
 	// advertised (see sessionconn.go).
 	dtlsAdapter := newDTLSPacketConn(sess.udpConn, sess.conn, sess.iceLite, remoteAddr)
 	logger.Info("Signal", "Session %s: starting DTLS handshake...", sess.id)
-	dtlsSess, err := HandshakeDTLS(dtlsAdapter, remoteAddr, s.dtlsConfig)
+	dtlsSess, err := HandshakeDTLS(dtlsAdapter, remoteAddr, s.dtlsConfig, sess.peerFingerprint)
 	if err != nil {
 		logger.Warn("Signal", "Session %s: DTLS handshake failed: %v", sess.id, err)
 		return
@@ -249,7 +264,9 @@ func (s *Server) runSession(sess *Session) {
 	// Read loop to handle any incoming packets (STUN keepalives, RTCP)
 	buf := make([]byte, 1500)
 	for {
-		sess.udpConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		// sendonly セッションは consent-refresh の遅延で 30s だと切断される
+		// ため 45s に緩和する (keepalive timeout)。
+		sess.udpConn.SetReadDeadline(time.Now().Add(45 * time.Second))
 		n, addr, err := sess.udpConn.ReadFromUDP(buf)
 		if err != nil {
 			logger.Info("Signal", "Session %s: connection closed", sess.id)
@@ -375,6 +392,18 @@ func prflxPriority(bump uint16) uint32 {
 	return (typePref << 24) | (localPref << 8) | 255
 }
 
+// generateSSRC returns a random non-zero 32-bit SSRC for a session.
+// SSRC=0 は予約値扱いになりうるため、0 が出たら 1 にフォールバックする。
+func generateSSRC() uint32 {
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	ssrc := binary.BigEndian.Uint32(b[:])
+	if ssrc == 0 {
+		ssrc = 1
+	}
+	return ssrc
+}
+
 // newTiebreaker returns a random 64-bit ICE tiebreaker.
 func newTiebreaker() uint64 {
 	var b [8]byte
@@ -413,9 +442,14 @@ func (s *Server) SendFrame(rtpPackets [][]byte) {
 			buf := make([]byte, len(pkt))
 			copy(buf, pkt)
 			buf[1] = (buf[1] & 0x80) | (pt & 0x7F)
+			// このセッション固有の SSRC でヘッダを書き換える
+			// (per-session SSRC)。SRTP の HMAC は SSRC を含むヘッダを
+			// 認証するため、ヘッダのバイト列と EncryptRTP に渡す ssrc 引数は
+			// 必ず一致させる。よって PutUint32 の後で sess.ssrc を読む。
+			binary.BigEndian.PutUint32(buf[8:12], sess.ssrc)
 
 			seq := uint16(buf[2])<<8 | uint16(buf[3])
-			ssrc := uint32(buf[8])<<24 | uint32(buf[9])<<16 | uint32(buf[10])<<8 | uint32(buf[11])
+			ssrc := sess.ssrc
 
 			encrypted := make([]byte, len(buf)+srtp.AuthTagLen)
 			encrypted, err := srtpCtx.EncryptRTP(encrypted, buf, 12, seq, ssrc)

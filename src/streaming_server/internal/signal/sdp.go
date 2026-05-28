@@ -30,7 +30,9 @@ var (
 	reFingerprint = regexp.MustCompile(`a=fingerprint:sha-256\s+(\S+)`)
 	reSetup       = regexp.MustCompile(`a=setup:(\S+)`)
 	reMID         = regexp.MustCompile(`a=mid:(\S+)`)
-	reRtpmap      = regexp.MustCompile(`a=rtpmap:(\d+)\s+H265/90000`)
+	// (?i): Android/libwebrtc stacks send lowercase `h265/90000`; without the
+	// case-insensitive flag the PT match misses and we fall back to PT=96 → no video.
+	reRtpmap = regexp.MustCompile(`(?i)a=rtpmap:(\d+)\s+H265/90000`)
 )
 
 // ParseOffer extracts relevant fields from a browser SDP offer.
@@ -151,7 +153,9 @@ func GenerateAnswer(p *AnswerParams) string {
 	// by individual ICE candidates, so the first IP is fine.
 	sb.WriteString(fmt.Sprintf("m=video %d UDP/TLS/RTP/SAVPF %d\r\n", p.CandidatePort, p.PayloadType))
 	sb.WriteString(fmt.Sprintf("c=IN %s %s\r\n", connAddrType, primaryIP))
-	sb.WriteString(fmt.Sprintf("a=rtcp:%d IN %s %s\r\n", p.CandidatePort, connAddrType, primaryIP))
+	// RFC 5761 §5.1.3: with rtcp-mux the a=rtcp line must use the muxed
+	// placeholder, not a real RTCP port/address. Emit the fixed form.
+	sb.WriteString("a=rtcp:9 IN IP4 0.0.0.0\r\n")
 
 	// ICE
 	sb.WriteString(fmt.Sprintf("a=ice-ufrag:%s\r\n", p.ICEUfrag))
