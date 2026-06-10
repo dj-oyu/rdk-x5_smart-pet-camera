@@ -68,6 +68,11 @@ static void* switcher_thread(void* arg) {
 
     LOG_INFO("Switcher", "Thread started");
 
+    // Exposure probe throttle: log every Nth poll while DAY is active (250ms
+    // poll -> ~1s cadence). NIGHT polls (5s) and switch events always log.
+    const int probe_every_day_polls = 4;
+    int probe_poll_count = 0;
+
     while (g_running) {
         // Read brightness directly from DAY camera ISP handle
         isp_brightness_result_t brightness = {.valid = false};
@@ -76,6 +81,7 @@ static void* switcher_thread(void* arg) {
         }
 
         if (brightness.valid) {
+            const char* probe_event = NULL;
             CameraSwitchDecision decision = camera_switcher_record_brightness(
                 &ctx->switcher, CAMERA_MODE_DAY, (double)brightness.brightness_avg);
 
@@ -87,6 +93,7 @@ static void* switcher_thread(void* arg) {
                                                          "auto-night");
                     LOG_INFO("Switcher", "Switch: DAY -> NIGHT (brightness=%.1f)",
                              brightness.brightness_avg);
+                    probe_event = "switch-to-night";
                     // Wake inactive pipeline threads immediately
                     pthread_cond_broadcast(&g_pipelines[0].switch_cond);
                     pthread_cond_broadcast(&g_pipelines[1].switch_cond);
@@ -99,10 +106,23 @@ static void* switcher_thread(void* arg) {
                                                          "auto-day");
                     LOG_INFO("Switcher", "Switch: NIGHT -> DAY (brightness=%.1f)",
                              brightness.brightness_avg);
+                    probe_event = "switch-to-day";
                     // Wake inactive pipeline threads immediately
                     pthread_cond_broadcast(&g_pipelines[0].switch_cond);
                     pthread_cond_broadcast(&g_pipelines[1].switch_cond);
                 }
+            }
+
+            // Exposure probe: verification data for the switch-signal redesign.
+            // Reads DAY camera exposure attrs (read-only) at low frequency.
+            probe_poll_count++;
+            const bool night_active = (g_active_camera == 1);
+            if (probe_event || night_active || probe_poll_count >= probe_every_day_polls) {
+                isp_exposure_info_t exp_info;
+                isp_get_exposure_info(g_pipelines[0].vio.isp_handle, &exp_info);
+                isp_exposure_probe_log(&exp_info, brightness.brightness_avg, g_active_camera,
+                                       probe_event ? probe_event : "poll");
+                probe_poll_count = 0;
             }
         }
 

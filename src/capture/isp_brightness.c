@@ -174,6 +174,78 @@ int isp_get_brightness(hbn_vnode_handle_t isp_handle, isp_brightness_result_t* r
 }
 
 // ============================================================================
+// Exposure probe (verification logging for switch-signal redesign)
+// ============================================================================
+
+#define EXPOSURE_PROBE_LOG_PATH "/tmp/isp_exposure_probe.log"
+
+static FILE* g_exposure_probe_file = NULL;
+
+int isp_get_exposure_info(hbn_vnode_handle_t isp_handle, isp_exposure_info_t* info) {
+    if (!info) {
+        return -1;
+    }
+    memset(info, 0, sizeof(*info));
+    info->valid = false;
+
+    if (isp_handle <= 0) {
+        return -1;
+    }
+
+    hbn_isp_exposure_attr_t exp_attr = {0};
+    int ret = hbn_isp_get_exposure_attr(isp_handle, &exp_attr);
+    if (ret != 0) {
+        return -1;
+    }
+
+    info->lock_state = exp_attr.lock_state;
+    info->exp_time = exp_attr.manual_attr.exp_time;
+    info->again = exp_attr.manual_attr.again;
+    info->dgain = exp_attr.manual_attr.dgain;
+    info->ispgain = exp_attr.manual_attr.ispgain;
+    info->ae_exp = exp_attr.manual_attr.ae_exp;
+    info->cur_lux = exp_attr.manual_attr.cur_lux;
+    info->frame_id = exp_attr.manual_attr.frame_id;
+    info->valid = true;
+    return 0;
+}
+
+void isp_exposure_probe_log(const isp_exposure_info_t* info, float brightness_avg,
+                            int active_camera, const char* event) {
+    if (g_exposure_probe_file == NULL) {
+        g_exposure_probe_file = fopen(EXPOSURE_PROBE_LOG_PATH, "a");
+        if (g_exposure_probe_file) {
+            setvbuf(g_exposure_probe_file, NULL, _IOLBF, 0); // Line buffered
+        }
+    }
+    if (!g_exposure_probe_file) {
+        return;
+    }
+
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    localtime_r(&ts.tv_sec, &tm);
+
+    if (!info || !info->valid) {
+        fprintf(g_exposure_probe_file,
+                "%04d/%02d/%02d %02d:%02d:%02d.%03ld active=%s event=%s brightness=%.1f err=1\n",
+                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
+                ts.tv_nsec / 1000000, active_camera == 0 ? "DAY" : "NIGHT",
+                event ? event : "poll", brightness_avg);
+        return;
+    }
+
+    fprintf(g_exposure_probe_file,
+            "%04d/%02d/%02d %02d:%02d:%02d.%03ld active=%s event=%s brightness=%.1f cur_lux=%u "
+            "exp_time=%.6f again=%.3f dgain=%.3f ispgain=%.3f ae_exp=%.1f lock=%u frame=%u\n",
+            tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
+            ts.tv_nsec / 1000000, active_camera == 0 ? "DAY" : "NIGHT", event ? event : "poll",
+            brightness_avg, info->cur_lux, info->exp_time, info->again, info->dgain, info->ispgain,
+            info->ae_exp, info->lock_state, info->frame_id);
+}
+
+// ============================================================================
 // Low-light correction implementation
 // ============================================================================
 

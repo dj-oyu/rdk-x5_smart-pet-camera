@@ -60,6 +60,47 @@ int isp_get_brightness(hbn_vnode_handle_t isp_handle, isp_brightness_result_t* r
 BrightnessZone isp_classify_brightness_zone(float brightness_avg, uint32_t cur_lux);
 
 /**
+ * Exposure state snapshot from ISP (AE loop output)
+ *
+ * Used by the exposure probe logging to evaluate whether exposure-derived
+ * signals (cur_lux, gains, exp_time) are a viable day/night switch source.
+ */
+typedef struct {
+    bool valid;          // True if hbn_isp_get_exposure_attr succeeded
+    uint32_t lock_state; // AE convergence state (non-zero = converged)
+    float exp_time;      // Exposure time in seconds
+    float again;         // Analog gain
+    float dgain;         // Digital gain
+    float ispgain;       // ISP digital gain
+    float ae_exp;        // AE exposure value
+    uint32_t cur_lux;    // Environment illuminance reported by ISP
+    uint32_t frame_id;   // Frame ID from exposure attributes
+} isp_exposure_info_t;
+
+/**
+ * Get exposure attributes from ISP hardware
+ *
+ * Reads hbn_isp_get_exposure_attr (manual_attr snapshot + lock_state).
+ * Read-only; does not modify exposure settings.
+ *
+ * Returns:
+ *   0 on success, -1 on error (info->valid is set accordingly)
+ */
+int isp_get_exposure_info(hbn_vnode_handle_t isp_handle, isp_exposure_info_t* info);
+
+/**
+ * Append one exposure probe record to /tmp/isp_exposure_probe.log
+ *
+ * Args:
+ *   info: Exposure snapshot (may be invalid; logged with err flag)
+ *   brightness_avg: Current AE-statistics brightness for correlation
+ *   active_camera: 0=DAY, 1=NIGHT
+ *   event: Record tag, e.g. "poll", "switch-to-night", "switch-to-day"
+ */
+void isp_exposure_probe_log(const isp_exposure_info_t* info, float brightness_avg,
+                            int active_camera, const char* event);
+
+/**
  * Low-light correction state (for hysteresis tracking)
  */
 typedef struct {
