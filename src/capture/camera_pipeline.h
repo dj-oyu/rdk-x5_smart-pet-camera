@@ -16,7 +16,7 @@
 #include "encoder_lowlevel.h"
 #include "encoder_thread.h"
 #include "shared_memory.h"
-#include "isp_brightness.h" // For isp_lowlight_state_t
+#include "isp_brightness.h" // For isp_brightness_result_t
 
 /**
  * NV12 sampling configuration
@@ -47,7 +47,7 @@ typedef struct {
     ZeroCopyFrameBuffer* shm_roi_zc[NUM_ROI_REGIONS];
 
     // Shared state (same process, no SHM needed)
-    volatile int* active_camera;
+    const _Atomic int* active_camera; // written by switcher thread, read here
 
     // Condition variable for inactive camera blocking
     pthread_mutex_t switch_mutex;
@@ -58,9 +58,6 @@ typedef struct {
 
     // NV12 sampling configuration (deprecated in new design)
     nv12_sampling_config_t nv12_sampling;
-
-    // Low-light correction state (Phase 2: ISP auto-correction)
-    isp_lowlight_state_t lowlight_state;
 
     // Configuration
     int camera_index;
@@ -97,7 +94,7 @@ typedef struct {
  */
 int pipeline_create(camera_pipeline_t* pipeline, int camera_index, int sensor_width,
                     int sensor_height, int output_width, int output_height, int fps, int bitrate,
-                    volatile int* active_camera);
+                    const _Atomic int* active_camera);
 
 /**
  * Start camera pipeline

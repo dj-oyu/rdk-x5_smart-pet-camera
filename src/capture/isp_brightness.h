@@ -1,8 +1,8 @@
 /**
  * isp_brightness.h - ISP brightness statistics module
  *
- * Provides hardware-accelerated brightness measurement using ISP AE statistics.
- * Used for low-light detection and automatic ISP correction.
+ * Read-only access to ISP hardware state: AE-statistics brightness and
+ * exposure attributes. Switch-signal policy lives in switch_signal.h.
  */
 
 #ifndef ISP_BRIGHTNESS_H
@@ -87,64 +87,5 @@ typedef struct {
  *   0 on success, -1 on error (info->valid is set accordingly)
  */
 int isp_get_exposure_info(hbn_vnode_handle_t isp_handle, isp_exposure_info_t* info);
-
-/**
- * Append one exposure probe record to /tmp/isp_exposure_probe.log
- *
- * Args:
- *   info: Exposure snapshot (may be invalid; logged with err flag)
- *   brightness_avg: Current AE-statistics brightness for correlation
- *   active_camera: 0=DAY, 1=NIGHT
- *   event: Record tag, e.g. "poll", "switch-to-night", "switch-to-day"
- */
-void isp_exposure_probe_log(const isp_exposure_info_t* info, float brightness_avg,
-                            int active_camera, const char* event);
-
-/**
- * Low-light correction state (for hysteresis tracking)
- */
-typedef struct {
-    bool correction_active;       // True if low-light correction is currently applied
-    BrightnessZone current_zone;  // Last applied zone
-    double below_threshold_since; // Timestamp when brightness dropped below threshold (-1 if not)
-    double above_threshold_since; // Timestamp when brightness rose above threshold (-1 if not)
-} isp_lowlight_state_t;
-
-/**
- * Initialize low-light correction state
- */
-void isp_lowlight_state_init(isp_lowlight_state_t* state);
-
-/**
- * Apply low-light correction profile based on brightness zone
- *
- * Sets ISP color processing (brightness, contrast, saturation) and gamma
- * correction parameters for the given zone.
- *
- * Args:
- *   isp_handle: ISP vnode handle
- *   zone: Target brightness zone
- *
- * Returns:
- *   0 on success, -1 on error
- */
-int isp_apply_lowlight_profile(hbn_vnode_handle_t isp_handle, BrightnessZone zone);
-
-/**
- * Update low-light correction with hysteresis
- *
- * Checks if correction should be enabled/disabled based on current brightness
- * and hysteresis thresholds. Applies profile if state changes.
- *
- * Args:
- *   isp_handle: ISP vnode handle
- *   state: Low-light state to track hysteresis
- *   brightness_result: Current brightness measurement
- *
- * Returns:
- *   true if correction is active after update, false otherwise
- */
-bool isp_update_lowlight_correction(hbn_vnode_handle_t isp_handle, isp_lowlight_state_t* state,
-                                    const isp_brightness_result_t* brightness_result);
 
 #endif // ISP_BRIGHTNESS_H

@@ -1,12 +1,11 @@
 /**
  * isp_brightness.c - ISP brightness statistics implementation
  *
- * Uses D-Robotics ISP API to get hardware-calculated brightness statistics
- * and applies low-light correction profiles.
+ * Uses D-Robotics ISP API to read hardware-calculated brightness statistics
+ * and exposure attributes. Read-only; no ISP settings are modified here.
  */
 
 #include "isp_brightness.h"
-#include "isp_lowlight_profile.h"
 #include "logger.h"
 
 #include <hbn_api.h>
@@ -60,9 +59,6 @@ static void lowlight_log(const char* level, const char* fmt, ...) {
 }
 
 #define LOWLIGHT_LOG_DEBUG(fmt, ...) lowlight_log("DEBUG", fmt, ##__VA_ARGS__)
-#define LOWLIGHT_LOG_INFO(fmt, ...)  lowlight_log("INFO", fmt, ##__VA_ARGS__)
-#define LOWLIGHT_LOG_WARN(fmt, ...)  lowlight_log("WARN", fmt, ##__VA_ARGS__)
-#define LOWLIGHT_LOG_ERROR(fmt, ...) lowlight_log("ERROR", fmt, ##__VA_ARGS__)
 
 // ISP AE statistics grid: 32x32 = 1024 zones, 4 channels each
 #define AE_GRID_SIZE  32
@@ -174,12 +170,8 @@ int isp_get_brightness(hbn_vnode_handle_t isp_handle, isp_brightness_result_t* r
 }
 
 // ============================================================================
-// Exposure probe (verification logging for switch-signal redesign)
+// Exposure attributes (read-only AE loop output)
 // ============================================================================
-
-#define EXPOSURE_PROBE_LOG_PATH "/tmp/isp_exposure_probe.log"
-
-static FILE* g_exposure_probe_file = NULL;
 
 int isp_get_exposure_info(hbn_vnode_handle_t isp_handle, isp_exposure_info_t* info) {
     if (!info) {
@@ -208,183 +200,4 @@ int isp_get_exposure_info(hbn_vnode_handle_t isp_handle, isp_exposure_info_t* in
     info->frame_id = exp_attr.manual_attr.frame_id;
     info->valid = true;
     return 0;
-}
-
-void isp_exposure_probe_log(const isp_exposure_info_t* info, float brightness_avg,
-                            int active_camera, const char* event) {
-    if (g_exposure_probe_file == NULL) {
-        g_exposure_probe_file = fopen(EXPOSURE_PROBE_LOG_PATH, "a");
-        if (g_exposure_probe_file) {
-            setvbuf(g_exposure_probe_file, NULL, _IOLBF, 0); // Line buffered
-        }
-    }
-    if (!g_exposure_probe_file) {
-        return;
-    }
-
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    struct tm tm;
-    localtime_r(&ts.tv_sec, &tm);
-
-    if (!info || !info->valid) {
-        fprintf(g_exposure_probe_file,
-                "%04d/%02d/%02d %02d:%02d:%02d.%03ld active=%s event=%s brightness=%.1f err=1\n",
-                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
-                ts.tv_nsec / 1000000, active_camera == 0 ? "DAY" : "NIGHT",
-                event ? event : "poll", brightness_avg);
-        return;
-    }
-
-    fprintf(g_exposure_probe_file,
-            "%04d/%02d/%02d %02d:%02d:%02d.%03ld active=%s event=%s brightness=%.1f cur_lux=%u "
-            "exp_time=%.6f again=%.3f dgain=%.3f ispgain=%.3f ae_exp=%.1f lock=%u frame=%u\n",
-            tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
-            ts.tv_nsec / 1000000, active_camera == 0 ? "DAY" : "NIGHT", event ? event : "poll",
-            brightness_avg, info->cur_lux, info->exp_time, info->again, info->dgain, info->ispgain,
-            info->ae_exp, info->lock_state, info->frame_id);
-}
-
-// ============================================================================
-// Low-light correction implementation
-// ============================================================================
-
-static double get_time_seconds(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec + ts.tv_nsec / 1e9;
-}
-
-void isp_lowlight_state_init(isp_lowlight_state_t* state) {
-    if (!state)
-        return;
-    state->correction_active = false;
-    state->current_zone = BRIGHTNESS_ZONE_NORMAL;
-    state->below_threshold_since = -1.0;
-    state->above_threshold_since = -1.0;
-    LOWLIGHT_LOG_INFO("Low-light state initialized");
-}
-
-int isp_apply_lowlight_profile(hbn_vnode_handle_t isp_handle, BrightnessZone zone) {
-    if (isp_handle <= 0) {
-        LOG_ERROR("ISP_Lowlight", "Invalid ISP handle");
-        return -1;
-    }
-
-    const isp_lowlight_profile_t profile = isp_get_profile_for_zone(zone);
-    int ret;
-
-    // Apply 3DNR (Temporal Noise Reduction) only
-    // 2DNR is disabled to minimize ISP API calls and avoid frame drops
-    // Skip hbn_isp_get_3dnr_attr() - directly set to avoid frame drops
-    hbn_isp_3dnr_attr_t tnr_attr = {0};
-    tnr_attr.mode = HBN_ISP_MODE_MANUAL;
-    tnr_attr.manual_attr.tnr_strength = (uint8_t)profile.denoise_3d;
-
-    ret = hbn_isp_set_3dnr_attr(isp_handle, &tnr_attr);
-    if (ret != 0) {
-        LOG_WARN("ISP_Lowlight", "Failed to set 3DNR attr: %d", ret);
-    } else {
-        LOWLIGHT_LOG_INFO("3DNR: -> %d (zone=%d)", profile.denoise_3d, zone);
-    }
-
-    LOG_INFO("ISP_Lowlight", "Applied zone %d: 3DNR=%d", zone, profile.denoise_3d);
-
-    return 0;
-}
-
-bool isp_update_lowlight_correction(hbn_vnode_handle_t isp_handle, isp_lowlight_state_t* state,
-                                    const isp_brightness_result_t* brightness_result) {
-    if (!state || !brightness_result || !brightness_result->valid) {
-        return state ? state->correction_active : false;
-    }
-
-    const isp_lowlight_hysteresis_t hyst = DEFAULT_HYSTERESIS;
-    const double now = get_time_seconds();
-    const float brightness = brightness_result->brightness_avg;
-    const BrightnessZone zone = brightness_result->zone;
-
-    // Log brightness periodically for debugging (every ~1 second based on frame rate)
-    static int log_counter = 0;
-    if (++log_counter >= 30) {
-        LOWLIGHT_LOG_DEBUG(
-            "brightness=%.1f lux=%u zone=%d correction=%d threshold_on=%.1f threshold_off=%.1f",
-            brightness, brightness_result->brightness_lux, zone, state->correction_active,
-            hyst.correction_on_threshold, hyst.correction_off_threshold);
-        log_counter = 0;
-    }
-
-    if (!state->correction_active) {
-        // Currently OFF - check if we should turn ON
-        if (brightness < hyst.correction_on_threshold) {
-            if (state->below_threshold_since < 0) {
-                state->below_threshold_since = now;
-                LOG_DEBUG("ISP_Lowlight", "Brightness %.1f below threshold, starting hold timer",
-                          brightness);
-                LOWLIGHT_LOG_INFO("Brightness %.1f below threshold %.1f, starting hold timer",
-                                  brightness, hyst.correction_on_threshold);
-            }
-            double elapsed = now - state->below_threshold_since;
-            if (elapsed >= hyst.hold_time_on_sec) {
-                // Enable correction
-                LOG_INFO("ISP_Lowlight",
-                         "Enabling low-light correction (brightness=%.1f, held for %.1fs)",
-                         brightness, elapsed);
-                LOWLIGHT_LOG_INFO(
-                    ">>> ENABLING low-light correction (brightness=%.1f, zone=%d, held for %.1fs)",
-                    brightness, zone, elapsed);
-                if (isp_apply_lowlight_profile(isp_handle, zone) == 0) {
-                    state->correction_active = true;
-                    state->current_zone = zone;
-                }
-                state->below_threshold_since = -1.0;
-            }
-        } else {
-            state->below_threshold_since = -1.0; // Reset timer
-        }
-        state->above_threshold_since = -1.0; // Clear other timer
-    } else {
-        // Currently ON - check if we should turn OFF
-        if (brightness > hyst.correction_off_threshold) {
-            if (state->above_threshold_since < 0) {
-                state->above_threshold_since = now;
-                LOG_DEBUG("ISP_Lowlight", "Brightness %.1f above threshold, starting hold timer",
-                          brightness);
-                LOWLIGHT_LOG_INFO("Brightness %.1f above threshold %.1f, starting hold timer",
-                                  brightness, hyst.correction_off_threshold);
-            }
-            double elapsed = now - state->above_threshold_since;
-            if (elapsed >= hyst.hold_time_off_sec) {
-                // Disable correction (apply NORMAL profile)
-                LOG_INFO("ISP_Lowlight",
-                         "Disabling low-light correction (brightness=%.1f, held for %.1fs)",
-                         brightness, elapsed);
-                LOWLIGHT_LOG_INFO(
-                    "<<< DISABLING low-light correction (brightness=%.1f, held for %.1fs)",
-                    brightness, elapsed);
-                if (isp_apply_lowlight_profile(isp_handle, BRIGHTNESS_ZONE_NORMAL) == 0) {
-                    state->correction_active = false;
-                    state->current_zone = BRIGHTNESS_ZONE_NORMAL;
-                }
-                state->above_threshold_since = -1.0;
-            }
-        } else {
-            state->above_threshold_since = -1.0; // Reset timer
-
-            // While correction is active, update zone if it changes significantly
-            if (zone != state->current_zone && zone != BRIGHTNESS_ZONE_NORMAL &&
-                zone != BRIGHTNESS_ZONE_BRIGHT) {
-                LOG_DEBUG("ISP_Lowlight", "Zone changed from %d to %d, updating profile",
-                          state->current_zone, zone);
-                LOWLIGHT_LOG_INFO("Zone changed from %d to %d, updating profile",
-                                  state->current_zone, zone);
-                if (isp_apply_lowlight_profile(isp_handle, zone) == 0) {
-                    state->current_zone = zone;
-                }
-            }
-        }
-        state->below_threshold_since = -1.0; // Clear other timer
-    }
-
-    return state->correction_active;
 }

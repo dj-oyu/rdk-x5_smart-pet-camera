@@ -1,0 +1,72 @@
+/**
+ * switch_signal.c - Day/night switch signal source
+ */
+
+#include "switch_signal.h"
+
+#include <stdio.h>
+#include <time.h>
+
+#define EXPOSURE_PROBE_LOG_PATH "/tmp/isp_exposure_probe.log"
+
+static FILE* g_probe_file = NULL;
+
+int switch_signal_read(hbn_vnode_handle_t isp_handle, switch_signal_sample_t* out) {
+    if (!out) {
+        return -1;
+    }
+    out->valid = false;
+    out->value = 0.0;
+
+    isp_get_brightness(isp_handle, &out->brightness);
+    isp_get_exposure_info(isp_handle, &out->exposure);
+
+    if (!out->brightness.valid) {
+        return -1;
+    }
+
+    // Signal v1: AE-statistics brightness average (0-255).
+    // Swap point for the gain-normalized scene luminance:
+    //   value = brightness_avg / (exp_time * again * dgain * ispgain)
+    // (requires out->exposure.valid and recalibrated thresholds)
+    out->value = (double)out->brightness.brightness_avg;
+    out->valid = true;
+    return 0;
+}
+
+void switch_signal_probe_log(const switch_signal_sample_t* sample, int active_camera,
+                             const char* event) {
+    if (g_probe_file == NULL) {
+        g_probe_file = fopen(EXPOSURE_PROBE_LOG_PATH, "a");
+        if (g_probe_file) {
+            setvbuf(g_probe_file, NULL, _IOLBF, 0); // Line buffered
+        }
+    }
+    if (!g_probe_file || !sample) {
+        return;
+    }
+
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    localtime_r(&ts.tv_sec, &tm);
+
+    const char* active = (active_camera == 0) ? "DAY" : "NIGHT";
+    const char* tag = event ? event : "poll";
+
+    if (!sample->valid || !sample->exposure.valid) {
+        fprintf(g_probe_file,
+                "%04d/%02d/%02d %02d:%02d:%02d.%03ld active=%s event=%s brightness=%.1f err=1\n",
+                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
+                ts.tv_nsec / 1000000, active, tag, sample->brightness.brightness_avg);
+        return;
+    }
+
+    const isp_exposure_info_t* e = &sample->exposure;
+    fprintf(g_probe_file,
+            "%04d/%02d/%02d %02d:%02d:%02d.%03ld active=%s event=%s brightness=%.1f cur_lux=%u "
+            "exp_time=%.6f again=%.3f dgain=%.3f ispgain=%.3f ae_exp=%.1f lock=%u frame=%u\n",
+            tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
+            ts.tv_nsec / 1000000, active, tag, sample->brightness.brightness_avg, e->cur_lux,
+            e->exp_time, e->again, e->dgain, e->ispgain, e->ae_exp, e->lock_state, e->frame_id);
+}

@@ -20,7 +20,7 @@ char Pipeline_log_header[16];
 
 int pipeline_create(camera_pipeline_t* pipeline, int camera_index, int sensor_width,
                     int sensor_height, int output_width, int output_height, int fps, int bitrate,
-                    volatile int* active_camera) {
+                    const _Atomic int* active_camera) {
     int ret = 0;
 
     snprintf(Pipeline_log_header, sizeof(Pipeline_log_header), "Pipeline %d", camera_index);
@@ -125,9 +125,6 @@ int pipeline_create(camera_pipeline_t* pipeline, int camera_index, int sensor_wi
         LOG_ERROR(Pipeline_log_header, "encoder_thread_create failed: %d", ret);
         goto error_cleanup;
     }
-
-    // Initialize low-light correction state (Phase 2)
-    isp_lowlight_state_init(&pipeline->lowlight_state);
 
     // Night camera 3DNR is set after first frame in pipeline_run
 
