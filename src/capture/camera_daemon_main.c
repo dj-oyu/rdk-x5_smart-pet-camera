@@ -139,10 +139,13 @@ int main(int argc, char* argv[]) {
     log_level_t log_level = LOG_LEVEL_INFO;
     int single_camera = -1; // -1 = dual, 0 = day only, 1 = night only
 
-    // Day/night switch tuning (overridable for threshold calibration)
+    // Day/night switch tuning (overridable for threshold calibration).
+    // Thresholds are in gain-normalized luminance L (see switch_signal.h),
+    // designed from probe-log analysis 2026-06-10..13: true darkness L<15,
+    // dimmest usable daylight L>90; dark-object dips bottom out at L~260.
     CameraSwitchConfig switch_cfg = {
-        .day_to_night_threshold = 50.0,
-        .night_to_day_threshold = 60.0,
+        .day_to_night_threshold = 40.0,
+        .night_to_day_threshold = 80.0,
         .day_to_night_hold_seconds = 0.5, // short on purpose: minimize dark frames at dusk
         .night_to_day_hold_seconds = 3.0,
         .warmup_frames = 15,
@@ -206,8 +209,8 @@ int main(int argc, char* argv[]) {
             printf("Usage: %s [-W width] [-H height] [-f fps] [-b bitrate] [-C camera] [-v]\n",
                    argv[0]);
             printf("  -C N   Single camera mode (0=day, 1=night). Default: dual mode\n");
-            printf("  --day-night-threshold V  Switch signal below V goes NIGHT (default 50)\n");
-            printf("  --night-day-threshold V  Switch signal above V goes DAY (default 60)\n");
+            printf("  --day-night-threshold V  Switch signal below V goes NIGHT (default 40)\n");
+            printf("  --night-day-threshold V  Switch signal above V goes DAY (default 80)\n");
             printf("  --day-night-hold S       Hold seconds before DAY->NIGHT (default 0.5)\n");
             printf("  --night-day-hold S       Hold seconds before NIGHT->DAY (default 3.0)\n");
             return 0;

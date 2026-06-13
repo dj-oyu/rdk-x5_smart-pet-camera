@@ -5,14 +5,19 @@
  * camera switcher. The switcher thread reads one sample per poll and feeds
  * sample.value into the camera_switcher hysteresis state machine.
  *
- * Swapping the illuminance calculation (e.g. from AE-statistics average to
- * gain-normalized scene luminance) only requires changing
- * switch_signal_read() and the thresholds passed to camera_switcher_init();
+ * Swapping the illuminance calculation only requires changing
+ * switch_signal_compute() and the thresholds passed to camera_switcher_init();
  * no other code needs to know the signal's definition.
  *
- * Current signal: AE-statistics brightness average (0-255). Known weakness:
- * AE keeps this near its target (~65 in daylight), so it sits next to the
- * 50/60 hysteresis band. See /tmp/isp_exposure_probe.log analysis.
+ * Current signal (v2): gain-normalized scene luminance
+ *   L = brightness_avg / (exp_time * again * dgain * ispgain)
+ * Unlike the raw AE-statistics average (v1), L is proportional to actual
+ * scene illumination: the AE loop compensates dark scenes with gain, and
+ * dividing by the gain product undoes that compensation. Probe-log analysis
+ * (2026-06-10..13, 80k samples): true darkness L < 15, morning daylight
+ * through curtains L 90-260, midday L 450-820, evening room light L 380-480.
+ * Short dark-object dips (pet near lens) only reach L~260 because the AE
+ * gain state still reflects the bright scene.
  */
 
 #ifndef SWITCH_SIGNAL_H
@@ -29,10 +34,28 @@
  */
 typedef struct {
     bool valid;   // True if the signal could be computed this poll
-    double value; // Signal consumed by camera_switcher (currently 0-255)
+    double value; // Gain-normalized luminance L consumed by camera_switcher
     isp_brightness_result_t brightness; // Raw AE-statistics reading
     isp_exposure_info_t exposure;       // Raw exposure snapshot (may be invalid)
 } switch_signal_sample_t;
+
+/**
+ * Compute the switch signal from raw ISP readings (pure function, unit
+ * tested in test_camera_switcher.c).
+ *
+ * Returns the gain-normalized luminance L, or -1.0 if the exposure snapshot
+ * is unusable (invalid or zero gain product).
+ */
+static inline double switch_signal_compute(double brightness_avg, const isp_exposure_info_t* e) {
+    if (!e || !e->valid) {
+        return -1.0;
+    }
+    const double gain = (double)e->exp_time * e->again * e->dgain * e->ispgain;
+    if (gain <= 0.0) {
+        return -1.0;
+    }
+    return brightness_avg / gain;
+}
 
 /**
  * Read ISP state and compute the day/night switch signal.

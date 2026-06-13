@@ -107,10 +107,29 @@ static void *switcher_thread(void *arg) {
 
 ### 切り替え信号 (switch_signal モジュール)
 
-判定信号の定義は `src/capture/switch_signal.c` の `switch_signal_read()` に集約されている。照度計算を載せ替える場合はこの関数と閾値設定のみを変更すればよい。
+判定信号の定義は `src/capture/switch_signal.h` の `switch_signal_compute()` に集約されている。照度計算を載せ替える場合はこの関数と閾値設定のみを変更すればよい。
 
-- 現行信号: AE統計平均輝度 (0-255)。AEがターゲットに引き戻すため昼間でも ~65 程度しか出ず、閾値帯 50/60 の近傍に張り付く既知の弱点がある
-- 検証データ: switcher スレッドが露出属性 (`hbn_isp_get_exposure_attr`) を毎ポーリングで読み取り、`/tmp/isp_exposure_probe.log` に記録（DAY時 ~1秒間隔、NIGHT時 5秒毎、切り替えイベント時は必ず）
+**現行信号 (v2): ゲイン正規化照度**
+
+```
+L = brightness_avg / (exp_time × again × dgain × ispgain)
+```
+
+AE 補正後の統計平均 (v1) は AE がターゲットへ引き戻すため昼間でも ~65 しか出ず閾値帯に張り付いたが、ゲイン積で割ることで AE 補正を打ち消し、実シーン照度に比例する値になる。
+
+プローブログ分析（2026-06-10〜13、約8万サンプル）による実測分布:
+
+| シーン | L |
+|--------|---|
+| 真っ暗（深夜消灯後） | < 15 |
+| 朝のカーテン越し自然光 | 90-260 |
+| 昼間 | 450-820 |
+| 夜間室内照明 | 380-480 |
+| ペット横切り等の短時間ディップ（昼間） | 最低でも ~260 |
+
+- 閾値: DAY→NIGHT **L < 40** / NIGHT→DAY **L > 80**（真っ暗 p95=8 と最暗の使える光 p5=93 の間、2倍ヒステリシス）
+- ディップは AE ゲイン状態が明シーンのままなので L~260 までしか落ちず、誤切り替えしない（v1 で観測された誤切替13件は全て防げる余裕）
+- 検証データ: switcher スレッドが露出属性 (`hbn_isp_get_exposure_attr`) を読み取り `/tmp/isp_exposure_probe.log` に記録（DAY時 ~1秒間隔、NIGHT時 5秒毎、切り替えイベント時は必ず）
 - **cur_lux は本ファームウェアでは常に 0**（未実装）。exp_time / again / dgain / ispgain / ae_exp は有効
 
 ### 非activeパイプラインのブロック
@@ -134,12 +153,12 @@ if (!write_active) {
 デフォルト値（`camera_daemon_main.c`）。起動引数で上書き可能:
 
 ```bash
-camera_daemon_drobotics --day-night-threshold 50 --night-day-threshold 60 \
+camera_daemon_drobotics --day-night-threshold 40 --night-day-threshold 80 \
                         --day-night-hold 0.5 --night-day-hold 3.0
 ```
 
-- **DAY→NIGHT**: 信号 < 50.0 が0.5秒持続（短いのは意図的: 日没時の真っ暗フレームを最小化）
-- **NIGHT→DAY**: 信号 > 60.0 が3.0秒持続
+- **DAY→NIGHT**: 信号 L < 40.0 が0.5秒持続（短いのは意図的: 日没時の真っ暗フレームを最小化）
+- **NIGHT→DAY**: 信号 L > 80.0 が3.0秒持続
 - ヒステリシス状態機械は `camera_switcher.c`（純ロジック、`make test` でユニットテスト可能）
 
 ---

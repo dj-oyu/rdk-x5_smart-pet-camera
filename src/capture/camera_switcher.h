@@ -39,8 +39,8 @@ typedef enum {
 } CameraSwitchDecision;
 
 typedef struct {
-    double day_to_night_threshold;    // brightness threshold (mean 0-255) to go night
-    double night_to_day_threshold;    // brightness threshold (mean 0-255) to go day
+    double day_to_night_threshold;    // switch-signal threshold to go night (see switch_signal.h)
+    double night_to_day_threshold;    // switch-signal threshold to go day
     double day_to_night_hold_seconds; // required duration below threshold to switch
     double night_to_day_hold_seconds; // required duration above threshold to switch
     unsigned int warmup_frames;       // frames to drop after switching

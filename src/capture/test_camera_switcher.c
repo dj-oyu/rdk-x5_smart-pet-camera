@@ -9,6 +9,7 @@
  */
 
 #include "camera_switcher.h"
+#include "switch_signal.h" // switch_signal_compute is header-inline (no ISP link needed)
 
 #include <stdio.h>
 #include <unistd.h>
@@ -209,6 +210,54 @@ static void test_status_reports_brightness_stats(void) {
     CHECK(stats[CAMERA_MODE_NIGHT].samples == 0);
 }
 
+// Values below are real samples from /tmp/isp_exposure_probe.log (2026-06-10..13).
+// Default thresholds: DAY->NIGHT at L<40, NIGHT->DAY at L>80.
+static void test_signal_compute_scene_ordering(void) {
+    isp_exposure_info_t e = {.valid = true, .dgain = 1.0f};
+
+    // Midday: brightness 62 at low gain -> bright scene, far above both thresholds
+    e.exp_time = 0.019989f;
+    e.again = 5.657f;
+    e.ispgain = 1.004f;
+    double midday = switch_signal_compute(62.0, &e);
+    CHECK(midday > 500.0 && midday < 600.0);
+
+    // Morning daylight through curtains: brightness 37 at high gain.
+    // Old signal (37 < 60) stayed stuck in NIGHT; L=128 correctly reads as day.
+    e.again = 9.935f;
+    e.ispgain = 1.453f;
+    double morning = switch_signal_compute(37.0, &e);
+    CHECK(morning > 80.0 && morning < 200.0);
+
+    // True darkness: brightness ~1 with gain maxed out
+    e.again = 15.99f;
+    e.ispgain = 4.0f;
+    double dark = switch_signal_compute(1.0, &e);
+    CHECK(dark >= 0.0 && dark < 40.0);
+
+    CHECK(midday > morning && morning > dark);
+}
+
+static void test_signal_compute_dip_resistance(void) {
+    // Pet near lens at midday: brightness drops 62->43 but the AE gain state
+    // still reflects the bright scene (gain rises only slightly with damping).
+    // L must stay far above the 40 NIGHT threshold.
+    isp_exposure_info_t e = {
+        .valid = true, .exp_time = 0.019989f, .again = 7.83f, .dgain = 1.0f, .ispgain = 1.004f};
+    double dip = switch_signal_compute(43.0, &e);
+    CHECK(dip > 200.0);
+}
+
+static void test_signal_compute_invalid_inputs(void) {
+    isp_exposure_info_t e = {.valid = false};
+    CHECK(switch_signal_compute(62.0, &e) < 0.0);
+    CHECK(switch_signal_compute(62.0, NULL) < 0.0);
+
+    // Zero gain product (ISP not ready) must not divide by zero
+    isp_exposure_info_t zero = {.valid = true, .exp_time = 0.0f, .again = 0.0f};
+    CHECK(switch_signal_compute(62.0, &zero) < 0.0);
+}
+
 int main(void) {
     test_init_defaults();
     test_day_stays_day_when_bright();
@@ -220,6 +269,9 @@ int main(void) {
     test_manual_mode_blocks_decisions();
     test_notify_resets_timers();
     test_status_reports_brightness_stats();
+    test_signal_compute_scene_ordering();
+    test_signal_compute_dip_resistance();
+    test_signal_compute_invalid_inputs();
 
     printf("camera_switcher tests: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
