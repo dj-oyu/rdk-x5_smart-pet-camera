@@ -17,9 +17,10 @@
 #include "camera_pipeline.h"
 #include "camera_switcher.h"
 #include "logger.h"
-#include "isp_brightness.h"
+#include "switch_signal.h"
 #include "tcp_relay.h"
 #include <getopt.h>
+#include <stdatomic.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -35,7 +36,7 @@
 
 // Shared state (no SHM needed — same process)
 static volatile bool g_running = true;
-static volatile int g_active_camera = 0; // 0=DAY, 1=NIGHT
+static _Atomic int g_active_camera = 0; // 0=DAY, 1=NIGHT; switcher writes, pipelines read
 
 // Pipelines
 static camera_pipeline_t g_pipelines[2];
@@ -68,16 +69,22 @@ static void* switcher_thread(void* arg) {
 
     LOG_INFO("Switcher", "Thread started");
 
+    // Probe log throttle: every Nth poll while DAY is active (250ms poll ->
+    // ~1s cadence). NIGHT polls (5s) and switch events always log.
+    const int probe_every_day_polls = 4;
+    int probe_poll_count = 0;
+
     while (g_running) {
-        // Read brightness directly from DAY camera ISP handle
-        isp_brightness_result_t brightness = {.valid = false};
+        // Read the switch signal from the DAY camera ISP
+        switch_signal_sample_t sample = {.valid = false};
         if (g_pipelines[0].vio.isp_handle > 0) {
-            isp_get_brightness(g_pipelines[0].vio.isp_handle, &brightness);
+            switch_signal_read(g_pipelines[0].vio.isp_handle, &sample);
         }
 
-        if (brightness.valid) {
-            CameraSwitchDecision decision = camera_switcher_record_brightness(
-                &ctx->switcher, CAMERA_MODE_DAY, (double)brightness.brightness_avg);
+        if (sample.valid) {
+            const char* probe_event = NULL;
+            CameraSwitchDecision decision =
+                camera_switcher_record_brightness(&ctx->switcher, CAMERA_MODE_DAY, sample.value);
 
             if (decision == CAMERA_SWITCH_DECISION_TO_NIGHT) {
                 int prev = g_active_camera;
@@ -85,8 +92,8 @@ static void* switcher_thread(void* arg) {
                 if (prev != 1) {
                     camera_switcher_notify_active_camera(&ctx->switcher, CAMERA_MODE_NIGHT,
                                                          "auto-night");
-                    LOG_INFO("Switcher", "Switch: DAY -> NIGHT (brightness=%.1f)",
-                             brightness.brightness_avg);
+                    LOG_INFO("Switcher", "Switch: DAY -> NIGHT (signal=%.1f)", sample.value);
+                    probe_event = "switch-to-night";
                     // Wake inactive pipeline threads immediately
                     pthread_cond_broadcast(&g_pipelines[0].switch_cond);
                     pthread_cond_broadcast(&g_pipelines[1].switch_cond);
@@ -97,12 +104,21 @@ static void* switcher_thread(void* arg) {
                 if (prev != 0) {
                     camera_switcher_notify_active_camera(&ctx->switcher, CAMERA_MODE_DAY,
                                                          "auto-day");
-                    LOG_INFO("Switcher", "Switch: NIGHT -> DAY (brightness=%.1f)",
-                             brightness.brightness_avg);
+                    LOG_INFO("Switcher", "Switch: NIGHT -> DAY (signal=%.1f)", sample.value);
+                    probe_event = "switch-to-day";
                     // Wake inactive pipeline threads immediately
                     pthread_cond_broadcast(&g_pipelines[0].switch_cond);
                     pthread_cond_broadcast(&g_pipelines[1].switch_cond);
                 }
+            }
+
+            // Probe log: verification data for the switch-signal redesign
+            probe_poll_count++;
+            const bool night_active = (g_active_camera == 1);
+            if (probe_event || night_active || probe_poll_count >= probe_every_day_polls) {
+                switch_signal_probe_log(&sample, g_active_camera,
+                                        probe_event ? probe_event : "poll");
+                probe_poll_count = 0;
             }
         }
 
@@ -123,15 +139,54 @@ int main(int argc, char* argv[]) {
     log_level_t log_level = LOG_LEVEL_INFO;
     int single_camera = -1; // -1 = dual, 0 = day only, 1 = night only
 
+    // Day/night switch tuning (overridable for threshold calibration).
+    // Thresholds are in gain-normalized luminance L (see switch_signal.h),
+    // designed from probe-log analysis 2026-06-10..13: true darkness L<15,
+    // dimmest usable daylight L>90; dark-object dips bottom out at L~260.
+    CameraSwitchConfig switch_cfg = {
+        .day_to_night_threshold = 40.0,
+        .night_to_day_threshold = 80.0,
+        .day_to_night_hold_seconds = 0.5, // short on purpose: minimize dark frames at dusk
+        .night_to_day_hold_seconds = 3.0,
+        .warmup_frames = 15,
+    };
+
+    enum {
+        OPT_DAY_NIGHT_THRESHOLD = 1000,
+        OPT_NIGHT_DAY_THRESHOLD,
+        OPT_DAY_NIGHT_HOLD,
+        OPT_NIGHT_DAY_HOLD,
+    };
+
     static const struct option long_options[] = {
-        {"width", required_argument, 0, 'W'},  {"height", required_argument, 0, 'H'},
-        {"fps", required_argument, 0, 'f'},    {"bitrate", required_argument, 0, 'b'},
-        {"camera", required_argument, 0, 'C'}, {"verbose", no_argument, 0, 'v'},
-        {"help", no_argument, 0, 'h'},         {0, 0, 0, 0}};
+        {"width", required_argument, 0, 'W'},
+        {"height", required_argument, 0, 'H'},
+        {"fps", required_argument, 0, 'f'},
+        {"bitrate", required_argument, 0, 'b'},
+        {"camera", required_argument, 0, 'C'},
+        {"day-night-threshold", required_argument, 0, OPT_DAY_NIGHT_THRESHOLD},
+        {"night-day-threshold", required_argument, 0, OPT_NIGHT_DAY_THRESHOLD},
+        {"day-night-hold", required_argument, 0, OPT_DAY_NIGHT_HOLD},
+        {"night-day-hold", required_argument, 0, OPT_NIGHT_DAY_HOLD},
+        {"verbose", no_argument, 0, 'v'},
+        {"help", no_argument, 0, 'h'},
+        {0, 0, 0, 0}};
 
     int opt;
     while ((opt = getopt_long(argc, argv, "W:H:f:b:C:vh", long_options, NULL)) != -1) {
         switch (opt) {
+        case OPT_DAY_NIGHT_THRESHOLD:
+            switch_cfg.day_to_night_threshold = atof(optarg);
+            break;
+        case OPT_NIGHT_DAY_THRESHOLD:
+            switch_cfg.night_to_day_threshold = atof(optarg);
+            break;
+        case OPT_DAY_NIGHT_HOLD:
+            switch_cfg.day_to_night_hold_seconds = atof(optarg);
+            break;
+        case OPT_NIGHT_DAY_HOLD:
+            switch_cfg.night_to_day_hold_seconds = atof(optarg);
+            break;
         case 'W':
             output_width = atoi(optarg);
             break;
@@ -154,6 +209,10 @@ int main(int argc, char* argv[]) {
             printf("Usage: %s [-W width] [-H height] [-f fps] [-b bitrate] [-C camera] [-v]\n",
                    argv[0]);
             printf("  -C N   Single camera mode (0=day, 1=night). Default: dual mode\n");
+            printf("  --day-night-threshold V  Switch signal below V goes NIGHT (default 40)\n");
+            printf("  --night-day-threshold V  Switch signal above V goes DAY (default 80)\n");
+            printf("  --day-night-hold S       Hold seconds before DAY->NIGHT (default 0.5)\n");
+            printf("  --night-day-hold S       Hold seconds before NIGHT->DAY (default 3.0)\n");
             return 0;
         default:
             return 1;
@@ -233,14 +292,10 @@ int main(int argc, char* argv[]) {
     pthread_t switcher_tid = 0;
     switcher_thread_ctx_t switcher_ctx = {0};
     if (num_cameras == 2) {
-        CameraSwitchConfig cfg = {
-            .day_to_night_threshold = 50.0,
-            .night_to_day_threshold = 60.0,
-            .day_to_night_hold_seconds = 0.5,
-            .night_to_day_hold_seconds = 3.0,
-            .warmup_frames = 15,
-        };
-        camera_switcher_init(&switcher_ctx.switcher, &cfg);
+        camera_switcher_init(&switcher_ctx.switcher, &switch_cfg);
+        LOG_INFO("Main", "Switch config: thresholds %.1f/%.1f, holds %.1fs/%.1fs",
+                 switch_cfg.day_to_night_threshold, switch_cfg.night_to_day_threshold,
+                 switch_cfg.day_to_night_hold_seconds, switch_cfg.night_to_day_hold_seconds);
         switcher_ctx.poll_interval_day_ms = 250;
         switcher_ctx.poll_interval_night_ms = 5000;
 

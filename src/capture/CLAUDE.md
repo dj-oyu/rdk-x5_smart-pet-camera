@@ -6,6 +6,7 @@ C言語によるカメラ制御、ISP設定、H.265エンコード、共有メ�
 ## Build
 ```bash
 cd src/capture && make
+make test         # ユニットテスト (camera_switcher 純ロジック、HW不要)
 make format       # clang-format-13
 make check-format # CI format check
 make lint         # clang-tidy (デバイス上のみ)

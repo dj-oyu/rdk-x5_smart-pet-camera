@@ -80,22 +80,23 @@ graph TD
 // camera_daemon_main.c
 static void *switcher_thread(void *arg) {
     while (g_running) {
-        // DAYカメラのISPハンドルからbrightness直接読み取り（SHM不要）
-        isp_brightness_result_t brightness = {.valid = false};
+        // DAYカメラのISPから切り替え信号を読み取り（switch_signal.c に集約）
+        switch_signal_sample_t sample = {.valid = false};
         if (g_pipelines[0].vio.isp_handle > 0) {
-            isp_get_brightness(g_pipelines[0].vio.isp_handle, &brightness);
+            switch_signal_read(g_pipelines[0].vio.isp_handle, &sample);
         }
 
-        if (brightness.valid) {
+        if (sample.valid) {
             CameraSwitchDecision decision = camera_switcher_record_brightness(
-                &ctx->switcher, CAMERA_MODE_DAY, (double)brightness.brightness_avg);
+                &ctx->switcher, CAMERA_MODE_DAY, sample.value);
 
             if (decision == CAMERA_SWITCH_DECISION_TO_NIGHT) {
-                g_active_camera = 1;
+                g_active_camera = 1;  // _Atomic int
                 pthread_cond_broadcast(&g_pipelines[0].switch_cond);
                 pthread_cond_broadcast(&g_pipelines[1].switch_cond);
             }
             // ... (逆方向も同様)
+            // 検証用プローブログ: /tmp/isp_exposure_probe.log (switch_signal_probe_log)
         }
 
         int interval_ms = (g_active_camera == 0) ? 250 : 5000;
@@ -103,6 +104,33 @@ static void *switcher_thread(void *arg) {
     }
 }
 ```
+
+### 切り替え信号 (switch_signal モジュール)
+
+判定信号の定義は `src/capture/switch_signal.h` の `switch_signal_compute()` に集約されている。照度計算を載せ替える場合はこの関数と閾値設定のみを変更すればよい。
+
+**現行信号 (v2): ゲイン正規化照度**
+
+```
+L = brightness_avg / (exp_time × again × dgain × ispgain)
+```
+
+AE 補正後の統計平均 (v1) は AE がターゲットへ引き戻すため昼間でも ~65 しか出ず閾値帯に張り付いたが、ゲイン積で割ることで AE 補正を打ち消し、実シーン照度に比例する値になる。
+
+プローブログ分析（2026-06-10〜13、約8万サンプル）による実測分布:
+
+| シーン | L |
+|--------|---|
+| 真っ暗（深夜消灯後） | < 15 |
+| 朝のカーテン越し自然光 | 90-260 |
+| 昼間 | 450-820 |
+| 夜間室内照明 | 380-480 |
+| ペット横切り等の短時間ディップ（昼間） | 最低でも ~260 |
+
+- 閾値: DAY→NIGHT **L < 40** / NIGHT→DAY **L > 80**（真っ暗 p95=8 と最暗の使える光 p5=93 の間、2倍ヒステリシス）
+- ディップは AE ゲイン状態が明シーンのままなので L~260 までしか落ちず、誤切り替えしない（v1 で観測された誤切替13件は全て防げる余裕）
+- 検証データ: switcher スレッドが露出属性 (`hbn_isp_get_exposure_attr`) を読み取り `/tmp/isp_exposure_probe.log` に記録（DAY時 ~1秒間隔、NIGHT時 5秒毎、切り替えイベント時は必ず）
+- **cur_lux は本ファームウェアでは常に 0**（未実装）。exp_time / again / dgain / ispgain / ae_exp は有効
 
 ### 非activeパイプラインのブロック
 
@@ -122,19 +150,16 @@ if (!write_active) {
 
 ### 切り替え判定パラメータ
 
-```c
-CameraSwitchConfig cfg = {
-    .day_to_night_threshold = 50.0,
-    .night_to_day_threshold = 60.0,
-    .day_to_night_hold_seconds = 0.5,
-    .night_to_day_hold_seconds = 3.0,
-    .warmup_frames = 15,
-};
+デフォルト値（`camera_daemon_main.c`）。起動引数で上書き可能:
+
+```bash
+camera_daemon_drobotics --day-night-threshold 40 --night-day-threshold 80 \
+                        --day-night-hold 0.5 --night-day-hold 3.0
 ```
 
-- **DAY→NIGHT**: brightness_avg < 50.0 が0.5秒持続
-- **NIGHT→DAY**: brightness_avg > 60.0 が3.0秒持続
-- ヒステリシス付き（`camera_switcher.c` の既存ロジックを維持）
+- **DAY→NIGHT**: 信号 L < 40.0 が0.5秒持続（短いのは意図的: 日没時の真っ暗フレームを最小化）
+- **NIGHT→DAY**: 信号 L > 80.0 が3.0秒持続
+- ヒステリシス状態機械は `camera_switcher.c`（純ロジック、`make test` でユニットテスト可能）
 
 ---
 
@@ -154,7 +179,7 @@ CameraSwitchConfig cfg = {
 
 ### 採用アーキテクチャ
 
-> **注意**: ISP低照度補正（NR調整・ガンマ補正）はフレームドロップの原因となったため**現在は無効化**されている。画像補正はYOLO detector側のCLAHE前処理で代替。以下は設計時の知見として残す。
+> **注意**: ISP低照度補正（NR調整・ガンマ補正）はフレームドロップの原因となったため無効化され、**実装コードも削除済み**（`isp_update_lowlight_correction` / `isp_apply_lowlight_profile` / `isp_lowlight_profile.h`）。画像補正はYOLO detector側のCLAHE前処理で代替。以下は設計時の知見として残す。
 
 ISPのHW機能（NR）＋ソフトウェアガンマ補正の組み合わせ:
 
@@ -206,16 +231,17 @@ if (lut) {
 
 ### AE統計のビット深度
 
-カメラごとに異なるため自動検出が必要:
-- Camera 0 (Day): 8-bit (max ~255)
-- Camera 1 (Night): 16-bit (max ~65535)
+現行実装（`isp_brightness.c`）は**固定7bitシフト**で 0-255 に正規化する:
 
 ```c
-int shift_bits = 0;
-if (max_val > 4095)      shift_bits = 8;   // 16-bit -> 8-bit
-else if (max_val > 255)  shift_bits = 4;   // 12-bit -> 8-bit
-result->brightness_avg = (float)(raw_avg >> shift_bits);
+// Sensor: 10-bit RAW input, ISP internally expands to ~15-bit range
+// Observed AE stat values: avg ~10000, max ~40000-48000
+#define AE_STAT_SHIFT_BITS 7
+result->brightness_avg = (float)(raw_avg >> AE_STAT_SHIFT_BITS);
 ```
+
+（旧実装の max 値ベース自動ビット深度検出は、フレーム内容で max が振れて
+スケールが不安定になったため固定シフトに置き換えられた）
 
 ### 性能
 
@@ -225,9 +251,9 @@ result->brightness_avg = (float)(raw_avg >> shift_bits);
 
 ### 関連ファイル
 
-- `src/capture/camera_pipeline.c` - 適応ガンマ補正
-- `src/capture/isp_brightness.c` - ISPノイズリダクション制御
-- `src/capture/isp_lowlight_profile.h` - プロファイル定義
+- `src/capture/isp_brightness.c` - ISP輝度統計・露出属性の読み取り（read-only）
+- `src/capture/switch_signal.c` - 昼夜切り替え信号の算出とプローブログ
+- 適応ガンマ補正・低照度プロファイルのコードは削除済み（CLAHE 移行のため）
 
 ---
 
