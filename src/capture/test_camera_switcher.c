@@ -17,13 +17,13 @@
 static int g_failures = 0;
 static int g_checks = 0;
 
-#define CHECK(cond)                                                                                \
-    do {                                                                                           \
-        g_checks++;                                                                                \
-        if (!(cond)) {                                                                             \
-            g_failures++;                                                                          \
-            fprintf(stderr, "FAIL %s:%d: %s\n", __func__, __LINE__, #cond);                        \
-        }                                                                                          \
+#define CHECK(cond)                                                         \
+    do {                                                                    \
+        g_checks++;                                                         \
+        if (!(cond)) {                                                      \
+            g_failures++;                                                   \
+            fprintf(stderr, "FAIL %s:%d: %s\n", __func__, __LINE__, #cond); \
+        }                                                                   \
     } while (0)
 
 // Short holds so tests run fast: 50ms day->night, 80ms night->day

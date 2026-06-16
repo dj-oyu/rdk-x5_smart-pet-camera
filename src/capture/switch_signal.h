@@ -33,8 +33,8 @@
  * and offline threshold analysis).
  */
 typedef struct {
-    bool valid;   // True if the signal could be computed this poll
-    double value; // Gain-normalized luminance L consumed by camera_switcher
+    bool valid;                         // True if the signal could be computed this poll
+    double value;                       // Gain-normalized luminance L consumed by camera_switcher
     isp_brightness_result_t brightness; // Raw AE-statistics reading
     isp_exposure_info_t exposure;       // Raw exposure snapshot (may be invalid)
 } switch_signal_sample_t;
