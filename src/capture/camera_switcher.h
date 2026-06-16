@@ -1,24 +1,19 @@
 /**
- * camera_switcher.h - Brightness-based camera switch controller (C
- * implementation)
+ * camera_switcher.h - Signal-based camera switch controller (C implementation)
  *
- * - Manages day/night camera selection based on brightness thresholds with
- * hysteresis
+ * - Manages day/night camera selection from a scalar switch signal with
+ *   hysteresis (signal definition lives in switch_signal.h)
  * - Supports manual override (debug) and automatic mode
- * - Provides warmup + double-buffered publishing to shared memory to avoid
- * frame drops
  *
- * Typical usage (within a capture daemon loop):
- *   1. Initialize with thresholds/hold times and warmup frames
- *   2. Periodically feed brightness samples for both cameras (active + probe)
- *   3. When a switch decision is returned, reconfigure hardware to the new
- * camera and call camera_switcher_notify_active_camera()
- *   4. For each captured frame from the active camera, call
- *      camera_switcher_publish_frame() to gate warmup frames and write to
- * shared memory
+ * Typical usage (switcher thread):
+ *   1. Initialize with thresholds/hold times
+ *   2. Periodically feed switch-signal samples via
+ *      camera_switcher_record_brightness()
+ *   3. When a TO_DAY/TO_NIGHT decision is returned, reconfigure hardware and
+ *      call camera_switcher_notify_active_camera()
  *
- * This module is self-contained (no vendor SDK dependencies) and focuses on
- * switch policy + double-buffering around shared memory publication.
+ * This module is pure logic (no vendor SDK or SHM dependencies) and is unit
+ * tested by test_camera_switcher.c (make test).
  */
 
 #ifndef CAMERA_SWITCHER_H
@@ -28,8 +23,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <time.h>
-
-#include "shared_memory.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,8 +39,8 @@ typedef enum {
 } CameraSwitchDecision;
 
 typedef struct {
-    double day_to_night_threshold;    // brightness threshold (mean 0-255) to go night
-    double night_to_day_threshold;    // brightness threshold (mean 0-255) to go day
+    double day_to_night_threshold;    // switch-signal threshold to go night (see switch_signal.h)
+    double night_to_day_threshold;    // switch-signal threshold to go day
     double day_to_night_hold_seconds; // required duration below threshold to switch
     double night_to_day_hold_seconds; // required duration above threshold to switch
     unsigned int warmup_frames;       // frames to drop after switching

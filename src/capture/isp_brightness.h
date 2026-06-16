@@ -1,8 +1,8 @@
 /**
  * isp_brightness.h - ISP brightness statistics module
  *
- * Provides hardware-accelerated brightness measurement using ISP AE statistics.
- * Used for low-light detection and automatic ISP correction.
+ * Read-only access to ISP hardware state: AE-statistics brightness and
+ * exposure attributes. Switch-signal policy lives in switch_signal.h.
  */
 
 #ifndef ISP_BRIGHTNESS_H
@@ -60,50 +60,32 @@ int isp_get_brightness(hbn_vnode_handle_t isp_handle, isp_brightness_result_t* r
 BrightnessZone isp_classify_brightness_zone(float brightness_avg, uint32_t cur_lux);
 
 /**
- * Low-light correction state (for hysteresis tracking)
+ * Exposure state snapshot from ISP (AE loop output)
+ *
+ * Used by the exposure probe logging to evaluate whether exposure-derived
+ * signals (cur_lux, gains, exp_time) are a viable day/night switch source.
  */
 typedef struct {
-    bool correction_active;       // True if low-light correction is currently applied
-    BrightnessZone current_zone;  // Last applied zone
-    double below_threshold_since; // Timestamp when brightness dropped below threshold (-1 if not)
-    double above_threshold_since; // Timestamp when brightness rose above threshold (-1 if not)
-} isp_lowlight_state_t;
+    bool valid;          // True if hbn_isp_get_exposure_attr succeeded
+    uint32_t lock_state; // AE convergence state (non-zero = converged)
+    float exp_time;      // Exposure time in seconds
+    float again;         // Analog gain
+    float dgain;         // Digital gain
+    float ispgain;       // ISP digital gain
+    float ae_exp;        // AE exposure value
+    uint32_t cur_lux;    // Environment illuminance reported by ISP
+    uint32_t frame_id;   // Frame ID from exposure attributes
+} isp_exposure_info_t;
 
 /**
- * Initialize low-light correction state
- */
-void isp_lowlight_state_init(isp_lowlight_state_t* state);
-
-/**
- * Apply low-light correction profile based on brightness zone
+ * Get exposure attributes from ISP hardware
  *
- * Sets ISP color processing (brightness, contrast, saturation) and gamma
- * correction parameters for the given zone.
- *
- * Args:
- *   isp_handle: ISP vnode handle
- *   zone: Target brightness zone
+ * Reads hbn_isp_get_exposure_attr (manual_attr snapshot + lock_state).
+ * Read-only; does not modify exposure settings.
  *
  * Returns:
- *   0 on success, -1 on error
+ *   0 on success, -1 on error (info->valid is set accordingly)
  */
-int isp_apply_lowlight_profile(hbn_vnode_handle_t isp_handle, BrightnessZone zone);
-
-/**
- * Update low-light correction with hysteresis
- *
- * Checks if correction should be enabled/disabled based on current brightness
- * and hysteresis thresholds. Applies profile if state changes.
- *
- * Args:
- *   isp_handle: ISP vnode handle
- *   state: Low-light state to track hysteresis
- *   brightness_result: Current brightness measurement
- *
- * Returns:
- *   true if correction is active after update, false otherwise
- */
-bool isp_update_lowlight_correction(hbn_vnode_handle_t isp_handle, isp_lowlight_state_t* state,
-                                    const isp_brightness_result_t* brightness_result);
+int isp_get_exposure_info(hbn_vnode_handle_t isp_handle, isp_exposure_info_t* info);
 
 #endif // ISP_BRIGHTNESS_H
