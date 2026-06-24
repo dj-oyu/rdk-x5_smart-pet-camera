@@ -1,0 +1,12 @@
+[Unit]
+Description=Renew pet-album Tailscale TLS cert (restart pet-album on change)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+PartOf=ai-pyramid.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/smart-pet-camera
+EnvironmentFile=-/opt/smart-pet-camera/.env
+ExecStart=/opt/smart-pet-camera/scripts/renew-album-cert.sh
+Nice=10
