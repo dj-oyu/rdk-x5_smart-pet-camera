@@ -36,6 +36,26 @@ journalctl -u pet-camera-capture -f          # ログ (journald)
 # ai-pyramid
 sudo systemctl start pet-album.service
 journalctl -u pet-album -f
+
+# TLS 証明書の自動更新 (週次, install で登録済み)
+sudo systemctl start pet-album-cert-renew.timer   # 有効化
+sudo systemctl start pet-album-cert-renew.service  # 手動更新
+journalctl -u pet-album-cert-renew -n 20           # 更新ログ
+```
+
+### renew-album-cert.sh — pet-album TLS 証明書更新
+
+`pet-album` は起動時に一度だけ TLS 証明書を読むため、Tailscale 証明書 (有効期限90日)
+が失効するとブラウザに `NET::ERR_CERT_DATE_INVALID` が出てアルバム iframe が読めなくなる。
+`pet-album-cert-renew.timer` が週次で呼び出し、証明書が変わったときだけ `pet-album` を再起動する。
+手動更新は `tailscale cert` (要 root):
+
+```bash
+sudo tailscale cert \
+  --cert-file /opt/smart-pet-camera/<album-tailnet-host>.crt \
+  --key-file /opt/smart-pet-camera/<album-tailnet-host>.key \
+  <album-tailnet-host>
+sudo systemctl restart pet-album.service
 ```
 
 ### resolve-model.sh — YOLO モデルパス解決
