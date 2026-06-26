@@ -210,7 +210,14 @@ impl PhotoWatcher {
         while let Some(filename) = rx.recv().await {
             let jpeg_path = photos_dir.join(&filename);
             if !jpeg_path.exists() {
+                // Source jpeg was deleted (e.g. by GC) after its DB row was
+                // created. Bump vlm_attempts so the row eventually drops out of
+                // the pending set instead of being re-queued forever every
+                // rescan. A few retries still tolerate a transient race.
                 warn!("Observation source missing {filename}");
+                let _ = commands
+                    .record_observation_failure(&filename, "source file missing on disk")
+                    .await;
                 continue;
             }
 
