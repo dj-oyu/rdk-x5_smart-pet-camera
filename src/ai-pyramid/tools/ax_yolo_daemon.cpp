@@ -506,7 +506,8 @@ static int ensure_nv12_cmm(AxModel& m, const int w, const int h) {
 
 // Inference from NV12 in CMM (already copied + flushed). Uses IVPS or CPU fallback.
 static int run_inference_nv12_cmm(AxModel& m, const int src_w, const int src_h,
-                                  std::vector<Detection>& results, double& elapsed_ms) {
+                                  const int src_stride, std::vector<Detection>& results,
+                                  double& elapsed_ms) {
     results.clear();
     const auto t0 = std::chrono::steady_clock::now();
 
@@ -515,11 +516,11 @@ static int run_inference_nv12_cmm(AxModel& m, const int src_w, const int src_h,
         sf.u32Width = src_w;
         sf.u32Height = src_h;
         sf.enImgFormat = AX_FORMAT_YUV420_SEMIPLANAR;
-        sf.u32PicStride[0] = src_w;
+        sf.u32PicStride[0] = src_stride;
         sf.u64PhyAddr[0] = m.nv12_phy;
         sf.u64VirAddr[0] = (AX_U64)(uintptr_t)m.nv12_vir;
-        sf.u64PhyAddr[1] = m.nv12_phy + src_w * src_h;
-        sf.u64VirAddr[1] = (AX_U64)(uintptr_t)((uint8_t*)m.nv12_vir + src_w * src_h);
+        sf.u64PhyAddr[1] = m.nv12_phy + src_stride * src_h;
+        sf.u64VirAddr[1] = (AX_U64)(uintptr_t)((uint8_t*)m.nv12_vir + src_stride * src_h);
 
         AX_VIDEO_FRAME_T df = {};
         df.u32Width = m.input_w;
@@ -545,7 +546,7 @@ static int run_inference_nv12_cmm(AxModel& m, const int src_w, const int src_h,
     }
 
     // CPU fallback.
-    cv::Mat nv12_mat(src_h * 3 / 2, src_w, CV_8UC1, m.nv12_vir);
+    cv::Mat nv12_mat(src_h * 3 / 2, src_w, CV_8UC1, m.nv12_vir, src_stride);
     cv::Mat bgr;
     cv::cvtColor(nv12_mat, bgr, cv::COLOR_YUV2BGR_NV12);
     cv::Mat cmm_mat(m.input_h, m.input_w, CV_8UC3, m.io_data.pInputs[0].pVirAddr);
@@ -724,14 +725,22 @@ static void handle_detect(const int fd, AxModel& m, const RequestHeader& req) {
             return;
         }
     } else if (req.input_type == INPUT_NV12_RAW) {
-        const size_t expected = (size_t)req.width * req.height * 3 / 2;
+        const uint32_t src_stride = req.reserved == 0 ? req.width : req.reserved;
+        if (req.width == 0 || req.height == 0 || (req.width & 1) != 0 || (req.height & 1) != 0 ||
+            src_stride < req.width || src_stride > UINT16_MAX || (src_stride & 1) != 0) {
+            std::vector<uint8_t> drain(req.payload_size);
+            read_exact(fd, drain.data(), req.payload_size);
+            send_error(fd, "invalid nv12 stride");
+            return;
+        }
+        const size_t expected = (size_t)src_stride * req.height * 3 / 2;
         if (req.payload_size != expected) {
             std::vector<uint8_t> drain(req.payload_size);
             read_exact(fd, drain.data(), req.payload_size);
             send_error(fd, "nv12 size mismatch");
             return;
         }
-        if (ensure_nv12_cmm(m, req.width, req.height) != 0) {
+        if (ensure_nv12_cmm(m, src_stride, req.height) != 0) {
             std::vector<uint8_t> drain(expected);
             read_exact(fd, drain.data(), expected);
             send_error(fd, "cmm alloc failed");
@@ -743,7 +752,7 @@ static void handle_detect(const int fd, AxModel& m, const RequestHeader& req) {
         }
         AX_SYS_MflushCache(m.nv12_phy, m.nv12_vir, expected);
         std::lock_guard<std::mutex> lock(m.npu_mutex);
-        if (run_inference_nv12_cmm(m, req.width, req.height, dets, ms) != 0) {
+        if (run_inference_nv12_cmm(m, req.width, req.height, src_stride, dets, ms) != 0) {
             send_error(fd, "inference failed");
             return;
         }

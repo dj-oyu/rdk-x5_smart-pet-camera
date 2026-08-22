@@ -1,5 +1,5 @@
 use super::wire::{
-    CMD_DETECT, CMD_LOAD, INPUT_JPEG_PATH, INPUT_NV12_RAW, RawLocalDetection, RequestHeader,
+    CMD_DETECT, CMD_LOAD, INPUT_JPEG_PATH, RawLocalDetection, RequestHeader, nv12_request_header,
     raw_detection, request_bytes, response_header, wire_detection,
 };
 use std::path::{Path, PathBuf};
@@ -40,15 +40,9 @@ impl DaemonClient {
         nv12: &[u8],
         width: u16,
         height: u16,
+        stride: u16,
     ) -> Result<Vec<RawLocalDetection>, String> {
-        let header = RequestHeader {
-            cmd: CMD_DETECT,
-            input_type: INPUT_NV12_RAW,
-            width,
-            height,
-            payload_size: nv12.len() as u32,
-            reserved: 0,
-        };
+        let header = nv12_request_header(width, height, stride, nv12.len() as u32);
         self.send_request(&header, nv12).await
     }
 

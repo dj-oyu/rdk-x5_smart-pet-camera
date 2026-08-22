@@ -290,9 +290,9 @@ SSE: `EventSource("/api/events")` でリアルタイム更新。
 ### Local detector (`detect/local/`)
 
 - `local.rs`: 公開facade、設定、画像file入力
-- `wire.rs`: 16-byte request、12-byte response/detection protocol
+- `wire.rs`: 16-byte request、12-byte response/detection protocol（NV12はreserved fieldでrow strideを通知）
 - `client.rs`: Unix socket transport
-- `image_conversion.rs`: RGB→NV12変換
+- `image_conversion.rs`: RGB→NV12変換（AX650 IVPS向け16-byte aligned stride）
 - `pipeline.rs`: YOLO26l raw-first実行、pet未検出時の4-panel fallback、bbox変換・merge
 
 Local detectorはpetcameraと同じ6 COCO class（person、cat、dog、cup、bowl、chair）だけを
