@@ -14,6 +14,24 @@ struct Detection {
     float x1, y1, x2, y2;
 };
 
+// Keep this set aligned with pet-camera's COCO_TO_DETECTION_CLASS. Selecting
+// from it before argmax preserves a useful second-best class when an unrelated
+// COCO class has the highest logit for the same cell.
+static constexpr int TARGET_CLASS_IDS[] = {0, 15, 16, 41, 45, 56};
+
+static bool best_target_class(const float* scores, int class_count, int& best_class,
+                              float& best_score) {
+    best_class = -1;
+    best_score = -1e9f;
+    for (const int class_id : TARGET_CLASS_IDS) {
+        if (class_id < class_count && scores[class_id] > best_score) {
+            best_score = scores[class_id];
+            best_class = class_id;
+        }
+    }
+    return best_class >= 0;
+}
+
 static float sigmoid(float x) {
     return 1.f / (1.f + std::exp(-x));
 }
@@ -30,14 +48,10 @@ static void generate_proposals_separated(int stride, const float* bbox_feat, con
             const int idx = h * feat_w + w;
             const float* cls_ptr = cls_feat + idx * cls_num;
 
-            int best_cls = 0;
-            float best_score = -1e9f;
-            for (int c = 0; c < cls_num; ++c) {
-                if (cls_ptr[c] > best_score) {
-                    best_score = cls_ptr[c];
-                    best_cls = c;
-                }
-            }
+            int best_cls;
+            float best_score;
+            if (!best_target_class(cls_ptr, cls_num, best_cls, best_score))
+                continue;
             const float prob = sigmoid(best_score);
             if (prob > prob_threshold) {
                 const float* box = bbox_feat + idx * 4;
@@ -91,14 +105,10 @@ static void generate_proposals_dfl(int stride, const float* feat, float prob_thr
             const float* cell = feat + (h * feat_w + w) * ch;
             const float* cls_ptr = cell + 4 * reg_max; // class scores start after DFL bins
 
-            int best_cls = 0;
-            float best_score = -1e9f;
-            for (int c = 0; c < cls_num; ++c) {
-                if (cls_ptr[c] > best_score) {
-                    best_score = cls_ptr[c];
-                    best_cls = c;
-                }
-            }
+            int best_cls;
+            float best_score;
+            if (!best_target_class(cls_ptr, cls_num, best_cls, best_score))
+                continue;
             const float prob = sigmoid(best_score);
             if (prob <= prob_threshold)
                 continue;
@@ -146,7 +156,7 @@ static void nms(std::vector<Detection>& dets, float nms_threshold) {
     for (const auto& d : dets) {
         bool suppressed = false;
         for (const auto& k : kept) {
-            if (det_iou(d, k) > nms_threshold) {
+            if (d.class_id == k.class_id && det_iou(d, k) > nms_threshold) {
                 suppressed = true;
                 break;
             }
