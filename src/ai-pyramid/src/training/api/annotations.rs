@@ -103,7 +103,13 @@ pub(super) async fn export(
 
     let mut files = Vec::new();
     for (filename, _w, _h, annotations) in &dataset {
-        let label_filename = filename.replace(".nv12", ".txt");
+        // Strip whichever frame extension the camera used. A blind
+        // replace(".nv12", ...) silently produced "frame.webp" as the label
+        // name once the camera switched formats.
+        let label_filename = format!(
+            "{}.txt",
+            crate::training::ssh::frame_stem(filename).unwrap_or(filename)
+        );
         let lines: Vec<String> = annotations
             .iter()
             .filter_map(|a| {

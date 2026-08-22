@@ -169,6 +169,24 @@ class BaseImageTracker:
         self._last_brightness = brightness
         return reset
 
+    def invalidate(self, rkey: str) -> None:
+        """Drop one ROI's base so it is rebuilt from scratch.
+
+        Used when the base has demonstrably stopped describing the empty scene:
+        something arrived and stayed, so every frame differs from the base
+        forever. Warm-up needs a quiet scene, and the caller's quiet counter only
+        advances once nothing is reported as moving — so the stale base sustains
+        the very motion that prevents its replacement. Dropping it breaks that
+        loop: with no base there is no base-diff motion, the scene reads quiet,
+        and a new base including the new object is built.
+        """
+        self._base.pop(rkey, None)
+        self._snapshot.pop(rkey, None)
+        self._valid.pop(rkey, None)
+        self._init_count.pop(rkey, None)
+        if self._logger is not None:
+            self._logger.info(f"Base image invalidated for {rkey}")
+
     def reset(self) -> None:
         """Drop everything — used when the active camera changes."""
         self._base.clear()
