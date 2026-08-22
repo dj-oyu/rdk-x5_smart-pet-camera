@@ -48,18 +48,12 @@ struct-layout change would break loudly instead of silently:
     (round-tripped via `struct.pack("<d", ...)`) so this doesn't weaken the
     test, it just decouples the frozen-bytes comparison from this field.
 
-  * `detection_update_sem` (offset 544, 32 bytes) — this is a `sem_t`, which
-    is libc/kernel-internal state, not something write_detection_result()
-    populates. Empirically (see the `test_*_sem_region_is_always_zeroed`
-    assertions below) it is **always all-zero** after a write, because
-    `c_det = CLatestDetectionResult()` zero-initializes the whole 576-byte
-    struct in Python before individual fields are assigned, and the sem
-    field is never subsequently touched — so `write_detection_result()`
-    unconditionally clobbers whatever was in that region with zero bytes.
-    This is asserted explicitly as a real, observed behavior (see report),
-    not assumed; it is still normalized out of the main hex comparison
-    per the task's instructions, in case that zero-initialization detail
-    ever changes.
+  * `detection_update_sem` (offset 544, 32 bytes) — this is a `sem_t`, i.e.
+    libc/kernel-internal synchronisation state, not payload. The writer stops
+    short of it (`_DETECTION_PAYLOAD_SIZE`) and then posts it to wake the Go
+    reader, so these bytes reflect a semaphore counter rather than anything
+    this test should freeze. Excluded from the hex comparison; the semaphore
+    protocol itself is covered by `tests/test_detection_sem.py`.
 
 `version` handling
 ------------------
@@ -166,10 +160,18 @@ def _assert_golden(raw: bytes, expected_normalized_hex: str, *, timestamp_sec: f
     normalized = _normalize(raw)
     assert normalized.hex() == expected_normalized_hex
 
-    # The two normalized-out ranges are still checked for their actual,
-    # real observed values (see module docstring):
+    # The timestamp is still checked for its actual value; only the frozen-bytes
+    # comparison excludes it.
     assert raw[_TS_OFF : _TS_OFF + _TS_SIZE] == struct.pack("<d", timestamp_sec)
-    assert raw[_SEM_OFF : _SEM_OFF + _SEM_SIZE] == b"\x00" * _SEM_SIZE
+
+    # The semaphore must carry a pending wakeup: the writer posts it so the Go
+    # reader's sem_timedwait returns early instead of burning its full timeout.
+    # Counter internals belong to libc, so this asserts the observable effect
+    # rather than a byte pattern. See tests/test_detection_sem.py.
+    if rsm.librt is not None:
+        assert raw[_SEM_OFF : _SEM_OFF + _SEM_SIZE] != b"\x00" * _SEM_SIZE, (
+            "write_detection_result did not post detection_update_sem"
+        )
 
     # version: deterministic (=1) for a fresh writer + single write; frozen
     # directly in expected_normalized_hex, reasserted here for clarity.
