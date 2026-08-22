@@ -88,6 +88,9 @@ pub(super) fn dispatch(store: &PhotoStore, command: DbCommand) {
         DbCommand::MarkDetected { photo_id, reply } => {
             send_reply(reply, store.mark_detected(photo_id))
         }
+        DbCommand::RecordEmptyLevel2 { photo_id, reply } => {
+            send_reply(reply, store.record_empty_level2(photo_id))
+        }
         DbCommand::GetEditHistory { since, reply } => {
             send_reply(reply, store.get_edit_history(since.as_deref()))
         }

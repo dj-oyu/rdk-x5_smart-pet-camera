@@ -52,6 +52,7 @@ pub trait EventRepositoryPort: Send + Sync {
     async fn captions_for_date(&self, date: &str) -> AppResult<Vec<String>>;
     async fn list_undetected_photos(&self, limit: i64) -> AppResult<Vec<EventSummary>>;
     async fn mark_detected(&self, photo_id: i64) -> AppResult<usize>;
+    async fn record_empty_level2(&self, photo_id: i64) -> AppResult<usize>;
     async fn get_edit_history(&self, since: Option<&str>) -> AppResult<Vec<EditHistoryEntry>>;
 }
 
@@ -296,6 +297,12 @@ impl EventRepositoryPort for PhotoStoreRepository {
     async fn mark_detected(&self, photo_id: i64) -> AppResult<usize> {
         self.db
             .request(|reply| DbCommand::MarkDetected { photo_id, reply })
+            .await
+    }
+
+    async fn record_empty_level2(&self, photo_id: i64) -> AppResult<usize> {
+        self.db
+            .request(|reply| DbCommand::RecordEmptyLevel2 { photo_id, reply })
             .await
     }
 

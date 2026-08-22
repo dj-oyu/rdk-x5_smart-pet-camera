@@ -83,6 +83,7 @@ pub(super) fn dispatch(store: &PhotoStore, command: DbCommand) {
         | DbCommand::CaptionsForDate { .. }
         | DbCommand::ListUndetectedPhotos { .. }
         | DbCommand::MarkDetected { .. }
+        | DbCommand::RecordEmptyLevel2 { .. }
         | DbCommand::GetEditHistory { .. }
         | DbCommand::GetBboxesForPhotos { .. } => {
             unreachable!("album command reached training dispatcher")

@@ -126,4 +126,8 @@ impl ObservationCommands {
     pub async fn mark_detected(&self, photo_id: i64) -> AppResult<usize> {
         self.repository.mark_detected(photo_id).await
     }
+
+    pub async fn record_empty_level2(&self, photo_id: i64) -> AppResult<usize> {
+        self.repository.record_empty_level2(photo_id).await
+    }
 }
