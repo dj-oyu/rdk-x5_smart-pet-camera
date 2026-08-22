@@ -45,6 +45,7 @@ from real_shared_memory import (  # noqa: E402
 from detection.yolo_detector import YoloDetector  # noqa: E402
 from detection.image_utils import jpeg_to_yolo_nv12  # noqa: E402
 import night_motion  # noqa: E402
+from base_image import BaseImageTracker  # noqa: E402
 
 # hb_mem bindings (required for zero-copy)
 from hb_mem_bindings import init_module as hb_mem_init, import_nv12_graph_buf  # noqa: E402
@@ -403,17 +404,6 @@ class YoloDetectorDaemon:
         self._roi_has_motion: bool = False  # Any ROI had motion recently
         self.motion_cooldown: int = 0  # Frames to skip after motion detected
 
-        # Base reference image state (per-ROI, snapshot-based update)
-        self._base_roi_y: dict[
-            str, np.ndarray
-        ] = {}  # {"roi0": f32 base, "roi1": f32 base}
-        self._snapshot_roi_y: dict[
-            str, np.ndarray
-        ] = {}  # recent snapshot (640x640 float32)
-        self._base_valid: dict[str, bool] = {}  # whether base image is usable per ROI
-        self._base_init_count: dict[
-            str, int
-        ] = {}  # initial EMA frames for first base build
         self._quiet_frames: int = (
             0  # consecutive frames with no motion AND no YOLO detection
         )
@@ -423,7 +413,6 @@ class YoloDetectorDaemon:
         self._noise_sigma: float = (
             4.8  # pre-computed from recordings (NIR + H.265 noise)
         )
-        self._last_brightness: float = -1.0  # for brightness change detection
         self.BASE_QUIET_THRESHOLD: int = (
             1800  # ~60s @ 30fps for initial base build only
         )
@@ -432,7 +421,16 @@ class YoloDetectorDaemon:
         self.BASE_INIT_FRAMES: int = 50  # EMA frames for initial base
         self.SNAPSHOT_INTERVAL: int = 300  # ~10s @ 30fps between snapshot updates
         self.SNAPSHOT_BLEND_ALPHA: float = 0.05  # how fast base absorbs stable changes
-        self._snapshot_timer: int = 0  # frames since last snapshot
+        # Per-ROI reference image of the empty scene (warm-up, snapshot refresh,
+        # stable-snapshot blending, brightness invalidation).
+        self._base_images = BaseImageTracker(
+            init_frames=self.BASE_INIT_FRAMES,
+            quiet_threshold=self.BASE_QUIET_THRESHOLD,
+            noise_floor=self.BASE_NOISE_FLOOR,
+            snapshot_interval=self.SNAPSHOT_INTERVAL,
+            snapshot_blend_alpha=self.SNAPSHOT_BLEND_ALPHA,
+            logger=logger,
+        )
 
         # Idle throttle (night mode only)
         self.IDLE_TIER1_FRAMES: int = 30  # ~1s quiet → ~10fps
@@ -1258,8 +1256,9 @@ class YoloDetectorDaemon:
                             if len(self._motion_bboxes) > 10:
                                 self._motion_bboxes = self._motion_bboxes[-5:]
                         # ── base_diff ──
-                        if self._base_valid.get(rkey, False):
-                            base_u8 = cv2.convertScaleAbs(self._base_roi_y[rkey])
+                        _base_u8 = self._base_images.base_u8(rkey)
+                        if _base_u8 is not None:
+                            base_u8 = _base_u8
                             # ROI 0 base is stored at crop size (480×480); no resize needed
                             if motion_roi_idx == 0:
                                 small_base = base_u8
@@ -1369,60 +1368,21 @@ class YoloDetectorDaemon:
 
         # ── Base image management (snapshot-based) ─────────
         if _y_denoised_for_base is not None and _rkey_for_base:
-            rk = _rkey_for_base
-            y_f32 = _y_denoised_for_base.astype(np.float32)
-
-            if not self._base_valid.get(rk, False):
-                if self._base_quiet_frames >= self.BASE_QUIET_THRESHOLD:
-                    if rk not in self._base_roi_y:
-                        self._base_roi_y[rk] = y_f32.copy()
-                        self._base_init_count[rk] = 1
-                    else:
-                        cv2.accumulateWeighted(
-                            _y_denoised_for_base, self._base_roi_y[rk], 0.02
-                        )
-                        self._base_init_count[rk] = self._base_init_count.get(rk, 0) + 1
-                    if self._base_init_count.get(rk, 0) >= self.BASE_INIT_FRAMES:
-                        self._base_valid[rk] = True
-                        self._snapshot_roi_y[rk] = y_f32.copy()
-                        self._snapshot_timer = 0
-                        logger.info(f"Base image ready for {rk}")
-            else:
-                self._snapshot_timer += 1
-                if self._snapshot_timer >= self.SNAPSHOT_INTERVAL:
-                    self._snapshot_roi_y[rk] = y_f32.copy()
-                    self._snapshot_timer = 0
-
-                if rk in self._snapshot_roi_y:
-                    snap = self._snapshot_roi_y[rk]
-                    snap_u8 = cv2.convertScaleAbs(snap)
-                    snap_diff = cv2.absdiff(_y_denoised_for_base, snap_u8)
-                    snap_diff = cv2.GaussianBlur(snap_diff, (5, 5), 0)
-                    snap_diff[snap_diff < self.BASE_NOISE_FLOOR] = 0
-                    snap_stable = cv2.countNonZero(snap_diff) / snap_diff.size
-
-                    if snap_stable < 0.005:
-                        cv2.accumulateWeighted(
-                            snap_u8, self._base_roi_y[rk], self.SNAPSHOT_BLEND_ALPHA
-                        )
+            self._base_images.update(
+                _rkey_for_base,
+                _y_denoised_for_base,
+                base_quiet_frames=self._base_quiet_frames,
+            )
 
         # Brightness change detection — invalidate base on large ISP shifts
-        if (
-            self._last_brightness >= 0
-            and abs(zc_frame.brightness_avg - self._last_brightness) > 20
-        ):  # type: ignore[attr-defined]
-            self._base_roi_y.clear()
-            self._base_valid.clear()
-            self._base_init_count.clear()
-            self._snapshot_roi_y.clear()
+        if self._base_images.note_brightness(
+            zc_frame.brightness_avg  # type: ignore[attr-defined]
+        ):
             self._quiet_frames = 0
             self._base_quiet_frames = 0
-            self._snapshot_timer = 0
-            logger.info("Base images cleared (brightness change)")
-        self._last_brightness = zc_frame.brightness_avg  # type: ignore[attr-defined]
 
         # ── Feeding zone event tracking (ROI 0) ─────────────────────
-        if vse_active and self._base_valid.get("roi0", False):
+        if vse_active and self._base_images.is_valid("roi0"):
             feeding_active = self._feeding_base_nz > self.FEEDING_MOTION_THRESH
             now = time.time()
 
@@ -1732,7 +1692,7 @@ class YoloDetectorDaemon:
                 f"yolo_skipped={self.stats['yolo_skipped_frames']} "
                 f"quiet={self._quiet_frames}"
                 f"{'(T2)' if self._quiet_frames >= self.IDLE_TIER2_FRAMES else '(T1)' if self._quiet_frames >= self.IDLE_TIER1_FRAMES else ''} "
-                f"base={'|'.join(k for k, v in self._base_valid.items() if v) or 'none'}"
+                f"base={'|'.join(self._base_images.valid_keys()) or 'none'}"
             )
 
         if is_debug and run_yolo and detection_dicts:
@@ -1780,15 +1740,10 @@ class YoloDetectorDaemon:
             self.detector.clahe_frequency = 6 if self.active_camera == 1 else 1
             if self.active_camera == 0:
                 self.detector.clear_clahe_cache()
-            self._base_roi_y.clear()
-            self._base_valid.clear()
-            self._base_init_count.clear()
-            self._snapshot_roi_y.clear()
+            self._base_images.reset()
             self._quiet_frames = 0
-            self._snapshot_timer = 0
             self._prev_roi_small.clear()
             self._diff_acc.clear()
-            self._last_brightness = -1.0
             self._reset_day_motion()
 
         # Initialize scale factors on first frame
