@@ -1706,4 +1706,507 @@ mod tests {
         assert_eq!(json["mike"], "Mike");
         assert_eq!(json["chatora"], "Chatora");
     }
+
+    #[tokio::test]
+    async fn event_by_id_returns_event_contract_and_not_found() {
+        let state = test_state();
+        let commands = state.context.observation_commands();
+        commands
+            .ingest_source_photo(crate::application::ObservationInput {
+                source_filename: "event-by-id.jpg".into(),
+                captured_at: dt(2026, 4, 2, 8, 30, 0),
+                pet_id: Some("mike".into()),
+            })
+            .await
+            .unwrap();
+        commands
+            .apply_observation(crate::application::ObservationResult {
+                source_filename: "event-by-id.jpg".into(),
+                is_valid: true,
+                summary: "Mike is watching the window".into(),
+                behavior: "watching".into(),
+            })
+            .await
+            .unwrap();
+
+        let app = router(state);
+        let found = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/event/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(found.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(found.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["id"], 1);
+        assert_eq!(json["source_filename"], "event-by-id.jpg");
+        assert_eq!(json["observed_at"], "2026-04-02T08:30:00");
+        assert_eq!(json["summary"], "Mike is watching the window");
+        assert_eq!(json["status"], "valid");
+        assert_eq!(json["pet_id"], "mike");
+        assert_eq!(json["behavior"], "watching");
+
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/event/999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(missing.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["error"], "not found");
+    }
+
+    #[tokio::test]
+    async fn photo_panel_serves_640_square_jpeg_and_validates_panel_number() {
+        let state = test_state();
+        let filename = "comic_20260402_083000_mike.jpg";
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            848,
+            496,
+            image::Rgb([20, 80, 160]),
+        ))
+        .write_to(&mut encoded, image::ImageFormat::Jpeg)
+        .unwrap();
+        std::fs::write(state.photos_dir.join(filename), encoded.into_inner()).unwrap();
+
+        let app = router(state);
+        let ok = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/photos/{filename}/panel/2"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        assert_eq!(ok.headers()[header::CONTENT_TYPE], "image/jpeg");
+        assert_eq!(
+            ok.headers()[header::CACHE_CONTROL],
+            "public, max-age=31536000, immutable"
+        );
+        let bytes = axum::body::to_bytes(ok.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let panel = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((panel.width(), panel.height()), (640, 640));
+
+        let invalid = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/photos/{filename}/panel/4"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn photo_patch_updates_all_editable_fields_and_rejects_empty_patch() {
+        let state = test_state();
+        state
+            .context
+            .observation_commands()
+            .ingest_source_photo(crate::application::ObservationInput {
+                source_filename: "editable.jpg".into(),
+                captured_at: dt(2026, 4, 2, 9, 0, 0),
+                pet_id: None,
+            })
+            .await
+            .unwrap();
+        let app = router(state);
+
+        let updated = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/photos/editable.jpg")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"is_valid":true,"pet_id":"chatora","behavior":"playing"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(updated.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(json["ok"].as_bool().unwrap());
+        assert!(json["is_valid"].as_bool().unwrap());
+        assert_eq!(json["pet_id"], "chatora");
+        assert_eq!(json["behavior"], "playing");
+
+        let event = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/event/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(event.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["status"], "valid");
+        assert_eq!(json["pet_id"], "chatora");
+        assert_eq!(json["behavior"], "playing");
+
+        let empty = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/photos/editable.jpg")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/photos/missing.jpg")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"is_valid":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn edit_history_returns_patch_diffs_and_honors_since_filter() {
+        let state = test_state();
+        state
+            .context
+            .observation_commands()
+            .ingest_source_photo(crate::application::ObservationInput {
+                source_filename: "history.jpg".into(),
+                captured_at: dt(2026, 4, 2, 9, 15, 0),
+                pet_id: Some("mike".into()),
+            })
+            .await
+            .unwrap();
+        let app = router(state);
+        for body in [
+            r#"{"pet_id":"chatora"}"#,
+            r#"{"behavior":"sleeping"}"#,
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri("/api/photos/history.jpg")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let history = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/edit-history")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(history.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(history.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let entries = json.as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["photo_id"], 1);
+        assert!(entries.iter().all(|entry| entry["id"].is_i64()));
+        assert!(entries.iter().all(|entry| entry["created_at"].is_string()));
+        let changes: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|entry| serde_json::from_str(entry["changes"].as_str().unwrap()).unwrap())
+            .collect();
+        assert!(changes.iter().any(|change| change["pet_id"]["old"] == "mike"));
+        assert!(
+            changes
+                .iter()
+                .any(|change| change["behavior"]["new"] == "sleeping")
+        );
+
+        let filtered = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/edit-history?since=2999-01-01T00%3A00%3A00")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(filtered.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(filtered.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn behaviors_returns_sorted_distinct_non_empty_values() {
+        let state = test_state();
+        let commands = state.context.observation_commands();
+        for (filename, behavior) in [
+            ("playing.jpg", "playing"),
+            ("sleeping.jpg", "sleeping"),
+            ("playing-again.jpg", "playing"),
+        ] {
+            commands
+                .ingest_source_photo(crate::application::ObservationInput {
+                    source_filename: filename.into(),
+                    captured_at: dt(2026, 4, 2, 10, 0, 0),
+                    pet_id: None,
+                })
+                .await
+                .unwrap();
+            commands.update_behavior(filename, behavior).await.unwrap();
+        }
+        commands
+            .ingest_source_photo(crate::application::ObservationInput {
+                source_filename: "empty.jpg".into(),
+                captured_at: dt(2026, 4, 2, 11, 0, 0),
+                pet_id: None,
+            })
+            .await
+            .unwrap();
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/behaviors")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json, serde_json::json!(["playing", "sleeping"]));
+    }
+
+    #[tokio::test]
+    async fn backfill_reports_unavailable_and_conflict_contracts() {
+        let unavailable = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/backfill")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(unavailable.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["error"], "detection not configured");
+
+        let mut state = test_state();
+        state.detect_client = Some(Arc::new(crate::detect::DetectClient::new(
+            crate::detect::DetectConfig {
+                camera_base_url: "http://127.0.0.1:1".into(),
+                self_base_url: "http://127.0.0.1:8082".into(),
+                timeout: std::time::Duration::from_millis(1),
+                score_threshold: 0.1,
+            },
+        )));
+        state.backfill_running.store(true, Ordering::SeqCst);
+        let conflict = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/backfill")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(conflict.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["error"], "backfill already running");
+    }
+
+    #[tokio::test]
+    async fn detect_now_reports_local_detector_unavailable() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/detect-now/comic.jpg")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["error"], "local detector not available");
+    }
+
+    #[tokio::test]
+    async fn daily_summary_without_observations_is_available_without_vlm() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/daily-summary")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"date":"2026-04-02"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["date"], "2026-04-02");
+        assert_eq!(json["summary"], "No observations for this date.");
+        assert_eq!(json["photo_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn daily_summary_rejects_invalid_request_shape() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/daily-summary")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"date":42}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn sse_preserves_detection_event_names_and_payloads() {
+        let state = test_state();
+        let tx = state.event_tx.clone();
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+
+        tx.send(PhotoEvent::DetectionPartial {
+            filename: "comic.jpg".into(),
+            bbox_x: 10,
+            bbox_y: 20,
+            bbox_w: 30,
+            bbox_h: 40,
+            yolo_class: "cat".into(),
+            confidence: 0.875,
+        })
+        .unwrap();
+        let partial = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let partial = String::from_utf8_lossy(&partial);
+        assert!(partial.contains("event: detection-partial"));
+        assert!(partial.contains("\"type\":\"detection-partial\""));
+        assert!(partial.contains("\"yolo_class\":\"cat\""));
+
+        tx.send(PhotoEvent::DetectionReady {
+            filename: "comic.jpg".into(),
+            count: 3,
+        })
+        .unwrap();
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let ready = String::from_utf8_lossy(&ready);
+        assert!(ready.contains("event: detection-ready"));
+        assert!(ready.contains("\"type\":\"detection-ready\""));
+        assert!(ready.contains("\"count\":3"));
+    }
 }

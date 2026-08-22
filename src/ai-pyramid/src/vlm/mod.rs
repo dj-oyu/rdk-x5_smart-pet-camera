@@ -652,6 +652,12 @@ fn strip_think(text: &str) -> String {
 mod tests {
     use super::*;
 
+    fn jpeg_fixture() -> tempfile::NamedTempFile {
+        let tmp = tempfile::Builder::new().suffix(".jpg").tempfile().unwrap();
+        image::RgbImage::new(1, 1).save(tmp.path()).unwrap();
+        tmp
+    }
+
     #[test]
     fn parse_valid_json() {
         let raw = r#"{"is_valid": true, "caption": "A tabby cat resting on a wall", "behavior": "resting"}"#;
@@ -738,10 +744,7 @@ mod tests {
     async fn client_with_mock_server() {
         use axum::{Json, Router, routing::post};
 
-        // Create a valid 1x1 JPEG using image crate
-        let tmp = tempfile::Builder::new().suffix(".jpg").tempfile().unwrap();
-        let img = image::RgbImage::new(1, 1);
-        img.save(tmp.path()).unwrap();
+        let tmp = jpeg_fixture();
 
         // Mock VLM API using axum
         let app = Router::new().route("/v1/chat/completions", post(|| async {
@@ -769,5 +772,93 @@ mod tests {
         assert!(resp.is_valid);
         assert_eq!(resp.caption, "A ginger cat");
         assert_eq!(resp.behavior, "resting");
+    }
+
+    #[tokio::test]
+    async fn analyze_retries_once_after_http_error() {
+        use axum::{
+            Json, Router,
+            http::StatusCode,
+            response::IntoResponse,
+            routing::post,
+        };
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let seen = attempts.clone();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let seen = seen.clone();
+                async move {
+                    if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return (StatusCode::SERVICE_UNAVAILABLE, "warming up").into_response();
+                    }
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "message": {
+                                "content": r#"{"is_valid": true, "caption": "Recovered", "behavior": "resting"}"#
+                            }
+                        }]
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let client = VlmClient::new(VlmConfig {
+            base_url: format!("http://{addr}"),
+            ..Default::default()
+        });
+
+        let tmp = jpeg_fixture();
+        let response = client.analyze(tmp.path()).await.unwrap();
+
+        assert_eq!(response.caption, "Recovered");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn wait_for_model_accepts_only_requested_model_id() {
+        use axum::{Json, Router, routing::get};
+
+        let app = Router::new().route(
+            "/v1/models",
+            get(|| async { Json(serde_json::json!({"data": [{"id": "vision-model"}]})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let http = reqwest::Client::new();
+
+        wait_for_model(
+            &http,
+            &format!("http://{addr}"),
+            "vision-model",
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+        let error = wait_for_model(
+            &http,
+            &format!("http://{addr}"),
+            "other-model",
+            Duration::from_millis(10),
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("other-model"));
+        assert!(error.contains("not ready"));
     }
 }

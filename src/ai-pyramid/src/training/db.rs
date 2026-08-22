@@ -471,3 +471,206 @@ impl PhotoStore {
         Ok(result)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> PhotoStore {
+        let store = PhotoStore::open_in_memory().unwrap();
+        store.migrate_training().unwrap();
+        store
+    }
+
+    fn annotation(class_label: &str, x_center: f64) -> AnnotationInput {
+        AnnotationInput {
+            class_label: class_label.to_string(),
+            x_center,
+            y_center: 0.5,
+            width: 0.25,
+            height: 0.4,
+        }
+    }
+
+    #[test]
+    fn frame_upsert_preserves_identity_and_list_contract() {
+        let store = store();
+        let first_id = store
+            .upsert_training_frame("frame-b.nv12", 1920, 1080, None)
+            .unwrap();
+        let second_id = store
+            .upsert_training_frame(
+                "frame-a.nv12",
+                640,
+                480,
+                Some("2026-01-02T03:04:05"),
+            )
+            .unwrap();
+
+        let updated_id = store
+            .upsert_training_frame("frame-b.nv12", 1280, 720, Some("new-timestamp"))
+            .unwrap();
+        assert_eq!(updated_id, first_id);
+
+        store
+            .update_training_frame_status(second_id, "approved")
+            .unwrap();
+        let (all, total) = store.list_training_frames(None, 1, 0).unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].filename, "frame-a.nv12");
+
+        let (approved, approved_total) = store
+            .list_training_frames(Some("approved"), 50, 0)
+            .unwrap();
+        assert_eq!(approved_total, 1);
+        assert_eq!(approved[0].id, second_id);
+
+        let updated = store.get_training_frame(first_id).unwrap().unwrap();
+        assert_eq!((updated.width, updated.height), (1280, 720));
+        assert_eq!(updated.captured_at.as_deref(), Some("new-timestamp"));
+    }
+
+    #[test]
+    fn replacing_annotations_updates_frame_count_and_supports_delete() {
+        let store = store();
+        let frame_id = store
+            .upsert_training_frame("annotated.nv12", 640, 480, None)
+            .unwrap();
+        store
+            .replace_training_annotations(
+                frame_id,
+                &[annotation("dog", 0.25), annotation("cat", 0.75)],
+            )
+            .unwrap();
+
+        let frame = store.get_training_frame(frame_id).unwrap().unwrap();
+        assert_eq!(frame.annotation_count, 2);
+        let original = store.list_training_annotations(frame_id).unwrap();
+        assert_eq!(
+            original
+                .iter()
+                .map(|a| a.class_label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dog", "cat"]
+        );
+
+        store
+            .replace_training_annotations(frame_id, &[annotation("bird", 0.5)])
+            .unwrap();
+        let replacement = store.list_training_annotations(frame_id).unwrap();
+        assert_eq!(replacement.len(), 1);
+        assert_eq!(replacement[0].class_label, "bird");
+        assert_eq!(store.delete_training_annotation(replacement[0].id).unwrap(), 1);
+        assert!(store
+            .list_training_annotations(frame_id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn stats_and_export_include_only_approved_frames() {
+        let store = store();
+        let approved = store
+            .upsert_training_frame("approved.nv12", 640, 480, None)
+            .unwrap();
+        let rejected = store
+            .upsert_training_frame("rejected.nv12", 320, 240, None)
+            .unwrap();
+        store
+            .update_training_frame_status(approved, "approved")
+            .unwrap();
+        store
+            .update_training_frame_status(rejected, "rejected")
+            .unwrap();
+        store
+            .replace_training_annotations(
+                approved,
+                &[annotation("cat", 0.4), annotation("cat", 0.6)],
+            )
+            .unwrap();
+        store
+            .replace_training_annotations(rejected, &[annotation("dog", 0.5)])
+            .unwrap();
+
+        let stats = store.training_stats().unwrap();
+        assert_eq!(
+            (stats.total, stats.pending, stats.approved, stats.rejected),
+            (2, 0, 1, 1)
+        );
+        assert_eq!(stats.total_annotations, 3);
+        assert_eq!(stats.class_counts[0].class_label, "cat");
+        assert_eq!(stats.class_counts[0].count, 2);
+
+        let export = store.export_training_dataset().unwrap();
+        assert_eq!(export.len(), 1);
+        assert_eq!(export[0].0, "approved.nv12");
+        assert_eq!(export[0].3.len(), 2);
+    }
+
+    #[test]
+    fn background_scores_reject_only_eligible_pending_frames() {
+        let store = store();
+        let low = store
+            .upsert_training_frame("low.nv12", 640, 480, None)
+            .unwrap();
+        let high = store
+            .upsert_training_frame("high.nv12", 640, 480, None)
+            .unwrap();
+        let approved = store
+            .upsert_training_frame("approved.nv12", 640, 480, None)
+            .unwrap();
+        store
+            .update_training_frame_status(approved, "approved")
+            .unwrap();
+        assert_eq!(
+            store
+                .bulk_update_bg_scores(&[(low, 2.0), (high, 9.0), (approved, 1.0)])
+                .unwrap(),
+            3
+        );
+        assert_eq!(store.bulk_reject_by_score(5.0).unwrap(), 1);
+        assert_eq!(
+            store.get_training_frame(low).unwrap().unwrap().status,
+            "rejected"
+        );
+        assert_eq!(
+            store.get_training_frame(high).unwrap().unwrap().status,
+            "pending"
+        );
+        assert_eq!(
+            store.get_training_frame(approved).unwrap().unwrap().status,
+            "approved"
+        );
+    }
+
+    #[test]
+    fn rejected_cleanup_preserves_background_references() {
+        let store = store();
+        let removable = store
+            .upsert_training_frame("remove.nv12", 640, 480, None)
+            .unwrap();
+        let bg_ref = store
+            .upsert_training_frame("keep.nv12", 640, 480, None)
+            .unwrap();
+        store
+            .update_training_frame_status(removable, "rejected")
+            .unwrap();
+        store
+            .update_training_frame_status(bg_ref, "rejected")
+            .unwrap();
+        store.set_bg_ref(bg_ref, true).unwrap();
+
+        assert_eq!(store.bg_ref_count().unwrap(), 1);
+        assert_eq!(
+            store.list_bg_ref_frames().unwrap(),
+            vec![(bg_ref, "keep.nv12".to_string())]
+        );
+        assert_eq!(
+            store.delete_rejected_frames().unwrap(),
+            vec!["remove.nv12".to_string()]
+        );
+        assert!(store.get_training_frame(removable).unwrap().is_none());
+        assert!(store.get_training_frame(bg_ref).unwrap().is_some());
+    }
+}

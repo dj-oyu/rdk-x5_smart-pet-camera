@@ -174,7 +174,11 @@ impl DetectClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Json, Router, routing::post};
+    use axum::{Json, Router, http::StatusCode, routing::post};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     #[tokio::test]
     async fn detect_panels_with_offset() {
@@ -277,5 +281,82 @@ mod tests {
             .await
             .unwrap();
         assert!(dets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn detect_request_retries_http_failure_once() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let seen = requests.clone();
+        let app = Router::new().route(
+            "/detect",
+            post(move || {
+                let seen = seen.clone();
+                async move {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    (StatusCode::BAD_GATEWAY, "detector unavailable")
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let client = DetectClient::new(DetectConfig {
+            camera_base_url: format!("http://{addr}"),
+            self_base_url: "http://localhost:8082".into(),
+            timeout: Duration::from_secs(5),
+            score_threshold: 0.2,
+        });
+
+        let request = DetectRequest {
+            image_url: "http://localhost:8082/api/photos/test.jpg/panel/0".into(),
+            score_threshold: 0.2,
+        };
+        let error = client
+            .detect_one(&format!("http://{addr}/detect"), &request)
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("502 Bad Gateway"));
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn malformed_panel_responses_are_omitted_without_aborting_batch() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let seen = requests.clone();
+        let app = Router::new().route(
+            "/detect",
+            post(move || {
+                let seen = seen.clone();
+                async move {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({"unexpected": true}))
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let client = DetectClient::new(DetectConfig {
+            camera_base_url: format!("http://{addr}"),
+            self_base_url: "http://localhost:8082".into(),
+            timeout: Duration::from_secs(5),
+            score_threshold: 0.2,
+        });
+
+        let dets = client
+            .detect("comic_20260321_104532_chatora.jpg")
+            .await
+            .unwrap();
+
+        assert!(dets.is_empty());
+        // Decode errors are not retried; retry is reserved for request/status failures.
+        assert_eq!(requests.load(Ordering::SeqCst), 4);
     }
 }

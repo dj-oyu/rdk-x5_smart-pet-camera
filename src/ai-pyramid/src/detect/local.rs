@@ -863,6 +863,19 @@ mod tests {
     }
 
     #[test]
+    fn stream_request_header_matches_daemon_wire_contract() {
+        let request = stream_request_header(b"rdk-x5");
+
+        assert_eq!(request.len(), 22);
+        assert_eq!(&request[0..2], &CMD_STREAM.to_ne_bytes());
+        assert_eq!(&request[2..4], &0u16.to_ne_bytes());
+        assert_eq!(&request[4..8], &[0, 0, 0, 0]);
+        assert_eq!(&request[8..12], &6u32.to_ne_bytes());
+        assert_eq!(&request[12..16], &[0, 0, 0, 0]);
+        assert_eq!(&request[16..], b"rdk-x5");
+    }
+
+    #[test]
     fn merge_dedup_same_class() {
         let dets = vec![
             RawLocalDetection {
