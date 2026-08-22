@@ -1,0 +1,12 @@
+[Unit]
+Description=Weekly renewal of pet-camera Tailscale TLS cert
+PartOf=pet-camera.target
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1w
+Persistent=true
+Unit=pet-camera-cert-renew.service
+
+[Install]
+WantedBy=pet-camera.target
