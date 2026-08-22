@@ -32,6 +32,7 @@ pub(super) async fn handle_backfill(State(state): State<AppState>) -> impl IntoR
     }
 
     let backfill_flag = state.backfill_running.clone();
+    let uses_level2 = local.is_some();
     let context = state.context.clone();
     let photos_dir = state.photos_dir.clone();
     let sse_tx = state.event_tx.clone();
@@ -107,7 +108,11 @@ pub(super) async fn handle_backfill(State(state): State<AppState>) -> impl IntoR
                         total,
                         photo.source_filename
                     );
-                    let _ = commands.mark_detected(photo.id).await;
+                    if uses_level2 {
+                        let _ = commands.record_empty_level2(photo.id).await;
+                    } else {
+                        let _ = commands.mark_detected(photo.id).await;
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -221,8 +226,13 @@ pub(super) async fn handle_detect_now(
                 .await
                 .ok()
                 .flatten()
+                && let Err(e) = commands.record_empty_level2(event.id).await
             {
-                let _ = commands.mark_detected(event.id).await;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("DB error: {e}")})),
+                )
+                    .into_response();
             }
 
             // Signal completion

@@ -296,8 +296,12 @@ SSE: `EventSource("/api/events")` でリアルタイム更新。
 - `pipeline.rs`: YOLO26l raw-first実行、pet未検出時の4-panel fallback、bbox変換・merge
 
 Local detectorはpetcameraと同じ6 COCO class（person、cat、dog、cup、bowl、chair）だけを
-argmax前に評価する。YOLO11sとアスペクト比変形は使用しない。Level 2がpanel内のcatを
-検出できなかった場合、DB queryはpetcamera由来のLevel 1 catをfallbackとして返す。
+argmax前に評価する。YOLO11sとアスペクト比変形は使用しない。Level 2が写真全体で
+cat/dogを1件も検出できなかった場合は、comic化前の高解像度frameで得たLevel 1の
+cat/dog行だけを`det_level=2`、`model=level1-inherited`として保存する。bbox、confidence、
+pet identity、color metricsは引き継ぐが、Level 1の非pet classは引き継がない。Level 2が
+少なくとも1件のpetを検出した場合は、panel単位の欠落に限りDB queryがLevel 1 catを
+fallbackとして返す。
 
 ### PhotoWatcher (ingest/watcher.rs)
 

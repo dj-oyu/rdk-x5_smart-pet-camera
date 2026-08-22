@@ -134,6 +134,10 @@ pub enum DbCommand {
         photo_id: i64,
         reply: oneshot::Sender<AppResult<usize>>,
     },
+    RecordEmptyLevel2 {
+        photo_id: i64,
+        reply: oneshot::Sender<AppResult<usize>>,
+    },
     GetEditHistory {
         since: Option<String>,
         reply: oneshot::Sender<AppResult<Vec<EditHistoryEntry>>>,
@@ -237,6 +241,7 @@ impl DbCommand {
             | DbCommand::CaptionsForDate { .. }
             | DbCommand::ListUndetectedPhotos { .. }
             | DbCommand::MarkDetected { .. }
+            | DbCommand::RecordEmptyLevel2 { .. }
             | DbCommand::GetEditHistory { .. }
             | DbCommand::GetBboxesForPhotos { .. }) => CommandDomain::Album(command),
             command @ (DbCommand::TrainingUpsertFrame { .. }
