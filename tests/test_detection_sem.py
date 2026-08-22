@@ -156,3 +156,46 @@ def test_payload_is_still_written_correctly(writer):
     assert stored_name == b"dog"
     assert snapshot.detections[0].confidence == pytest.approx(0.75)
     assert snapshot.detections[0].bbox.x == 1
+
+
+def test_negative_frame_number_does_not_wrap_to_uint64_max(writer, caplog):
+    """A negative frame number must not silently become 2**64-1.
+
+    frame_number is uint64_t on the C side, so -1 lands as 18446744073709551615.
+    Readers match detections to frames by number — the web monitor draws an
+    overlay only when the two are within 30 frames — so the corruption is
+    invisible: detections keep flowing and simply stop being drawn. This is
+    exactly what happened on the device, where the night path wrote a
+    never-initialised -1 for hours.
+    """
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        writer.write_detection_result(-1, 100.0, [_detection()])
+
+    snapshot = rsm.CLatestDetectionResult.from_buffer_copy(
+        writer.detection_mmap[: ctypes.sizeof(rsm.CLatestDetectionResult)]
+    )
+    assert snapshot.frame_number != (2**64 - 1)
+    assert snapshot.frame_number == 0
+    assert any("negative frame_number" in r.message for r in caplog.records)
+
+
+def test_negative_frame_number_warns_once(writer, caplog):
+    """The detector writes several times a second; one warning is enough."""
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(5):
+            writer.write_detection_result(-1, 100.0, [_detection()])
+
+    warnings = [r for r in caplog.records if "negative frame_number" in r.message]
+    assert len(warnings) == 1
+
+
+def test_valid_frame_numbers_are_untouched(writer):
+    writer.write_detection_result(259264, 100.0, [_detection()])
+    snapshot = rsm.CLatestDetectionResult.from_buffer_copy(
+        writer.detection_mmap[: ctypes.sizeof(rsm.CLatestDetectionResult)]
+    )
+    assert snapshot.frame_number == 259264
