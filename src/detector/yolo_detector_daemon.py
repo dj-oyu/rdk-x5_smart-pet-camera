@@ -476,7 +476,12 @@ class YoloDetectorDaemon:
         self.feeding_events_path = _night_collect_base / "feeding_events.jsonl"
         self.FEEDING_MOTION_THRESH: float = 0.008  # nz_ratio threshold (validated)
         self.FEEDING_QUIET_GAP: int = 15  # frames of quiet before event ends
-        self.FEEDING_SAVE_INTERVAL: int = 30  # save full frame every N motion frames
+        self.FEEDING_SAVE_INTERVAL: int = 60  # save full frame every N motion frames
+        # A feeding event that runs this long is not a pet eating — something
+        # arrived and stayed, so the base image no longer describes the empty
+        # scene. Observed in the event log: single "events" of 15 and 20 hours,
+        # which between them produced most of the 5 GB/day of collected frames.
+        self.FEEDING_MAX_EVENT_SEC: float = 600.0
         self._feeding_base_nz: float = 0.0  # latest ROI 0 base_diff ratio
         self._feeding_motion: bool = False  # currently in a feeding event
         self._feeding_event_start: float | None = None  # event start timestamp
@@ -1161,6 +1166,39 @@ class YoloDetectorDaemon:
             except Exception:
                 pass
 
+    def _end_feeding_event(self, now: float, truncated: bool = False) -> None:
+        """Close the current feeding event and append it to the event log.
+
+        `truncated` marks a run cut off by FEEDING_MAX_EVENT_SEC rather than by
+        the zone going quiet, so the log distinguishes a real visit from a base
+        image that had gone stale.
+        """
+        start = self._feeding_event_start or now
+        duration = now - start
+        event = {
+            "start": round(start, 3),
+            "end": round(now, 3),
+            "duration_sec": round(duration, 2),
+        }
+        if truncated:
+            event["truncated"] = True
+        try:
+            with open(self.feeding_events_path, "a") as _ef:
+                _ef.write(json.dumps(event) + "\n")
+        except Exception as _e:
+            logger.warning(f"Feeding event write failed: {_e}")
+        if truncated:
+            logger.warning(
+                f"Feeding zone: event truncated after {duration:.0f}s "
+                "— rebuilding base image"
+            )
+        else:
+            logger.info(f"Feeding zone: motion ended ({duration:.1f}s)")
+        self._feeding_motion = False
+        self._feeding_event_start = None
+        self._feeding_quiet_count = 0
+        self._feeding_save_counter = 0
+
     def _run_night_iteration(
         self,
         nv12_data: np.ndarray,
@@ -1361,6 +1399,20 @@ class YoloDetectorDaemon:
             feeding_active = self._feeding_base_nz > self.FEEDING_MOTION_THRESH
             now = time.time()
 
+            # A run that never goes quiet means the base image has stopped
+            # describing the empty scene. Cut the event and rebuild the base;
+            # otherwise the stale base keeps reporting motion, the quiet counter
+            # never advances, and the base can never be replaced.
+            if (
+                feeding_active
+                and self._feeding_motion
+                and self._feeding_event_start is not None
+                and now - self._feeding_event_start > self.FEEDING_MAX_EVENT_SEC
+            ):
+                self._end_feeding_event(now, truncated=True)
+                self._base_images.invalidate("roi0")
+                feeding_active = False
+
             if feeding_active:
                 self._feeding_quiet_count = 0
                 self._feeding_save_counter += 1
@@ -1378,18 +1430,35 @@ class YoloDetectorDaemon:
                     self._feeding_last_motion_bboxes = list(self._motion_bboxes)
                     try:
                         self.feeding_collect_dir.mkdir(parents=True, exist_ok=True)
-                        nv12_path = (
+                        _fw = int(zc_frame.width)  # type: ignore[attr-defined]
+                        _fh = int(zc_frame.height)  # type: ignore[attr-defined]
+                        # Store the luma plane only, WebP lossless. The night
+                        # camera is effectively monochrome (measured chroma
+                        # sigma 6-8), so dropping UV costs no usable signal,
+                        # and lossless matters because what this dataset is for
+                        # is telling a pet apart from IR sensor noise — a lossy
+                        # codec would reshape exactly that grain.
+                        _y = np.frombuffer(
+                            nv12_data, dtype=np.uint8, count=_fw * _fh
+                        ).reshape(_fh, _fw)
+                        frame_path = (
                             self.feeding_collect_dir
-                            / f"feeding_{fn:08d}_1280x720.nv12"
+                            / f"feeding_{fn:08d}_{_fw}x{_fh}.webp"
                         )
-                        with open(nv12_path, "wb") as _f:
-                            _f.write(bytes(nv12_data))
+                        _ok, _enc = cv2.imencode(
+                            ".webp", _y, [cv2.IMWRITE_WEBP_QUALITY, 101]
+                        )
+                        if not _ok:
+                            raise RuntimeError("WebP encode failed")
+                        with open(frame_path, "wb") as _f:
+                            _f.write(_enc.tobytes())
+                        nv12_path = frame_path
                         # Save motion bbox annotations as sidecar JSON
                         anno = {
                             "frame": fn,
                             "timestamp": now,
-                            "width": 1280,
-                            "height": 720,
+                            "width": _fw,
+                            "height": _fh,
                             "nz_ratio": round(self._feeding_base_nz, 4),
                             "motion_bboxes": [
                                 {
@@ -1411,25 +1480,7 @@ class YoloDetectorDaemon:
                 if self._feeding_motion:
                     self._feeding_quiet_count += 1
                     if self._feeding_quiet_count >= self.FEEDING_QUIET_GAP:
-                        # Event ended
-                        duration = now - (self._feeding_event_start or now)
-                        event = {
-                            "start": round(self._feeding_event_start or now, 3),
-                            "end": round(now, 3),
-                            "duration_sec": round(duration, 2),
-                        }
-                        try:
-                            with open(self.feeding_events_path, "a") as _ef:
-                                _ef.write(json.dumps(event) + "\n")
-                        except Exception as _e:
-                            logger.warning(f"Feeding event write failed: {_e}")
-                        logger.info(
-                            f"Feeding zone: motion ended ({duration:.1f}s)"
-                        )
-                        self._feeding_motion = False
-                        self._feeding_event_start = None
-                        self._feeding_quiet_count = 0
-                        self._feeding_save_counter = 0
+                        self._end_feeding_event(now)
 
         # ── YOLO: both ROIs in one frame (every 2nd frame) ─────────
         run_yolo = (

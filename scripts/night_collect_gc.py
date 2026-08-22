@@ -27,6 +27,15 @@ class _Entry:
     size: int
 
 
+# Frame files were stored as raw .nv12; they are now WebP-encoded luma. Both
+# are recognised so the ~22k frames collected under the old format stay managed.
+FRAME_SUFFIXES = (".nv12", ".webp")
+
+
+def _is_frame(path: Path) -> bool:
+    return path.suffix in FRAME_SUFFIXES
+
+
 def _scan_nv12(
     directory: Path, now: float, min_age_seconds: float
 ) -> tuple[list[_Entry], int]:
@@ -34,7 +43,7 @@ def _scan_nv12(
     eligible: list[_Entry] = []
     fresh = 0
     for p in directory.iterdir():
-        if not p.is_file() or p.suffix != ".nv12":
+        if not p.is_file() or not _is_frame(p):
             continue
         try:
             st = p.stat()
@@ -112,6 +121,7 @@ def _cleanup_orphans(
     """
     nv12_stems: set[str] = set()
     json_stems: set[str] = set()
+    frame_paths: dict[str, Path] = {}
     for p in directory.iterdir():
         if not p.is_file():
             continue
@@ -121,7 +131,8 @@ def _cleanup_orphans(
             continue
         if now - st.st_mtime < min_age_seconds:
             continue
-        if p.suffix == ".nv12":
+        if _is_frame(p):
+            frame_paths[p.stem] = p
             nv12_stems.add(p.stem)
         elif p.suffix == ".json":
             json_stems.add(p.stem)
@@ -129,7 +140,7 @@ def _cleanup_orphans(
     deleted_nv12 = 0
     deleted_json = 0
     for stem in nv12_stems - json_stems:
-        p = directory / f"{stem}.nv12"
+        p = frame_paths[stem]
         if dry_run:
             logger.info("[dry-run] would delete orphan %s", p.name)
             deleted_nv12 += 1
