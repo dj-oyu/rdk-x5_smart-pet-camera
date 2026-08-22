@@ -314,10 +314,13 @@ mod tests {
             image_url: "http://localhost:8082/api/photos/test.jpg/panel/0".into(),
             score_threshold: 0.2,
         };
-        let error = client
+        let error = match client
             .detect_one(&format!("http://{addr}/detect"), &request)
             .await
-            .unwrap_err();
+        {
+            Ok(_) => panic!("the detector should return its HTTP error"),
+            Err(error) => error,
+        };
 
         assert!(error.contains("502 Bad Gateway"));
         assert_eq!(requests.load(Ordering::SeqCst), 2);

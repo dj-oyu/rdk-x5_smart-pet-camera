@@ -389,11 +389,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(photos.path().join("not-a-comic.jpg"), b"jpeg").unwrap();
-        std::fs::write(
-            photos.path().join("comic_20260321_120000_mike.png"),
-            b"png",
-        )
-        .unwrap();
+        std::fs::write(photos.path().join("comic_20260321_120000_mike.png"), b"png").unwrap();
 
         let watcher = test_watcher(photos.path());
         watcher.initial_scan().await;

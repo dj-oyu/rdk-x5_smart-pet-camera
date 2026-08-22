@@ -246,7 +246,7 @@ async fn handle_event_by_id(
             .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("{e}")})),
+            Json(serde_json::json!({"error": e.to_string()})),
         )
             .into_response(),
     }
@@ -1926,10 +1926,7 @@ mod tests {
             .await
             .unwrap();
         let app = router(state);
-        for body in [
-            r#"{"pet_id":"chatora"}"#,
-            r#"{"behavior":"sleeping"}"#,
-        ] {
+        for body in [r#"{"pet_id":"chatora"}"#, r#"{"behavior":"sleeping"}"#] {
             let response = app
                 .clone()
                 .oneshot(
@@ -1971,7 +1968,11 @@ mod tests {
             .iter()
             .map(|entry| serde_json::from_str(entry["changes"].as_str().unwrap()).unwrap())
             .collect();
-        assert!(changes.iter().any(|change| change["pet_id"]["old"] == "mike"));
+        assert!(
+            changes
+                .iter()
+                .any(|change| change["pet_id"]["old"] == "mike")
+        );
         assert!(
             changes
                 .iter()

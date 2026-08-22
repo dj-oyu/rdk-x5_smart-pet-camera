@@ -796,12 +796,7 @@ mod tests {
         store.migrate_training().unwrap();
 
         let pending_id = store
-            .upsert_training_frame(
-                "frame-a.nv12",
-                640,
-                480,
-                Some("2026-01-02T03:04:05"),
-            )
+            .upsert_training_frame("frame-a.nv12", 640, 480, Some("2026-01-02T03:04:05"))
             .unwrap();
         store
             .replace_training_annotations(
@@ -992,13 +987,7 @@ mod tests {
     #[tokio::test]
     async fn stats_classes_and_export_keep_public_json_contracts() {
         let fixture = fixture();
-        let (status, body) = send(
-            &fixture.state,
-            Method::GET,
-            "/api/training/stats",
-            None,
-        )
-        .await;
+        let (status, body) = send(&fixture.state, Method::GET, "/api/training/stats", None).await;
         assert_eq!(status, StatusCode::OK);
         let body = json(&body);
         assert_eq!(body["total"], 2);
@@ -1006,22 +995,10 @@ mod tests {
         assert_eq!(body["approved"], 1);
         assert_eq!(body["total_annotations"], 3);
 
-        let (_, body) = send(
-            &fixture.state,
-            Method::GET,
-            "/api/training/classes",
-            None,
-        )
-        .await;
+        let (_, body) = send(&fixture.state, Method::GET, "/api/training/classes", None).await;
         assert_eq!(json(&body)["classes"], serde_json::json!(["cat", "dog"]));
 
-        let (_, body) = send(
-            &fixture.state,
-            Method::GET,
-            "/api/training/export",
-            None,
-        )
-        .await;
+        let (_, body) = send(&fixture.state, Method::GET, "/api/training/export", None).await;
         let body = json(&body);
         assert_eq!(body["total_frames"], 1);
         assert_eq!(body["total_annotations"], 1);
@@ -1036,13 +1013,8 @@ mod tests {
     #[tokio::test]
     async fn background_status_and_reject_routes_work_without_external_processes() {
         let fixture = fixture();
-        let (status, body) = send(
-            &fixture.state,
-            Method::GET,
-            "/api/training/bg/status",
-            None,
-        )
-        .await;
+        let (status, body) =
+            send(&fixture.state, Method::GET, "/api/training/bg/status", None).await;
         assert_eq!(status, StatusCode::OK);
         let body = json(&body);
         assert!(!body["model_exists"].as_bool().unwrap());
@@ -1061,13 +1033,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let (_, body) = send(
-            &fixture.state,
-            Method::GET,
-            "/api/training/bg/status",
-            None,
-        )
-        .await;
+        let (_, body) = send(&fixture.state, Method::GET, "/api/training/bg/status", None).await;
         assert_eq!(json(&body)["bg_ref_count"], 1);
 
         for threshold in [-0.1, 100.1] {
@@ -1110,34 +1076,29 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(String::from_utf8(body).unwrap(), "frame not found");
 
-        let (status, body) = send(
-            &fixture.state,
-            Method::POST,
-            "/api/training/bg/build",
-            None,
-        )
-        .await;
+        let (status, body) =
+            send(&fixture.state, Method::POST, "/api/training/bg/build", None).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(String::from_utf8(body).unwrap().contains("background reference frames"));
+        assert!(
+            String::from_utf8(body)
+                .unwrap()
+                .contains("background reference frames")
+        );
 
-        let (status, body) = send(
-            &fixture.state,
-            Method::POST,
-            "/api/training/bg/score",
-            None,
-        )
-        .await;
+        let (status, body) =
+            send(&fixture.state, Method::POST, "/api/training/bg/score", None).await;
         assert_eq!(status, StatusCode::PRECONDITION_FAILED);
-        assert!(String::from_utf8(body).unwrap().contains("no background model"));
+        assert!(
+            String::from_utf8(body)
+                .unwrap()
+                .contains("no background model")
+        );
     }
 
     #[tokio::test]
     async fn cleanup_can_delete_rejected_rows_without_remote_ssh() {
         let fixture = fixture();
-        let status_uri = format!(
-            "/api/training/frames/{}/status",
-            fixture.pending_id
-        );
+        let status_uri = format!("/api/training/frames/{}/status", fixture.pending_id);
         let (status, _) = send(
             &fixture.state,
             Method::PUT,

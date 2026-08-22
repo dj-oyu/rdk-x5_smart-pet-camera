@@ -776,12 +776,7 @@ mod tests {
 
     #[tokio::test]
     async fn analyze_retries_once_after_http_error() {
-        use axum::{
-            Json, Router,
-            http::StatusCode,
-            response::IntoResponse,
-            routing::post,
-        };
+        use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
         use std::sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},

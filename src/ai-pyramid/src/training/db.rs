@@ -499,12 +499,7 @@ mod tests {
             .upsert_training_frame("frame-b.nv12", 1920, 1080, None)
             .unwrap();
         let second_id = store
-            .upsert_training_frame(
-                "frame-a.nv12",
-                640,
-                480,
-                Some("2026-01-02T03:04:05"),
-            )
+            .upsert_training_frame("frame-a.nv12", 640, 480, Some("2026-01-02T03:04:05"))
             .unwrap();
 
         let updated_id = store
@@ -520,9 +515,8 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].filename, "frame-a.nv12");
 
-        let (approved, approved_total) = store
-            .list_training_frames(Some("approved"), 50, 0)
-            .unwrap();
+        let (approved, approved_total) =
+            store.list_training_frames(Some("approved"), 50, 0).unwrap();
         assert_eq!(approved_total, 1);
         assert_eq!(approved[0].id, second_id);
 
@@ -561,11 +555,16 @@ mod tests {
         let replacement = store.list_training_annotations(frame_id).unwrap();
         assert_eq!(replacement.len(), 1);
         assert_eq!(replacement[0].class_label, "bird");
-        assert_eq!(store.delete_training_annotation(replacement[0].id).unwrap(), 1);
-        assert!(store
-            .list_training_annotations(frame_id)
-            .unwrap()
-            .is_empty());
+        assert_eq!(
+            store.delete_training_annotation(replacement[0].id).unwrap(),
+            1
+        );
+        assert!(
+            store
+                .list_training_annotations(frame_id)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
