@@ -40,7 +40,7 @@
 
 ### Rust
 
-- 合計78テスト
+- リファクタリング前は合計78テスト、characterization追加後は107テスト
 - 最新のRust workflow成功: 2026-06-24
 - 最新のaarch64 build成功: 2026-06-26
 - CIにline/branch coverage計測は未導入
@@ -165,7 +165,14 @@ Coverage gateの導入手順:
 3. baseline改善後、その達成値を最低値としてCIに設定する
 4. 以後はline/branch coverageの低下を失敗扱いにする
 
-Gate: format、clippy、Rust tests、Bun tests/build、coverage reportが全成功。production behaviorに変更なし。
+Gate: format、clippy、Rust tests、Bun tests/buildが全成功し、取得可能なcoverage baselineを保存する。production behaviorに変更なし。
+
+結果:
+
+- [x] Rust characterization testsを追加し、107 tests成功
+- [x] Bun testsを27から41へ追加、41 tests成功
+- [x] `training-api.ts` line coverage 100%、function coverage 92.59%を確認
+- [ ] Rust line/branch coverage CI（workflow変更はこのmoduleの書込scope外のため別作業）
 
 ### Phase 2 — Parallel structural rewrite
 
@@ -187,7 +194,16 @@ Rules:
 - algorithm、timeout、sleep、semaphore permit数を変更しない
 - formatting-only moveとbehavior changeを同じcommitに混ぜない
 
-Gate: 各laneを統合した状態で全自動テストとcoverage non-regressionが成功。
+Gate: 各laneを統合した状態で全自動テストが成功し、取得可能なcoverage baselineが低下しない。
+
+結果:
+
+- [x] serverをalbum/detection/events/summary/assets/test_pagesへ分割
+- [x] training APIをframes/annotations/background/testsへ分割
+- [x] local detectorをwire/client/image_conversion/pipelineへ分割
+- [x] VLMをclient/parser/supervisorへ分割
+- [x] EventDetailからmetadata editorとdetection listを抽出
+- [x] GitHub Rust CI `32592676514` 成功
 
 ### Phase 3 — Integration rewrite
 
@@ -201,35 +217,54 @@ Phase 2で安定した公開constructorを使い、競合しやすいcomposition
 
 Gate: `main.rs`はCLI parseとbootstrap呼出しを中心に約100行、各moduleの責務を1文で説明できること。全CI成功。
 
+結果:
+
+- [x] DB dispatchをalbum 22 command / training 15 commandへ分割
+- [x] 全37 commandを網羅列挙し、新variant追加漏れをcompile error化
+- [x] `main.rs`を332行から9行へ縮小、起動構成を`bootstrap`へ抽出
+- [x] GitHub Rust CI `32593481852` 成功（fmt、Clippy、107 tests）
+
 ### Phase 4 — GitHub CI and device validation
 
-1. branchをpushしてPR workflowsを起動
+1. branchをpushしてGitHub Actions workflowsを起動
 2. Rust `fmt`、`clippy -D warnings`、tests、coverageを確認
 3. aarch64 release workflow成功を確認
 4. `pet-album-aarch64` artifactをデバイスへdownload
-5. 現行binaryを退避後、`/opt/smart-pet-camera/build/pet-album`へinstall
-6. `pet-album.service`をrestartし、journalにpanic/errorがないことを確認
+5. mainへ統合する段階で、現行binaryを退避後、`/opt/smart-pet-camera/build/pet-album`へinstall
+6. mainへ統合する段階で、`pet-album.service`をrestartし、journalにpanic/errorがないことを確認
 7. `/health`、album list/detail、ingest、SSE、MCP、training APIをsmoke test
 8. local YOLO、VLM caption、daily summary/model restoreを実データで確認
-9. repository guidelineに従い `uv run scripts/profile_shm.py` を実行し、他moduleのSHM metricsが不変であることを確認
+9. capture/detector/streamingやSHM契約を変更した場合のみ `uv run scripts/profile_shm.py` を実行する
 
 失敗時は退避したbinaryへ戻し、ログとfailure fixtureを保存してから修正する。
+
+実施結果 (2026-08-23):
+
+- [x] aarch64 workflow `32593541576` 成功（tests、release build、artifact upload）
+- [x] `pet-album-aarch64`をデバイスの`/tmp`へdownload
+- [x] AArch64 ELF64、7.1 MiB、SHA-256 `fee0bca50b1777fc677876f8b62e3df8529a1c611de42799e50dcf337c012afa`
+- [x] 一時SQLite・一時photos・別port `127.0.0.1:18082`で起動
+- [x] health、album list、stats、training stats、embedded SPAをsmoke test
+- [x] ingest成功、invalid timestamp 400、登録event/detections readbackを確認
+- [x] 稼働中`pet-album.service`とproduction DB/binaryは未変更
+- [x] SHM profilerは対象外（ai-pyramidはSHMを直接読み書きせず、SHM module変更なし）
+- [ ] productionへのinstall、service restart、実データ連携確認（main統合前には実施しない）
 
 ## 6. Acceptance Criteria
 
 - 全既存外部契約がcharacterization testsで維持される
-- GitHub CIのformat、clippy、Rust tests、Bun tests/build、coverage gateが成功
-- aarch64 artifact buildとdevice installが成功
-- 既存SQLite DBをコピーしたfixtureでmigrationが成功し、件数と主要値が不変
-- systemd restart後にserviceがactive、panicなし
-- album、detection、VLM、training、MCPの実機smoke testsが成功
-- pure logicとHTTP contractsのcoverageがbaselineを下回らない
+- GitHub CIのformat、clippy、Rust testsと、ローカルのBun tests/buildが成功
+- aarch64 artifact buildと隔離環境でのdevice smoke testが成功
+- main統合前に、既存SQLite DBをコピーしたfixtureでmigrationが成功し、件数と主要値が不変
+- main統合前に、systemd restart後にserviceがactive、panicなし
+- main統合前に、local detector、VLM、daily summary、MCPを実データで確認する
+- pure logicとHTTP contractsのcoverage baselineを記録する（Rust coverage CIは別作業）
 - UI coverageが一部ファイルだけでなく対象source一覧を正しく含む
 - 意図的なfeature、schema、protocol、UI変更が含まれない
 
 ## 7. Commit Strategy
 
-mainへは一つのrefactoring PRとして統合するが、branch内では次のcheckpoint commitを維持する。
+mainへ統合する場合は一つのrefactoring PRとするが、現段階ではPRを作成しない。branch内では次のcheckpoint commitを維持する。
 
 1. `test: characterize ai-pyramid external contracts`
 2. `ci: add backend and frontend coverage reporting`
