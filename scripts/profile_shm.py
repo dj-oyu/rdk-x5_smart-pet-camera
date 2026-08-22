@@ -32,7 +32,7 @@ import os
 import statistics
 import sys
 import time
-from ctypes import Structure, c_int, c_int32, c_long, c_uint8, c_uint32, c_uint64, sizeof
+from ctypes import sizeof
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,7 +47,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src" / "capture"))
 sys.path.insert(0, str(PROJECT_ROOT / "src" / "common" / "src"))
 try:
     from real_shared_memory import (
-        CTimespec,
+        CH265ZeroCopyBuffer,
         CZeroCopyFrameBuffer,
         SHM_NAME_DETECTIONS,
         SHM_NAME_YOLO_ZC,
@@ -141,36 +141,12 @@ class ReadOnlyZeroCopySharedMemory(ZeroCopySharedMemory):
 # ============================================================================
 # Read-only H.265 zero-copy reader (/pet_camera_h265_zc)
 #
-# H265ZeroCopyFrame/H265ZeroCopyBuffer (src/capture/shared_memory.h) have no
-# existing Python binding — real_shared_memory.py only covers the NV12
-# ZeroCopyFrameBuffer layout used by the detector. Mirrored here read-only
-# since src/ must not be modified for this task. Verified against the live
-# device: sizeof(CH265ZeroCopyBuffer) below equals the actual
-# /dev/shm/pet_camera_h265_zc file size (160 bytes) at the time of writing.
-# Keep in sync with shared_memory.h if that struct changes.
+# H265ZeroCopyFrame/H265ZeroCopyBuffer ctypes mirrors now live in
+# src/capture/real_shared_memory.py (CH265ZeroCopyFrame/CH265ZeroCopyBuffer,
+# imported above) — one ctypes mirror per C struct, verified against
+# shared_memory.h by scripts/check_shm_layout.py. This reader class stays
+# here since it is profiling-specific (read-only open, no wait_for_frame()).
 # ============================================================================
-HB_MEM_COM_BUF_SIZE = 48  # sizeof(hb_mem_common_buf_t); shared_memory.h
-
-
-class CH265ZeroCopyFrame(Structure):
-    _fields_ = [
-        ("frame_number", c_uint64),
-        ("timestamp", CTimespec),
-        ("camera_id", c_int),
-        ("width", c_int),
-        ("height", c_int),
-        ("data_size", c_uint32),
-        ("hb_mem_buf_data", c_uint8 * HB_MEM_COM_BUF_SIZE),
-        ("version", c_uint32),
-    ]
-
-
-class CH265ZeroCopyBuffer(Structure):
-    _fields_ = [
-        ("new_frame_sem", c_uint8 * 32),  # sem_t
-        ("consumed_sem", c_uint8 * 32),  # sem_t
-        ("frame", CH265ZeroCopyFrame),
-    ]
 
 
 @dataclass
