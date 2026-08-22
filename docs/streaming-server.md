@@ -2,7 +2,8 @@
 
 ## 概要
 
-**pion/webrtc v4**を使用したGo実装の単一バイナリストリーミングサーバー。H.265 passthroughによるゼロコピー配信、録画、Prometheusメトリクスを提供する。
+**pion/webrtc を排除した**自前 WebRTC スタックによる Go 実装。pion/dtls のみ残置。
+H.265 passthrough（デコードなし）、録画、Prometheus メトリクスを 1 バイナリで提供。
 
 ### パフォーマンス目標
 
@@ -27,42 +28,43 @@ graph TD
         vio --> enc
     end
 
-    shm["/pet_camera_h265_zc<br/>(POSIX shared memory)"]
+    shm["/pet_camera_h265_zc<br/>(POSIX SHM, zero-copy)"]
     enc -->|"H.265 NAL units"| shm
 
-    subgraph go["Go Streaming Server"]
-        reader["SHM Reader (cgo)"]
+    subgraph go["Go Streaming Server (:8081)"]
+        reader["SHM Reader (cgo)<br/>hb_mem import+copy"]
         proc["Codec Processor<br/>(NAL解析, VPS/SPS/PPS キャッシュ)"]
-        webrtc["WebRTC Server<br/>(pion/webrtc v4, Fan-Out)"]
+        rtp["rtppack<br/>(H.265 RTP packetizer)"]
+        signal["signal.Server<br/>(SDP / ICE / DTLS / SRTP)"]
         rec["Recorder<br/>(.hevc → .mp4)"]
-        met["Prometheus Metrics"]
-        http["HTTP API Server"]
+        met["Prometheus Metrics (:9090)"]
 
         reader --> proc
-        proc --> webrtc
+        proc --> rtp --> signal
         proc --> rec
         proc --> met
     end
 
     shm --> reader
+    signal -->|"SRTP / UDP"| browser["Browser"]
 ```
 
-### データフロー
+### データフロー (2ステージパイプライン)
 
 ```mermaid
 graph LR
-    cam["Camera Daemon"]
-    shm["/pet_camera_h265_zc<br/>(POSIX SHM)"]
-    reader["Go SHM Reader<br/>(cgo, zero-copy)"]
-    proc["Codec Processor<br/>(VPS/SPS/PPS キャッシュ)"]
-    webrtc["WebRTC Track<br/>(H.265 passthrough)"]
-    rec["Recorder<br/>(.hevc → .mp4)"]
+    shm["SHM<br/>(VPU buffer)"]
+    stage1["Stage 1: readFrames<br/>ReadLatestCopyBuf → Process<br/>recorder copy → sendCh"]
+    stage2["Stage 2: sender goroutine<br/>PacketizeH265 → signal.SendFrame<br/>(SRTP encrypt + UDP write)"]
+    rec["Recorder goroutine<br/>(distributeRecorder)"]
     browser["Browser"]
 
-    cam --> shm --> reader --> proc
-    proc --> webrtc --> browser
-    proc --> rec
+    shm --> stage1
+    stage1 -->|"sendCh (cap=1)"| stage2 --> browser
+    stage1 -->|"recorderChan (cap=60)"| rec
 ```
+
+`ReadLatestCopyBuf` は VPU バッファを Go-owned コピーに変換するため、Stage 1 が即次フレームを取得する間も Stage 2 が同フレームを保持できる。
 
 ### プロジェクト構造
 
@@ -72,17 +74,30 @@ src/streaming_server/
 │   ├── server/main.go              # WebRTC streaming server (:8081)
 │   └── web_monitor/main.go         # MJPEG web monitor (:8080)
 ├── internal/
-│   ├── shm/reader.go               # cgo共有メモリアクセス
-│   ├── codec/processor.go          # H.265 NALユニット処理
-│   ├── webrtc/server.go            # WebRTCサーバー (pion/webrtc v4)
+│   ├── shm/reader.go               # cgo: hb_mem import+copy, VPU バッファ管理
+│   ├── codec/processor.go          # H.265 NAL解析, VPS/SPS/PPS キャッシュ
+│   ├── signal/                     # 自前 WebRTC シグナリング
+│   │   ├── session.go              # Session / Server / HandleOffer / SendFrame
+│   │   ├── ice.go                  # ICELite + STUN Binding Request/Response
+│   │   ├── stun_client.go          # outbound STUN (ICE-full mode)
+│   │   ├── dtls.go                 # pion/dtls ラッパー + SRTP key export
+│   │   ├── sdp.go                  # SDP パース / Answer 生成
+│   │   ├── candidate.go            # ICE candidate パース
+│   │   ├── sessionconn.go          # IPv6 source-pin (IPV6_PKTINFO)
+│   │   └── localaddrs.go           # 非ループバック IP 列挙
+│   ├── srtp/                       # 自前 SRTP (AES-128-CTR + HMAC-SHA1-80)
+│   │   ├── context.go              # SRTP コンテキスト (ROC tracking)
+│   │   ├── cipher.go               # AES-CTR encrypt + HMAC-SHA1 auth tag
+│   │   ├── keyderiv.go             # RFC 3711 AES-CM key derivation
+│   │   └── afalg.go                # AF_ALG 実装 (検証済み、現在は未使用)
+│   ├── rtppack/h265.go             # H.265 RTP packetizer (single-NALU / FU-A)
 │   ├── recorder/recorder.go        # H.265録画 (.hevc → .mp4)
-│   ├── metrics/metrics.go          # Prometheusメトリクス
-│   ├── webmonitor/                  # MJPEG配信、BBox描画、comic生成
-│   ├── flaskcompat/                 # Flask互換テスト
-│   └── logger/logger.go            # ロガー
+│   ├── metrics/metrics.go          # Prometheus メトリクス
+│   ├── webmonitor/                 # MJPEG配信, BBox描画, comic生成
+│   └── logger/logger.go            # 構造化ロガー
 ├── pkg/
-│   ├── types/frame.go              # 共通型定義
-│   └── proto/detection.pb.go       # Protobuf検出結果
+│   ├── types/frame.go              # VideoFrame 型
+│   └── proto/detection.pb.go       # Protobuf 検出結果
 ├── go.mod / go.sum
 └── README.md
 ```
@@ -91,196 +106,111 @@ src/streaming_server/
 
 ## 並行処理モデル
 
-### 4+N Goroutine構成
+### 2+1 Goroutine 構成
 
 ```mermaid
 graph TD
-    reader["Reader<br/>(10ms polling)"]
-    proc_chan["processChan<br/>(buffer: 30)"]
-    processor["Processor<br/>(NAL processing)"]
-    webrtc_chan["webrtcChan<br/>(buffer: 30)"]
-    rec_chan["recorderChan<br/>(buffer: 60)"]
-    metrics["metrics update"]
-    webrtc_dist["WebRTC Distributor"]
-    rec_dist["Recorder Distributor"]
-    clients["N clients<br/>(parallel)"]
-    file["File I/O"]
+    main["main goroutine<br/>(HTTP server)"]
+    readFrames["readFrames goroutine<br/>(Stage 1: SHM poll → process → distribute)"]
+    sender["inline sender goroutine<br/>(Stage 2: RTP pack + SRTP + UDP)"]
+    distributeRecorder["distributeRecorder goroutine<br/>(file I/O)"]
+    runSession["runSession goroutine × N<br/>(ICE → DTLS → SRTP lifecycle)"]
 
-    reader --> proc_chan --> processor
-    processor --> webrtc_chan --> webrtc_dist --> clients
-    processor --> rec_chan --> rec_dist --> file
-    processor --> metrics
+    main --> readFrames
+    readFrames --> sender
+    readFrames --> distributeRecorder
+    main -->|"per offer"| runSession
 ```
 
 | Goroutine | 数量 | 役割 |
 |-----------|-----|------|
-| Reader | 1 | 共有メモリポーリング（10ms間隔） |
-| Processor | 1 | NAL解析、SPS/PPSキャッシュ、ヘッダー付与 |
-| WebRTC Distributor | 1 | 全クライアントへフレームFan-Out配信 |
-| Recorder Distributor | 1 | 録画有効時のみフレーム送信 |
-| WebRTC Client Writer | N | クライアントごとの並列送信 |
+| readFrames | 1 | SHM ポーリング、NAL 処理、channel 分配 |
+| sender (inline) | 1 | RTP packetize + signal.SendFrame |
+| distributeRecorder | 1 | recorder.SendFrame (ファイル I/O) |
+| runSession | N | ICE→DTLS→SRTP ライフサイクル（セッション毎） |
 
 ### チャネルバッファサイズ
 
-| チャネル | バッファサイズ | 理由 |
+| チャネル | バッファサイズ | 備考 |
 |---------|--------------|------|
-| processChan | 30 | 1秒分 @ 30fps |
-| webrtcChan | 30 | 1秒分 |
-| recorderChan | 60 | 2秒分（ディスクI/O余裕） |
-| clientChan | 30 | クライアント毎 |
+| sendCh (Stage 1→2) | 1 | 送信側ビジー時は drop（recorder 側に既保存） |
+| recorderChan | 60 | 2秒分 @ 30fps |
 
 ### バックプレッシャー戦略
 
-非ブロッキング送信 + フレームドロップ方式を採用。リアルタイム性を優先し、バッファが溢れた場合は古いフレームをドロップする。ドロップ数はメトリクスで監視可能。
-
-```go
-// ノンブロッキング送信パターン
-select {
-case ch <- frame:
-    // 送信成功
-default:
-    // バッファ満杯 → フレームドロップ、メトリクス更新
-}
-```
-
-### エラーハンドリング方針
-
-| エラータイプ | 処理方法 |
-|------------|---------|
-| 一時的エラー（フレーム読み取り失敗等） | ログ + 続行 |
-| 致命的エラー（共有メモリクローズ等） | エラーチャネル + サーバー停止 |
-| Panic | defer recover + ログ + エラーチャネル |
-| 連続エラー（10回連続読み取り失敗等） | 致命的エラーに昇格 |
-| クライアントエラー（3回連続write失敗） | クライアント切断 |
+sendCh は capacity=1 のため Stage 2 がビジーの場合 WebRTC フレームをドロップし、
+Stage 1 は即次フレームへ進む。録画パスは独立した memcopy 済みバッファを持つため
+WebRTC ドロップの影響を受けない。
 
 ### グレースフルシャットダウン
 
-`context.WithCancel`による全goroutineの協調的終了。5秒のタイムアウト付き`WaitGroup.Wait()`で全goroutineの停止を保証。
+`context.WithCancel` による全 goroutine の協調終了。`Shutdown()` の流れ:
+
+1. `s.cancel()` → ctx 通知
+2. `s.wg.Wait()` で readFrames / distributeRecorder 終了待ち
+3. `s.recorder.Stop()` → 録画ファイル close
+4. `s.signal.Close()` / `s.shmReader.Close()`
+5. `s.httpServer.Shutdown(5s timeout)`
 
 ---
 
-## 主要コンポーネント
+## 自前 WebRTC スタック詳細
 
-### Shared Memory Reader (`internal/shm/reader.go`)
+### 採択理由
 
-cgoによるPOSIX共有メモリアクセス。`shared_memory.h`のFrame構造体との互換性。
+pion/webrtc v4 は H.265 サポートが不完全かつ SSRC/PT ネゴシエーションの挙動が
+不透明だったため全排除。pion/dtls のみ残置し、それ以外は自前実装。
 
-```go
-func NewReader(shmName string) (*Reader, error)
-func (r *Reader) ReadLatest() (*types.H264Frame, error)
-func (r *Reader) WaitForFrame(timeout time.Duration) (*types.H264Frame, error)
-func (r *Reader) Close() error
-```
+| レイヤ | 実装 | 場所 |
+|--------|-----|------|
+| SDP パース/生成 | 自前 | `signal/sdp.go` |
+| ICE-lite (passive) | 自前 STUN handler | `signal/ice.go` |
+| ICE-full (active) | 自前 outbound STUN | `signal/stun_client.go` |
+| DTLS | pion/dtls v3 | `signal/dtls.go` |
+| SRTP | 自前 AES-128-CTR + HMAC-SHA1-80 | `srtp/` |
+| RTP packetizer | 自前 H.265 (single / FU-A) | `rtppack/h265.go` |
 
-- Zero-copy設計（memcpyは共有メモリ→Goヒープのみ）
-- ポーリングベース（10msインターバル）
+### SRTP 実装
 
-### Codec Processor (`internal/codec/processor.go`)
+`srtp/cipher.go` の `Cipher` が SRTP の暗号化・認証タグ生成を担う。
 
-H.265 NALユニット解析とVPS/SPS/PPSキャッシング。
+- **暗号化**: AES-128-CTR (`crypto/aes` + 自前 CTR ループ)
+- **認証タグ**: HMAC-SHA1-80 (先頭 10 バイト)
+- **authPool**: `sync.Pool` で HMAC インスタンスを再利用し、per-packet alloc を削減
+- **AF_ALG 実装** (`srtp/afalg.go`): OP-TEE 経由の HW 暗号化を実装・検証済みだが、
+  TE コンテキストスイッチのオーバーヘッドがソフトウェア実装より遅いため**未採用**。
+  詳細: `docs/optee-afalg-findings.md`
 
-**NALユニットタイプ対応 (H.265)**:
-- `NALTypeVPS (32)`: Video Parameter Set → キャッシュ
-- `NALTypeSPS (33)`: Sequence Parameter Set → キャッシュ
-- `NALTypePPS (34)`: Picture Parameter Set → キャッシュ
-- `NALTypeIDR_W_RADL (19)`, `IDR_N_LP (20)`: IDRフレーム → VPS+SPS+PPS自動付与
+### ICE 動作モード
 
-録画途中開始時やクライアント途中参加時のヘッダー欠落問題を解決。
-
-### WebRTC Server (`internal/webrtc/server.go`)
-
-pion/webrtc v4によるH.265 passthroughストリーミング。
-
-```go
-func NewServer(stunServers []string, maxClients int) *Server
-func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error)
-func (s *Server) SendFrame(frame *types.H264Frame)
-func (s *Server) GetClientCount() int
-func (s *Server) Close() error
-```
-
-- H.265コーデック登録: `webrtc.MimeTypeH265`, ClockRate=90000
-- マルチクライアント対応（Fan-Outパターン）
-- ICE接続状態監視による自動クライアント削除
-- デフォルト最大10クライアント（`-max-clients`で変更可能）
-- RTCP処理（品質フィードバック）
-
-### Recorder (`internal/recorder/recorder.go`)
-
-H.265録画（.hevc → .mp4変換）。
-
-```go
-func NewRecorder(basePath string) *Recorder
-func (r *Recorder) Start() error
-func (r *Recorder) Stop() error
-func (r *Recorder) SendFrame(frame *types.H264Frame) bool
-func (r *Recorder) GetStatus() RecordingStatus
-```
-
-- 録画形式: H.265 NAL → `.hevc` → `ffmpeg -f hevc -c copy` → `.mp4`
-- 非ブロッキング録画（バッファ60フレーム = 2秒分）
-- IDRフレーム検出時にVPS/SPS/PPSを自動付与
-- ハートビート3秒タイムアウト、最大30分
-
-### Metrics (`internal/metrics/metrics.go`)
-
-Prometheus形式メトリクス（30+ metrics）。atomic操作によるスレッドセーフな更新。
-
-| メトリクス名 | 説明 |
-|------------|------|
-| `streaming_frames_read_total` | 共有メモリ読み取りフレーム数 |
-| `streaming_frames_dropped_total` | ドロップフレーム数 |
-| `streaming_webrtc_frames_sent_total` | WebRTC送信フレーム数 |
-| `streaming_active_clients` | アクティブWebRTCクライアント数 |
-| `streaming_recording_active` | 録画状態（0/1） |
-| `streaming_frame_latency_ms` | フレームレイテンシ（ms） |
-| `streaming_webrtc_buffer_usage_percent` | WebRTCバッファ使用率（%） |
-
----
-
-## WebRTC設計
-
-### 自前 WebRTC スタックによる H.265 passthrough
-
-pion/webrtc を排除し、SDP / ICE / DTLS / SRTP を自前実装している (pion/dtls のみ残置)。
-
-- H.265 NAL units を直接 RTP パケットとして送信（デコード不要）
-- VPS/SPS/PPS をキャッシュして mid-stream クライアント join を許容
-- クライアントごとに PT を再ネゴ (Safari PT=35, Chrome PT=49)
-- iPhone Safari、Chrome で H.265 WebRTC 再生確認済み (LAN / Wi-Fi / 5G LTE)
+| モード | 説明 | 有効化 |
+|--------|-----|--------|
+| ICE-lite (default) | passive のみ、browser からの STUN 待ち | デフォルト |
+| ICE-full | server も outbound STUN を送り MAP-E NAT を開ける | `PET_CAMERA_ENABLE_ICE_FULL=1` |
+| IPv6 candidates | SLAAC mngtmpaddr を SDP に advertise | `PET_CAMERA_ENABLE_IPV6_CANDIDATES=1` |
 
 ### モバイル接続経路 (5G/LTE)
 
-MAP-E ISP 環境下では v4 のポート開放が使えず、外部から直接の inbound v4 が
-通らない。サーバ側で 2 経路を並行運用することで iPhone Safari over LTE まで
-含めて再生可能にしている。設計詳細は `docs/webrtc-ice-full-restoration.md` 参照。
+MAP-E ISP 環境下では v4 inbound が使えない。2 経路を並行運用。
 
-| 経路 | 仕組み | env var |
-|---|---|---|
-| **IPv6 直通** | KDDI au の v6 GUA を SDP host candidate として advertise。MAP-E トンネル外の素 v6 で iPhone 5G と直結。NAT 越え不要、最速 (DTLS ready ~100ms)。`IPV6_PKTINFO` で source IP を mngtmpaddr に固定 (kernel 既定の RFC 4941 temp に上書きされると DTLS reject されるため)。 | `PET_CAMERA_ENABLE_IPV6_CANDIDATES=1` |
-| **ICE-full + prflx** | Server から iPhone の candidate に STUN binding request を投げて MAP-E NAT 内側から穴を開け、peer-reflexive で v4 経路を確立。iPhone は Google STUN で取った自前 srflx を candidate として送ってくる。 | `PET_CAMERA_ENABLE_ICE_FULL=1` |
+| 経路 | 仕組み |
+|------|--------|
+| **IPv6 直通** | au KDDI v6 GUA を host candidate として advertise。`IPV6_PKTINFO` で送信元を mngtmpaddr に固定（RFC 4941 temp addr に上書きされると DTLS が reject される）|
+| **ICE-full + prflx** | server 側から peer candidate に STUN binding request を投げて MAP-E NAT を内側から開ける。peer-reflexive 経路で v4 確立 |
 
-両方とも default ON。ブラウザの ICE が priority で v6 を選び、v6 不通環境では
-ICE-full + prflx に自動フォールバック。LAN 同一セグメントでは host candidate
-(192.168.x.x) が最速で勝つ。
+詳細: `docs/webrtc-ice-full-restoration.md`
 
-#### 制約と運用上の注意
+#### 運用上の注意
 
-- HTTPS signaling 自体は Tailscale 経由前提 (pet-camera は public v4 を持たない)。
-  WebRTC media は Tailscale を通らず v6 直通 / 5G srflx 経路を取りうる。
-- v6 host candidate には kernel から得た mngtmpaddr の SLAAC アドレスを使う。
-  RFC 4941 temporary / deprecated は `/proc/net/if_inet6` のフラグで弾く
-  (rotate されると進行中セッションが切れる)。
-- Phase A 着地時点のオリジナル設計では Phase D (server-side srflx via STUN
-  client) も計画していたが、iPhone Safari が自前 srflx を offer に積むため
-  prflx-only で目的を達成できると判明、未実装。
+- HTTPS signaling は Tailscale 経由が必須（pet-camera は public v4 なし）
+- WebRTC media は Tailscale を通らず v6 直通 / 5G srflx 経路
+- mngtmpaddr は `/proc/net/if_inet6` のフラグで判定（deprecated / temporary を除外）
 
 ### ブラウザクライアント実装
 
-`src/web/src/hooks/useWebRTC.ts` を参照。シグナリングは HTTP one-shot (trickle
-ICE チャンネルなし) のため、offer POST 前に `iceGatheringState === 'complete'`
-を待ち、`pc.localDescription.sdp` を送る必要がある — これを怠ると Safari over
-5G で candidate 0 個の offer が飛び、ICE が確立しない。
+`src/web/src/hooks/useWebRTC.ts` 参照。シグナリングは HTTP one-shot。
+
+**ICE gathering 完了待ちが必須**:
 
 ```javascript
 const offer = await pc.createOffer();
@@ -296,68 +226,91 @@ if (pc.iceGatheringState !== 'complete') {
     pc.addEventListener('icegatheringstatechange', handler);
   });
 }
-const r = await fetch('/api/webrtc/offer', {
+// gathering 完了後に POST
+const r = await fetch('/offer', {
   method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ sdp: pc.localDescription.sdp, type: offer.type }),
+  body: JSON.stringify({ sdp: pc.localDescription.sdp, type: 'offer' }),
 });
 await pc.setRemoteDescription(await r.json());
 ```
 
+gathering 完了前に POST すると Safari over 5G で candidate 0 個の offer が飛び ICE が確立しない。
+
 ---
 
-## Go web_monitor + streaming server 統合アーキテクチャ
+## Shared Memory Reader
 
-### 2サーバー構成
+cgo による POSIX SHM アクセス。`src/capture/shm_constants.h` が single source of truth。
 
-```mermaid
-graph LR
-    browser["Browser"]
-    wm["Go web_monitor<br/>(:8080)<br/>MJPEG, REST API, Preact SPA"]
-    ss["Go streaming server<br/>(:8081)<br/>WebRTC H.265"]
+```go
+// Zero-copy (VPU buffer mapping, free on next call)
+func (r *Reader) ReadLatest() (*types.VideoFrame, error)
 
-    browser -->|"HTTP / MJPEG"| wm
-    browser -->|"WebRTC (直接接続)"| ss
+// Copy-on-read (hb_mem import + memcpy + free, async safe)
+func (r *Reader) ReadLatestCopyBuf(dst []byte) (*types.VideoFrame, error)
+
+// Frame interval measurement (version change polling)
+func (r *Reader) MeasureFrameInterval(samples int) time.Duration
 ```
 
-| 機能 | フロー |
-|------|--------|
-| UI表示 | Browser → web_monitor (Preact SPA) |
-| WebRTC映像 | Browser → streaming server（直接接続、低遅延） |
-| MJPEG映像 + BBox | Browser ← web_monitor (Go描画) |
-| 録画制御 | Browser → web_monitor → streaming server |
-| 状態取得 | Browser → web_monitor |
+- `ReadLatest`: VPU buffer を zero-copy でマップ。次の呼び出しで自動 free → 同期消費のみ
+- `ReadLatestCopyBuf`: import + memcpy + free を 1 呼び出しで完結。非同期消費（recorder等）に安全
+- `shmBufPool` (`sync.Pool[*[]byte]`): 512KB バッファを再利用し per-frame alloc を削減
 
 ---
 
-## HTTP API エンドポイント
+## Codec Processor
 
-### Go Server (Port 8081)
+H.265 NAL unit 解析と VPS/SPS/PPS キャッシング (`internal/codec/processor.go`)。
+
+| NAL タイプ | 値 | 処理 |
+|-----------|---|------|
+| VPS | 32 | キャッシュ |
+| SPS | 33 | キャッシュ |
+| PPS | 34 | キャッシュ |
+| IDR_W_RADL | 19 | IDR フレームとして VPS+SPS+PPS を自動付与 |
+| IDR_N_LP | 20 | 同上 |
+
+クライアントの mid-stream join や録画途中開始時のヘッダー欠落を防ぐ。
+
+---
+
+## Recorder
+
+H.265 録画 (`internal/recorder/recorder.go`)。
+
+```go
+func (r *Recorder) Start() error
+func (r *Recorder) Stop() error
+func (r *Recorder) SendFrame(frame *types.VideoFrame) bool
+func (r *Recorder) UpdateHeaders(vps, sps, pps []byte)
+func (r *Recorder) GetStatus() RecordingStatus
+```
+
+- 形式: H.265 NAL Annex B → `.hevc` → `ffmpeg -f hevc -c copy` → `.mp4`
+- `recorderChan` (cap=60) 経由で非同期受信
+- IDR フレーム先頭に VPS/SPS/PPS を自動付与
+
+---
+
+## HTTP API
+
+### Go streaming server (Port 8081)
 
 | エンドポイント | メソッド | 説明 |
 |--------------|---------|------|
-| `/offer` | POST | WebRTC SDP offer/answer交換 |
+| `/offer` | POST | WebRTC SDP offer → answer |
 | `/start` | POST | 録画開始 |
 | `/stop` | POST | 録画停止 |
-| `/status` | GET | 録画状態取得 |
+| `/status` | GET | 録画状態 |
 | `/health` | GET | ヘルスチェック |
+| `/api/clients/count` | GET | 接続 WebRTC クライアント数 |
 
-CORS設定: `Access-Control-Allow-Origin: *`
+CORS: `Access-Control-Allow-Origin: *`
 
 ### レスポンス例
 
-**録画状態 (`GET /status`)**:
-```json
-{
-  "recording": true,
-  "filename": "recording_20251226_223031.h264",
-  "frame_count": 1500,
-  "bytes_written": 2457600,
-  "duration_ms": 50000
-}
-```
-
-**ヘルスチェック (`GET /health`)**:
+**`GET /health`**:
 ```json
 {
   "status": "ok",
@@ -367,106 +320,113 @@ CORS設定: `Access-Control-Allow-Origin: *`
 }
 ```
 
+**`GET /status`**:
+```json
+{
+  "recording": true,
+  "filename": "recording_20260101_120000.hevc",
+  "frame_count": 1500,
+  "bytes_written": 2457600,
+  "duration_ms": 50000
+}
+```
+
+---
+
+## 環境変数
+
+| 変数名 | 説明 | デフォルト |
+|-------|------|----------|
+| `PET_CAMERA_ENABLE_ICE_FULL` | ICE-full (outbound STUN) を有効化 | `0` (ICE-lite) |
+| `PET_CAMERA_ENABLE_IPV6_CANDIDATES` | IPv6 host candidate を advertise | `0` |
+
+CLI フラグ: `-shm`, `-http`, `-metrics`, `-pprof`, `-record-path`, `-max-clients`, `-log-level`, `-log-color`
+
+---
+
+## 既知の問題 / TODO
+
+### 未修正
+
+| 優先度 | 場所 | 問題 | 修正方針 |
+|--------|------|------|---------|
+| 🟠 MED | `cmd/server/main.go:243` | RTP SSRC が `0x12345678` 固定。`signal/session.go:141` が採番する per-session SSRC は SDP の `a=ssrc` にのみ反映され、実際の RTP パケットと一致しない。RTCP フィードバックのセッション識別が不可能 | 全セッション共通の packetizer (`main.go:253`) が単一の SSRC で組んでいるのが原因。セッションごとに再パケット化するか、SRTP 暗号化前に SSRC を書き換える |
+
+### 解決済み (#215 / cdd49cd)
+
+以下はコードレビューで挙がり、いずれも修正済み。参考として記録する。
+
+| 場所 | 問題 | 対応 |
+|------|------|------|
+| `signal/ice.go` | HandleSTUN が USERNAME / MESSAGE-INTEGRITY を未検証 (ICE ハイジャック) | `validateRequestAuth()` を追加し、検証失敗時は無応答 |
+| `signal/dtls.go` | SDP offer の fingerprint が DTLS peer 証明書と未照合 | `VerifyPeerCertificate` で SHA-256 を照合 + `RequireAnyClientCert` |
+| `cmd/server/main.go` | shutdown 時に `recorderChan` を drain せず録画末尾が欠損 | `sendCh` → `sendWg.Wait()` → `close(recorderChan)` の順に drain |
+| `signal/session.go` | MaxClients チェックが TOCTOU 競合 | check と insert を同一クリティカルセクションに統合 |
+| `cmd/server/main.go` | RTP タイムスタンプが 30fps ハードコード | 壁時計 90kHz 基準 (`time.Since(streamStart)`) に変更 |
+| `signal/sdp.go` | `H265/90000` regex が大文字のみ | `(?i)` フラグを追加 |
+| `signal/sdp.go` | `a=rtcp` 行と `a=rtcp-mux` が矛盾 | `a=rtcp:9 IN IP4 0.0.0.0` に修正 |
+| `signal/session.go` | keepalive タイムアウト 30s が狭い | 45s に緩和 |
+| `cmd/server/main.go` | `io.ReadAll(r.Body)` にサイズ制限なし | `MaxBytesReader` 64KiB + `ReadTimeout` 10s |
+
 ---
 
 ## ビルドと起動
 
-### ビルド
-
 ```bash
 cd src/streaming_server
-go build -o ../../build/streaming-server ./cmd/server
+go build ./cmd/server && go build ./cmd/web_monitor
+go test ./...
 ```
 
-### 実行
-
 ```bash
-./build/streaming-server \
+# 起動例
+./server \
   -shm /pet_camera_h265_zc \
   -http :8081 \
   -metrics :9090 \
   -pprof :6060 \
-  -record-path ./recordings \
-  -max-clients 10
+  -max-clients 10 \
+  -log-level info
 ```
 
-### 一括起動スクリプト
-
-```bash
-./scripts/run_camera_switcher_yolo_streaming.sh
-```
-
-起動コンポーネント:
-1. camera_daemon - カメラ切替＋H.265エンコード (C)
-2. yolo_detector_daemon - YOLO物体検出 (Python)
-3. web_monitor - Go MJPEG + REST API（ポート8080）
-4. streaming-server - Go WebRTC＋録画サーバー（ポート8081）
-
-### スクリプトオプション
-
-| オプション | 説明 | デフォルト |
-|----------|------|----------|
-| `--skip-build` | ビルドをスキップ | なし |
-| `--no-streaming` | Go streaming server無効化 | 有効 |
-| `--streaming-port P` | Streaming serverポート | 8081 |
-| `--metrics-port P` | Prometheusポート | 9090 |
-| `--pprof-port P` | pprofポート | 6060 |
-| `--max-clients N` | 最大WebRTCクライアント数 | 10 |
-
-### 環境変数
-
-| 変数名 | 説明 | デフォルト |
-|-------|------|----------|
-| `STREAMING_PORT` | Streaming serverポート | `8081` |
-| `STREAMING_MAX_CLIENTS` | 最大WebRTCクライアント数 | `10` |
-| `STREAMING_SHM` | 共有メモリ名 | `/pet_camera_h265_zc` |
-| `RECORDING_PATH` | 録画保存先 | `./recordings` |
+systemd サービス: `scripts/USAGE.md` 参照。
 
 ---
 
-## 監視・プロファイリング
-
-### Prometheusメトリクス
+## 監視
 
 ```bash
-curl http://localhost:9090/metrics
-watch -n 1 'curl -s http://localhost:9090/metrics | grep streaming_active_clients'
-```
+# Prometheus メトリクス
+curl http://localhost:9090/metrics | grep streaming_
 
-### pprof
-
-```bash
-# CPU プロファイル（30秒）
+# pprof CPU (30秒)
 go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
 
-# メモリプロファイル
+# pprof メモリ
 go tool pprof http://localhost:6060/debug/pprof/heap
-
-# Goroutineプロファイル
-go tool pprof http://localhost:6060/debug/pprof/goroutine
 ```
 
----
+主要メトリクス:
 
-## 録画ファイル
-
-- **形式**: H.265 Annex B（`.hevc`）→ `.mp4` 自動変換
-- **変換コマンド**: `ffmpeg -f hevc -i recording.hevc -c:v copy output.mp4`
-- **再生**: `ffplay recordings/recording_YYYYMMDD_HHMMSS.mp4`
+| メトリクス名 | 説明 |
+|------------|------|
+| `streaming_frames_read_total` | SHM 読み取りフレーム数 |
+| `streaming_webrtc_frames_sent_total` | WebRTC 送信フレーム数 |
+| `streaming_recorder_frames_dropped_total` | recorder チャネル満杯によるドロップ数 |
+| `streaming_active_clients` | SRTP 確立済みクライアント数 |
+| `streaming_recording_active` | 録画状態 (0/1) |
+| `streaming_frame_latency_ms` | SHM キャプチャ → 処理完了レイテンシ |
 
 ---
 
 ## 依存関係
 
 ```
-module github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server
-
-require (
-    github.com/pion/webrtc/v4 v4.2.9
-    github.com/prometheus/client_golang v1.23.2
-    golang.org/x/image v0.37.0
-    google.golang.org/protobuf v1.36.8
-)
+github.com/pion/dtls/v3         DTLS 1.2 ハンドシェイク (pion/webrtc は除外)
+golang.org/x/net/ipv6           IPV6_PKTINFO (source IP pin)
+github.com/prometheus/...       メトリクス
+golang.org/x/image              MJPEG 描画 (web_monitor)
+google.golang.org/protobuf      検出結果 protobuf
 ```
 
-**必須ツール**: `go` (1.25以降), `gcc` (cgo用), `make`
+**必須ビルドツール**: `go 1.21+`, `gcc` (cgo), `libhbmem` (RDK X5 専用, `/usr/hobot/lib`)
