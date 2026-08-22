@@ -12,27 +12,21 @@
 #include <hbn_isp_api.h>
 #include <stdarg.h>
 #include <string.h>
+#include "rotating_log.h"
+
 #include <time.h>
 
 // ============================================================================
 // ISP Lowlight dedicated file logging
 // ============================================================================
 
-#define ISP_LOWLIGHT_LOG_PATH "/tmp/isp_lowlight.log"
+#define ISP_LOWLIGHT_LOG_PREFIX     "isp_lowlight"
+#define ISP_LOWLIGHT_RETENTION_DAYS 14
 
-static FILE* g_lowlight_log_file = NULL;
-
-static void lowlight_log_init(void) {
-    if (g_lowlight_log_file == NULL) {
-        g_lowlight_log_file = fopen(ISP_LOWLIGHT_LOG_PATH, "a");
-        if (g_lowlight_log_file) {
-            setvbuf(g_lowlight_log_file, NULL, _IOLBF, 0); // Line buffered
-        }
-    }
-}
+static rotating_log_t g_lowlight_log = ROTATING_LOG_INITIALIZER;
 
 static void lowlight_log(const char* level, const char* fmt, ...) {
-    lowlight_log_init();
+    rotating_log_configure(&g_lowlight_log, ISP_LOWLIGHT_LOG_PREFIX, ISP_LOWLIGHT_RETENTION_DAYS);
 
     // Get timestamp
     struct timespec ts;
@@ -45,17 +39,15 @@ static void lowlight_log(const char* level, const char* fmt, ...) {
     snprintf(timestamp, sizeof(timestamp), "%04d/%02d/%02d %02d:%02d:%02d.%03ld", tm.tm_year + 1900,
              tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000);
 
+    // Compose the message first so the whole record reaches the rotating
+    // log as one write (it locks per call, not per fragment).
+    char message[512];
     va_list args;
     va_start(args, fmt);
-
-    // Write to file
-    if (g_lowlight_log_file) {
-        fprintf(g_lowlight_log_file, "%s [%s] ", timestamp, level);
-        vfprintf(g_lowlight_log_file, fmt, args);
-        fprintf(g_lowlight_log_file, "\n");
-    }
-
+    vsnprintf(message, sizeof(message), fmt, args);
     va_end(args);
+
+    rotating_log_printf(&g_lowlight_log, "%s [%s] %s\n", timestamp, level, message);
 }
 
 #define LOWLIGHT_LOG_DEBUG(fmt, ...) lowlight_log("DEBUG", fmt, ##__VA_ARGS__)

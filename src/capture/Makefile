@@ -6,7 +6,7 @@ BUILD_DIR := ../../build
 
 LDFLAGS := -L/usr/hobot/lib
 
-DAEMON_SOURCES := camera_daemon_main.c camera_pipeline.c camera_switcher.c switch_signal.c vio_lowlevel.c encoder_lowlevel.c encoder_thread.c tcp_relay.c shared_memory.c isp_brightness.c logger.c
+DAEMON_SOURCES := camera_daemon_main.c camera_pipeline.c camera_switcher.c switch_signal.c vio_lowlevel.c encoder_lowlevel.c encoder_thread.c tcp_relay.c shared_memory.c isp_brightness.c logger.c rotating_log.c
 JPEG_ENCODER_SOURCES := jpeg_encoder.c logger.c
 N2D_COMIC_SOURCES := n2d_comic.c logger.c
 RGN_OVERLAY_SOURCES := rgn_overlay.c
@@ -30,6 +30,7 @@ LDLIBS_DAEMON := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lmultimedia -lm
 DAEMON_ARGS ?= -C 0 -P 1
 
 TEST_SWITCHER_BINARY := $(BUILD_DIR)/test_camera_switcher
+TEST_ROTLOG_BINARY   := $(BUILD_DIR)/test_rotating_log
 
 .PHONY: all clean run run-daemon cleanup kill-processes help jpeg-encoder-lib format check-format lint test
 
@@ -65,9 +66,14 @@ jpeg-encoder-lib: $(JPEG_ENCODER_LIB)
 $(TEST_SWITCHER_BINARY): test_camera_switcher.c camera_switcher.c logger.c camera_switcher.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ test_camera_switcher.c camera_switcher.c logger.c -lpthread
 
-test: $(TEST_SWITCHER_BINARY)
+$(TEST_ROTLOG_BINARY): test_rotating_log.c rotating_log.c logger.c rotating_log.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ test_rotating_log.c rotating_log.c logger.c -lpthread
+
+test: $(TEST_SWITCHER_BINARY) $(TEST_ROTLOG_BINARY)
 	@echo "[Test] Running camera_switcher unit tests..."
 	@$(TEST_SWITCHER_BINARY)
+	@echo "[Test] Running rotating_log unit tests..."
+	@$(TEST_ROTLOG_BINARY)
 
 %.o: %.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<

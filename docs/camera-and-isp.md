@@ -96,7 +96,8 @@ static void *switcher_thread(void *arg) {
                 pthread_cond_broadcast(&g_pipelines[1].switch_cond);
             }
             // ... (逆方向も同様)
-            // 検証用プローブログ: /tmp/isp_exposure_probe.log (switch_signal_probe_log)
+            // 検証用プローブログ (switch_signal_probe_should_log で間引き後
+            // switch_signal_probe_log が rotating_log 経由で追記)
         }
 
         int interval_ms = (g_active_camera == 0) ? 250 : 5000;
@@ -129,7 +130,16 @@ AE 補正後の統計平均 (v1) は AE がターゲットへ引き戻すため�
 
 - 閾値: DAY→NIGHT **L < 40** / NIGHT→DAY **L > 80**（真っ暗 p95=8 と最暗の使える光 p5=93 の間、2倍ヒステリシス）
 - ディップは AE ゲイン状態が明シーンのままなので L~260 までしか落ちず、誤切り替えしない（v1 で観測された誤切替13件は全て防げる余裕）
-- 検証データ: switcher スレッドが露出属性 (`hbn_isp_get_exposure_attr`) を読み取り `/tmp/isp_exposure_probe.log` に記録（DAY時 ~1秒間隔、NIGHT時 5秒毎、切り替えイベント時は必ず）
+- 検証データ: switcher スレッドが露出属性 (`hbn_isp_get_exposure_attr`) を読み取り `$PET_CAMERA_LOG_DIR/isp_exposure_probe-YYYYMMDD.log`（既定 `/mnt/petcam-data/logs/`）に記録。**14日でローテーション削除**
+- 記録ポリシー (`switch_signal.h` の `switch_signal_probe_should_log`):
+
+  | 条件 | 動作 |
+  |------|------|
+  | 切り替えイベント | 必ず記録 |
+  | ハートビート | DAY 10秒 / NIGHT 60秒ごと |
+  | 信号の変化 | 直前の記録から 15% 以上動いたら記録（最短間隔 2秒） |
+
+  遷移帯（夜明け・日没）は変化検知で細かく残り、平坦な昼夜はハートビートのみ。実ログ (2026/08/22, 86,200行) で検証したところ **8,740行 / 15.2MB→1.54MB (89.9%削減)**。旧ポリシー（毎ポーリング記録・ローテーションなし）は 2.5ヶ月で 893MB に達し `/tmp` (2GB tmpfs) を枯渇させた
 - **cur_lux は本ファームウェアでは常に 0**（未実装）。exp_time / again / dgain / ispgain / ae_exp は有効
 
 ### 非activeパイプラインのブロック
