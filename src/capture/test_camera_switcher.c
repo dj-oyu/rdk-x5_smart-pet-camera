@@ -258,6 +258,74 @@ static void test_signal_compute_invalid_inputs(void) {
     CHECK(switch_signal_compute(62.0, &zero) < 0.0);
 }
 
+// ============================================================================
+// Probe log write policy (switch_signal_probe_should_log)
+// ============================================================================
+
+static void test_probe_events_always_log(void) {
+    switch_probe_throttle_t st = {0};
+    switch_signal_probe_mark(&st, 100.0, 1000);
+
+    // A switch event must never be throttled, however recent the last record
+    CHECK(switch_signal_probe_should_log(&st, 100.0, false, "switch-to-night", 1001));
+    CHECK(switch_signal_probe_should_log(&st, 100.0, true, "switch-to-day", 1001));
+}
+
+static void test_probe_first_sample_logs(void) {
+    switch_probe_throttle_t st = {0};
+    CHECK(switch_signal_probe_should_log(&st, 100.0, false, NULL, 0));
+    CHECK(switch_signal_probe_should_log(NULL, 100.0, false, NULL, 0));
+}
+
+static void test_probe_flat_signal_uses_heartbeat(void) {
+    switch_probe_throttle_t st = {0};
+    switch_signal_probe_mark(&st, 100.0, 0);
+
+    // A flat DAY signal is silent until the heartbeat elapses
+    CHECK(!switch_signal_probe_should_log(&st, 100.0, false, NULL, 1000));
+    CHECK(!switch_signal_probe_should_log(&st, 100.0, false, NULL,
+                                          SWITCH_PROBE_HEARTBEAT_DAY_MS - 1));
+    CHECK(switch_signal_probe_should_log(&st, 100.0, false, NULL, SWITCH_PROBE_HEARTBEAT_DAY_MS));
+
+    // NIGHT is quieter still: the DAY heartbeat must not fire it
+    CHECK(!switch_signal_probe_should_log(&st, 100.0, true, NULL, SWITCH_PROBE_HEARTBEAT_DAY_MS));
+    CHECK(switch_signal_probe_should_log(&st, 100.0, true, NULL, SWITCH_PROBE_HEARTBEAT_NIGHT_MS));
+}
+
+static void test_probe_change_triggers_record(void) {
+    switch_probe_throttle_t st = {0};
+    switch_signal_probe_mark(&st, 100.0, 0);
+
+    // Below the delta ratio: still throttled
+    CHECK(!switch_signal_probe_should_log(&st, 110.0, false, NULL, SWITCH_PROBE_MIN_INTERVAL_MS));
+
+    // At or above the delta ratio, in both directions
+    CHECK(switch_signal_probe_should_log(&st, 115.0, false, NULL, SWITCH_PROBE_MIN_INTERVAL_MS));
+    CHECK(switch_signal_probe_should_log(&st, 85.0, false, NULL, SWITCH_PROBE_MIN_INTERVAL_MS));
+}
+
+static void test_probe_min_interval_caps_rate(void) {
+    switch_probe_throttle_t st = {0};
+    switch_signal_probe_mark(&st, 100.0, 0);
+
+    // A large swing inside the minimum interval is held back: this is the
+    // bound that keeps a rapidly oscillating signal from reproducing the
+    // old every-poll write rate.
+    CHECK(
+        !switch_signal_probe_should_log(&st, 500.0, false, NULL, SWITCH_PROBE_MIN_INTERVAL_MS - 1));
+    CHECK(switch_signal_probe_should_log(&st, 500.0, false, NULL, SWITCH_PROBE_MIN_INTERVAL_MS));
+}
+
+static void test_probe_near_zero_signal_is_stable(void) {
+    switch_probe_throttle_t st = {0};
+
+    // True darkness (L < 15) must not divide by a tiny base and fire on
+    // every poll; the base clamps at 1.0.
+    switch_signal_probe_mark(&st, 0.0, 0);
+    CHECK(!switch_signal_probe_should_log(&st, 0.1, true, NULL, SWITCH_PROBE_MIN_INTERVAL_MS));
+    CHECK(switch_signal_probe_should_log(&st, 1.0, true, NULL, SWITCH_PROBE_MIN_INTERVAL_MS));
+}
+
 int main(void) {
     test_init_defaults();
     test_day_stays_day_when_bright();
@@ -272,6 +340,12 @@ int main(void) {
     test_signal_compute_scene_ordering();
     test_signal_compute_dip_resistance();
     test_signal_compute_invalid_inputs();
+    test_probe_events_always_log();
+    test_probe_first_sample_logs();
+    test_probe_flat_signal_uses_heartbeat();
+    test_probe_change_triggers_record();
+    test_probe_min_interval_caps_rate();
+    test_probe_near_zero_signal_is_stable();
 
     printf("camera_switcher tests: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
