@@ -62,6 +62,39 @@ fn fixture() -> Fixture {
     }
 }
 
+#[tokio::test]
+async fn export_derives_label_names_from_webp_frames() {
+    // The camera stores frames as lossless WebP luma; raw .nv12 predates that.
+    // Deriving the label name with replace(".nv12", ".txt") silently left WebP
+    // frames labelled "*.webp", so an exported dataset had no usable labels.
+    let store = PhotoStore::open_in_memory().unwrap();
+    store.migrate_training().unwrap();
+    let id = store
+        .upsert_training_frame("feeding_00013775_1280x720.webp", 1280, 720, None)
+        .unwrap();
+    store
+        .replace_training_annotations(id, &[annotation("cat", 0.5)])
+        .unwrap();
+    store.update_training_frame_status(id, "approved").unwrap();
+
+    let cache = tempfile::tempdir().unwrap();
+    let state = TrainingState {
+        db: Database::new(store),
+        ssh_host: "unused.invalid".to_string(),
+        remote_dir: "/unused".to_string(),
+        cache_dir: cache.path().to_path_buf(),
+        ssh_key: None,
+    };
+
+    let (_, body) = send(&state, Method::GET, "/api/training/export", None).await;
+    let body = json(&body);
+    assert_eq!(body["files"][0]["image"], "feeding_00013775_1280x720.webp");
+    assert_eq!(
+        body["files"][0]["label_file"],
+        "feeding_00013775_1280x720.txt"
+    );
+}
+
 async fn send(
     state: &TrainingState,
     method: Method,
@@ -234,6 +267,7 @@ async fn stats_classes_and_export_keep_public_json_contracts() {
     assert_eq!(body["total_annotations"], 1);
     assert_eq!(body["classes"], serde_json::json!(["cat"]));
     assert_eq!(body["files"][0]["image"], "frame-b.nv12");
+    assert_eq!(body["files"][0]["label_file"], "frame-b.txt");
     assert_eq!(
         body["files"][0]["labels"][0],
         "0 0.500000 0.500000 0.200000 0.300000"

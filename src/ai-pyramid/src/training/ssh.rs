@@ -32,9 +32,30 @@ pub struct RemoteFrame {
     pub json_filename: Option<String>,
 }
 
-/// Parse dimensions from filename pattern `*_WIDTHxHEIGHT.nv12`
+/// Frame extensions the camera may have written. Raw `.nv12` was the original
+/// format; `.webp` (lossless luma) replaced it to cut the collected volume, and
+/// both must be accepted so the frames already on the camera stay usable.
+const FRAME_EXTENSIONS: [&str; 2] = [".nv12", ".webp"];
+
+pub fn frame_stem(filename: &str) -> Option<&str> {
+    FRAME_EXTENSIONS
+        .iter()
+        .find_map(|ext| filename.strip_suffix(ext))
+}
+
+/// Name of the cached JPEG preview for a frame.
+///
+/// Every caller used to derive this with `replace(".nv12", ".jpg")`, which
+/// silently produced `frame.webp` once the camera changed formats — the preview
+/// was then written and looked up under different names, so the cache never hit
+/// and stale entries were never cleaned up.
+pub fn jpeg_cache_name(filename: &str) -> String {
+    format!("{}.jpg", frame_stem(filename).unwrap_or(filename))
+}
+
+/// Parse dimensions from filename pattern `*_WIDTHxHEIGHT.{nv12,webp}`
 fn parse_frame_filename(filename: &str) -> Option<(i32, i32)> {
-    let stem = filename.strip_suffix(".nv12")?;
+    let stem = frame_stem(filename)?;
     let dim_part = stem.rsplit('_').next()?;
     let (w, h) = dim_part.split_once('x')?;
     Some((w.parse().ok()?, h.parse().ok()?))
@@ -63,14 +84,14 @@ pub async fn list_remote_frames(
 
     let mut frames = Vec::new();
     for file in &all_files {
-        if !file.ends_with(".nv12") {
+        if frame_stem(file).is_none() {
             continue;
         }
         let Some((width, height)) = parse_frame_filename(file) else {
             warn!("skipping unparseable NV12 filename: {file}");
             continue;
         };
-        let json_name = file.replace(".nv12", ".json");
+        let json_name = format!("{}.json", frame_stem(file).unwrap_or(file));
         let json_filename = if all_files.iter().any(|f| *f == json_name) {
             Some(json_name)
         } else {
@@ -102,7 +123,9 @@ pub async fn fetch_and_convert_frame(
     cache_dir: &Path,
     ssh_key: Option<&str>,
 ) -> Result<PathBuf, String> {
-    let jpeg_name = filename.replace(".nv12", ".jpg");
+    let jpeg_name = jpeg_cache_name(filename);
+    // Raw .nv12 needs the geometry spelled out; .webp carries its own header.
+    let is_raw_nv12 = filename.ends_with(".nv12");
     let jpeg_path = cache_dir.join(&jpeg_name);
 
     // Return cached version if exists
@@ -140,27 +163,33 @@ pub async fn fetch_and_convert_frame(
         return Err(format!("scp error: {stderr}"));
     }
 
-    // Convert NV12 → JPEG via ffmpeg (output to temp path).
+    // Convert the fetched frame → JPEG via ffmpeg (output to temp path).
     // -f mjpeg is required because the temp filename ends in .tmp, not .jpg.
+    let mut ffmpeg_args: Vec<String> = vec!["-y".into()];
+    if is_raw_nv12 {
+        // Raw frames carry no header, so the decoder needs the geometry.
+        ffmpeg_args.extend([
+            "-f".into(),
+            "rawvideo".into(),
+            "-pix_fmt".into(),
+            "nv12".into(),
+            "-s".into(),
+            format!("{width}x{height}"),
+        ]);
+    }
+    ffmpeg_args.extend([
+        "-i".into(),
+        nv12_tmp.to_str().unwrap().to_string(),
+        "-frames:v".into(),
+        "1".into(),
+        "-q:v".into(),
+        "2".into(),
+        "-f".into(),
+        "mjpeg".into(),
+        jpeg_tmp.to_str().unwrap().to_string(),
+    ]);
     let ffmpeg_out = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "nv12",
-            "-s",
-            &format!("{width}x{height}"),
-            "-i",
-            nv12_tmp.to_str().unwrap(),
-            "-frames:v",
-            "1",
-            "-q:v",
-            "2",
-            "-f",
-            "mjpeg",
-            jpeg_tmp.to_str().unwrap(),
-        ])
+        .args(&ffmpeg_args)
         .output()
         .await
         .map_err(|e| format!("ffmpeg failed: {e}"))?;
@@ -252,6 +281,10 @@ mod tests {
     #[test]
     fn parse_standard_filename() {
         assert_eq!(
+            parse_frame_filename("feeding_00013775_1280x720.webp"),
+            Some((1280, 720))
+        );
+        assert_eq!(
             parse_frame_filename("feeding_00013775_1280x720.nv12"),
             Some((1280, 720))
         );
@@ -269,5 +302,23 @@ mod tests {
     fn parse_invalid() {
         assert_eq!(parse_frame_filename("random.nv12"), None);
         assert_eq!(parse_frame_filename("feeding_1280x720.jpg"), None);
+    }
+
+    #[test]
+    fn frame_stem_strips_both_frame_formats() {
+        // Label and sidecar names are derived from this. A blind
+        // replace(".nv12", ...) left WebP frames with a label file named
+        // "*.webp" once the camera switched formats, so the exported dataset
+        // had no usable labels.
+        assert_eq!(
+            frame_stem("feeding_00013775_1280x720.nv12"),
+            Some("feeding_00013775_1280x720")
+        );
+        assert_eq!(
+            frame_stem("feeding_00013775_1280x720.webp"),
+            Some("feeding_00013775_1280x720")
+        );
+        assert_eq!(frame_stem("feeding_00013775_1280x720.jpg"), None);
+        assert_eq!(frame_stem("notaframe"), None);
     }
 }
