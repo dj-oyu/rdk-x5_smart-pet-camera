@@ -296,6 +296,7 @@ class DetectionWriter:
         # before mmap.close() or Python refuses to unmap an exported buffer.
         self._sem_view: Optional[ctypes.Array] = None
         self._sem_warned = False
+        self._negative_frame_warned = False
 
     def open(self) -> None:
         shm_path = f"/dev/shm{self.detection_shm_name}"
@@ -336,6 +337,22 @@ class DetectionWriter:
         if not self.detection_mmap:
             return
         c_det = CLatestDetectionResult()
+        if frame_number < 0:
+            # frame_number is uint64_t on the C side, so a negative value does
+            # not fail — it lands as 2**64-1. Readers match detections to frames
+            # by number (the web monitor draws an overlay only when the two are
+            # within 30 frames), so the mismatch is silent: detections keep
+            # flowing and simply stop being drawn. Say so instead.
+            if not self._negative_frame_warned:
+                self._negative_frame_warned = True
+                import logging
+
+                logging.warning(
+                    "DetectionWriter: negative frame_number %d — writing 0. "
+                    "Detections will not match any frame until this is fixed.",
+                    frame_number,
+                )
+            frame_number = 0
         c_det.frame_number = frame_number
         c_det.timestamp = timestamp_sec
         c_det.num_detections = min(len(detections), MAX_DETECTIONS)
