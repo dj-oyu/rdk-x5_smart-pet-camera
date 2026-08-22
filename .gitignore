@@ -196,3 +196,9 @@ deploy/*/*.service
 deploy/*/*.timer
 deploy/*/*.target
 !deploy/*/*.example
+
+# ROI monitor: runtime DB and captures
+scripts/roi_monitor.db
+scripts/roi_monitor.db-shm
+scripts/roi_monitor.db-wal
+scripts/captures/
