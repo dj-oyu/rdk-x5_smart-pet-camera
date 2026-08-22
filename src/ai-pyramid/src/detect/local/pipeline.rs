@@ -49,7 +49,12 @@ pub(super) async fn detect_comic_raw_first(
             .to_rgb8();
         let nv12 = rgb_to_nv12(&rgb, panel_width, panel_height);
         let panel_detections = client
-            .detect_nv12(&nv12, panel_width as u16, panel_height as u16)
+            .detect_nv12(
+                &nv12.data,
+                panel_width as u16,
+                panel_height as u16,
+                nv12.stride as u16,
+            )
             .await?;
         combined.extend(
             panel_detections
