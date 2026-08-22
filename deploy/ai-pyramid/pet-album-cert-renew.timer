@@ -1,0 +1,12 @@
+[Unit]
+Description=Weekly renewal of pet-album Tailscale TLS cert
+PartOf=ai-pyramid.target
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1w
+Persistent=true
+Unit=pet-album-cert-renew.service
+
+[Install]
+WantedBy=ai-pyramid.target

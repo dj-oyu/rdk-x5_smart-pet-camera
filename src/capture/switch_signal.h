@@ -26,6 +26,8 @@
 #include "isp_brightness.h"
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 /**
  * One switch-signal sample: the value fed to the hysteresis state machine
@@ -69,11 +71,13 @@ static inline double switch_signal_compute(double brightness_avg, const isp_expo
 int switch_signal_read(hbn_vnode_handle_t isp_handle, switch_signal_sample_t* out);
 
 /**
- * Append one probe record to /tmp/isp_exposure_probe.log
+ * Append one probe record to the rotating probe log.
  *
  * Verification data for the switch-signal redesign: correlates the signal
- * value with raw exposure state. Line-buffered append; safe to call from
- * the switcher thread only (not thread-safe).
+ * value with raw exposure state. Writes to
+ * $PET_CAMERA_LOG_DIR/isp_exposure_probe-YYYYMMDD.log with a
+ * SWITCH_PROBE_RETENTION_DAYS retention window (see rotating_log.h).
+ * Thread-safe.
  *
  * Args:
  *   sample: Sample from switch_signal_read (invalid samples log err=1)
@@ -82,5 +86,94 @@ int switch_signal_read(hbn_vnode_handle_t isp_handle, switch_signal_sample_t* ou
  */
 void switch_signal_probe_log(const switch_signal_sample_t* sample, int active_camera,
                              const char* event);
+
+// ============================================================================
+// Probe log write policy
+// ============================================================================
+
+/**
+ * How long probe logs are kept before rotation deletes them.
+ */
+#define SWITCH_PROBE_RETENTION_DAYS 14
+
+/**
+ * Heartbeat: log at least this often even when the signal is flat.
+ * The old policy logged every poll (DAY ~1/s, NIGHT 1/5s), which produced
+ * ~15 MB/day of almost entirely redundant records.
+ */
+#define SWITCH_PROBE_HEARTBEAT_DAY_MS   10000
+#define SWITCH_PROBE_HEARTBEAT_NIGHT_MS 60000
+
+/**
+ * Change-triggered records: when the signal moves by at least
+ * SWITCH_PROBE_DELTA_RATIO relative to the last recorded value, log it —
+ * but never more often than SWITCH_PROBE_MIN_INTERVAL_MS. Dawn and dusk
+ * transitions, the interval the redesign actually cares about, therefore
+ * keep sub-heartbeat resolution while a flat midday signal costs 6 lines
+ * per minute.
+ */
+#define SWITCH_PROBE_MIN_INTERVAL_MS 2000
+#define SWITCH_PROBE_DELTA_RATIO     0.15
+
+/**
+ * Rate-limit state for switch_signal_probe_should_log(). Zero-initialize.
+ */
+typedef struct {
+    bool has_last;       // False until the first record is written
+    double last_value;   // Signal value of the last written record
+    int64_t last_log_ms; // Monotonic timestamp of the last written record
+} switch_probe_throttle_t;
+
+/**
+ * Decide whether this sample deserves a probe record (pure function, unit
+ * tested in test_camera_switcher.c).
+ *
+ * Always true for switch events and for the first sample. Otherwise true
+ * when the heartbeat interval has elapsed, or when the signal moved by
+ * SWITCH_PROBE_DELTA_RATIO and at least SWITCH_PROBE_MIN_INTERVAL_MS has
+ * passed since the last record.
+ *
+ * The caller must pass the same now_ms clock every time (monotonic ms) and
+ * must call switch_signal_probe_mark() when it writes the record.
+ */
+static inline bool switch_signal_probe_should_log(const switch_probe_throttle_t* st, double value,
+                                                  bool night_active, const char* event,
+                                                  int64_t now_ms) {
+    if (event != NULL) {
+        return true;
+    }
+    if (!st || !st->has_last) {
+        return true;
+    }
+
+    const int64_t elapsed = now_ms - st->last_log_ms;
+    const int64_t heartbeat =
+        night_active ? SWITCH_PROBE_HEARTBEAT_NIGHT_MS : SWITCH_PROBE_HEARTBEAT_DAY_MS;
+    if (elapsed >= heartbeat) {
+        return true;
+    }
+    if (elapsed < SWITCH_PROBE_MIN_INTERVAL_MS) {
+        return false;
+    }
+
+    const double base = (st->last_value > 1.0) ? st->last_value : 1.0;
+    const double delta =
+        (value > st->last_value) ? (value - st->last_value) : (st->last_value - value);
+    return (delta / base) >= SWITCH_PROBE_DELTA_RATIO;
+}
+
+/**
+ * Record that a probe line was written, so the next decision can rate-limit
+ * against it.
+ */
+static inline void switch_signal_probe_mark(switch_probe_throttle_t* st, double value,
+                                            int64_t now_ms) {
+    if (!st) {
+        return;
+    }
+    st->has_last = true;
+    st->last_value = value;
+    st->last_log_ms = now_ms;
+}
 
 #endif // SWITCH_SIGNAL_H

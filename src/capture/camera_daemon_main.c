@@ -69,10 +69,10 @@ static void* switcher_thread(void* arg) {
 
     LOG_INFO("Switcher", "Thread started");
 
-    // Probe log throttle: every Nth poll while DAY is active (250ms poll ->
-    // ~1s cadence). NIGHT polls (5s) and switch events always log.
-    const int probe_every_day_polls = 4;
-    int probe_poll_count = 0;
+    // Probe log throttle: heartbeat + change-triggered records. See
+    // switch_signal.h for the policy and why the old every-poll cadence
+    // (~15 MB/day, unbounded) was replaced.
+    switch_probe_throttle_t probe_throttle = {0};
 
     while (g_running) {
         // Read the switch signal from the DAY camera ISP
@@ -113,12 +113,16 @@ static void* switcher_thread(void* arg) {
             }
 
             // Probe log: verification data for the switch-signal redesign
-            probe_poll_count++;
             const bool night_active = (g_active_camera == 1);
-            if (probe_event || night_active || probe_poll_count >= probe_every_day_polls) {
+            struct timespec probe_now;
+            clock_gettime(CLOCK_MONOTONIC, &probe_now);
+            const int64_t probe_now_ms =
+                (int64_t)probe_now.tv_sec * 1000 + probe_now.tv_nsec / 1000000;
+            if (switch_signal_probe_should_log(&probe_throttle, sample.value, night_active,
+                                               probe_event, probe_now_ms)) {
                 switch_signal_probe_log(&sample, g_active_camera,
                                         probe_event ? probe_event : "poll");
-                probe_poll_count = 0;
+                switch_signal_probe_mark(&probe_throttle, sample.value, probe_now_ms);
             }
         }
 
