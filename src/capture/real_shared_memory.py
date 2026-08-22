@@ -52,6 +52,10 @@ except OSError:
         import logging
         logging.warning("Failed to load librt/libpthread for semaphore support")
 
+if librt is not None:
+    librt.sem_init.argtypes = [c_void_p, c_int, ctypes.c_uint]
+    librt.sem_init.restype = c_int
+
 # Constants (must match shm_constants.h)
 ZEROCOPY_MAX_PLANES = 2
 HB_MEM_GRAPHIC_BUF_SIZE = 160
@@ -239,26 +243,52 @@ def open_roi_readers() -> list["ZeroCopySharedMemory"]:
 # DetectionWriter — writes YOLO results to detection SHM
 # ============================================================================
 
+# Byte range of the payload, i.e. everything up to detection_update_sem.
+# Writing the whole struct would overwrite a live semaphore that the Go
+# web_monitor is blocked on (see DetectionWriter.write_detection_result).
+_DETECTION_PAYLOAD_SIZE = CLatestDetectionResult.detection_update_sem.offset
+_DETECTION_SEM_OFFSET = CLatestDetectionResult.detection_update_sem.offset
+_DETECTION_SEM_SIZE = CLatestDetectionResult.detection_update_sem.size
+
+
 class DetectionWriter:
     def __init__(self, detection_shm_name: str = SHM_NAME_DETECTIONS):
         self.detection_shm_name = detection_shm_name
         self.detection_fd: Optional[int] = None
         self.detection_mmap: Optional[mmap.mmap] = None
         self.last_detection_version = 0
+        # ctypes view onto the semaphore inside the mapping. Held for the
+        # lifetime of the mapping so its address stays valid; must be released
+        # before mmap.close() or Python refuses to unmap an exported buffer.
+        self._sem_view: Optional[ctypes.Array] = None
+        self._sem_warned = False
 
     def open(self) -> None:
         shm_path = f"/dev/shm{self.detection_shm_name}"
+        created = False
         try:
             self.detection_fd = os.open(shm_path, os.O_RDWR)
         except FileNotFoundError:
             self.detection_fd = os.open(shm_path, os.O_CREAT | os.O_RDWR, 0o666)
             os.ftruncate(self.detection_fd, sizeof(CLatestDetectionResult))
+            created = True
         self.detection_mmap = mmap.mmap(
             self.detection_fd, sizeof(CLatestDetectionResult),
             mmap.MAP_SHARED, mmap.PROT_WRITE | mmap.PROT_READ,
         )
+        self._sem_view = (c_uint8 * _DETECTION_SEM_SIZE).from_buffer(
+            self.detection_mmap, _DETECTION_SEM_OFFSET
+        )
+        if created and librt is not None:
+            # Only when this process created the segment. The C side calls
+            # sem_init in shm_detection_create; re-initialising a semaphore
+            # someone else already set up would discard their state.
+            librt.sem_init(addressof(self._sem_view), 1, 0)
 
     def close(self) -> None:
+        # Release the exported view first, otherwise mmap.close() raises
+        # BufferError ("cannot close exported pointers exist").
+        self._sem_view = None
         if self.detection_mmap:
             self.detection_mmap.close()
             self.detection_mmap = None
@@ -288,6 +318,21 @@ class DetectionWriter:
             c_detection.bbox.h = det["bbox"]["h"]
         self.last_detection_version += 1
         c_det.version = self.last_detection_version
+        # Write the payload only. The trailing detection_update_sem must not be
+        # overwritten: the Go web_monitor blocks on it (sem_timedwait in
+        # internal/webmonitor/shm.go), so rewriting those bytes would corrupt a
+        # live synchronisation primitive and lose wakeups.
         self.detection_mmap.seek(0)
-        self.detection_mmap.write(bytes(c_det))
+        self.detection_mmap.write(bytes(c_det)[:_DETECTION_PAYLOAD_SIZE])
         self.detection_mmap.flush()
+        # Signal readers, matching the protocol that the C writer implements in
+        # shm_detection_write (shared_memory.c). Without this the reader's
+        # sem_timedwait always times out and falls back to version polling.
+        if librt is not None and self._sem_view is not None:
+            librt.sem_post(addressof(self._sem_view))
+        elif not self._sem_warned:
+            self._sem_warned = True
+            import logging
+            logging.warning(
+                "librt unavailable: detection readers fall back to version polling"
+            )
