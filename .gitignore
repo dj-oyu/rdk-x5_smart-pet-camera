@@ -107,6 +107,7 @@ logs/
 *.out
 build/
 bin/
+!src/ai-pyramid/src/bin/
 cmake-build-*/
 CMakeCache.txt
 CMakeFiles/
