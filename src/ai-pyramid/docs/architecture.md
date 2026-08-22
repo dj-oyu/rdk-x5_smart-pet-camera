@@ -250,10 +250,43 @@ App
 └── BackfillButton     # detection backfill 実行ボタン (standalone sidebar)
 ```
 
-`EventDetail` のmetadata編集とdetection一覧は、それぞれ
-`components/event-detail/metadata-editor.tsx` と
-`components/event-detail/detection-list.tsx` に分離する。親componentはnavigation、canvas、
-zoom、API mutation orchestrationを保持する。
+`EventDetail`はcompositionとAPI mutation orchestrationを担当し、表示責務を
+`components/event-detail/`へ分離する。
+
+| File | Responsibility |
+|------|----------------|
+| `metadata-editor.tsx` | photo metadata編集 |
+| `detection-list.tsx` | detection一覧とoverride操作 |
+| `comic-view.tsx` | comic全体表示とbbox overlay |
+| `panel-carousel.tsx` | panel carouselとnavigation UI |
+| `use-panel-view.ts` | panel crop描画、active panel、zoom/pan/navigation state |
+| `presentation.ts` | 座標・表示用pure helper |
+
+### Training UI and frame formats
+
+training UIは`components/training/`に置き、`annotate-page.tsx`をpage composition、
+`annotate-canvas.tsx`をbbox描画・pointer interactionの境界とする。残る責務は次へ分離する。
+
+| File | Responsibility |
+|------|----------------|
+| `training-frame-card.tsx` | frame card表示と選択 |
+| `training-dialogs.tsx` | purge/background等の確認dialog |
+| `annotation-model.ts` | annotation stateとpure update helper |
+| `annotation-toolbar.tsx` | class、approve/reject等の操作 |
+| `annotation-sidebar.tsx` | frame navigationとannotation一覧 |
+
+frame一覧、annotation CRUD、approve/reject、background model、dataset exportは
+`lib/training-api.ts`の型付きclientを通す。
+
+rdk-x5の給餌frameは次の両形式を同じlogical frameとして扱う。
+
+- `feeding_<frame>_<width>x<height>.nv12`: 従来のraw NV12
+- `feeding_<frame>_<width>x<height>.webp`: 現行のlossless luma WebP
+
+sidecarはどちらも拡張子を除いた同じstemの`.json`である。preview cacheは元形式に
+かかわらず`data/training/<stem>.jpg`となる。WebPはheaderから画像をdecodeし、NV12だけ
+filenameのgeometryをffmpegへ渡す。dataset export時のlabelも`<stem>.txt`とし、
+`.webp.txt`や`.nv12.txt`にはしない。
 
 ### API Client (api.ts)
 
@@ -356,7 +389,8 @@ fallbackとして返す。
 
 ## Test Coverage
 
-`src/ai-pyramid/src` 配下の `#[test]` / `#[tokio::test]` は現在 66 件ある。
+core refactorのGitHub CIではRust 107 testsが成功した。その後も回帰testを追加しているため、
+現在件数は固定値ではなくCIの`cargo test`結果を正とする。
 
 | Module | Focus |
 |--------|-------|
