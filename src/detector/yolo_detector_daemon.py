@@ -32,6 +32,9 @@ COMMON_SRC = PROJECT_ROOT / "src" / "common" / "src"
 
 sys.path.insert(0, str(CAPTURE_DIR))
 sys.path.insert(0, str(COMMON_SRC))
+# Sibling modules (night_motion, ...). Already implicit when this file is
+# run as a script, but not when it is loaded by path from a test.
+sys.path.insert(0, str(DETECTOR_DIR))
 
 from real_shared_memory import (  # noqa: E402
     DetectionWriter,
@@ -41,6 +44,7 @@ from real_shared_memory import (  # noqa: E402
 )
 from detection.yolo_detector import YoloDetector  # noqa: E402
 from detection.image_utils import jpeg_to_yolo_nv12  # noqa: E402
+import night_motion  # noqa: E402
 
 # hb_mem bindings (required for zero-copy)
 from hb_mem_bindings import init_module as hb_mem_init, import_nv12_graph_buf  # noqa: E402
@@ -1225,95 +1229,34 @@ class YoloDetectorDaemon:
 
                         # ── frame_diff ──
                         if rkey in self._prev_roi_small:
-                            diff = cv2.absdiff(y_small, self._prev_roi_small[rkey])
-                            diff = cv2.GaussianBlur(diff, (5, 5), 0)
-                            diff[diff < 15] = 0  # IR noise floor (3σ threshold for frame-diff)
-
-                            # Temporal sum accumulation (uint16, same size as y_small)
                             if rkey not in self._diff_acc:
                                 self._diff_acc[rkey] = np.zeros(
                                     (small_size, small_size), dtype=np.uint16
                                 )
-                            acc = self._diff_acc[rkey]
-                            acc >>= 1
-                            acc += diff.astype(np.uint16)
-
-                            acc_u8 = cv2.convertScaleAbs(acc)
-                            _, thresh = cv2.threshold(
-                                acc_u8, 50, 255, cv2.THRESH_BINARY
+                            blobs = night_motion.detect_motion(
+                                y_small,
+                                self._prev_roi_small[rkey],
+                                self._diff_acc[rkey],
+                                roi_index=motion_roi_idx,
+                                roi_region=self.VSE_ROI_REGIONS[motion_roi_idx],
+                                small_size=small_size,
+                                crop_x0=_crop_x0,
+                                crop_y0=_crop_y0,
                             )
-                            # MORPH_OPEN: remove isolated scatter noise
-                            open_kernel = cv2.getStructuringElement(
-                                cv2.MORPH_ELLIPSE, (5, 5)
-                            )
-                            thresh = cv2.morphologyEx(
-                                thresh, cv2.MORPH_OPEN, open_kernel
-                            )
-                            # Group nearby blobs: connect edge-clustered fragments
-                            # (real objects show diff along their silhouette edges)
-                            group_kernel = cv2.getStructuringElement(
-                                cv2.MORPH_ELLIPSE, (9, 9)
-                            )
-                            thresh_grouped = cv2.dilate(thresh, group_kernel)
-                            contours, _ = cv2.findContours(
-                                thresh_grouped, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-                            )
-
-                            roi_sx, roi_sy, roi_sw, _ = self.VSE_ROI_REGIONS[motion_roi_idx]
-                            small_pixels = small_size * small_size
-                            min_orig_pixels = small_pixels * 0.001  # original pixel count floor
-                            for cnt in contours:
-                                gx, gy, gw, gh = cv2.boundingRect(cnt)
-                                if gw < 20 or gh < 20:
-                                    continue
-                                # Count original (pre-dilation) pixels in group bbox
-                                orig_pixels = cv2.countNonZero(
-                                    thresh[gy : gy + gh, gx : gx + gw]
-                                )
-                                if orig_pixels < min_orig_pixels:
-                                    continue
-                                # Fill ratio: sparse noise → low fill; real object → high fill
-                                fill_ratio = orig_pixels / (gw * gh)
-                                if fill_ratio < 0.08:
-                                    continue
-                                # Use tight bbox of original pixels for accurate coords
-                                orig_pts = cv2.findNonZero(
-                                    thresh[gy : gy + gh, gx : gx + gw]
-                                )
-                                if orig_pts is None:
-                                    continue
-                                ox, oy, ow, oh = cv2.boundingRect(orig_pts)
-                                bx, by, bw, bh = gx + ox, gy + oy, ow, oh
+                            if blobs:
                                 motion_detected_this_frame = True
-                                if motion_roi_idx == 0:
-                                    # ROI 0 is 1:1 crop: pixel → sensor coord via crop offset
-                                    _sx = 1280.0 / 1920.0
-                                    _sy = 720.0 / 1080.0
-                                    x_d = int((bx + _crop_x0 + roi_sx) * _sx)
-                                    y_d = int((by + _crop_y0 + roi_sy) * _sy)
-                                    w_d = int(bw * _sx)
-                                    h_d = int(bh * _sy)
-                                else:
-                                    # ROI 1: 320→sensor via resize scale = roi_sw/480
-                                    ms = roi_sw / 480.0
-                                    roi_ox = int(roi_sx * (1280.0 / 1920.0))
-                                    roi_oy = int(roi_sy * (720.0 / 1080.0))
-                                    x_d = int(bx * ms) + roi_ox
-                                    y_d = int(by * ms) + roi_oy
-                                    w_d = int(bw * ms)
-                                    h_d = int(bh * ms)
+                            for _blob in blobs:
                                 self._motion_bboxes.append(
                                     DetDict(
                                         class_name=DetectionClass.MOTION,
-                                        confidence=min(
-                                            1.0, orig_pixels / (small_pixels * 0.05)
+                                        confidence=_blob.confidence,
+                                        bbox=DetBbox(
+                                            x=_blob.x, y=_blob.y, w=_blob.w, h=_blob.h
                                         ),
-                                        bbox=DetBbox(x=x_d, y=y_d, w=w_d, h=h_d),
                                     )
                                 )
                             if len(self._motion_bboxes) > 10:
                                 self._motion_bboxes = self._motion_bboxes[-5:]
-
                         # ── base_diff ──
                         if self._base_valid.get(rkey, False):
                             base_u8 = cv2.convertScaleAbs(self._base_roi_y[rkey])
