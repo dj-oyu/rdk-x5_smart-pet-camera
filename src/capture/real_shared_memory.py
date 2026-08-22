@@ -127,6 +127,40 @@ class CLatestDetectionResult(Structure):
 
 
 # ============================================================================
+# H.265 zero-copy structures (matching shared_memory.h H265ZeroCopyFrame /
+# H265ZeroCopyBuffer). Used read-only by scripts/profile_shm.py — no
+# production Python writer/reader exists for this SHM segment (the C
+# encoder writes it, the Go streaming server reads it). Defined here, not in
+# scripts/profile_shm.py, so there is exactly one ctypes mirror per C struct
+# (see scripts/check_shm_layout.py, which verifies this file's mirrors stay
+# in sync with shared_memory.h).
+# ============================================================================
+
+HB_MEM_COM_BUF_SIZE = 48  # sizeof(hb_mem_common_buf_t); shared_memory.h
+
+
+class CH265ZeroCopyFrame(Structure):
+    _fields_ = [
+        ("frame_number", c_uint64),
+        ("timestamp", CTimespec),
+        ("camera_id", c_int),
+        ("width", c_int),
+        ("height", c_int),
+        ("data_size", c_uint32),
+        ("hb_mem_buf_data", c_uint8 * HB_MEM_COM_BUF_SIZE),
+        ("version", c_uint32),
+    ]
+
+
+class CH265ZeroCopyBuffer(Structure):
+    _fields_ = [
+        ("new_frame_sem", c_uint8 * 32),  # sem_t
+        ("consumed_sem", c_uint8 * 32),  # sem_t
+        ("frame", CH265ZeroCopyFrame),
+    ]
+
+
+# ============================================================================
 # Python dataclass for frame metadata
 # ============================================================================
 

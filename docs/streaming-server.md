@@ -346,11 +346,7 @@ CLI フラグ: `-shm`, `-http`, `-metrics`, `-pprof`, `-record-path`, `-max-clie
 
 ## 既知の問題 / TODO
 
-### 未修正
-
-| 優先度 | 場所 | 問題 | 修正方針 |
-|--------|------|------|---------|
-| 🟠 MED | `cmd/server/main.go:243` | RTP SSRC が `0x12345678` 固定。`signal/session.go:141` が採番する per-session SSRC は SDP の `a=ssrc` にのみ反映され、実際の RTP パケットと一致しない。RTCP フィードバックのセッション識別が不可能 | 全セッション共通の packetizer (`main.go:253`) が単一の SSRC で組んでいるのが原因。セッションごとに再パケット化するか、SRTP 暗号化前に SSRC を書き換える |
+未対応の指摘は現時点でなし。
 
 ### 解決済み (#215 / cdd49cd)
 
@@ -362,6 +358,7 @@ CLI フラグ: `-shm`, `-http`, `-metrics`, `-pprof`, `-record-path`, `-max-clie
 | `signal/dtls.go` | SDP offer の fingerprint が DTLS peer 証明書と未照合 | `VerifyPeerCertificate` で SHA-256 を照合 + `RequireAnyClientCert` |
 | `cmd/server/main.go` | shutdown 時に `recorderChan` を drain せず録画末尾が欠損 | `sendCh` → `sendWg.Wait()` → `close(recorderChan)` の順に drain |
 | `signal/session.go` | MaxClients チェックが TOCTOU 競合 | check と insert を同一クリティカルセクションに統合 |
+| `signal/session.go` / `cmd/server/main.go` | SSRC が全セッション共通 `0x12345678` | セッションごとに `generateSSRC()` で採番し SDP に載せ、`SendFrame` が送信直前にパケットヘッダを `sess.ssrc` へ書き換える (session.go:449)。共有 packetizer が使う `main.go:243` の値は上書き前のプレースホルダ |
 | `cmd/server/main.go` | RTP タイムスタンプが 30fps ハードコード | 壁時計 90kHz 基準 (`time.Since(streamStart)`) に変更 |
 | `signal/sdp.go` | `H265/90000` regex が大文字のみ | `(?i)` フラグを追加 |
 | `signal/sdp.go` | `a=rtcp` 行と `a=rtcp-mux` が矛盾 | `a=rtcp:9 IN IP4 0.0.0.0` に修正 |

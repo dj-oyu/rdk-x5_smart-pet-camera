@@ -1,0 +1,253 @@
+{
+  "_meta": {
+    "generated_by": "scripts/check_shm_layout.py --update-expected",
+    "arch": "aarch64",
+    "platform": "Linux-6.1.83-aarch64-with-glibc2.35",
+    "note": "C-side offsetof()/sizeof() dump of the structs in src/capture/shared_memory.h, captured on real hardware. Used by CI (which cannot build against shared_memory.h) as the expected layout to check the Python ctypes mirrors in src/capture/real_shared_memory.py against. Regenerate with 'python3 scripts/check_shm_layout.py --update-expected' on the real device whenever shared_memory.h's struct layouts change, and commit the result."
+  },
+  "structs": [
+    {
+      "name": "timespec",
+      "sizeof": 16,
+      "fields": [
+        {
+          "name": "tv_sec",
+          "offset": 0,
+          "size": 8
+        },
+        {
+          "name": "tv_nsec",
+          "offset": 8,
+          "size": 8
+        }
+      ]
+    },
+    {
+      "name": "ZeroCopyFrame",
+      "sizeof": 232,
+      "fields": [
+        {
+          "name": "frame_number",
+          "offset": 0,
+          "size": 8
+        },
+        {
+          "name": "timestamp",
+          "offset": 8,
+          "size": 16
+        },
+        {
+          "name": "camera_id",
+          "offset": 24,
+          "size": 4
+        },
+        {
+          "name": "width",
+          "offset": 28,
+          "size": 4
+        },
+        {
+          "name": "height",
+          "offset": 32,
+          "size": 4
+        },
+        {
+          "name": "brightness_avg",
+          "offset": 36,
+          "size": 4
+        },
+        {
+          "name": "share_id",
+          "offset": 40,
+          "size": 8
+        },
+        {
+          "name": "plane_size",
+          "offset": 48,
+          "size": 16
+        },
+        {
+          "name": "plane_cnt",
+          "offset": 64,
+          "size": 4
+        },
+        {
+          "name": "hb_mem_buf_data",
+          "offset": 68,
+          "size": 160
+        },
+        {
+          "name": "version",
+          "offset": 228,
+          "size": 4
+        }
+      ]
+    },
+    {
+      "name": "ZeroCopyFrameBuffer",
+      "sizeof": 264,
+      "fields": [
+        {
+          "name": "new_frame_sem",
+          "offset": 0,
+          "size": 32
+        },
+        {
+          "name": "frame",
+          "offset": 32,
+          "size": 232
+        }
+      ]
+    },
+    {
+      "name": "DetectionBBox",
+      "sizeof": 16,
+      "fields": [
+        {
+          "name": "x",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "y",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "w",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "h",
+          "offset": 12,
+          "size": 4
+        }
+      ]
+    },
+    {
+      "name": "DetectionEntry",
+      "sizeof": 52,
+      "fields": [
+        {
+          "name": "class_name",
+          "offset": 0,
+          "size": 32
+        },
+        {
+          "name": "confidence",
+          "offset": 32,
+          "size": 4
+        },
+        {
+          "name": "bbox",
+          "offset": 36,
+          "size": 16
+        }
+      ]
+    },
+    {
+      "name": "LatestDetectionResult",
+      "sizeof": 576,
+      "fields": [
+        {
+          "name": "frame_number",
+          "offset": 0,
+          "size": 8
+        },
+        {
+          "name": "timestamp",
+          "offset": 8,
+          "size": 8
+        },
+        {
+          "name": "num_detections",
+          "offset": 16,
+          "size": 4
+        },
+        {
+          "name": "detections",
+          "offset": 20,
+          "size": 520
+        },
+        {
+          "name": "version",
+          "offset": 540,
+          "size": 4
+        },
+        {
+          "name": "detection_update_sem",
+          "offset": 544,
+          "size": 32
+        }
+      ]
+    },
+    {
+      "name": "H265ZeroCopyFrame",
+      "sizeof": 96,
+      "fields": [
+        {
+          "name": "frame_number",
+          "offset": 0,
+          "size": 8
+        },
+        {
+          "name": "timestamp",
+          "offset": 8,
+          "size": 16
+        },
+        {
+          "name": "camera_id",
+          "offset": 24,
+          "size": 4
+        },
+        {
+          "name": "width",
+          "offset": 28,
+          "size": 4
+        },
+        {
+          "name": "height",
+          "offset": 32,
+          "size": 4
+        },
+        {
+          "name": "data_size",
+          "offset": 36,
+          "size": 4
+        },
+        {
+          "name": "hb_mem_buf_data",
+          "offset": 40,
+          "size": 48
+        },
+        {
+          "name": "version",
+          "offset": 88,
+          "size": 4
+        }
+      ]
+    },
+    {
+      "name": "H265ZeroCopyBuffer",
+      "sizeof": 160,
+      "fields": [
+        {
+          "name": "new_frame_sem",
+          "offset": 0,
+          "size": 32
+        },
+        {
+          "name": "consumed_sem",
+          "offset": 32,
+          "size": 32
+        },
+        {
+          "name": "frame",
+          "offset": 64,
+          "size": 96
+        }
+      ]
+    }
+  ]
+}
