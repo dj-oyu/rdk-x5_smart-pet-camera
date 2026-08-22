@@ -1,0 +1,13 @@
+[Unit]
+Description=Smart Pet Camera Stack (rdk-x5)
+After=network-online.target
+Wants=network-online.target
+Wants=pet-camera-capture.service
+Wants=pet-camera-detector.service
+Wants=pet-camera-monitor.service
+Wants=pet-camera-streaming.service
+Wants=comic-sync.service
+Wants=pet-camera-night-gc.timer
+
+[Install]
+WantedBy=multi-user.target

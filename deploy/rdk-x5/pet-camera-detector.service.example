@@ -1,0 +1,29 @@
+[Unit]
+Description=Pet Camera YOLO Detector (BPU)
+After=pet-camera-capture.service
+PartOf=pet-camera-capture.service
+PartOf=pet-camera.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/smart-pet-camera
+EnvironmentFile=-/opt/smart-pet-camera/.env
+
+Environment=PET_CAMERA_YOLO_MODEL=v26n
+Environment=PET_CAMERA_YOLO_SCORE_THRESHOLD=0.6
+Environment=PET_CAMERA_YOLO_NMS_THRESHOLD=0.7
+Environment=PET_CAMERA_LOG_LEVEL=info
+
+ExecStartPre=/bin/mkdir -p ${NIGHT_COLLECT_DIR}/feeding
+ExecStart=/bin/sh -c 'exec /home/sunrise/.local/bin/uv run src/detector/yolo_detector_daemon.py \
+  --model-path "$(scripts/resolve-model.sh ${PET_CAMERA_YOLO_MODEL})" \
+  --score-threshold ${PET_CAMERA_YOLO_SCORE_THRESHOLD} \
+  --nms-threshold ${PET_CAMERA_YOLO_NMS_THRESHOLD} \
+  --log-level ${PET_CAMERA_LOG_LEVEL}'
+
+# SHM not ready yet → crash → auto-restart
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=pet-camera.target

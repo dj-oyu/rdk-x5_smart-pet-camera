@@ -1,0 +1,42 @@
+[Unit]
+Description=Pet Camera Streaming Server (WebRTC)
+After=pet-camera-capture.service
+PartOf=pet-camera-capture.service
+PartOf=pet-camera.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/smart-pet-camera
+EnvironmentFile=-/opt/smart-pet-camera/.env
+
+Environment=PET_CAMERA_STREAMING_HOST=0.0.0.0
+Environment=PET_CAMERA_STREAMING_PORT=8081
+Environment=PET_CAMERA_METRICS_PORT=9090
+Environment=PET_CAMERA_PPROF_PORT=6060
+Environment=PET_CAMERA_MAX_CLIENTS=10
+Environment=PET_CAMERA_STREAMING_SHM=/pet_camera_h265_zc
+Environment=PET_CAMERA_LOG_LEVEL=info
+
+# Mobile-connectivity feature flags (see docs/webrtc-ice-full-restoration.md):
+#   ENABLE_ICE_FULL — server originates STUN binding requests so it can
+#     reach 5G/LTE clients across MAP-E NAT via peer-reflexive discovery.
+#   ENABLE_IPV6_CANDIDATES — advertise stable v6 host candidates for
+#     direct dual-stack peers (mngtmpaddr; temp/deprecated are filtered).
+Environment=PET_CAMERA_ENABLE_ICE_FULL=1
+Environment=PET_CAMERA_ENABLE_IPV6_CANDIDATES=1
+
+ExecStartPre=/bin/mkdir -p ${RECORDING_PATH}
+ExecStart=/opt/smart-pet-camera/build/streaming-server \
+  -shm "${PET_CAMERA_STREAMING_SHM}" \
+  -http "${PET_CAMERA_STREAMING_HOST}:${PET_CAMERA_STREAMING_PORT}" \
+  -metrics ":${PET_CAMERA_METRICS_PORT}" \
+  -pprof ":${PET_CAMERA_PPROF_PORT}" \
+  -record-path "${RECORDING_PATH}" \
+  -max-clients "${PET_CAMERA_MAX_CLIENTS}" \
+  -log-level "${PET_CAMERA_LOG_LEVEL}"
+
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=pet-camera.target

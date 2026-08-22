@@ -1,0 +1,9 @@
+[Unit]
+Description=AI Pyramid Stack (pet-album + yolo-daemon)
+After=network-online.target
+Wants=network-online.target
+Wants=ax-yolo-daemon.service
+Wants=pet-album.service
+
+[Install]
+WantedBy=multi-user.target
