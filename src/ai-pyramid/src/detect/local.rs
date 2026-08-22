@@ -111,13 +111,8 @@ impl LocalDetector {
             .unwrap_or_else(|_| chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
         let image = image::open(&jpeg_path)
             .map_err(|error| format!("open {}: {error}", jpeg_path.display()))?;
-        let detections = detect_comic_raw_first(
-            &self.client,
-            &self.config.model,
-            &jpeg_path,
-            &image,
-        )
-        .await?;
+        let detections =
+            detect_comic_raw_first(&self.client, &self.config.model, &jpeg_path, &image).await?;
         Ok(raw_dets_to_inputs(
             &detections,
             &detected_at,
@@ -128,9 +123,7 @@ impl LocalDetector {
 
 #[cfg(test)]
 mod tests {
-    use super::pipeline::{
-        bbox_to_panel, has_pet_detection, merge_detections, raw_dets_to_inputs,
-    };
+    use super::pipeline::{bbox_to_panel, has_pet_detection, merge_detections, raw_dets_to_inputs};
     use super::wire::{CMD_STREAM, RequestHeader, ResponseHeader, WireDetection};
     use super::*;
 

@@ -45,20 +45,11 @@ pub(super) async fn detect_comic_raw_first(
     for index in 0..4u32 {
         let (origin_x, origin_y) = panel_origin(index);
         let rgb = image
-            .crop_imm(
-                origin_x as u32,
-                origin_y as u32,
-                panel_width,
-                panel_height,
-            )
+            .crop_imm(origin_x as u32, origin_y as u32, panel_width, panel_height)
             .to_rgb8();
         let nv12 = rgb_to_nv12(&rgb, panel_width, panel_height);
         let panel_detections = client
-            .detect_nv12(
-                &nv12,
-                panel_width as u16,
-                panel_height as u16,
-            )
+            .detect_nv12(&nv12, panel_width as u16, panel_height as u16)
             .await?;
         combined.extend(
             panel_detections
@@ -122,14 +113,11 @@ pub(super) fn merge_detections(mut detections: Vec<RawLocalDetection>) -> Vec<Ra
     }
 
     merged.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
-    let mut result = Vec::new();
+    let mut result: Vec<RawLocalDetection> = Vec::new();
     for detection in merged {
-        if !result
-            .iter()
-            .any(|candidate| {
-                candidate.class_id == detection.class_id && iou_raw(candidate, &detection) > 0.3
-            })
-        {
+        if !result.iter().any(|candidate| {
+            candidate.class_id == detection.class_id && iou_raw(candidate, &detection) > 0.3
+        }) {
             result.push(detection);
         }
     }
