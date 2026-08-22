@@ -1,4 +1,5 @@
 pub mod application;
+pub mod bootstrap;
 pub mod db;
 pub mod detect;
 pub mod ingest;

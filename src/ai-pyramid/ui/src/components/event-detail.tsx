@@ -12,21 +12,12 @@ import {
   createDetailStore,
   PANELS, PW,
   bboxColor, classTier, panelOf,
-  type DetailStore,
 } from "../lib/detail-store";
+import { DetectionList } from "./event-detail/detection-list";
+import { MetadataEditor } from "./event-detail/metadata-editor";
 
 const COMIC_W = 848;
 const COMIC_H = 496;
-
-const PET_OPTIONS = ["mike", "chatora", "other"];
-const BEHAVIOR_OPTIONS = [
-  "eating", "drinking", "sleeping", "playing", "resting", "moving", "grooming", "other",
-];
-
-function petDisplay(id: string | null, petNames: PetNames): string {
-  if (!id) return "unknown";
-  return petNames[id] ?? id;
-}
 
 function useContainerScale(ref: preact.RefObject<HTMLDivElement | null>) {
   const [layout, setLayout] = useState({ scale: 1, offsetX: 0, offsetY: 0 });
@@ -537,105 +528,22 @@ export function EventDetail({ event, petNames, onClose, onUpdated, initialPanel 
             )}
           </div>
 
-          {s.editing.value ? (
-            <div class="detail-edit-form">
-              <div class="edit-row">
-                <label>Pet</label>
-                <span class="pet-select">
-                  {PET_OPTIONS.map(opt => (
-                    <button type="button" class={`pet-opt ${s.formPetId.value === opt ? "selected" : ""}`} onClick={() => { s.formPetId.value = opt; }}>
-                      {petDisplay(opt, petNames)}
-                    </button>
-                  ))}
-                </span>
-              </div>
-              <div class="edit-row">
-                <label>Status</label>
-                <span class="pet-select">
-                  {(["valid", "invalid"] as const).map(opt => (
-                    <button type="button" class={`pet-opt ${s.formStatus.value === opt ? "selected" : ""}`} onClick={() => { s.formStatus.value = opt; }}>
-                      {opt}
-                    </button>
-                  ))}
-                </span>
-              </div>
-              <div class="edit-row">
-                <label>Behavior</label>
-                <span class="pet-select">
-                  {BEHAVIOR_OPTIONS.map(opt => (
-                    <button type="button" class={`pet-opt ${s.formBehavior.value === opt ? "selected" : ""}`} onClick={() => { s.formBehavior.value = opt; }}>
-                      {opt}
-                    </button>
-                  ))}
-                </span>
-              </div>
-              <div class="edit-actions">
-                <button type="button" class="edit-save" onClick={handleSave}>Save</button>
-                <button type="button" class="edit-cancel" onClick={handleCancel}>Cancel</button>
-              </div>
-            </div>
-          ) : (
-            <div class="detail-meta">
-              <span class="pet-pill">{petDisplay(s.formPetId.value, petNames)}</span>
-              <span class={`status-pill ${s.formStatus.value}`}>{s.formStatus.value}</span>
-              <span>{s.formBehavior.value ?? ""}</span>
-              <span>{new Date(event.observed_at).toLocaleString()}</span>
-              <button type="button" class="detail-edit-btn" onClick={() => { s.editing.value = true; }}>Edit</button>
-            </div>
-          )}
+          <MetadataEditor
+            event={event}
+            petNames={petNames}
+            store={s}
+            onSave={handleSave}
+            onCancel={handleCancel}
+          />
         </div>
 
         {/* Detection list */}
-        {!s.detLoading.value && s.visibleDets.value.length > 0 && (
-          <div class="detail-detections">
-            <strong>
-              Detections ({s.visibleDets.value.length})
-              {s.viewMode.value === "panel" && ` — Panel ${s.activePanel.value}`}
-            </strong>
-            <ul>
-              {s.visibleDets.value.map(det => (
-                <li
-                  key={det.id}
-                  class={`det-item ${s.activeDetId.value === det.id ? "highlighted" : ""}`}
-                  onMouseEnter={() => { s.hoveredDetId.value = det.id; }}
-                  onMouseLeave={() => { s.hoveredDetId.value = null; }}
-                  onClick={() => handleDetClick(det)}
-                >
-                  <span class="det-color" style={{ background: bboxColor(det) }} />
-                  <span class="det-class">{det.yolo_class ?? "?"}</span>
-                  {(det.pet_id_override ?? det.pet_class) && (
-                    <span class="det-pet">{petDisplay(det.pet_id_override ?? det.pet_class, petNames)}</span>
-                  )}
-                  <span class="det-conf-wrap">
-                    {det.confidence != null && (
-                      <>
-                        <span class="det-conf-bar">
-                          <span class="det-conf-fill" style={{ width: `${det.confidence * 100}%`, background: bboxColor(det) }} />
-                        </span>
-                        <span class="det-conf">{(det.confidence * 100).toFixed(0)}%</span>
-                      </>
-                    )}
-                  </span>
-                  {det.yolo_class === "cat" && (
-                    s.editingId.value === det.id ? (
-                      <span class="pet-select">
-                        {PET_OPTIONS.map(opt => (
-                          <button type="button" class={`pet-opt ${(det.pet_id_override ?? det.pet_class) === opt ? "selected" : ""}`}
-                            onClick={e => { e.stopPropagation(); handleDetectionOverride(det.id, opt); }}>
-                            {petDisplay(opt, petNames)}
-                          </button>
-                        ))}
-                        <button type="button" class="pet-opt cancel" onClick={e => { e.stopPropagation(); s.editingId.value = null; }}>Cancel</button>
-                      </span>
-                    ) : (
-                      <button type="button" class="detection-edit" onClick={e => { e.stopPropagation(); s.editingId.value = det.id; }}>edit</button>
-                    )
-                  )}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
+        <DetectionList
+          store={s}
+          petNames={petNames}
+          onDetectionClick={handleDetClick}
+          onOverride={handleDetectionOverride}
+        />
       </div>
     </div>
   );

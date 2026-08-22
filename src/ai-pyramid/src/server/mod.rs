@@ -1,26 +1,22 @@
-use crate::application::{AppContext, EventQueries, EventSummary, ObservationCommands};
-use crate::db::DetectionInput;
+use crate::application::{AppContext, EventQueries, ObservationCommands};
 use crate::detect::DetectClient;
-use crate::ingest::filename::parse_comic_filename;
 use axum::Router;
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{IntoResponse, Json, Response};
+use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
-use futures_util::stream::Stream;
-use include_dir::{Dir, include_dir};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 use tokio::sync::Mutex;
-use tokio_stream::StreamExt;
-use tokio_stream::wrappers::BroadcastStream;
 
-static EMBEDDED_UI: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/ui/dist");
+mod album;
+mod assets;
+mod detection;
+mod events;
+mod summary;
+mod test_pages;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
@@ -125,1027 +121,55 @@ pub fn router(state: AppState) -> Router {
         .with_state(mcp_state);
 
     Router::new()
-        .route("/app", get(handle_embedded_app))
-        .route("/app/{*path}", get(handle_embedded_asset))
-        .route("/api/photos", get(handle_photos_list))
+        .route("/app", get(assets::handle_embedded_app))
+        .route("/app/{*path}", get(assets::handle_embedded_asset))
+        .route("/api/photos", get(album::handle_photos_list))
         .route(
             "/api/photos/{filename}",
-            get(handle_photo_serve).patch(handle_photo_update),
+            get(album::handle_photo_serve).patch(album::handle_photo_update),
         )
         .route(
             "/api/photos/{filename}/panel/{panel}",
-            get(handle_photo_panel),
+            get(album::handle_photo_panel),
         )
-        .route("/api/photos/ingest", post(handle_ingest))
-        .route("/api/event/{id}", get(handle_event_by_id))
+        .route("/api/photos/ingest", post(album::handle_ingest))
+        .route("/api/event/{id}", get(album::handle_event_by_id))
         .route(
             "/api/detections/{id}",
-            get(handle_detections_get).patch(handle_detection_update),
+            get(album::handle_detections_get).patch(album::handle_detection_update),
         )
-        .route("/api/backfill", post(handle_backfill))
-        .route("/api/backfill/status", get(handle_backfill_status))
-        .route("/api/detect-now/{filename}", post(handle_detect_now))
-        .route("/api/edit-history", get(handle_edit_history))
-        .route("/api/stats", get(handle_stats))
-        .route("/api/behaviors", get(handle_behaviors))
-        .route("/api/daily-summary", post(handle_daily_summary))
-        .route("/api/pet-names", get(handle_pet_names))
-        .route("/api/events", get(handle_sse))
+        .route("/api/backfill", post(detection::handle_backfill))
+        .route(
+            "/api/backfill/status",
+            get(detection::handle_backfill_status),
+        )
+        .route(
+            "/api/detect-now/{filename}",
+            post(detection::handle_detect_now),
+        )
+        .route("/api/edit-history", get(album::handle_edit_history))
+        .route("/api/stats", get(album::handle_stats))
+        .route("/api/behaviors", get(album::handle_behaviors))
+        .route("/api/daily-summary", post(summary::handle_daily_summary))
+        .route("/api/pet-names", get(album::handle_pet_names))
+        .route("/api/events", get(events::handle_sse))
         .route(
             "/api/night-assist/detections/stream",
-            get(handle_night_assist_sse),
+            get(events::handle_night_assist_sse),
         )
         .route("/health", get(handle_health))
-        .route("/test/websr", get(handle_websr_test))
-        .route("/test/esrgan", get(handle_esrgan_test))
-        .route("/test/carousel", get(handle_carousel_demo))
-        .route("/test/carousel.js", get(handle_carousel_js))
-        .route("/test/models/{*path}", get(handle_test_model))
-        .route("/api/models/{*path}", get(handle_test_model))
+        .route("/test/websr", get(test_pages::handle_websr_test))
+        .route("/test/esrgan", get(test_pages::handle_esrgan_test))
+        .route("/test/carousel", get(test_pages::handle_carousel_demo))
+        .route("/test/carousel.js", get(test_pages::handle_carousel_js))
+        .route("/test/models/{*path}", get(test_pages::handle_test_model))
+        .route("/api/models/{*path}", get(test_pages::handle_test_model))
         .with_state(state)
         .merge(mcp_router)
 }
 
-#[derive(Deserialize)]
-struct PhotosQuery {
-    is_valid: Option<String>,
-    pet_id: Option<String>,
-    limit: Option<i64>,
-    offset: Option<i64>,
-    search: Option<String>,
-    behavior: Option<String>,
-    yolo_class: Option<String>,
-}
-
-#[derive(Serialize)]
-struct PhotosResponse {
-    events: Vec<EventSummary>,
-    total: i64,
-}
-
-async fn handle_embedded_app() -> Response {
-    embedded_ui_response(None)
-}
-
-async fn handle_embedded_asset(Path(path): Path<String>) -> Response {
-    embedded_ui_response(Some(path.as_str()))
-}
-
-fn embedded_ui_response(path: Option<&str>) -> Response {
-    let requested = path.unwrap_or("index.html").trim_start_matches('/');
-    let file = EMBEDDED_UI
-        .get_file(requested)
-        .or_else(|| EMBEDDED_UI.get_file("index.html"));
-
-    match file {
-        Some(file) => {
-            let mime = mime_guess::from_path(file.path())
-                .first_or_octet_stream()
-                .to_string();
-            let mut response = Response::new(file.contents().to_vec().into_response().into_body());
-            *response.status_mut() = StatusCode::OK;
-            response.headers_mut().insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_str(&mime)
-                    .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
-            );
-            response
-        }
-        None => (StatusCode::NOT_FOUND, "embedded asset not found").into_response(),
-    }
-}
-
-// --- REST API ---
-
-async fn handle_photos_list(
-    State(state): State<AppState>,
-    Query(q): Query<PhotosQuery>,
-) -> impl IntoResponse {
-    let query = build_event_query(&q);
-    match state.queries().list_events(query).await {
-        Ok((events, total)) => Json(PhotosResponse { events, total }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
-    }
-}
-
-/// GET /api/event/{id} — single event by DB primary key (for deep links)
-async fn handle_event_by_id(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-) -> impl IntoResponse {
-    match state.queries().get_event_by_id(id).await {
-        Ok(Some(ev)) => Json(serde_json::json!(ev)).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "not found"})),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("{e}")})),
-        )
-            .into_response(),
-    }
-}
-
-async fn handle_photo_serve(
-    State(state): State<AppState>,
-    Path(filename): Path<String>,
-) -> impl IntoResponse {
-    let safe_name = sanitize_filename(&filename);
-    let path = state.photos_dir.join(&safe_name);
-
-    match tokio::fs::File::open(&path).await {
-        Ok(file) => {
-            let stream = tokio_util::io::ReaderStream::new(file);
-            let body = axum::body::Body::from_stream(stream);
-            (
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, "image/jpeg"),
-                    (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
-                ],
-                body,
-            )
-                .into_response()
-        }
-        Err(_) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "not found"})),
-        )
-            .into_response(),
-    }
-}
-
-/// GET /api/photos/{filename}/panel/{panel} — serve a single panel (0-3) from a 2×2 comic image.
-async fn handle_photo_panel(
-    State(state): State<AppState>,
-    Path((filename, panel)): Path<(String, u32)>,
-) -> impl IntoResponse {
-    if panel > 3 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "panel must be 0-3"})),
-        )
-            .into_response();
-    }
-
-    let safe_name = sanitize_filename(&filename);
-    let path = state.photos_dir.join(&safe_name);
-
-    let bytes = match tokio::fs::read(&path).await {
-        Ok(b) => b,
-        Err(_) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "not found"})),
-            )
-                .into_response();
-        }
-    };
-
-    // Decode, crop panel, re-encode as JPEG
-    match crop_panel(&bytes, panel) {
-        Ok(jpeg) => (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, "image/jpeg"),
-                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
-            ],
-            jpeg,
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("crop failed: {e}")})),
-        )
-            .into_response(),
-    }
-}
-
-/// Crop a 2×2 comic panel from a JPEG, stripping borders/margins,
-/// and letterbox to 640×640 for YOLO input.
-///
-/// Comic layout (848×496): margin=12, border=2, gap=8, panel=404×228
-/// Panel content starts at (margin+border, margin+border) = (14, 14)
-///
-/// Optimized: RGB (no alpha), SubImage view (no panel copy), replace (no blend).
-fn crop_panel(jpeg_bytes: &[u8], panel: u32) -> Result<Vec<u8>, String> {
-    const MARGIN: u32 = 12;
-    const BORDER: u32 = 2;
-    const GAP: u32 = 8;
-    const PANEL_W: u32 = 404;
-    const PANEL_H: u32 = 228;
-    const CELL_W: u32 = PANEL_W + 2 * BORDER;
-    const CELL_H: u32 = PANEL_H + 2 * BORDER;
-    const TARGET: u32 = 640;
-
-    // Decode to RGB (no alpha — JPEG has none)
-    let rgb = image::load_from_memory_with_format(jpeg_bytes, image::ImageFormat::Jpeg)
-        .map_err(|e| e.to_string())?
-        .into_rgb8();
-
-    let col = panel % 2;
-    let row = panel / 2;
-    let x = MARGIN + BORDER + col * (CELL_W + GAP);
-    let y = MARGIN + BORDER + row * (CELL_H + GAP);
-
-    // SubImage view — no pixel copy, just a window into rgb
-    let panel_view = image::imageops::crop_imm(&rgb, x, y, PANEL_W, PANEL_H);
-
-    // Letterbox: resize preserving aspect ratio, center on black 640×640 canvas
-    let scale = (TARGET as f64 / PANEL_W as f64).min(TARGET as f64 / PANEL_H as f64);
-    let new_w = (PANEL_W as f64 * scale) as u32;
-    let new_h = (PANEL_H as f64 * scale) as u32;
-    let resized = image::imageops::resize(
-        &*panel_view,
-        new_w,
-        new_h,
-        image::imageops::FilterType::Lanczos3,
-    );
-
-    let pad_x = (TARGET - new_w) / 2;
-    let pad_y = (TARGET - new_h) / 2;
-    let mut canvas = image::RgbImage::new(TARGET, TARGET); // black (zero-initialized)
-    image::imageops::replace(&mut canvas, &resized, pad_x as i64, pad_y as i64);
-
-    // Encode directly as RGB JPEG — pre-allocate ~50KB
-    let mut buf = std::io::Cursor::new(Vec::with_capacity(50_000));
-    image::DynamicImage::ImageRgb8(canvas)
-        .write_to(&mut buf, image::ImageFormat::Jpeg)
-        .map_err(|e| e.to_string())?;
-    Ok(buf.into_inner())
-}
-
-#[derive(Deserialize)]
-struct PhotoUpdate {
-    is_valid: Option<bool>,
-    pet_id: Option<String>,
-    behavior: Option<String>,
-}
-
-async fn handle_photo_update(
-    State(state): State<AppState>,
-    Path(filename): Path<String>,
-    Json(body): Json<PhotoUpdate>,
-) -> impl IntoResponse {
-    let safe_name = sanitize_filename(&filename);
-    let queries = state.queries();
-    let commands = state.commands();
-
-    match queries.get_event_by_source(&safe_name).await {
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "not found"})),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response();
-        }
-        Ok(Some(_)) => {}
-    }
-
-    let mut updated = serde_json::json!({"ok": true});
-
-    if let Some(is_valid) = body.is_valid {
-        if let Err(e) = commands.override_event_validity(&safe_name, is_valid).await {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response();
-        }
-        updated["is_valid"] = serde_json::json!(is_valid);
-    }
-
-    if let Some(ref pet_id) = body.pet_id {
-        if let Err(e) = commands.update_pet_id(&safe_name, pet_id).await {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response();
-        }
-        updated["pet_id"] = serde_json::json!(pet_id);
-    }
-
-    if let Some(ref behavior) = body.behavior {
-        if let Err(e) = commands.update_behavior(&safe_name, behavior).await {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response();
-        }
-        updated["behavior"] = serde_json::json!(behavior);
-    }
-
-    if body.is_valid.is_none() && body.pet_id.is_none() && body.behavior.is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "is_valid, pet_id, or behavior required"})),
-        )
-            .into_response();
-    }
-
-    Json(updated).into_response()
-}
-
-fn deserialize_null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Default + Deserialize<'de>,
-{
-    Ok(Option::deserialize(deserializer)?.unwrap_or_default())
-}
-
-// POST /api/photos/ingest — rdk-x5 sends comic metadata + detections
-#[derive(Deserialize)]
-struct IngestRequest {
-    filename: String,
-    captured_at: String,
-    pet_id: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_null_as_default")]
-    detections: Vec<DetectionInput>,
-}
-
-async fn handle_ingest(
-    State(state): State<AppState>,
-    Json(body): Json<IngestRequest>,
-) -> impl IntoResponse {
-    let captured_at =
-        match chrono::NaiveDateTime::parse_from_str(&body.captured_at, "%Y-%m-%dT%H:%M:%S") {
-            Ok(dt) => dt,
-            Err(_) => match chrono::NaiveDateTime::parse_from_str(
-                &body.captured_at,
-                "%Y-%m-%dT%H:%M:%S%.f",
-            ) {
-                Ok(dt) => dt,
-                Err(e) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": format!("invalid captured_at: {e}")})),
-                    )
-                        .into_response();
-                }
-            },
-        };
-
-    let safe_name = sanitize_filename(&body.filename);
-    let commands = state.commands();
-
-    match commands
-        .ingest_with_detections(
-            &safe_name,
-            captured_at,
-            body.pet_id.as_deref(),
-            &body.detections,
-        )
-        .await
-    {
-        Ok(photo_id) => Json(serde_json::json!({
-            "ok": true,
-            "photo_id": photo_id,
-            "detections_count": body.detections.len(),
-        }))
-        .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
-    }
-}
-
-// GET /api/detections/:id — get detections for a photo
-async fn handle_detections_get(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-) -> impl IntoResponse {
-    match state.queries().get_detections(id).await {
-        Ok(dets) => Json(dets).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
-    }
-}
-
-// PATCH /api/detections/:id — update pet_id_override on a detection
-#[derive(Deserialize)]
-struct DetectionUpdate {
-    pet_id_override: String,
-}
-
-async fn handle_detection_update(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-    Json(body): Json<DetectionUpdate>,
-) -> impl IntoResponse {
-    match state
-        .commands()
-        .update_detection_override(id, &body.pet_id_override)
-        .await
-    {
-        Ok(0) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "detection not found"})),
-        )
-            .into_response(),
-        Ok(_) => Json(serde_json::json!({"ok": true, "pet_id_override": body.pet_id_override}))
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
-    }
-}
-
-// GET /api/edit-history — list edit history entries, optionally filtered by since
-#[derive(Deserialize)]
-struct EditHistoryQuery {
-    since: Option<String>,
-}
-
-async fn handle_edit_history(
-    State(state): State<AppState>,
-    Query(query): Query<EditHistoryQuery>,
-) -> impl IntoResponse {
-    match state
-        .context
-        .event_queries()
-        .get_edit_history(query.since.as_deref())
-        .await
-    {
-        Ok(entries) => Json(entries).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
-    }
-}
-
-// POST /api/backfill — trigger detection backfill for photos without detections
-async fn handle_backfill(State(state): State<AppState>) -> impl IntoResponse {
-    // Need either local detector or remote detect client
-    let local = state.local_detector.clone();
-    let remote = state.detect_client.clone();
-    if local.is_none() && remote.is_none() {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "detection not configured"})),
-        )
-            .into_response();
-    }
-
-    // Prevent concurrent backfill runs
-    if state
-        .backfill_running
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": "backfill already running"})),
-        )
-            .into_response();
-    }
-
-    let backfill_flag = state.backfill_running.clone();
-    let context = state.context.clone();
-    let photos_dir = state.photos_dir.clone();
-    let sse_tx = state.event_tx.clone();
-    tokio::spawn(async move {
-        let queries = context.event_queries();
-        let commands = context.observation_commands();
-        let photos = match queries.list_undetected_photos(500).await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!("Backfill query failed: {e}");
-                backfill_flag.store(false, Ordering::SeqCst);
-                return;
-            }
-        };
-
-        let total = photos.len();
-        tracing::info!(
-            "Backfill: {total} photos to process (local={}, remote={})",
-            local.is_some(),
-            remote.is_some()
-        );
-        let mut ok = 0u32;
-        let mut fail = 0u32;
-
-        for (idx, photo) in photos.iter().enumerate() {
-            // Skip invalid photos
-            if photo.status == crate::application::EventStatus::Invalid {
-                let _ = commands.mark_detected(photo.id).await;
-                continue;
-            }
-
-            // Detect: prefer local (level2), fallback to remote (level1)
-            let dets = if let Some(ref ld) = local {
-                let _permit = context.yolo_semaphore().acquire().await;
-                ld.detect_comic(&photos_dir, &photo.source_filename).await
-            } else if let Some(ref rc) = remote {
-                rc.detect(&photo.source_filename).await
-            } else {
-                Err("no detector".into())
-            };
-
-            match dets {
-                Ok(dets) if !dets.is_empty() => {
-                    let captured_at = parse_comic_filename(&photo.source_filename)
-                        .map(|m| m.captured_at)
-                        .unwrap_or_default();
-                    if let Err(e) = commands
-                        .ingest_with_detections(
-                            &photo.source_filename,
-                            captured_at,
-                            photo.pet_id.as_deref(),
-                            &dets,
-                        )
-                        .await
-                    {
-                        tracing::warn!("Backfill DB error {}: {e}", photo.source_filename);
-                        fail += 1;
-                    } else {
-                        tracing::info!(
-                            "Backfill [{}/{}] OK: {} ({} dets)",
-                            idx + 1,
-                            total,
-                            photo.source_filename,
-                            dets.len()
-                        );
-                        ok += 1;
-                    }
-                }
-                Ok(_) => {
-                    tracing::info!(
-                        "Backfill [{}/{}]: no detections for {}",
-                        idx + 1,
-                        total,
-                        photo.source_filename
-                    );
-                    let _ = commands.mark_detected(photo.id).await;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Backfill [{}/{}] detect error {}: {e}",
-                        idx + 1,
-                        total,
-                        photo.source_filename
-                    );
-                    fail += 1;
-                }
-            }
-
-            // SSE progress event
-            let _ = sse_tx.send(PhotoEvent::Update {
-                filename: photo.source_filename.clone(),
-                is_valid: photo.status == crate::application::EventStatus::Valid,
-                caption: String::new(),
-                behavior: String::new(),
-                pet_id: photo.pet_id.clone(),
-            });
-
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
-
-        tracing::info!("Backfill complete: {ok} ok, {fail} failed, {total} total");
-        backfill_flag.store(false, Ordering::SeqCst);
-    });
-
-    Json(serde_json::json!({"ok": true, "message": "backfill started"})).into_response()
-}
-
-async fn handle_backfill_status(State(state): State<AppState>) -> impl IntoResponse {
-    Json(serde_json::json!({
-        "running": state.backfill_running.load(Ordering::SeqCst)
-    }))
-}
-
-/// POST /api/detect-now/{filename} — run Level2 detection with progressive SSE updates.
-/// Each detection is streamed as a `detection-partial` SSE event as soon as found.
-/// On completion, saves to DB and sends `detection-ready`.
-async fn handle_detect_now(
-    State(state): State<AppState>,
-    Path(filename): Path<String>,
-) -> impl IntoResponse {
-    let local = match &state.local_detector {
-        Some(ld) => ld.clone(),
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": "local detector not available"})),
-            )
-                .into_response();
-        }
-    };
-
-    let safe_name = sanitize_filename(&filename);
-    let photos_dir = state.photos_dir.clone();
-    let commands = state.commands();
-    let sse_tx = state.event_tx.clone();
-    let yolo_semaphore = state.context.yolo_semaphore().clone();
-
-    // Channel for streaming partial detections
-    let (det_tx, mut det_rx) = tokio::sync::mpsc::channel::<crate::db::DetectionInput>(64);
-    let sse_tx2 = sse_tx.clone();
-    let fname = safe_name.clone();
-
-    // Forward partial detections to SSE as they arrive
-    let relay = tokio::spawn(async move {
-        while let Some(det) = det_rx.recv().await {
-            let _ = sse_tx2.send(PhotoEvent::DetectionPartial {
-                filename: fname.clone(),
-                bbox_x: det.bbox_x,
-                bbox_y: det.bbox_y,
-                bbox_w: det.bbox_w,
-                bbox_h: det.bbox_h,
-                yolo_class: det.yolo_class.clone().unwrap_or_default(),
-                confidence: det.confidence.unwrap_or(0.0),
-            });
-        }
-    });
-
-    let _permit = yolo_semaphore.acquire().await;
-
-    // Run streaming detection
-    let result = local
-        .detect_comic_stream(&photos_dir, &safe_name, &det_tx)
-        .await;
-    drop(det_tx); // close channel so relay task finishes
-    let _ = relay.await;
-
-    match result {
-        Ok(dets) => {
-            let det_count = dets.len();
-            if !dets.is_empty() {
-                let captured_at = parse_comic_filename(&safe_name)
-                    .map(|m| m.captured_at)
-                    .unwrap_or_default();
-                if let Err(e) = commands
-                    .ingest_with_detections(&safe_name, captured_at, None, &dets)
-                    .await
-                {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": format!("DB error: {e}")})),
-                    )
-                        .into_response();
-                }
-            } else if let Some(event) = state
-                .queries()
-                .get_event_by_source(&safe_name)
-                .await
-                .ok()
-                .flatten()
-            {
-                let _ = commands.mark_detected(event.id).await;
-            }
-
-            // Signal completion
-            let _ = sse_tx.send(PhotoEvent::DetectionReady {
-                filename: safe_name.clone(),
-                count: det_count,
-            });
-
-            Json(serde_json::json!({
-                "ok": true,
-                "filename": safe_name,
-                "detections": det_count,
-            }))
-            .into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
-    }
-}
-
-async fn handle_stats(State(state): State<AppState>) -> impl IntoResponse {
-    match state.queries().activity_stats().await {
-        Ok(stats) => Json(stats).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
-    }
-}
-
-async fn handle_sse(
-    State(state): State<AppState>,
-) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
-    let rx = state.event_tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
-        Ok(ref photo_event) => {
-            let event_name = match photo_event {
-                PhotoEvent::Update { .. } => "event",
-                PhotoEvent::DetectionPartial { .. } => "detection-partial",
-                PhotoEvent::DetectionReady { .. } => "detection-ready",
-            };
-            let json = serde_json::to_string(&photo_event).unwrap_or_default();
-            Some(Ok(Event::default().event(event_name).data(json)))
-        }
-        Err(_) => None,
-    });
-    Sse::new(stream).keep_alive(KeepAlive::default())
-}
-
-async fn handle_night_assist_sse(State(state): State<AppState>) -> impl IntoResponse {
-    let Some(ref host) = state.night_assist_host else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "night assist not configured",
-        )
-            .into_response();
-    };
-
-    let socket_path = state
-        .local_detector
-        .as_ref()
-        .map(|ld| ld.socket_path().to_path_buf())
-        .unwrap_or_else(|| {
-            std::path::PathBuf::from(
-                std::env::var("AX_YOLO_DAEMON_SOCKET")
-                    .unwrap_or_else(|_| "/run/ax_yolo_daemon.sock".to_string()),
-            )
-        });
-
-    let host = host.clone();
-
-    // Connect to daemon and send CMD_STREAM.
-    let setup = async move {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut conn = tokio::net::UnixStream::connect(&socket_path).await.ok()?;
-        let header = crate::detect::local::stream_request_header(host.as_bytes());
-        conn.write_all(&header).await.ok()?;
-        // Read initial OK response (12 bytes).
-        let mut resp_buf = [0u8; 12];
-        conn.read_exact(&mut resp_buf).await.ok()?;
-        Some(conn)
-    };
-
-    let conn = setup.await;
-    let stream = futures_util::stream::unfold(conn, |state| async move {
-        use tokio::io::AsyncReadExt;
-        let mut conn = state?;
-
-        // Read ResponseHeader (12 bytes).
-        let mut hdr_buf = [0u8; 12];
-        conn.read_exact(&mut hdr_buf).await.ok()?;
-        let det_count = u16::from_ne_bytes([hdr_buf[2], hdr_buf[3]]) as usize;
-
-        // Read detections (12 bytes each).
-        let mut dets = Vec::new();
-        for _ in 0..det_count {
-            let mut det_buf = [0u8; 12];
-            conn.read_exact(&mut det_buf).await.ok()?;
-            let x1 = i16::from_ne_bytes([det_buf[0], det_buf[1]]);
-            let y1 = i16::from_ne_bytes([det_buf[2], det_buf[3]]);
-            let x2 = i16::from_ne_bytes([det_buf[4], det_buf[5]]);
-            let y2 = i16::from_ne_bytes([det_buf[6], det_buf[7]]);
-            let class_id = u16::from_ne_bytes([det_buf[8], det_buf[9]]);
-            let confidence = u16::from_ne_bytes([det_buf[10], det_buf[11]]);
-            dets.push(crate::night_assist::NightAssistDetection {
-                class_name: crate::detect::local::coco_name(class_id),
-                confidence: confidence as f64 / 10000.0,
-                bbox: crate::night_assist::BBox {
-                    x: x1 as i32,
-                    y: y1 as i32,
-                    w: (x2 - x1) as i32,
-                    h: (y2 - y1) as i32,
-                },
-            });
-        }
-
-        let event_name = if dets.is_empty() {
-            "heartbeat"
-        } else {
-            "detection"
-        };
-        let event = crate::night_assist::DetectionEvent {
-            detections: dets,
-            source_width: 1280,
-            source_height: 720,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs_f64(),
-        };
-        let json = serde_json::to_string(&event).unwrap_or_default();
-        let sse_event =
-            Ok::<_, std::convert::Infallible>(Event::default().event(event_name).data(json));
-        Some((sse_event, Some(conn)))
-    });
-
-    Sse::new(stream)
-        .keep_alive(KeepAlive::default())
-        .into_response()
-}
-
-async fn handle_pet_names(State(state): State<AppState>) -> impl IntoResponse {
-    match state.queries().distinct_pet_ids().await {
-        Ok(ids) => {
-            let map: HashMap<String, String> = ids
-                .into_iter()
-                .map(|id| {
-                    let display = state
-                        .pet_names
-                        .get(&id)
-                        .cloned()
-                        .unwrap_or_else(|| id.clone());
-                    (id, display)
-                })
-                .collect();
-            Json(map).into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
-    }
-}
-
-async fn handle_behaviors(State(state): State<AppState>) -> impl IntoResponse {
-    match state.queries().distinct_behaviors().await {
-        Ok(behaviors) => Json(behaviors).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
-    }
-}
-
-#[derive(Deserialize)]
-struct DailySummaryRequest {
-    date: Option<String>,
-}
-
-#[derive(Serialize)]
-struct DailySummaryResponse {
-    date: String,
-    summary: String,
-    photo_count: usize,
-}
-
-async fn handle_daily_summary(
-    State(state): State<AppState>,
-    Json(body): Json<DailySummaryRequest>,
-) -> impl IntoResponse {
-    let date = body
-        .date
-        .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
-
-    // Check cache (2-hour TTL)
-    {
-        let cache = state.daily_summary_cache.lock().await;
-        if let Some((ref d, cached_at, ref json)) = *cache
-            && d == &date
-            && cached_at.elapsed() < std::time::Duration::from_secs(2 * 3600)
-        {
-            return Json(json.clone()).into_response();
-        }
-    }
-
-    let captions = match state.queries().captions_for_date(&date).await {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response();
-        }
-    };
-
-    if captions.is_empty() {
-        return Json(DailySummaryResponse {
-            date,
-            summary: "No observations for this date.".into(),
-            photo_count: 0,
-        })
-        .into_response();
-    }
-
-    let photo_count = captions.len();
-
-    // Pick a random photo from the day for visual context
-    let random_photo = {
-        let date_prefix = format!("comic_{}", date.replace('-', ""));
-        let mut candidates: Vec<_> = std::fs::read_dir(&state.photos_dir)
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().starts_with(&date_prefix))
-            .collect();
-        if !candidates.is_empty() {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut h = DefaultHasher::new();
-            date.hash(&mut h);
-            let idx = h.finish() as usize % candidates.len();
-            Some(candidates.swap_remove(idx).path())
-        } else {
-            None
-        }
-    };
-
-    let vlm_config = state.context.vlm_config();
-    let vlm_client = crate::vlm::VlmClient::new(vlm_config);
-    let _permit = state.context.vlm_semaphore().acquire().await.unwrap();
-    let summary_result = match state.context.vlm_swap_config() {
-        Some(swap) => {
-            vlm_client
-                .summarize_day_with_swap(swap, &captions, random_photo.as_deref())
-                .await
-        }
-        None => {
-            vlm_client
-                .summarize_day(&captions, random_photo.as_deref())
-                .await
-        }
-    };
-    match summary_result {
-        Ok(summary) => {
-            let resp = DailySummaryResponse {
-                date: date.clone(),
-                summary,
-                photo_count,
-            };
-            let json = serde_json::to_value(&resp).unwrap();
-            state
-                .daily_summary_cache
-                .lock()
-                .await
-                .replace((date, Instant::now(), json));
-            Json(resp).into_response()
-        }
-        Err(e) => {
-            // Fallback: return captions list
-            let fallback = format!("{photo_count} observations recorded. VLM unavailable: {e}");
-            Json(DailySummaryResponse {
-                date,
-                summary: fallback,
-                photo_count,
-            })
-            .into_response()
-        }
-    }
-}
-
 async fn handle_health() -> impl IntoResponse {
     Json(serde_json::json!({"ok": true}))
-}
-
-fn build_event_query(q: &PhotosQuery) -> crate::application::EventQuery {
-    use crate::application::EventStatusFilter;
-    let is_pending = q.is_valid.as_deref() == Some("pending");
-    crate::application::EventQuery {
-        status: if is_pending {
-            EventStatusFilter::Pending
-        } else {
-            match q.is_valid.as_deref() {
-                Some("true") | Some("1") => EventStatusFilter::Valid,
-                Some("false") | Some("0") => EventStatusFilter::Invalid,
-                _ => EventStatusFilter::All,
-            }
-        },
-        pet_id: q.pet_id.clone().filter(|s| !s.is_empty()),
-        limit: q.limit,
-        offset: q.offset,
-        search: q.search.clone().filter(|s| !s.is_empty()),
-        behavior: q.behavior.clone().filter(|s| !s.is_empty()),
-        yolo_classes: q
-            .yolo_class
-            .as_deref()
-            .unwrap_or("")
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .collect(),
-    }
 }
 
 fn sanitize_filename(name: &str) -> String {
@@ -1155,101 +179,16 @@ fn sanitize_filename(name: &str) -> String {
         .unwrap_or_default()
 }
 
-async fn latest_filename(state: &AppState) -> String {
-    state
-        .queries()
-        .list_events(crate::application::EventQuery {
-            limit: Some(1),
-            ..Default::default()
-        })
-        .await
-        .ok()
-        .and_then(|(events, _)| events.into_iter().next())
-        .map(|e| e.source_filename)
-        .unwrap_or_default()
-}
-
-async fn handle_websr_test(State(state): State<AppState>) -> impl IntoResponse {
-    let latest = latest_filename(&state).await;
-    let html = include_str!("../../static/websr.html").replace("__LATEST__", &latest);
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        html,
-    )
-}
-
-async fn handle_test_model(Path(path): Path<String>) -> impl IntoResponse {
-    let safe_path = path.trim_start_matches('/').replace("..", "");
-    let file_path = std::path::Path::new("/data/esrgan-models").join(&safe_path);
-    match tokio::fs::read(&file_path).await {
-        Ok(data) => {
-            let mime = if safe_path.ends_with(".json") {
-                "application/json"
-            } else {
-                "application/octet-stream"
-            };
-            (
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, mime.to_string()),
-                    (
-                        header::CACHE_CONTROL,
-                        "public, max-age=31536000, immutable".to_string(),
-                    ),
-                ],
-                data,
-            )
-                .into_response()
-        }
-        Err(_) => (
-            StatusCode::NOT_FOUND,
-            format!("model not found: {safe_path}"),
-        )
-            .into_response(),
-    }
-}
-
-async fn handle_carousel_demo(State(state): State<AppState>) -> impl IntoResponse {
-    let latest = latest_filename(&state).await;
-    let html = include_str!("../../static/carousel.html").replace("__LATEST__", &latest);
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        html,
-    )
-}
-
-async fn handle_carousel_js() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [(
-            header::CONTENT_TYPE,
-            "application/javascript; charset=utf-8",
-        )],
-        include_str!("../../static/carousel.js"),
-    )
-}
-
-async fn handle_esrgan_test(State(state): State<AppState>) -> impl IntoResponse {
-    let latest = latest_filename(&state).await;
-    let html = include_str!("../../static/esrgan.html").replace("__LATEST__", &latest);
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        html,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::application::PhotoStoreRepository;
     use crate::db::PhotoStore;
     use axum::body::Body;
-    use axum::http::Request;
+    use axum::http::{Request, StatusCode, header};
     use chrono::NaiveDate;
     use futures_util::StreamExt;
+    use std::sync::atomic::Ordering;
     use tower::util::ServiceExt;
 
     fn dt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> chrono::NaiveDateTime {
@@ -1705,5 +644,509 @@ mod tests {
         // Display names from AppState.pet_names override
         assert_eq!(json["mike"], "Mike");
         assert_eq!(json["chatora"], "Chatora");
+    }
+
+    #[tokio::test]
+    async fn event_by_id_returns_event_contract_and_not_found() {
+        let state = test_state();
+        let commands = state.context.observation_commands();
+        commands
+            .ingest_source_photo(crate::application::ObservationInput {
+                source_filename: "event-by-id.jpg".into(),
+                captured_at: dt(2026, 4, 2, 8, 30, 0),
+                pet_id: Some("mike".into()),
+            })
+            .await
+            .unwrap();
+        commands
+            .apply_observation(crate::application::ObservationResult {
+                source_filename: "event-by-id.jpg".into(),
+                is_valid: true,
+                summary: "Mike is watching the window".into(),
+                behavior: "watching".into(),
+            })
+            .await
+            .unwrap();
+
+        let app = router(state);
+        let found = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/event/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(found.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(found.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["id"], 1);
+        assert_eq!(json["source_filename"], "event-by-id.jpg");
+        assert_eq!(json["observed_at"], "2026-04-02T08:30:00");
+        assert_eq!(json["summary"], "Mike is watching the window");
+        assert_eq!(json["status"], "valid");
+        assert_eq!(json["pet_id"], "mike");
+        assert_eq!(json["behavior"], "watching");
+
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/event/999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(missing.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["error"], "not found");
+    }
+
+    #[tokio::test]
+    async fn photo_panel_serves_640_square_jpeg_and_validates_panel_number() {
+        let state = test_state();
+        let filename = "comic_20260402_083000_mike.jpg";
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            848,
+            496,
+            image::Rgb([20, 80, 160]),
+        ))
+        .write_to(&mut encoded, image::ImageFormat::Jpeg)
+        .unwrap();
+        std::fs::write(state.photos_dir.join(filename), encoded.into_inner()).unwrap();
+
+        let app = router(state);
+        let ok = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/photos/{filename}/panel/2"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        assert_eq!(ok.headers()[header::CONTENT_TYPE], "image/jpeg");
+        assert_eq!(
+            ok.headers()[header::CACHE_CONTROL],
+            "public, max-age=31536000, immutable"
+        );
+        let bytes = axum::body::to_bytes(ok.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let panel = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((panel.width(), panel.height()), (640, 640));
+
+        let invalid = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/photos/{filename}/panel/4"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn photo_patch_updates_all_editable_fields_and_rejects_empty_patch() {
+        let state = test_state();
+        state
+            .context
+            .observation_commands()
+            .ingest_source_photo(crate::application::ObservationInput {
+                source_filename: "editable.jpg".into(),
+                captured_at: dt(2026, 4, 2, 9, 0, 0),
+                pet_id: None,
+            })
+            .await
+            .unwrap();
+        let app = router(state);
+
+        let updated = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/photos/editable.jpg")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"is_valid":true,"pet_id":"chatora","behavior":"playing"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(updated.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(json["ok"].as_bool().unwrap());
+        assert!(json["is_valid"].as_bool().unwrap());
+        assert_eq!(json["pet_id"], "chatora");
+        assert_eq!(json["behavior"], "playing");
+
+        let event = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/event/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(event.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["status"], "valid");
+        assert_eq!(json["pet_id"], "chatora");
+        assert_eq!(json["behavior"], "playing");
+
+        let empty = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/photos/editable.jpg")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/photos/missing.jpg")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"is_valid":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn edit_history_returns_patch_diffs_and_honors_since_filter() {
+        let state = test_state();
+        state
+            .context
+            .observation_commands()
+            .ingest_source_photo(crate::application::ObservationInput {
+                source_filename: "history.jpg".into(),
+                captured_at: dt(2026, 4, 2, 9, 15, 0),
+                pet_id: Some("mike".into()),
+            })
+            .await
+            .unwrap();
+        let app = router(state);
+        for body in [r#"{"pet_id":"chatora"}"#, r#"{"behavior":"sleeping"}"#] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri("/api/photos/history.jpg")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let history = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/edit-history")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(history.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(history.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let entries = json.as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["photo_id"], 1);
+        assert!(entries.iter().all(|entry| entry["id"].is_i64()));
+        assert!(entries.iter().all(|entry| entry["created_at"].is_string()));
+        let changes: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|entry| serde_json::from_str(entry["changes"].as_str().unwrap()).unwrap())
+            .collect();
+        assert!(
+            changes
+                .iter()
+                .any(|change| change["pet_id"]["old"] == "mike")
+        );
+        assert!(
+            changes
+                .iter()
+                .any(|change| change["behavior"]["new"] == "sleeping")
+        );
+
+        let filtered = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/edit-history?since=2999-01-01T00%3A00%3A00")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(filtered.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(filtered.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn behaviors_returns_sorted_distinct_non_empty_values() {
+        let state = test_state();
+        let commands = state.context.observation_commands();
+        for (filename, behavior) in [
+            ("playing.jpg", "playing"),
+            ("sleeping.jpg", "sleeping"),
+            ("playing-again.jpg", "playing"),
+        ] {
+            commands
+                .ingest_source_photo(crate::application::ObservationInput {
+                    source_filename: filename.into(),
+                    captured_at: dt(2026, 4, 2, 10, 0, 0),
+                    pet_id: None,
+                })
+                .await
+                .unwrap();
+            commands.update_behavior(filename, behavior).await.unwrap();
+        }
+        commands
+            .ingest_source_photo(crate::application::ObservationInput {
+                source_filename: "empty.jpg".into(),
+                captured_at: dt(2026, 4, 2, 11, 0, 0),
+                pet_id: None,
+            })
+            .await
+            .unwrap();
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/behaviors")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json, serde_json::json!(["playing", "sleeping"]));
+    }
+
+    #[tokio::test]
+    async fn backfill_reports_unavailable_and_conflict_contracts() {
+        let unavailable = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/backfill")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(unavailable.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["error"], "detection not configured");
+
+        let mut state = test_state();
+        state.detect_client = Some(Arc::new(crate::detect::DetectClient::new(
+            crate::detect::DetectConfig {
+                camera_base_url: "http://127.0.0.1:1".into(),
+                self_base_url: "http://127.0.0.1:8082".into(),
+                timeout: std::time::Duration::from_millis(1),
+                score_threshold: 0.1,
+            },
+        )));
+        state.backfill_running.store(true, Ordering::SeqCst);
+        let conflict = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/backfill")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(conflict.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["error"], "backfill already running");
+    }
+
+    #[tokio::test]
+    async fn detect_now_reports_local_detector_unavailable() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/detect-now/comic.jpg")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["error"], "local detector not available");
+    }
+
+    #[tokio::test]
+    async fn daily_summary_without_observations_is_available_without_vlm() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/daily-summary")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"date":"2026-04-02"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["date"], "2026-04-02");
+        assert_eq!(json["summary"], "No observations for this date.");
+        assert_eq!(json["photo_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn daily_summary_rejects_invalid_request_shape() {
+        let response = router(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/daily-summary")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"date":42}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn sse_preserves_detection_event_names_and_payloads() {
+        let state = test_state();
+        let tx = state.event_tx.clone();
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut stream = response.into_body().into_data_stream();
+
+        tx.send(PhotoEvent::DetectionPartial {
+            filename: "comic.jpg".into(),
+            bbox_x: 10,
+            bbox_y: 20,
+            bbox_w: 30,
+            bbox_h: 40,
+            yolo_class: "cat".into(),
+            confidence: 0.875,
+        })
+        .unwrap();
+        let partial = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let partial = String::from_utf8_lossy(&partial);
+        assert!(partial.contains("event: detection-partial"));
+        assert!(partial.contains("\"type\":\"detection-partial\""));
+        assert!(partial.contains("\"yolo_class\":\"cat\""));
+
+        tx.send(PhotoEvent::DetectionReady {
+            filename: "comic.jpg".into(),
+            count: 3,
+        })
+        .unwrap();
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let ready = String::from_utf8_lossy(&ready);
+        assert!(ready.contains("event: detection-ready"));
+        assert!(ready.contains("\"type\":\"detection-ready\""));
+        assert!(ready.contains("\"count\":3"));
     }
 }
