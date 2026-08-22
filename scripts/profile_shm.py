@@ -4,68 +4,286 @@ scripts/profile_shm.py - Shared Memory Profiler Tool
 
 This tool samples shared memory for a specified duration and outputs
 statistical health metrics in JSON format.
+
+Zero-copy architecture note (see docs/shared-memory.md,
+src/capture/shm_constants.h): /pet_camera_yolo_zc, /pet_camera_mjpeg_zc and
+/pet_camera_h265_zc carry only frame *metadata* (frame_number, camera_id,
+width/height, timestamps, an hb_mem share_id, and — for the NV12 regions —
+an ISP-computed brightness_avg). The actual pixel/bitstream bytes live in a
+separate hb_mem VIO buffer pool referenced by that share_id, not in this SHM
+segment. Reading them back out requires hb_mem_bindings.import_nv12_graph_buf()
+after hb_mem_init(), which shares state with the live yolo_detector_daemon
+consumer — this script intentionally does not do that (see --save-iframes
+below). This tool therefore reports frame-timing/integrity health plus the
+metadata fields the producer already computes, not decoded pixel content.
+
+This script opens all shared memory strictly read-only (O_RDONLY / PROT_READ)
+and never creates or writes to any SHM segment — services may be live on the
+device while this runs.
 """
+
+from __future__ import annotations
 
 import argparse
 import asyncio
 import json
+import mmap
 import os
-import signal
 import statistics
-import subprocess
 import sys
 import time
+from ctypes import Structure, c_int, c_int32, c_long, c_uint8, c_uint32, c_uint64, sizeof
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.request import urlopen
-from urllib.error import URLError
 
-import cv2
-import numpy as np
-
-# Add src/capture to sys.path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "capture"))
+# Add src/capture and src/common/src to sys.path.
+# real_shared_memory imports common.types, so both roots are required —
+# same set the detector daemon puts on the path.
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "src" / "capture"))
+sys.path.insert(0, str(PROJECT_ROOT / "src" / "common" / "src"))
 try:
-    from real_shared_memory import RealSharedMemory
-except ImportError:
-    print("Error: Could not import RealSharedMemory. Ensure src/capture is in PYTHONPATH.")
+    from real_shared_memory import (
+        CTimespec,
+        CZeroCopyFrameBuffer,
+        SHM_NAME_DETECTIONS,
+        SHM_NAME_YOLO_ZC,
+        ZeroCopySharedMemory,
+    )
+except ImportError as exc:
+    print(f"Error: Could not import from real_shared_memory: {exc}")
+    print("Expected src/capture and src/common/src on sys.path.")
     sys.exit(1)
 
-# New shared memory names (Option B design)
-SHM_NAME_BRIGHTNESS = "/pet_camera_brightness"  # Lightweight brightness data
+# ============================================================================
+# SHM name / wire-format catalogue
+#
+# shm_constants.h is the single source of truth for names. real_shared_memory.py
+# only exports the names the detector daemon itself consumes (SHM_NAME_YOLO_ZC,
+# SHM_NAME_DETECTIONS, the ROI names) — SHM_NAME_MJPEG_ZC and SHM_NAME_H265_ZC
+# are mirrored here for the same reason CH265ZeroCopyFrame is (see below).
+# Keep these in sync with src/capture/shm_constants.h if it changes.
+# ============================================================================
+SHM_NAME_MJPEG_ZC = "/pet_camera_mjpeg_zc"
+SHM_NAME_H265_ZC = "/pet_camera_h265_zc"
+
+# /pet_camera_yolo_zc and /pet_camera_mjpeg_zc both use the ZeroCopyFrameBuffer
+# layout (NV12 metadata + hb_mem share_id). /pet_camera_h265_zc uses a
+# different struct (H265ZeroCopyFrame: bitstream metadata, no brightness_avg,
+# an extra consumed_sem). See src/capture/shared_memory.h.
+_NV12_ZC_SHM_NAMES = {SHM_NAME_YOLO_ZC, SHM_NAME_MJPEG_ZC}
+_H265_ZC_SHM_NAMES = {SHM_NAME_H265_ZC}
 
 
-def find_switcher_daemon_pid() -> Optional[int]:
-    """Find the PID of camera_switcher_daemon using pgrep"""
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", "camera_switcher_daemon"],
-            capture_output=True,
-            text=True,
-            timeout=2
+def classify_shm(shm_name: str) -> str:
+    """Return which wire format `shm_name` uses: 'nv12_zc', 'h265_zc',
+    'detections', or 'unknown'. Determines which reader class to use.
+    """
+    if shm_name in _NV12_ZC_SHM_NAMES:
+        return "nv12_zc"
+    if shm_name in _H265_ZC_SHM_NAMES:
+        return "h265_zc"
+    if shm_name == SHM_NAME_DETECTIONS:
+        return "detections"
+    return "unknown"
+
+
+# ============================================================================
+# Read-only NV12 zero-copy reader (/pet_camera_yolo_zc, /pet_camera_mjpeg_zc)
+# ============================================================================
+class ReadOnlyZeroCopySharedMemory(ZeroCopySharedMemory):
+    """Read-only variant of real_shared_memory.ZeroCopySharedMemory.
+
+    The production class opens O_RDWR / PROT_READ|PROT_WRITE (needed by
+    consumers that call wait_for_frame(), which touches the semaphore).
+    This profiler never calls wait_for_frame() and must never hold a
+    writable mapping onto live production SHM, so open() is overridden to
+    use O_RDONLY / PROT_READ only. get_frame()/close() are inherited
+    unchanged since they only read.
+    """
+
+    def open(self) -> bool:
+        shm_path = f"/dev/shm{self.shm_name}"
+        try:
+            self.fd = os.open(shm_path, os.O_RDONLY)
+        except FileNotFoundError:
+            return False
+        except Exception as e:
+            print(f"[Error] Failed to open ZeroCopy SHM (read-only) {self.shm_name}: {e}", file=sys.stderr)
+            return False
+
+        expected_size = sizeof(CZeroCopyFrameBuffer)
+        actual_size = os.fstat(self.fd).st_size
+        if actual_size != expected_size:
+            print(
+                f"[Error] {self.shm_name}: size mismatch (expected {expected_size} bytes "
+                f"from CZeroCopyFrameBuffer, got {actual_size}). Struct layout may be out "
+                f"of sync with shared_memory.h — refusing to read.",
+                file=sys.stderr,
+            )
+            os.close(self.fd)
+            self.fd = None
+            return False
+
+        try:
+            self.mmap_obj = mmap.mmap(self.fd, expected_size, mmap.MAP_SHARED, mmap.PROT_READ)
+            return True
+        except Exception as e:
+            print(f"[Error] Failed to mmap ZeroCopy SHM (read-only) {self.shm_name}: {e}", file=sys.stderr)
+            os.close(self.fd)
+            self.fd = None
+            return False
+
+
+# ============================================================================
+# Read-only H.265 zero-copy reader (/pet_camera_h265_zc)
+#
+# H265ZeroCopyFrame/H265ZeroCopyBuffer (src/capture/shared_memory.h) have no
+# existing Python binding — real_shared_memory.py only covers the NV12
+# ZeroCopyFrameBuffer layout used by the detector. Mirrored here read-only
+# since src/ must not be modified for this task. Verified against the live
+# device: sizeof(CH265ZeroCopyBuffer) below equals the actual
+# /dev/shm/pet_camera_h265_zc file size (160 bytes) at the time of writing.
+# Keep in sync with shared_memory.h if that struct changes.
+# ============================================================================
+HB_MEM_COM_BUF_SIZE = 48  # sizeof(hb_mem_common_buf_t); shared_memory.h
+
+
+class CH265ZeroCopyFrame(Structure):
+    _fields_ = [
+        ("frame_number", c_uint64),
+        ("timestamp", CTimespec),
+        ("camera_id", c_int),
+        ("width", c_int),
+        ("height", c_int),
+        ("data_size", c_uint32),
+        ("hb_mem_buf_data", c_uint8 * HB_MEM_COM_BUF_SIZE),
+        ("version", c_uint32),
+    ]
+
+
+class CH265ZeroCopyBuffer(Structure):
+    _fields_ = [
+        ("new_frame_sem", c_uint8 * 32),  # sem_t
+        ("consumed_sem", c_uint8 * 32),  # sem_t
+        ("frame", CH265ZeroCopyFrame),
+    ]
+
+
+@dataclass
+class H265Frame:
+    frame_number: int
+    timestamp_sec: float
+    camera_id: int
+    width: int
+    height: int
+    data_size: int
+    version: int
+
+
+class ReadOnlyH265ZeroCopyReader:
+    """Read-only reader for /pet_camera_h265_zc (H265ZeroCopyBuffer layout).
+
+    Opened O_RDONLY / PROT_READ only — never writes, never creates.
+    """
+
+    def __init__(self, shm_name: str = SHM_NAME_H265_ZC) -> None:
+        self.shm_name = shm_name
+        self.fd: Optional[int] = None
+        self.mmap_obj: Optional[mmap.mmap] = None
+
+    def open(self) -> bool:
+        shm_path = f"/dev/shm{self.shm_name}"
+        try:
+            self.fd = os.open(shm_path, os.O_RDONLY)
+        except FileNotFoundError:
+            return False
+        except Exception as e:
+            print(f"[Error] Failed to open H265 zero-copy SHM {self.shm_name}: {e}", file=sys.stderr)
+            return False
+
+        expected_size = sizeof(CH265ZeroCopyBuffer)
+        actual_size = os.fstat(self.fd).st_size
+        if actual_size != expected_size:
+            print(
+                f"[Error] {self.shm_name}: size mismatch (expected {expected_size} bytes "
+                f"from CH265ZeroCopyBuffer, got {actual_size}). Struct layout may be out "
+                f"of sync with shared_memory.h — refusing to read.",
+                file=sys.stderr,
+            )
+            os.close(self.fd)
+            self.fd = None
+            return False
+
+        try:
+            self.mmap_obj = mmap.mmap(self.fd, expected_size, mmap.MAP_SHARED, mmap.PROT_READ)
+            return True
+        except Exception as e:
+            print(f"[Error] Failed to mmap H265 zero-copy SHM {self.shm_name}: {e}", file=sys.stderr)
+            os.close(self.fd)
+            self.fd = None
+            return False
+
+    def close(self) -> None:
+        if self.mmap_obj:
+            self.mmap_obj.close()
+            self.mmap_obj = None
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    def get_frame(self) -> Optional[H265Frame]:
+        if not self.mmap_obj:
+            return None
+        self.mmap_obj.seek(0)
+        data = self.mmap_obj.read(sizeof(CH265ZeroCopyBuffer))
+        buf = CH265ZeroCopyBuffer.from_buffer_copy(data)
+        f = buf.frame
+        if f.version == 0:
+            return None
+        ts = f.timestamp.tv_sec + f.timestamp.tv_nsec / 1e9
+        return H265Frame(
+            frame_number=f.frame_number,
+            timestamp_sec=ts,
+            camera_id=f.camera_id,
+            width=f.width,
+            height=f.height,
+            data_size=f.data_size,
+            version=f.version,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            pid = int(result.stdout.strip().split('\n')[0])
-            return pid
-    except (subprocess.TimeoutExpired, ValueError, FileNotFoundError) as e:
-        print(f"[Error] Failed to find camera_switcher_daemon PID: {e}", file=sys.stderr)
+
+
+def _read_version(reader) -> int:
+    """Snapshot the producer's write-count (the `version` field, incremented
+    on every shm_zerocopy_write()/shm_h265_zc_write() call) without requiring
+    a *new* frame to have arrived. get_frame() returns None only when
+    version == 0 (never written), so this is a reliable "write index".
+    """
+    frame = reader.get_frame()
+    return frame.version if frame is not None else 0
+
+
+def _frame_byte_size(frame, kind: str) -> int:
+    """Metadata-only byte-size estimate — no pixel/bitstream bytes are read."""
+    if kind == "nv12_zc":
+        plane_cnt = frame.plane_cnt if frame.plane_cnt > 0 else len(frame.plane_size)
+        return sum(frame.plane_size[:plane_cnt])
+    if kind == "h265_zc":
+        return frame.data_size
+    return 0
+
+
+def _frame_luma(frame, kind: str) -> Optional[float]:
+    """avg_luma is sourced from the ISP-computed brightness_avg metadata field
+    (NV12 regions only) — no pixel data is decoded. H.265 frames carry no
+    brightness metadata.
+    """
+    if kind == "nv12_zc":
+        return float(frame.brightness_avg)
     return None
-
-
-def nv12_to_bgr(nv12_data: bytes, width: int, height: int) -> np.ndarray:
-    """Convert NV12 format to BGR for OpenCV"""
-    y_plane_size = width * height
-    uv_plane_size = width * height // 2
-
-    if len(nv12_data) < y_plane_size + uv_plane_size:
-        raise ValueError(f"NV12 data size mismatch: expected {y_plane_size + uv_plane_size}, got {len(nv12_data)}")
-
-    nv12 = np.frombuffer(nv12_data[:y_plane_size + uv_plane_size], dtype=np.uint8)
-    yuv = nv12.reshape((height * 3 // 2, width))
-    bgr = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_NV12)
-
-    return bgr
 
 
 async def check_http_endpoint(url: str, timeout: float = 2.0) -> Dict:
@@ -74,10 +292,9 @@ async def check_http_endpoint(url: str, timeout: float = 2.0) -> Dict:
     """
     start_time = time.time()
     try:
-        # Use run_in_executor for blocking I/O
         loop = asyncio.get_running_loop()
         status_code = await loop.run_in_executor(
-            None, 
+            None,
             lambda: urlopen(url, timeout=timeout).getcode()
         )
         latency_ms = (time.time() - start_time) * 1000
@@ -96,18 +313,36 @@ async def check_http_endpoint(url: str, timeout: float = 2.0) -> Dict:
 
 
 async def profile_shm(shm_name: str, duration: float, monitor_url: Optional[str] = None,
-                      save_iframes: bool = False, output_dir: Optional[Path] = None,
                       test_switching: bool = False) -> Dict:
     """
-    Sample shared memory and calculate metrics. Optionally check monitor URL and save I-frames.
+    Sample shared memory and calculate metrics. Optionally check monitor URL.
     """
-    shm = RealSharedMemory(frame_shm_name=shm_name)
-    try:
-        shm.open()
-    except Exception as e:
+    kind = classify_shm(shm_name)
+    if kind == "detections":
         return {
             "status": "ERROR",
-            "error": str(e),
+            "error": (
+                f"{shm_name} uses the LatestDetectionResult layout (detection results), "
+                "not a frame stream — this tool profiles frame SHM (yolo_zc/mjpeg_zc/h265_zc). "
+                "Unsupported by design."
+            ),
+            "target_shm": shm_name,
+        }
+    if kind == "unknown":
+        return {
+            "status": "ERROR",
+            "error": (
+                f"Unrecognized SHM name {shm_name!r}. Supported: "
+                f"{SHM_NAME_YOLO_ZC}, {SHM_NAME_MJPEG_ZC}, {SHM_NAME_H265_ZC}"
+            ),
+            "target_shm": shm_name,
+        }
+
+    reader = ReadOnlyZeroCopySharedMemory(shm_name) if kind == "nv12_zc" else ReadOnlyH265ZeroCopyReader(shm_name)
+    if not reader.open():
+        return {
+            "status": "ERROR",
+            "error": f"Failed to open {shm_name} (not found, wrong size, or permission denied)",
             "target_shm": shm_name
         }
 
@@ -124,110 +359,72 @@ async def profile_shm(shm_name: str, duration: float, monitor_url: Optional[str]
     frame_sizes: List[int] = []
     last_frame_number = -1
 
-    # Metadata from first valid frame
     resolution = "unknown"
-    frame_format = "unknown"
+    frame_format = "NV12" if kind == "nv12_zc" else "H.265"
 
-    # Content check samples
+    # Content check: sourced from producer-computed metadata only (no pixel
+    # data is available in this SHM — see module docstring).
     luma_samples: List[float] = []
 
-    # Camera switching detection
+    # Camera switching detection (passive — observes camera_id changes during
+    # normal operation; does not depend on any external switch-trigger).
     camera_ids: List[int] = []
     switch_events: List[Dict] = []
     last_camera_id = None
 
-    # I-frame saving
-    saved_iframe_count = 0
-    if save_iframes and output_dir:
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Record initial write_index for accurate FPS calculation
-    initial_write_index = shm.get_write_index()
+    # Record initial version for accurate FPS calculation
+    initial_write_index = _read_version(reader)
 
     print(f"Sampling {shm_name} for {duration}s...", file=sys.stderr)
 
     last_frame_obj = None
 
     while time.time() < end_time:
-        frame = shm.get_latest_frame()
+        frame = reader.get_frame()
 
         if frame and frame.frame_number != last_frame_number:
-            last_frame_obj = frame # Keep for integrity check
+            last_frame_obj = frame
             now = time.time()
             frame_timestamps.append(now)
             frame_numbers.append(frame.frame_number)
-            frame_sizes.append(len(frame.data))
+            frame_sizes.append(_frame_byte_size(frame, kind))
             last_frame_number = frame.frame_number
 
-            # Camera switching detection
             if test_switching:
                 camera_ids.append(frame.camera_id)
                 if last_camera_id is not None and frame.camera_id != last_camera_id:
-                    # Camera switch detected!
-                    # Calculate frame gap (should be 1 for smooth transition)
                     prev_frame_num = frame_numbers[-2] if len(frame_numbers) >= 2 else 0
                     gap = frame.frame_number - prev_frame_num - 1 if prev_frame_num > 0 else 0
-                    switch_event = {
+                    switch_events.append({
                         "time_offset_sec": round(now - start_time, 3),
                         "frame_number": frame.frame_number,
                         "from_camera": last_camera_id,
                         "to_camera": frame.camera_id,
                         "frame_gap": gap
-                    }
-                    switch_events.append(switch_event)
+                    })
                 last_camera_id = frame.camera_id
 
-            # Record metadata
             if resolution == "unknown":
                 resolution = f"{frame.width}x{frame.height}"
-                format_map = {0: "JPEG", 1: "NV12", 2: "RGB", 3: "H.264"}
-                frame_format = format_map.get(frame.format, f"unknown({frame.format})")
-            
-            # Simple content check for NV12/RGB/JPEG
-            if frame.format in (0, 1, 2) and len(frame.data) > 0:
-                if frame.format == 1: # NV12: Y-plane is the first width*height bytes
-                    y_plane = np.frombuffer(frame.data[:frame.width * frame.height], dtype=np.uint8)
-                    luma_samples.append(float(np.mean(y_plane)))
 
-                    # Save I-frame as JPEG if enabled
-                    if save_iframes and output_dir:
-                        try:
-                            bgr = nv12_to_bgr(frame.data, frame.width, frame.height)
-                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-                            filename = f"iframe_{timestamp}_frame{frame.frame_number:06d}.jpg"
-                            filepath = output_dir / filename
-                            cv2.imwrite(str(filepath), bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                            saved_iframe_count += 1
-                        except Exception:
-                            pass  # Silently ignore save errors
-
-                elif frame.format == 2: # RGB
-                    rgb_data = np.frombuffer(frame.data, dtype=np.uint8).reshape((frame.height, frame.width, 3))
-                    luma = 0.299 * rgb_data[:,:,0] + 0.587 * rgb_data[:,:,1] + 0.114 * rgb_data[:,:,2]
-                    luma_samples.append(float(np.mean(luma)))
+            luma = _frame_luma(frame, kind)
+            if luma is not None:
+                luma_samples.append(luma)
 
         await asyncio.sleep(0.005)  # 5ms poll interval
 
     # Integrity Checks (Before closing)
-    write_index = shm.get_write_index()
+    write_index = _read_version(reader)
     write_index_delta = write_index - initial_write_index
     actual_write_fps = write_index_delta / duration if duration > 0 else 0
 
-    shm.close()
+    reader.close()
 
-    # Get monitor result if available
     monitor_result = None
     if monitor_task:
         monitor_result = await monitor_task
 
     if not frame_timestamps:
-        # Check if we at least opened it and saw a write_index
-        is_stale = False
-        if write_index > 0:
-             # Even if no NEW frames, check if existing data is stale
-             # (This part is tricky without a frame object, but we can assume NO_DATA if no frames arrived)
-             pass
-
         return {
             "status": "NO_DATA",
             "target_shm": shm_name,
@@ -240,15 +437,13 @@ async def profile_shm(shm_name: str, duration: float, monitor_url: Optional[str]
             "error": "No frames received during sampling period."
         }
 
-    # Calculate statistics
     total_frames = len(frame_timestamps)
 
     avg_luma = statistics.mean(luma_samples) if luma_samples else None
-    is_black_screen = avg_luma is not None and avg_luma < 10.0 # Threshold for "black"
+    is_black_screen = avg_luma is not None and avg_luma < 10.0  # Threshold for "black"
 
-    # Integrity Checks
     integrity_status = "OK"
-    if write_index > 1_000_000_000: # Arbitrary large number check for corruption
+    if write_index > 1_000_000_000:  # Arbitrary large number check for corruption
         integrity_status = "POSSIBLE_CORRUPTION"
 
     is_stale = False
@@ -261,28 +456,23 @@ async def profile_shm(shm_name: str, duration: float, monitor_url: Optional[str]
             is_stale = True
             integrity_status = "STALE_DATA"
 
-    # Status determination (use actual_write_fps for accurate assessment)
     status = "HEALTHY"
 
     if integrity_status != "OK":
         status = "CRITICAL" if integrity_status == "POSSIBLE_CORRUPTION" else "WARNING"
 
-    # Use actual write FPS for status determination
-    if actual_write_fps < 15: # Critical drop
+    if actual_write_fps < 15:  # Critical drop
         status = "CRITICAL"
-    elif actual_write_fps < 25: # Slight drop
-        if status == "HEALTHY": status = "DEGRADED"
+    elif actual_write_fps < 25:  # Slight drop
+        if status == "HEALTHY":
+            status = "DEGRADED"
 
     if is_black_screen:
-        # If it's healthy otherwise, call it WARNING
         if status == "HEALTHY":
             status = "WARNING"
 
     if total_frames == 0:
-         if is_stale:
-             status = "STALE"
-         else:
-             status = "NO_FRAMES"
+        status = "STALE" if is_stale else "NO_FRAMES"
 
     result = {
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -290,7 +480,7 @@ async def profile_shm(shm_name: str, duration: float, monitor_url: Optional[str]
         "sampling_duration_sec": duration,
         "stats": {
             "total_frames": total_frames,
-            "actual_write_fps": round(actual_write_fps, 2),  # FPS based on write_index delta
+            "actual_write_fps": round(actual_write_fps, 2),  # FPS based on version-counter delta
             "write_index": write_index,
             "write_index_delta": write_index_delta
         },
@@ -299,7 +489,16 @@ async def profile_shm(shm_name: str, duration: float, monitor_url: Optional[str]
             "resolution": resolution,
             "avg_frame_size_bytes": int(statistics.mean(frame_sizes)) if frame_sizes else 0,
             "avg_luma": round(avg_luma, 2) if avg_luma is not None else "N/A",
-            "is_black_screen": is_black_screen
+            "is_black_screen": is_black_screen,
+            # Zero-copy SHM carries no pixel/bitstream bytes (see module
+            # docstring) — these two fields document where avg_luma actually
+            # came from, since callers may have assumed decoded-pixel luma.
+            "pixel_data_available": False,
+            "luma_source": (
+                "brightness_avg (ISP-computed metadata field, no pixel data read)"
+                if kind == "nv12_zc"
+                else "unavailable (H.265 bitstream frames carry no brightness metadata)"
+            ),
         },
         "integrity": {
             "status": integrity_status,
@@ -309,7 +508,6 @@ async def profile_shm(shm_name: str, duration: float, monitor_url: Optional[str]
         "status": status
     }
 
-    # Add camera switching info if test mode enabled
     if test_switching:
         if camera_ids:
             camera_0_frames = camera_ids.count(0)
@@ -325,9 +523,8 @@ async def profile_shm(shm_name: str, duration: float, monitor_url: Optional[str]
                     "camera_1_percent": round(camera_1_frames / len(camera_ids) * 100, 1) if camera_ids else 0
                 }
             }
-            # Update status if switching is problematic
             if len(switch_events) > 0:
-                max_gap = max([e["frame_gap"] for e in switch_events])
+                max_gap = max(e["frame_gap"] for e in switch_events)
                 if max_gap > 5:  # More than 5 frames dropped during switch
                     if status == "HEALTHY":
                         status = "WARNING"
@@ -339,7 +536,7 @@ async def profile_shm(shm_name: str, duration: float, monitor_url: Optional[str]
                 "switches_detected": 0,
                 "note": "No frames received during test"
             }
-    
+
     if monitor_result:
         result["monitor_check"] = monitor_result
         if not monitor_result.get("available"):
@@ -348,155 +545,26 @@ async def profile_shm(shm_name: str, duration: float, monitor_url: Optional[str]
     return result
 
 
-async def profile_with_forced_switching(shm_name: str, phase_duration: float = 5.0) -> Dict:
-    """
-    Perform automated camera switching test using signals.
-
-    Test flow:
-    1. Profile initial state (phase_duration seconds)
-    2. Send signal to force switch (SIGUSR1 or SIGUSR2)
-    3. Profile switched state (phase_duration seconds)
-    4. Send reverse signal to switch back
-    5. Profile final state (phase_duration seconds)
-
-    Returns comprehensive results from all phases.
-    """
-    print("[ForcedSwitchingTest] Starting automated camera switching test", file=sys.stderr)
-
-    # Find camera_switcher_daemon PID
-    switcher_pid = find_switcher_daemon_pid()
-    if switcher_pid is None:
-        return {
-            "status": "ERROR",
-            "error": "camera_switcher_daemon not found. Is it running?"
-        }
-
-    print(f"[ForcedSwitchingTest] Found camera_switcher_daemon PID: {switcher_pid}", file=sys.stderr)
-
-    # Phase 1: Initial state
-    print(f"\n[Phase 1] Profiling initial state ({phase_duration}s)...", file=sys.stderr)
-    phase1_result = await profile_shm(shm_name, phase_duration, test_switching=True)
-
-    if phase1_result.get("status") == "ERROR":
-        return phase1_result
-
-    # Determine current camera from phase 1
-    camera_ids_phase1 = phase1_result.get("camera_switching", {}).get("camera_0_frames", 0)
-    initial_camera = 0 if camera_ids_phase1 > 0 else 1
-    target_camera = 1 - initial_camera  # Switch to the other camera
-
-    print(f"[Phase 1] Initial camera: {initial_camera}, will switch to: {target_camera}", file=sys.stderr)
-
-    # Phase 2: Send signal to force switch
-    signal_to_send = signal.SIGUSR2 if target_camera == 1 else signal.SIGUSR1
-    signal_name = "SIGUSR2 (→NIGHT)" if target_camera == 1 else "SIGUSR1 (→DAY)"
-
-    print(f"\n[Phase 2] Sending {signal_name} to PID {switcher_pid}...", file=sys.stderr)
-    try:
-        os.kill(switcher_pid, signal_to_send)
-        await asyncio.sleep(1)  # Wait for switch to complete
-    except OSError as e:
-        return {
-            "status": "ERROR",
-            "error": f"Failed to send signal to camera_switcher_daemon: {e}"
-        }
-
-    print(f"[Phase 2] Profiling switched state ({phase_duration}s)...", file=sys.stderr)
-    phase2_result = await profile_shm(shm_name, phase_duration, test_switching=True)
-
-    if phase2_result.get("status") == "ERROR":
-        return phase2_result
-
-    # Phase 3: Send reverse signal to switch back
-    reverse_signal = signal.SIGUSR1 if target_camera == 1 else signal.SIGUSR2
-    reverse_signal_name = "SIGUSR1 (→DAY)" if target_camera == 1 else "SIGUSR2 (→NIGHT)"
-
-    print(f"\n[Phase 3] Sending {reverse_signal_name} to PID {switcher_pid}...", file=sys.stderr)
-    try:
-        os.kill(switcher_pid, reverse_signal)
-        await asyncio.sleep(1)  # Wait for switch to complete
-    except OSError as e:
-        return {
-            "status": "ERROR",
-            "error": f"Failed to send reverse signal: {e}"
-        }
-
-    print(f"[Phase 3] Profiling reversed state ({phase_duration}s)...", file=sys.stderr)
-    phase3_result = await profile_shm(shm_name, phase_duration, test_switching=True)
-
-    if phase3_result.get("status") == "ERROR":
-        return phase3_result
-
-    # Analyze results
-    print("\n[Analysis] Analyzing switching test results...", file=sys.stderr)
-
-    # Count camera switches in each phase
-    switches_phase1 = phase1_result.get("camera_switching", {}).get("switches_detected", 0)
-    switches_phase2 = phase2_result.get("camera_switching", {}).get("switches_detected", 0)
-    switches_phase3 = phase3_result.get("camera_switching", {}).get("switches_detected", 0)
-
-    # Extract camera distribution
-    def get_primary_camera(result):
-        cam_switch = result.get("camera_switching", {})
-        cam0 = cam_switch.get("camera_0_frames", 0)
-        cam1 = cam_switch.get("camera_1_frames", 0)
-        return 0 if cam0 > cam1 else 1
-
-    camera_phase1 = get_primary_camera(phase1_result)
-    camera_phase2 = get_primary_camera(phase2_result)
-    camera_phase3 = get_primary_camera(phase3_result)
-
-    # Determine test success
-    switch_successful = (camera_phase2 == target_camera)
-    reverse_successful = (camera_phase3 == initial_camera)
-
-    test_status = "PASS" if (switch_successful and reverse_successful) else "FAIL"
-
-    print(f"[Analysis] Camera sequence: {camera_phase1} → {camera_phase2} → {camera_phase3}", file=sys.stderr)
-    print(f"[Analysis] Switch successful: {switch_successful}, Reverse successful: {reverse_successful}", file=sys.stderr)
-    print(f"[Analysis] Test status: {test_status}", file=sys.stderr)
-
-    # Compile comprehensive result
-    return {
-        "test_type": "forced_camera_switching",
-        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "switcher_daemon_pid": switcher_pid,
-        "phase_duration_sec": phase_duration,
-        "test_sequence": {
-            "initial_camera": initial_camera,
-            "target_camera": target_camera,
-            "reverse_camera": initial_camera,
-            "signal_sent": signal_name,
-            "reverse_signal_sent": reverse_signal_name
-        },
-        "phases": {
-            "phase1_initial": phase1_result,
-            "phase2_switched": phase2_result,
-            "phase3_reversed": phase3_result
-        },
-        "analysis": {
-            "camera_sequence": [camera_phase1, camera_phase2, camera_phase3],
-            "switches_per_phase": [switches_phase1, switches_phase2, switches_phase3],
-            "switch_successful": switch_successful,
-            "reverse_successful": reverse_successful,
-            "test_status": test_status
-        },
-        "status": test_status
-    }
-
-
 def main():
     parser = argparse.ArgumentParser(
-        description="Profile shared memory frames.",
+        description="Profile shared memory frames (read-only; never writes to or creates SHM).",
         epilog="""
-Shared Memory Design (Option B - Zero-Copy):
-  - /pet_camera_active_frame   : Active camera NV12 (30fps, written by active camera daemon)
-  - /pet_camera_stream         : Active camera H.264 (30fps, written by active camera daemon)
-  - /pet_camera_brightness     : Lightweight brightness data (~100 bytes, both cameras)
+Shared Memory Design (current zero-copy architecture — see shm_constants.h):
+  - /pet_camera_h265_zc     : H.265 bitstream zero-copy (encoder -> Go streaming)
+  - /pet_camera_yolo_zc     : YOLO input NV12 zero-copy (camera -> Python detector)
+  - /pet_camera_mjpeg_zc    : MJPEG NV12 zero-copy (camera -> Go web_monitor)
+  - /pet_camera_detections  : Detection results (not a frame stream; unsupported here)
 
-Camera daemons receive signals from camera_switcher_daemon:
-  - SIGUSR1: Activate (start writing to active_frame/stream)
-  - SIGUSR2: Deactivate (stop writing)
+These SHM regions carry frame *metadata* only (frame_number, camera_id,
+width/height, timestamps, an hb_mem share_id, and — NV12 regions only — an
+ISP-computed brightness_avg). Actual pixel/bitstream bytes live in a separate
+hb_mem VIO buffer pool and are not read by this tool.
+
+Day/night camera switching is an internal thread inside camera_daemon_drobotics
+(src/capture/camera_daemon_main.c switcher_thread) with no external trigger
+API — the standalone camera_switcher_daemon this tool used to signal no
+longer exists. --test-switching still works (it passively watches camera_id
+change during normal operation); --force-switch-test does not (see --help).
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -504,27 +572,68 @@ Camera daemons receive signals from camera_switcher_daemon:
     parser.add_argument("--shm-name", type=str, default="/pet_camera_yolo_zc",
                         help="Shared memory name (default: /pet_camera_yolo_zc)")
     parser.add_argument("--monitor-url", type=str, help="Optional HTTP URL to check (e.g. http://localhost:8080/api/status)")
-    parser.add_argument("--save-iframes", action="store_true", help="Save NV12 I-frames as JPEG images")
+    parser.add_argument("--save-iframes", action="store_true",
+                        help="[UNSUPPORTED] Previously decoded NV12 bytes read directly from SHM "
+                             "into JPEG files. The zero-copy redesign no longer places pixel data "
+                             "in these SHM regions -- only metadata plus an hb_mem share_id is "
+                             "exposed. Reading real pixels would require "
+                             "hb_mem_bindings.import_nv12_graph_buf() after hb_mem_init(), which "
+                             "shares state with the live yolo_detector_daemon consumer; calling "
+                             "that from this diagnostic tool was judged unsafe. Passing this flag "
+                             "exits with an error instead of silently doing nothing.")
     parser.add_argument("--output-dir", type=str, default="recordings",
-                        help="Output directory for saved I-frames (default: recordings)")
+                        help="(Unused while --save-iframes is unsupported.)")
     parser.add_argument("--test-switching", action="store_true",
-                        help="Enable camera switching detection and testing (monitors camera_id changes)")
+                        help="Passively monitor frame.camera_id changes during normal sampling "
+                             "(day/night switches happen automatically based on brightness -- this "
+                             "does not force a switch).")
     parser.add_argument("--force-switch-test", action="store_true",
-                        help="Perform automated forced camera switching test using signals (3 phases)")
+                        help="[UNSUPPORTED] Used to send SIGUSR1/2 to the standalone "
+                             "camera_switcher_daemon to force a day/night switch. That daemon no "
+                             "longer exists -- switching is now an internal thread inside "
+                             "camera_daemon_drobotics (src/capture/camera_daemon_main.c "
+                             "switcher_thread) with no external trigger API. This cannot be "
+                             "reimplemented without changing src/capture, which is out of scope "
+                             "for this script. Passing this flag exits with an error.")
 
     args = parser.parse_args()
 
-    # Prepare output directory if saving I-frames
-    output_dir = Path(args.output_dir) if args.save_iframes else None
-
-    # Run forced switching test or regular profiling
     if args.force_switch_test:
-        # Forced switching test mode (3-phase test)
-        result = asyncio.run(profile_with_forced_switching(args.shm_name, args.duration))
-    else:
-        # Regular profiling mode
-        result = asyncio.run(profile_shm(args.shm_name, args.duration, args.monitor_url,
-                                         args.save_iframes, output_dir, args.test_switching))
+        print(
+            "[Error] --force-switch-test is unsupported in the current architecture: "
+            "camera_switcher_daemon no longer exists (day/night switching was integrated "
+            "into camera_daemon_drobotics's switcher_thread, see "
+            "src/capture/camera_daemon_main.c). There is no external API (signal, socket, "
+            "etc.) to force a switch from outside that daemon anymore. Use "
+            "--test-switching during normal operation to passively observe naturally "
+            "occurring day/night switches instead.",
+            file=sys.stderr,
+        )
+        print(json.dumps({
+            "status": "UNSUPPORTED",
+            "error": "force-switch-test: camera_switcher_daemon no longer exists; "
+                     "no external switch-trigger API in current architecture",
+        }, indent=2))
+        sys.exit(1)
+
+    if args.save_iframes:
+        print(
+            "[Error] --save-iframes is unsupported in the current architecture: zero-copy "
+            "SHM regions no longer carry pixel data (only an hb_mem share_id + metadata). "
+            "Extracting real frames would require "
+            "hb_mem_bindings.import_nv12_graph_buf() + hb_mem_init(), which shares state "
+            "with the live yolo_detector_daemon consumer and was judged unsafe to call from "
+            "this read-only diagnostic tool.",
+            file=sys.stderr,
+        )
+        print(json.dumps({
+            "status": "UNSUPPORTED",
+            "error": "save-iframes: pixel data not available in zero-copy SHM without "
+                     "hb_mem import (unsafe for this tool)",
+        }, indent=2))
+        sys.exit(1)
+
+    result = asyncio.run(profile_shm(args.shm_name, args.duration, args.monitor_url, args.test_switching))
     print(json.dumps(result, indent=2))
 
 
