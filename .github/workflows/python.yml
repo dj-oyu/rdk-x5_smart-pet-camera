@@ -1,0 +1,65 @@
+name: "Python"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/detector/**'
+      - 'src/common/**'
+      - 'src/capture/**.py'
+      - 'src/mock/**'
+      - 'scripts/**.py'
+      - 'tests/**'
+      - '.github/workflows/python.yml'
+  workflow_dispatch:
+
+jobs:
+  # Hardware-independent unit tests. The project's runtime dependency
+  # hobot-dnn-rdkx5 only exists for the RDK X5 (aarch64), so `uv sync` cannot
+  # work here — install just what the pure-logic tests import instead.
+  pytest:
+    name: pytest (pure logic)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest numpy opencv-python-headless scipy
+
+      - name: Run hardware-independent tests
+        run: |
+          # tests/test_vse_roi_shm.py and tests/hw_motion_vector_test.py talk to
+          # live shared memory and the VPU, so they only run on the device.
+          pytest tests/ -q \
+            --ignore=tests/test_vse_roi_shm.py \
+            --ignore=tests/hw_motion_vector_test.py
+
+  # The gate's gate. scripts/profile_shm.py is what CLAUDE.md designates as the
+  # verification tool for every change, and it silently rotted against the
+  # current API — nothing ever executed it. Importing it exercises the whole
+  # chain (profile_shm -> real_shared_memory -> common.types), which is exactly
+  # where it broke, and needs no third-party packages at all.
+  tools-smoke:
+    name: verification tools import
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: profile_shm.py loads and parses arguments
+        run: python3 scripts/profile_shm.py --help
+
+      - name: check_shm_constants.py runs
+        run: python3 scripts/check_shm_constants.py --verbose
