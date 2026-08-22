@@ -245,3 +245,98 @@ def detect_motion(
             )
         )
     return blobs
+
+
+# ---------------------------------------------------------------- base diff
+
+@dataclass(frozen=True)
+class BaseDiffParams:
+    """Tuning constants for comparing a frame against the empty-scene base."""
+
+    noise_floor: int = 15
+    """Per-pixel difference below this is discarded (sweep-tuned against IR noise)."""
+
+    border_mask: int = 16
+    """Pixels blanked along each edge. The IR LEDs light the frame unevenly, so
+    the outer band differs from the base even with nothing in the scene."""
+
+    blur_kernel: tuple[int, int] = (5, 5)
+    open_kernel: tuple[int, int] = (5, 5)
+
+
+DEFAULT_BASE_DIFF_PARAMS = BaseDiffParams()
+
+HEATMAP_GRID_SIZE = 16
+"""Side of the coarse grid published for the web UI heatmap."""
+
+
+@dataclass(frozen=True)
+class BaseDiffResult:
+    """Outcome of one base comparison."""
+
+    nz_ratio: float
+    """Share of the frame that differs from the base after noise removal."""
+
+    raw: np.ndarray
+    """Blurred absolute difference, before thresholding. Feeds the heatmap, which
+    wants the full gradient rather than a binary mask."""
+
+    coherent: np.ndarray
+    """Difference after the noise floor, border mask and morphological opening —
+    what `nz_ratio` is measured on."""
+
+
+def base_diff(
+    y_small: np.ndarray,
+    base_u8: np.ndarray,
+    params: BaseDiffParams = DEFAULT_BASE_DIFF_PARAMS,
+) -> BaseDiffResult:
+    """Compare a frame against the empty-scene base image.
+
+    Unlike `accumulate_diff`, which needs movement between consecutive frames,
+    this notices something that arrived and then stopped — a pet sitting still
+    still differs from the empty scene.
+
+    `base_u8` is resized to match when the two disagree; in practice they never
+    do, because the base is built from the very frames it is compared against.
+    """
+    if base_u8.shape[:2] != y_small.shape[:2]:
+        base_u8 = cv2.resize(
+            base_u8,
+            (y_small.shape[1], y_small.shape[0]),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    raw = cv2.absdiff(y_small, base_u8)
+    raw = cv2.GaussianBlur(raw, params.blur_kernel, 0)
+
+    masked = raw.copy()
+    masked[masked < params.noise_floor] = 0
+
+    b = params.border_mask
+    masked[:b, :] = 0
+    masked[-b:, :] = 0
+    masked[:, :b] = 0
+    masked[:, -b:] = 0
+
+    # Morphological OPEN: remove spatially scattered noise pixels while
+    # preserving coherent motion regions (e.g. dark cat)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, params.open_kernel)
+    coherent = cv2.morphologyEx(masked, cv2.MORPH_OPEN, kernel)
+
+    height, width = y_small.shape[:2]
+    nz_ratio = cv2.countNonZero(coherent) / (width * height)
+    return BaseDiffResult(nz_ratio=nz_ratio, raw=raw, coherent=coherent)
+
+
+def heatmap_grid(
+    raw: np.ndarray, grid_size: int = HEATMAP_GRID_SIZE
+) -> list[list[float]]:
+    """Downsample a difference image into the grid the web UI draws.
+
+    Uses the pre-threshold difference so the UI shows a gradient rather than the
+    binary mask the ratio is measured on. Values are normalised to 0..1 and
+    rounded, because this is serialised to JSON several times a second.
+    """
+    grid = cv2.resize(raw, (grid_size, grid_size), interpolation=cv2.INTER_AREA)
+    return np.round(grid.astype(np.float32) / 255.0, 3).tolist()

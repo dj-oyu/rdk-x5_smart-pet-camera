@@ -216,3 +216,115 @@ def test_mapped_coordinates_stay_inside_the_video_frame():
         )
         assert 0 <= x <= 1280, f"roi{roi_index} x out of frame: {x}"
         assert 0 <= y <= 720, f"roi{roi_index} y out of frame: {y}"
+
+
+# ------------------------------------------------------------------ base diff
+
+
+def base_pair(size: int = SMALL, value: int = 60):
+    """An empty-scene base and a frame identical to it."""
+    base = blank(size, value)
+    return base, base.copy()
+
+
+def test_identical_frame_differs_from_base_by_nothing():
+    base, frame = base_pair()
+    result = nm.base_diff(frame, base)
+    assert result.nz_ratio == 0.0
+    assert result.coherent.max() == 0
+
+
+def test_still_object_is_detected_against_the_base():
+    """The point of base-diff: a pet that arrived and stopped moving."""
+    base, frame = base_pair()
+    frame[80:200, 80:200] = 220
+
+    result = nm.base_diff(frame, base)
+    assert result.nz_ratio > 0.0
+    assert result.coherent.max() > 0
+
+
+def test_border_band_is_masked():
+    """IR LEDs light the edges unevenly, so the outer band never counts."""
+    base, frame = base_pair()
+    b = nm.DEFAULT_BASE_DIFF_PARAMS.border_mask
+    frame[: b - 2, :] = 255
+    frame[-(b - 2) :, :] = 255
+    frame[:, : b - 2] = 255
+    frame[:, -(b - 2) :] = 255
+
+    result = nm.base_diff(frame, base)
+    assert result.nz_ratio == 0.0, "edge-only difference leaked past the border mask"
+
+
+def test_difference_below_noise_floor_is_ignored():
+    base, frame = base_pair(value=60)
+    frame[:] = 60 + nm.DEFAULT_BASE_DIFF_PARAMS.noise_floor - 1
+
+    result = nm.base_diff(frame, base)
+    assert result.nz_ratio == 0.0
+    # The raw image keeps the gradient even though the ratio ignores it — the
+    # heatmap is drawn from raw.
+    assert result.raw.max() > 0
+
+
+def test_scattered_pixels_are_opened_away():
+    base, frame = base_pair()
+    rng = np.random.default_rng(7)
+    ys = rng.integers(40, SMALL - 40, size=80)
+    xs = rng.integers(40, SMALL - 40, size=80)
+    frame[ys, xs] = 255
+
+    result = nm.base_diff(frame, base)
+    assert result.nz_ratio == 0.0, "scattered noise survived the morphological open"
+
+
+def test_base_is_resized_when_it_does_not_match():
+    """Guard the shape reconciliation; today the two always agree."""
+    base = blank(160, 60)
+    frame = blank(SMALL, 60)
+    frame[100:200, 100:200] = 240
+
+    result = nm.base_diff(frame, base)
+    assert result.raw.shape == frame.shape
+    assert result.coherent.shape == frame.shape
+
+
+# -------------------------------------------------------------------- heatmap
+
+
+def test_heatmap_grid_shape_and_range():
+    base, frame = base_pair()
+    frame[60:120, 60:120] = 200
+    grid = nm.heatmap_grid(nm.base_diff(frame, base).raw)
+
+    assert len(grid) == nm.HEATMAP_GRID_SIZE
+    assert all(len(row) == nm.HEATMAP_GRID_SIZE for row in grid)
+    flat = [v for row in grid for v in row]
+    assert all(0.0 <= v <= 1.0 for v in flat)
+    assert max(flat) > 0.0
+
+
+def test_heatmap_grid_is_json_safe():
+    """It is serialised several times a second, so it must be plain floats."""
+    base, frame = base_pair()
+    frame[60:120, 60:120] = 200
+    grid = nm.heatmap_grid(nm.base_diff(frame, base).raw)
+
+    import json
+
+    assert json.loads(json.dumps({"grid": grid}))["grid"] == grid
+
+    # Values are rounded to 3 decimals — but in float32, so the resulting
+    # doubles are only close to a 3-decimal value, not equal to one
+    # (0.012 comes back as 0.012000000104308128). The rounding therefore does
+    # not shorten the JSON as much as it looks like it should: about 594 bytes
+    # per write, three times a second. Recorded here rather than fixed, since
+    # this test exists to pin the behaviour the refactor preserved.
+    assert all(abs(v - round(v, 3)) < 1e-6 for row in grid for v in row)
+
+
+def test_empty_scene_produces_a_blank_heatmap():
+    base, frame = base_pair()
+    grid = nm.heatmap_grid(nm.base_diff(frame, base).raw)
+    assert all(v == 0.0 for row in grid for v in row)

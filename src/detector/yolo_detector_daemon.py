@@ -1258,35 +1258,14 @@ class YoloDetectorDaemon:
                         # ── base_diff ──
                         _base_u8 = self._base_images.base_u8(rkey)
                         if _base_u8 is not None:
-                            base_u8 = _base_u8
-                            # ROI 0 base is stored at crop size (480×480); no resize needed
-                            if motion_roi_idx == 0:
-                                small_base = base_u8
-                            else:
-                                small_base = cv2.resize(
-                                    base_u8, (320, 320), interpolation=cv2.INTER_AREA
-                                )
-                            bdiff_raw = cv2.absdiff(y_small, small_base)
-                            bdiff_raw = cv2.GaussianBlur(bdiff_raw, (5, 5), 0)
-                            bdiff = bdiff_raw.copy()
-                            bdiff[bdiff < self.BASE_NOISE_FLOOR] = 0
-                            # Mask border (outer ~3%) — IR LED illumination unevenness
-                            b = 16
-                            bdiff[:b, :] = 0
-                            bdiff[-b:, :] = 0
-                            bdiff[:, :b] = 0
-                            bdiff[:, -b:] = 0
-                            # Morphological OPEN: remove spatially scattered noise pixels
-                            # while preserving coherent motion regions (e.g. dark cat)
-                            _morph_k = cv2.getStructuringElement(
-                                cv2.MORPH_ELLIPSE, (5, 5)
+                            bd = night_motion.base_diff(
+                                y_small,
+                                _base_u8,
+                                night_motion.BaseDiffParams(
+                                    noise_floor=self.BASE_NOISE_FLOOR
+                                ),
                             )
-                            bdiff_coherent = cv2.morphologyEx(
-                                bdiff, cv2.MORPH_OPEN, _morph_k
-                            )
-                            nz_ratio = cv2.countNonZero(bdiff_coherent) / (
-                                small_size * small_size
-                            )
+                            nz_ratio = bd.nz_ratio
                             if nz_ratio > self.BASE_MOTION_THRESH:
                                 motion_detected_this_frame = True
                             if motion_roi_idx == 0:
@@ -1298,16 +1277,10 @@ class YoloDetectorDaemon:
                                     f"base_quiet={self._base_quiet_frames}"
                                 )
                             # 16x16 heatmap grid for web UI
-                            grid_arr = cv2.resize(
-                                bdiff_raw, (16, 16), interpolation=cv2.INTER_AREA
-                            )
-                            grid = np.round(
-                                grid_arr.astype(np.float32) / 255.0, 3
-                            ).tolist()
-                            self._roi_grids[rkey] = grid
+                            self._roi_grids[rkey] = night_motion.heatmap_grid(bd.raw)
                             if fp % 10 == 0:  # ~3fps instead of 30fps
                                 try:
-                                    grid_size = 16
+                                    grid_size = night_motion.HEATMAP_GRID_SIZE
                                     g0 = self._roi_grids.get(
                                         "roi0", [[0.0] * grid_size] * grid_size
                                     )
@@ -1336,6 +1309,8 @@ class YoloDetectorDaemon:
                                     Path("/tmp/base_diff_grid.json.tmp").replace(
                                         "/tmp/base_diff_grid.json"
                                     )
+                                except Exception:
+                                    pass
                                 except Exception:
                                     pass
 
