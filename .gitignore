@@ -112,6 +112,12 @@ CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 
+# scripts/check_shm_layout.py compiles tools/shm_layout/dump_layout.c into a
+# tempdir at check time, but a manual `gcc ... -o dump_layout` in-place
+# (e.g. while debugging the tool itself) would drop an extensionless binary
+# here — never commit it.
+tools/shm_layout/dump_layout
+
 # Debug files
 debug_frames/
 debug_output/

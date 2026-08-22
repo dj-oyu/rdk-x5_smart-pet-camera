@@ -12,9 +12,10 @@ import "C"
 import (
 	"image"
 	"image/color"
-	"log"
 	"sync"
 	"unsafe"
+
+	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/logger"
 )
 
 // Font search paths.
@@ -48,7 +49,7 @@ func initFreeType() {
 		}
 
 		if textPath == "" {
-			log.Printf("[ft_text] No text font found — text rendering disabled")
+			logger.Warn("ft_text", "No text font found — text rendering disabled")
 			return
 		}
 
@@ -62,12 +63,12 @@ func initFreeType() {
 		}
 
 		if ret := C.ft_text_init(cText, cEmoji); ret != 0 {
-			log.Printf("[ft_text] Init failed: %d", ret)
+			logger.Error("ft_text", "Init failed: %d", ret)
 			return
 		}
 
 		ftInitOK = true
-		log.Printf("[ft_text] Initialized (text=%s, emoji=%s)", textPath, emojiPath)
+		logger.Info("ft_text", "Initialized (text=%s, emoji=%s)", textPath, emojiPath)
 	})
 }
 

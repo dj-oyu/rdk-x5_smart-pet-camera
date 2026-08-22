@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"image/color"
-	"log"
 	"math/rand"
 	"net/http"
 	"os"
@@ -22,6 +21,8 @@ import (
 	"sync"
 	"time"
 	"unsafe"
+
+	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/logger"
 )
 
 var httpClient = &http.Client{Timeout: 10 * time.Second}
@@ -236,7 +237,7 @@ func (cc *ComicCapture) startCapturing(now time.Time) {
 	cc.sessionID = now.Format("20060102_150405")
 	cc.panels = nil
 	cc.captureStartTime = now
-	log.Printf("[Comic] Capture started: session=%s", cc.sessionID)
+	logger.Info("Comic", "Capture started: session=%s", cc.sessionID)
 	// Capture first panel immediately
 	cc.capturePanel(now)
 }
@@ -255,7 +256,7 @@ func (cc *ComicCapture) finalizeSession() {
 	cc.state = comicIdle
 	cc.panels = nil
 	cc.catFirstSeen = time.Time{}
-	log.Printf("[Comic] Session finished: %s", cc.sessionID)
+	logger.Info("Comic", "Session finished: %s", cc.sessionID)
 	cc.mu.Unlock()
 }
 
@@ -306,7 +307,7 @@ func (cc *ComicCapture) fillMissingPanels(now time.Time) {
 		if isMotion {
 			hint = "+motion"
 		}
-		log.Printf("[Comic] Panel %d filled (placeholder%s, session=%s)", len(cc.panels), hint, cc.sessionID)
+		logger.Info("Comic", "Panel %d filled (placeholder%s, session=%s)", len(cc.panels), hint, cc.sessionID)
 	}
 }
 
@@ -359,7 +360,7 @@ func (cc *ComicCapture) capturePanel(now time.Time) {
 	cc.panels = append(cc.panels, panel)
 	cc.lastCaptureTime = now
 
-	log.Printf("[Comic] Panel %d captured (session=%s, %d detections)", len(cc.panels), cc.sessionID, len(dets))
+	logger.Info("Comic", "Panel %d captured (session=%s, %d detections)", len(cc.panels), cc.sessionID, len(dets))
 }
 
 // Layout constants for the comic grid.
@@ -404,7 +405,7 @@ func (cc *ComicCapture) stitchAndSave() {
 
 func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption string) string {
 	if err := os.MkdirAll(cc.outputDir, 0755); err != nil {
-		log.Printf("[Comic] Failed to create output dir: %v", err)
+		logger.Error("Comic", "Failed to create output dir: %v", err)
 		return ""
 	}
 
@@ -581,7 +582,7 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 		C.int(outW), C.int(outH),
 	)
 	if ret != 0 {
-		log.Printf("[Comic] nano2D composition failed: %d", ret)
+		logger.Error("Comic", "nano2D composition failed: %d", ret)
 		return ""
 	}
 
@@ -613,7 +614,7 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 	// HW JPEG encode (via VPU, same path as MJPEG)
 	jpegData, err := nv12ToJPEG(outNV12, outW, outH)
 	if err != nil {
-		log.Printf("[Comic] HW JPEG encode failed: %v", err)
+		logger.Error("Comic", "HW JPEG encode failed: %v", err)
 		return ""
 	}
 
@@ -628,11 +629,11 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 			scores[p.petClass] += p.petConfidence
 		}
 	}
-	log.Printf("[Comic] Stitched %d panels (dominant=%s, scores=%v)", numPanels, petID, scores)
+	logger.Info("Comic", "Stitched %d panels (dominant=%s, scores=%v)", numPanels, petID, scores)
 	filename := fmt.Sprintf("comic_%s_%s.jpg", sessionID, petID)
 	outPath := filepath.Join(cc.outputDir, filename)
 	if err := os.WriteFile(outPath, jpegData, 0644); err != nil {
-		log.Printf("[Comic] Failed to write %s: %v", filename, err)
+		logger.Error("Comic", "Failed to write %s: %v", filename, err)
 		return ""
 	}
 
@@ -754,7 +755,7 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 	go func() {
 		ingestJSON, err := json.Marshal(payload)
 		if err != nil {
-			log.Printf("[Comic] Failed to marshal ingest payload: %v", err)
+			logger.Error("Comic", "Failed to marshal ingest payload: %v", err)
 			return
 		}
 		sendIngestToAIPyramid(ingestJSON)
@@ -772,7 +773,7 @@ func (cc *ComicCapture) doStitch(panels []capturedPanel, sessionID, caption stri
 	cc.recentComics = trimmed
 	cc.mu.Unlock()
 
-	log.Printf("[Comic] Saved %s (%d panels, nano2D+HW JPEG)", filename, numPanels)
+	logger.Info("Comic", "Saved %s (%d panels, nano2D+HW JPEG)", filename, numPanels)
 	return filename
 }
 
@@ -811,15 +812,15 @@ func sendIngestToAIPyramid(payload []byte) {
 				time.Sleep(2 * time.Second)
 				continue
 			}
-			log.Printf("[Comic] Ingest API failed: %v", err)
+			logger.Error("Comic", "Ingest API failed: %v", err)
 			return
 		}
 		resp.Body.Close()
 		if resp.StatusCode < 300 {
-			log.Printf("[Comic] Ingest API OK (%d)", resp.StatusCode)
+			logger.Info("Comic", "Ingest API OK (%d)", resp.StatusCode)
 			return
 		}
-		log.Printf("[Comic] Ingest API status %d (attempt %d)", resp.StatusCode, attempt+1)
+		logger.Warn("Comic", "Ingest API status %d (attempt %d)", resp.StatusCode, attempt+1)
 		if attempt == 0 {
 			time.Sleep(2 * time.Second)
 		}
@@ -901,7 +902,7 @@ func (cc *ComicCapture) CaptureComic(message string) (string, error) {
 	entries, _ := os.ReadDir(cc.outputDir)
 	for _, e := range entries {
 		if !e.IsDir() && strings.HasPrefix(e.Name(), prefix) {
-			log.Printf("[Comic] On-demand comic saved: %s", e.Name())
+			logger.Info("Comic", "On-demand comic saved: %s", e.Name())
 			return e.Name(), nil
 		}
 	}
