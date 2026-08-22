@@ -225,7 +225,7 @@ pub(super) async fn cleanup(
 
     let total = filenames.len();
     let cache_futs = filenames.iter().map(|f| {
-        let path = state.cache_dir.join(f.replace(".nv12", ".jpg"));
+        let path = state.cache_dir.join(crate::training::ssh::jpeg_cache_name(f));
         tokio::fs::remove_file(path)
     });
     futures_util::future::join_all(cache_futs).await;

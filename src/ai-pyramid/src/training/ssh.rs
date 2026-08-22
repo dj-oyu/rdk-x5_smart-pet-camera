@@ -43,6 +43,16 @@ pub fn frame_stem(filename: &str) -> Option<&str> {
         .find_map(|ext| filename.strip_suffix(ext))
 }
 
+/// Name of the cached JPEG preview for a frame.
+///
+/// Every caller used to derive this with `replace(".nv12", ".jpg")`, which
+/// silently produced `frame.webp` once the camera changed formats — the preview
+/// was then written and looked up under different names, so the cache never hit
+/// and stale entries were never cleaned up.
+pub fn jpeg_cache_name(filename: &str) -> String {
+    format!("{}.jpg", frame_stem(filename).unwrap_or(filename))
+}
+
 /// Parse dimensions from filename pattern `*_WIDTHxHEIGHT.{nv12,webp}`
 fn parse_frame_filename(filename: &str) -> Option<(i32, i32)> {
     let stem = frame_stem(filename)?;
@@ -113,8 +123,7 @@ pub async fn fetch_and_convert_frame(
     cache_dir: &Path,
     ssh_key: Option<&str>,
 ) -> Result<PathBuf, String> {
-    let stem = frame_stem(filename).unwrap_or(filename);
-    let jpeg_name = format!("{stem}.jpg");
+    let jpeg_name = jpeg_cache_name(filename);
     // Raw .nv12 needs the geometry spelled out; .webp carries its own header.
     let is_raw_nv12 = filename.ends_with(".nv12");
     let jpeg_path = cache_dir.join(&jpeg_name);
