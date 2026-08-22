@@ -1,0 +1,13 @@
+[Unit]
+Description=Warn before a filesystem the camera depends on fills up
+PartOf=pet-camera.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/smart-pet-camera
+EnvironmentFile=-/opt/smart-pet-camera/.env
+ExecStart=/opt/smart-pet-camera/scripts/check_disk_usage.sh
+# A full disk is a warning, not a failure of this unit — exiting non-zero would
+# leave the unit in a failed state and hide the next run's output.
+SuccessExitStatus=0 1
+Nice=15
