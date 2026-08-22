@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -122,9 +121,9 @@ func NewServer(cfg Config) *Server {
 		comicsDir := filepath.Join(cfg.RecordingOutputPath, "comics")
 		comicCapture = NewComicCapture(comicShm, comicsDir)
 		comicCapture.Start()
-		log.Printf("[Comic] Started (frame=%s, detection=%s, output=%s)", cfg.FrameShmName, cfg.DetectionShmName, comicsDir)
+		logger.Info("Comic", "Started (frame=%s, detection=%s, output=%s)", cfg.FrameShmName, cfg.DetectionShmName, comicsDir)
 	} else {
-		log.Printf("[Comic] Disabled: SHM reader failed: %v", err)
+		logger.Warn("Comic", "Disabled: SHM reader failed: %v", err)
 	}
 
 	return &Server{
@@ -377,7 +376,7 @@ func (s *Server) handleRecordingStart(w http.ResponseWriter, r *http.Request) {
 
 	filename, err := s.recorder.Start()
 	if err != nil {
-		writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusBadRequest)
+		writeJSONError(w, err, http.StatusBadRequest)
 		return
 	}
 
@@ -395,10 +394,10 @@ func (s *Server) handleRecordingStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[Recorder] Stop API called")
+	logger.Info("Recorder", "Stop API called")
 	filename, err := s.recorder.Stop()
 	if err != nil {
-		writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusBadRequest)
+		writeJSONError(w, err, http.StatusBadRequest)
 		return
 	}
 
@@ -434,7 +433,7 @@ func (s *Server) handleRecordingsList(w http.ResponseWriter, r *http.Request) {
 
 	recordings, err := s.recorder.ListRecordings()
 	if err != nil {
-		writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusInternalServerError)
+		writeJSONError(w, err, http.StatusInternalServerError)
 		return
 	}
 
@@ -471,7 +470,7 @@ func (s *Server) handleRecordingDownload(w http.ResponseWriter, r *http.Request)
 
 	if r.Method == http.MethodDelete {
 		if err := s.recorder.DeleteRecording(filename); err != nil {
-			writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusNotFound)
+			writeJSONError(w, err, http.StatusNotFound)
 			return
 		}
 		writeJSON(w, map[string]any{"deleted": true, "filename": filename})
@@ -481,7 +480,7 @@ func (s *Server) handleRecordingDownload(w http.ResponseWriter, r *http.Request)
 	// GET - download file
 	filePath, err := s.recorder.GetRecordingPath(filename)
 	if err != nil {
-		writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusNotFound)
+		writeJSONError(w, err, http.StatusNotFound)
 		return
 	}
 
@@ -515,7 +514,7 @@ func (s *Server) handleThumbnailRegenerate(w http.ResponseWriter, r *http.Reques
 	}
 
 	if err := s.recorder.RegenerateThumbnail(filename, req.Timestamp); err != nil {
-		writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusInternalServerError)
+		writeJSONError(w, err, http.StatusInternalServerError)
 		return
 	}
 
@@ -669,7 +668,7 @@ func (s *Server) handleComicsList(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]any{"comics": []any{}, "total": 0})
 			return
 		}
-		writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusInternalServerError)
+		writeJSONError(w, err, http.StatusInternalServerError)
 		return
 	}
 
@@ -747,7 +746,7 @@ func (s *Server) handleComicServe(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, filePath)
 	case http.MethodDelete:
 		if err := os.Remove(filePath); err != nil {
-			writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusNotFound)
+			writeJSONError(w, err, http.StatusNotFound)
 			return
 		}
 		writeJSON(w, map[string]any{"deleted": true, "filename": filename})
@@ -777,7 +776,7 @@ func (s *Server) handleComicCaptureNow(w http.ResponseWriter, r *http.Request) {
 
 	filename, err := s.comicCapture.CaptureComic(reqBody.Message)
 	if err != nil {
-		writeJSONWithStatus(w, map[string]any{"error": err.Error()}, http.StatusInternalServerError)
+		writeJSONError(w, err, http.StatusInternalServerError)
 		return
 	}
 
@@ -797,4 +796,8 @@ func writeJSONWithStatus(w http.ResponseWriter, payload any, status int) {
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		_, _ = fmt.Fprintf(w, `{"error":"%s"}`, err.Error())
 	}
+}
+
+func writeJSONError(w http.ResponseWriter, err error, status int) {
+	writeJSONWithStatus(w, map[string]any{"error": err.Error()}, status)
 }
