@@ -226,14 +226,13 @@ pub(super) async fn handle_detect_now(
                 .await
                 .ok()
                 .flatten()
+                && let Err(e) = commands.record_empty_level2(event.id).await
             {
-                if let Err(e) = commands.record_empty_level2(event.id).await {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": format!("DB error: {e}")})),
-                    )
-                        .into_response();
-                }
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("DB error: {e}")})),
+                )
+                    .into_response();
             }
 
             // Signal completion

@@ -388,8 +388,7 @@ impl PhotoStore {
         // Only inherit pet rows when the new highest level found no pet at all;
         // non-pet Level 1 objects remain excluded.
         let highest_level_has_pet = detections.iter().any(|d| {
-            d.det_level == max_new_level
-                && matches!(d.yolo_class.as_deref(), Some("cat" | "dog"))
+            d.det_level == max_new_level && matches!(d.yolo_class.as_deref(), Some("cat" | "dog"))
         });
         if max_new_level >= 2 && !highest_level_has_pet {
             self.inherit_l1_pet_detections(photo_id, max_new_level)?;
@@ -1640,11 +1639,7 @@ mod tests {
         assert_eq!(inherited[0].0, "cat");
         assert_eq!(inherited[0].1.as_deref(), Some("mike"));
         assert_eq!(inherited[0].2, Some(0.657));
-        assert!(inherited[0]
-            .3
-            .as_deref()
-            .unwrap()
-            .contains("orange_ratio"));
+        assert!(inherited[0].3.as_deref().unwrap().contains("orange_ratio"));
         assert_eq!(inherited[1].0, "dog");
 
         let inherited_cup_count: i64 = store
@@ -1662,12 +1657,16 @@ mod tests {
         let detections = store.get_detections(photo_id).unwrap();
         assert_eq!(detections.len(), 4);
         assert!(detections.iter().all(|d| d.det_level == 2));
-        assert!(detections
-            .iter()
-            .any(|d| d.yolo_class.as_deref() == Some("cat")));
-        assert!(detections
-            .iter()
-            .any(|d| d.yolo_class.as_deref() == Some("dog")));
+        assert!(
+            detections
+                .iter()
+                .any(|d| d.yolo_class.as_deref() == Some("cat"))
+        );
+        assert!(
+            detections
+                .iter()
+                .any(|d| d.yolo_class.as_deref() == Some("dog"))
+        );
     }
 
     #[test]
