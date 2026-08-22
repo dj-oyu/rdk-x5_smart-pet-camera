@@ -2,7 +2,7 @@ use super::*;
 use crate::db::PhotoStore;
 use crate::training::{bg, db::AnnotationInput};
 use axum::body::{Body, to_bytes};
-use axum::http::{header, Method, Request, StatusCode};
+use axum::http::{Method, Request, StatusCode, header};
 use tower::util::ServiceExt;
 
 struct Fixture {
@@ -243,8 +243,7 @@ async fn stats_classes_and_export_keep_public_json_contracts() {
 #[tokio::test]
 async fn background_status_and_reject_routes_work_without_external_processes() {
     let fixture = fixture();
-    let (status, body) =
-        send(&fixture.state, Method::GET, "/api/training/bg/status", None).await;
+    let (status, body) = send(&fixture.state, Method::GET, "/api/training/bg/status", None).await;
     assert_eq!(status, StatusCode::OK);
     let body = json(&body);
     assert!(!body["model_exists"].as_bool().unwrap());
@@ -306,8 +305,7 @@ async fn external_process_routes_fail_safely_before_spawning_tools() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(String::from_utf8(body).unwrap(), "frame not found");
 
-    let (status, body) =
-        send(&fixture.state, Method::POST, "/api/training/bg/build", None).await;
+    let (status, body) = send(&fixture.state, Method::POST, "/api/training/bg/build", None).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(
         String::from_utf8(body)
@@ -315,8 +313,7 @@ async fn external_process_routes_fail_safely_before_spawning_tools() {
             .contains("background reference frames")
     );
 
-    let (status, body) =
-        send(&fixture.state, Method::POST, "/api/training/bg/score", None).await;
+    let (status, body) = send(&fixture.state, Method::POST, "/api/training/bg/score", None).await;
     assert_eq!(status, StatusCode::PRECONDITION_FAILED);
     assert!(
         String::from_utf8(body)

@@ -96,10 +96,7 @@ pub(super) async fn build(
             let fid = *id;
             let frame = state
                 .db
-                .request(move |reply| DbCommand::TrainingGetFrame {
-                    id: fid,
-                    reply,
-                })
+                .request(move |reply| DbCommand::TrainingGetFrame { id: fid, reply })
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
                 .ok_or_else(|| {

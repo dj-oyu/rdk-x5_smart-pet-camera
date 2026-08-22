@@ -11,8 +11,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 use tokio::sync::Mutex;
 
-mod assets;
 mod album;
+mod assets;
 mod detection;
 mod events;
 mod summary;
@@ -150,10 +150,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/edit-history", get(album::handle_edit_history))
         .route("/api/stats", get(album::handle_stats))
         .route("/api/behaviors", get(album::handle_behaviors))
-        .route(
-            "/api/daily-summary",
-            post(summary::handle_daily_summary),
-        )
+        .route("/api/daily-summary", post(summary::handle_daily_summary))
         .route("/api/pet-names", get(album::handle_pet_names))
         .route("/api/events", get(events::handle_sse))
         .route(
@@ -165,14 +162,8 @@ pub fn router(state: AppState) -> Router {
         .route("/test/esrgan", get(test_pages::handle_esrgan_test))
         .route("/test/carousel", get(test_pages::handle_carousel_demo))
         .route("/test/carousel.js", get(test_pages::handle_carousel_js))
-        .route(
-            "/test/models/{*path}",
-            get(test_pages::handle_test_model),
-        )
-        .route(
-            "/api/models/{*path}",
-            get(test_pages::handle_test_model),
-        )
+        .route("/test/models/{*path}", get(test_pages::handle_test_model))
+        .route("/api/models/{*path}", get(test_pages::handle_test_model))
         .with_state(state)
         .merge(mcp_router)
 }

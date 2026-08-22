@@ -42,10 +42,7 @@ pub fn router(state: TrainingState) -> Router {
         .route("/api/training/stats", get(annotations::stats))
         .route("/api/training/export", get(annotations::export))
         .route("/api/training/classes", get(annotations::classes))
-        .route(
-            "/api/training/frames/{id}/bg_ref",
-            put(background::set_ref),
-        )
+        .route("/api/training/frames/{id}/bg_ref", put(background::set_ref))
         .route("/api/training/bg/status", get(background::status))
         .route("/api/training/bg/build", post(background::build))
         .route("/api/training/bg/score", post(background::score))
@@ -55,4 +52,3 @@ pub fn router(state: TrainingState) -> Router {
 
 #[cfg(test)]
 mod tests;
-

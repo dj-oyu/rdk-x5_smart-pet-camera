@@ -217,8 +217,7 @@ mod tests {
             detection(56, "chair", 0.30, 500, 50, 50, 50),
             detection(1, "bicycle", 0.80, 100, 300, 50, 50),
         ];
-        let inputs =
-            raw_dets_to_inputs(&detections, "2026-03-30T01:00:00", "yolo26l-ax650-raw");
+        let inputs = raw_dets_to_inputs(&detections, "2026-03-30T01:00:00", "yolo26l-ax650-raw");
         assert_eq!(inputs.len(), 3);
         assert_eq!(inputs[0].panel_index, Some(0));
         assert_eq!(inputs[0].yolo_class.as_deref(), Some("cat"));

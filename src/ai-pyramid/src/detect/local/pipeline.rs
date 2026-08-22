@@ -4,8 +4,7 @@ use super::wire::RawLocalDetection;
 use crate::db::DetectionInput;
 
 const KEEP_CLASSES: &[i32] = &[
-    0, 14, 15, 16, 24, 26, 28, 39, 41, 43, 45, 56, 57, 59, 60, 62, 63, 66, 67, 73, 75, 58,
-    74,
+    0, 14, 15, 16, 24, 26, 28, 39, 41, 43, 45, 56, 57, 59, 60, 62, 63, 66, 67, 73, 75, 58, 74,
 ];
 
 const MARGIN: i32 = 12;
@@ -37,12 +36,7 @@ pub(super) async fn detect_panels_raw(
         .map(|index| {
             let (origin_x, origin_y) = panel_origin(index);
             let rgb = image
-                .crop_imm(
-                    origin_x as u32,
-                    origin_y as u32,
-                    panel_width,
-                    panel_height,
-                )
+                .crop_imm(origin_x as u32, origin_y as u32, panel_width, panel_height)
                 .to_rgb8();
             (origin_x, origin_y, rgb)
         })
@@ -200,13 +194,7 @@ fn map_panel_detection(
     if panel.scale_x == 1.0 && panel.scale_y == 1.0 {
         map_to_comic(detection, origin_x, origin_y)
     } else {
-        map_to_comic_scaled(
-            detection,
-            origin_x,
-            origin_y,
-            panel.scale_x,
-            panel.scale_y,
-        )
+        map_to_comic_scaled(detection, origin_x, origin_y, panel.scale_x, panel.scale_y)
     }
 }
 
@@ -243,17 +231,14 @@ pub(super) fn raw_dets_to_inputs(
         .collect()
 }
 
-pub(super) fn merge_detections(
-    mut detections: Vec<RawLocalDetection>,
-) -> Vec<RawLocalDetection> {
+pub(super) fn merge_detections(mut detections: Vec<RawLocalDetection>) -> Vec<RawLocalDetection> {
     detections.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
     let mut merged: Vec<RawLocalDetection> = Vec::new();
     for detection in detections {
         if let Some(existing) = merged.iter_mut().find(|candidate| {
             candidate.class_id == detection.class_id && iou_raw(candidate, &detection) > 0.5
         }) {
-            existing.confidence =
-                1.0 - (1.0 - existing.confidence) * (1.0 - detection.confidence);
+            existing.confidence = 1.0 - (1.0 - existing.confidence) * (1.0 - detection.confidence);
         } else {
             merged.push(detection);
         }
@@ -297,23 +282,15 @@ pub(super) fn bbox_to_panel(x: i32, y: i32, width: i32, height: i32) -> Option<i
     None
 }
 
-fn map_to_comic(
-    detection: RawLocalDetection,
-    origin_x: i32,
-    origin_y: i32,
-) -> RawLocalDetection {
+fn map_to_comic(detection: RawLocalDetection, origin_x: i32, origin_y: i32) -> RawLocalDetection {
     RawLocalDetection {
         class_id: detection.class_id,
         class_name: detection.class_name,
         confidence: detection.confidence,
         bbox_x: origin_x + detection.bbox_x.max(0),
         bbox_y: origin_y + detection.bbox_y.max(0),
-        bbox_w: detection
-            .bbox_w
-            .min(PANEL_W - detection.bbox_x.max(0)),
-        bbox_h: detection
-            .bbox_h
-            .min(PANEL_H - detection.bbox_y.max(0)),
+        bbox_w: detection.bbox_w.min(PANEL_W - detection.bbox_x.max(0)),
+        bbox_h: detection.bbox_h.min(PANEL_H - detection.bbox_y.max(0)),
     }
 }
 
@@ -353,8 +330,8 @@ fn iou_raw(a: &RawLocalDetection, b: &RawLocalDetection) -> f64 {
     let x2 = (a.bbox_x + a.bbox_w).min(b.bbox_x + b.bbox_w);
     let y2 = (a.bbox_y + a.bbox_h).min(b.bbox_y + b.bbox_h);
     let intersection = (x2 - x1).max(0) as f64 * (y2 - y1).max(0) as f64;
-    let union = a.bbox_w as f64 * a.bbox_h as f64 + b.bbox_w as f64 * b.bbox_h as f64
-        - intersection;
+    let union =
+        a.bbox_w as f64 * a.bbox_h as f64 + b.bbox_w as f64 * b.bbox_h as f64 - intersection;
     if union <= 0.0 {
         0.0
     } else {

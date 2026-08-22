@@ -6,10 +6,9 @@ pub(super) fn rgb_to_nv12(rgb: &image::RgbImage, width: u32, height: u32) -> Vec
     for row in 0..height {
         for col in 0..width {
             let pixel = rgb.get_pixel(col, row).0;
-            let y =
-                (66 * pixel[0] as i32 + 129 * pixel[1] as i32 + 25 * pixel[2] as i32 + 128)
-                    / 256
-                    + 16;
+            let y = (66 * pixel[0] as i32 + 129 * pixel[1] as i32 + 25 * pixel[2] as i32 + 128)
+                / 256
+                + 16;
             y_plane[(row * width + col) as usize] = y.clamp(0, 255) as u8;
         }
     }
@@ -17,9 +16,7 @@ pub(super) fn rgb_to_nv12(rgb: &image::RgbImage, width: u32, height: u32) -> Vec
     for row in (0..height).step_by(2) {
         for col in (0..width).step_by(2) {
             let pixel = rgb.get_pixel(col, row).0;
-            let u = (-38 * pixel[0] as i32 - 74 * pixel[1] as i32
-                + 112 * pixel[2] as i32
-                + 128)
+            let u = (-38 * pixel[0] as i32 - 74 * pixel[1] as i32 + 112 * pixel[2] as i32 + 128)
                 / 256
                 + 128;
             let v = (112 * pixel[0] as i32 - 94 * pixel[1] as i32 - 18 * pixel[2] as i32 + 128)
