@@ -15,6 +15,7 @@ pub(super) struct RequestHeader {
     pub(super) width: u16,
     pub(super) height: u16,
     pub(super) payload_size: u32,
+    /// NV12 row stride in bytes; zero retains the packed legacy contract.
     pub(super) reserved: u32,
 }
 
@@ -141,6 +142,22 @@ pub fn coco_name(class_id: u16) -> String {
 
 pub(super) fn request_bytes(header: &RequestHeader) -> &[u8] {
     unsafe { std::slice::from_raw_parts(header as *const _ as *const u8, 16) }
+}
+
+pub(super) fn nv12_request_header(
+    width: u16,
+    height: u16,
+    stride: u16,
+    payload_size: u32,
+) -> RequestHeader {
+    RequestHeader {
+        cmd: CMD_DETECT,
+        input_type: INPUT_NV12_RAW,
+        width,
+        height,
+        payload_size,
+        reserved: stride as u32,
+    }
 }
 
 pub(super) fn response_header(bytes: &[u8; 12]) -> ResponseHeader {

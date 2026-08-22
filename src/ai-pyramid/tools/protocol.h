@@ -24,6 +24,7 @@ struct RequestHeader {
     uint16_t width;
     uint16_t height;
     uint32_t payload_size;
+    // NV12 row stride in bytes. Zero means packed (stride == width) for compatibility.
     uint32_t reserved;
 };
 

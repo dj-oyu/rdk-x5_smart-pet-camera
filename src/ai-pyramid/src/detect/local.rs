@@ -65,7 +65,7 @@ impl LocalDetector {
         width: u16,
         height: u16,
     ) -> Result<Vec<RawLocalDetection>, String> {
-        self.client.detect_nv12(nv12, width, height).await
+        self.client.detect_nv12(nv12, width, height, width).await
     }
 
     /// Hot-swap the daemon's loaded model by name.
@@ -124,7 +124,10 @@ impl LocalDetector {
 #[cfg(test)]
 mod tests {
     use super::pipeline::{bbox_to_panel, has_pet_detection, merge_detections, raw_dets_to_inputs};
-    use super::wire::{CMD_STREAM, RequestHeader, ResponseHeader, WireDetection};
+    use super::wire::{
+        CMD_STREAM, RequestHeader, ResponseHeader, WireDetection, nv12_request_header,
+        request_bytes,
+    };
     use super::*;
 
     #[test]
@@ -170,6 +173,17 @@ mod tests {
         assert_eq!(&request[8..12], &6u32.to_ne_bytes());
         assert_eq!(&request[12..16], &[0, 0, 0, 0]);
         assert_eq!(&request[16..], b"rdk-x5");
+    }
+
+    #[test]
+    fn nv12_request_carries_aligned_stride_in_reserved_field() {
+        let header = nv12_request_header(404, 228, 416, 416 * 228 * 3 / 2);
+        let request = request_bytes(&header);
+
+        assert_eq!(&request[4..6], &404u16.to_ne_bytes());
+        assert_eq!(&request[6..8], &228u16.to_ne_bytes());
+        assert_eq!(&request[8..12], &(416u32 * 228 * 3 / 2).to_ne_bytes());
+        assert_eq!(&request[12..16], &416u32.to_ne_bytes());
     }
 
     #[test]
