@@ -1,0 +1,12 @@
+[Unit]
+Description=Renew pet-camera Tailscale TLS cert (restart monitor on change)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+PartOf=pet-camera.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/smart-pet-camera
+EnvironmentFile=-/opt/smart-pet-camera/.env
+ExecStart=/opt/smart-pet-camera/scripts/renew-camera-cert.sh
+Nice=10
