@@ -1621,8 +1621,8 @@ class YoloDetectorDaemon:
 
             if scaled_dicts:
                 self.detection_writer.write_detection_result(
-                    frame_number=self.cache_frame_number,
-                    timestamp_sec=self.cache_timestamp,
+                    frame_number=zc_frame.frame_number,  # type: ignore[attr-defined]
+                    timestamp_sec=zc_frame.timestamp_sec,  # type: ignore[attr-defined]
                     detections=[_det_to_dict(d) for d in scaled_dicts],
                 )
 
@@ -1633,9 +1633,17 @@ class YoloDetectorDaemon:
                 merged = self.night_assist_merger.merge(self._motion_bboxes, [])
                 self._motion_bboxes = []
                 if merged:
+                    # The current frame, not the last frame YOLO ran on:
+                    # cache_frame_number only advances inside `if run_yolo`, so on
+                    # a skipped frame it is stale — and on a detector that has not
+                    # run YOLO once it is still its -1 initialiser, which lands in
+                    # the uint64 SHM field as 2**64-1. Consumers match detections
+                    # to frames by number (webmonitor draws an overlay only when
+                    # the two are within 30 frames), so a stale number silently
+                    # drops the overlay.
                     self.detection_writer.write_detection_result(
-                        frame_number=self.cache_frame_number,
-                        timestamp_sec=self.cache_timestamp,
+                        frame_number=zc_frame.frame_number,  # type: ignore[attr-defined]
+                        timestamp_sec=zc_frame.timestamp_sec,  # type: ignore[attr-defined]
                         detections=[_det_to_dict(d) for d in merged],
                     )
                     detection_dicts = merged
