@@ -188,8 +188,11 @@ src/ai-pyramid/ui/*.zip
 *.ts.net.crt
 *.ts.net.key
 
-# Deploy: device-specific files (use .example templates)
+# Deploy: unit files and sudoers rules are device-specific (paths, model names,
+# the user they run as), so the repository tracks only .example templates and
+# scripts/install-services.sh strips the suffix on install.
 deploy/*/sudoers-*
-!deploy/*/sudoers-*.example
 deploy/*/*.service
-!deploy/*/*.service.example
+deploy/*/*.timer
+deploy/*/*.target
+!deploy/*/*.example
