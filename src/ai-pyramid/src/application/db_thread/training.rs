@@ -47,9 +47,7 @@ pub(super) fn dispatch(store: &PhotoStore, command: DbCommand) {
             send_reply(reply, store.delete_rejected_frames())
         }
         DbCommand::TrainingStats { reply } => send_reply(reply, store.training_stats()),
-        DbCommand::TrainingExport { reply } => {
-            send_reply(reply, store.export_training_dataset())
-        }
+        DbCommand::TrainingExport { reply } => send_reply(reply, store.export_training_dataset()),
         DbCommand::TrainingSetBgRef {
             id,
             is_bg_ref,

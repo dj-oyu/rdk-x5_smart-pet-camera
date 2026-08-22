@@ -54,12 +54,7 @@ pub(super) fn dispatch(store: &PhotoStore, command: DbCommand) {
             reply,
         } => send_reply(
             reply,
-            store.ingest_with_detections(
-                &filename,
-                captured_at,
-                pet_id.as_deref(),
-                &detections,
-            ),
+            store.ingest_with_detections(&filename, captured_at, pet_id.as_deref(), &detections),
         ),
         DbCommand::GetDetections { photo_id, reply } => {
             send_reply(reply, store.get_detections(photo_id))
