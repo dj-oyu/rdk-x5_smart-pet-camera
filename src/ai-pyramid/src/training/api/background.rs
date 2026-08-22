@@ -88,7 +88,7 @@ pub(super) async fn build(
     let mut jpeg_paths = Vec::with_capacity(refs.len());
     let mut fetched = 0usize;
     for (id, filename) in &refs {
-        let jpeg_name = crate::training::ssh::jpeg_cache_name(&filename);
+        let jpeg_name = crate::training::ssh::jpeg_cache_name(filename);
         let cached = state.cache_dir.join(&jpeg_name);
         if cached.exists() {
             jpeg_paths.push(cached);
