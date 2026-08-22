@@ -6,7 +6,7 @@ mod wire;
 use crate::db::DetectionInput;
 use crate::ingest::filename::parse_comic_filename;
 use client::DaemonClient;
-use pipeline::{detect_panels_raw, merge_detections, raw_dets_to_inputs};
+use pipeline::{detect_comic_raw_first, raw_dets_to_inputs};
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
@@ -16,10 +16,8 @@ pub use wire::{RawLocalDetection, coco_name, stream_request_header};
 pub struct LocalDetectorConfig {
     /// Unix socket path for ax_yolo_daemon.
     pub daemon_socket: PathBuf,
-    /// Fast model for aspect ratio probing (e.g. "yolo11s").
-    pub fast_model: String,
-    /// Accurate model for final detection (e.g. "yolo26l").
-    pub accurate_model: String,
+    /// Model used for raw-first comic detection (e.g. "yolo26l").
+    pub model: String,
 }
 
 impl Default for LocalDetectorConfig {
@@ -29,8 +27,7 @@ impl Default for LocalDetectorConfig {
                 std::env::var("AX_YOLO_DAEMON_SOCKET")
                     .unwrap_or_else(|_| "/run/ax_yolo_daemon.sock".to_string()),
             ),
-            fast_model: std::env::var("YOLO_FAST_MODEL").unwrap_or_default(),
-            accurate_model: std::env::var("YOLO_ACCURATE_MODEL").unwrap_or_default(),
+            model: std::env::var("YOLO_ACCURATE_MODEL").unwrap_or_else(|_| "yolo26l".into()),
         }
     }
 }
@@ -76,7 +73,7 @@ impl LocalDetector {
         self.client.load_model(name).await
     }
 
-    /// Detect pets in a comic image using per-panel aspect-ratio correction.
+    /// Detect pets in a comic image using YOLO26l raw-first detection.
     pub async fn detect_comic(
         &self,
         photos_dir: &Path,
@@ -85,7 +82,7 @@ impl LocalDetector {
         self.detect_comic_inputs(photos_dir, filename).await
     }
 
-    /// Send each detection through `tx` after the panel pipeline completes.
+    /// Send each detection through `tx` after the raw-first pipeline completes.
     pub async fn detect_comic_stream(
         &self,
         photos_dir: &Path,
@@ -114,24 +111,26 @@ impl LocalDetector {
             .unwrap_or_else(|_| chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
         let image = image::open(&jpeg_path)
             .map_err(|error| format!("open {}: {error}", jpeg_path.display()))?;
-        let detections = detect_panels_raw(
+        let detections = detect_comic_raw_first(
             &self.client,
-            &self.config.fast_model,
-            &self.config.accurate_model,
+            &self.config.model,
+            &jpeg_path,
             &image,
         )
         .await?;
         Ok(raw_dets_to_inputs(
-            &merge_detections(detections),
+            &detections,
             &detected_at,
-            "yolo26l-ax650-panel",
+            "yolo26l-ax650-raw-first",
         ))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::pipeline::{bbox_to_panel, merge_detections, raw_dets_to_inputs};
+    use super::pipeline::{
+        bbox_to_panel, has_pet_detection, merge_detections, raw_dets_to_inputs,
+    };
     use super::wire::{CMD_STREAM, RequestHeader, ResponseHeader, WireDetection};
     use super::*;
 
@@ -195,9 +194,19 @@ mod tests {
     fn merge_keeps_different_classes() {
         let detections = vec![
             detection(15, "cat", 0.81, 231, 329, 113, 77),
-            detection(45, "bowl", 0.50, 177, 396, 49, 39),
+            detection(45, "bowl", 0.50, 231, 329, 113, 77),
         ];
         assert_eq!(merge_detections(detections).len(), 2);
+    }
+
+    #[test]
+    fn panel_fallback_only_when_raw_detection_has_no_pet() {
+        let objects = vec![detection(45, "bowl", 0.8, 10, 10, 20, 20)];
+        assert!(!has_pet_detection(&objects));
+
+        let mut with_cat = objects;
+        with_cat.push(detection(15, "cat", 0.6, 30, 30, 40, 40));
+        assert!(has_pet_detection(&with_cat));
     }
 
     #[test]
@@ -216,13 +225,14 @@ mod tests {
             detection(16, "dog", 0.42, 500, 300, 100, 80),
             detection(56, "chair", 0.30, 500, 50, 50, 50),
             detection(1, "bicycle", 0.80, 100, 300, 50, 50),
+            detection(73, "book", 0.95, 200, 300, 50, 50),
         ];
         let inputs = raw_dets_to_inputs(&detections, "2026-03-30T01:00:00", "yolo26l-ax650-raw");
         assert_eq!(inputs.len(), 3);
         assert_eq!(inputs[0].panel_index, Some(0));
         assert_eq!(inputs[0].yolo_class.as_deref(), Some("cat"));
         assert_eq!(inputs[1].panel_index, Some(3));
-        assert_eq!(inputs[1].yolo_class.as_deref(), Some("cat"));
+        assert_eq!(inputs[1].yolo_class.as_deref(), Some("dog"));
         assert_eq!(inputs[2].panel_index, Some(1));
         assert_eq!(inputs[2].yolo_class.as_deref(), Some("chair"));
     }

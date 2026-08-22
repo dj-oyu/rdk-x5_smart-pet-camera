@@ -9,7 +9,7 @@ LDLIBS := -lax_engine -lax_sys -lax_ivps -lax_vdec $(shell pkg-config --libs ope
 DAEMON_BINARY := $(BUILD_DIR)/ax_yolo_daemon
 DAEMON_SOURCES := ax_yolo_daemon.cpp
 
-.PHONY: all clean format check-format lint
+.PHONY: all clean format check-format lint test
 
 all: $(DAEMON_BINARY)
 
@@ -38,6 +38,10 @@ lint:
 		clang-tidy $$src -- $(CXXFLAGS) $(CPPFLAGS) 2>&1 | grep -v "warnings generated" || true; \
 	done
 	@echo "[Lint] Done"
+
+test:
+	$(CXX) $(CXXFLAGS) -o /tmp/test_yolo_postprocess test_yolo_postprocess.cpp
+	/tmp/test_yolo_postprocess
 
 clean:
 	@rm -f $(DAEMON_BINARY)

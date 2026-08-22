@@ -293,7 +293,11 @@ SSE: `EventSource("/api/events")` でリアルタイム更新。
 - `wire.rs`: 16-byte request、12-byte response/detection protocol
 - `client.rs`: Unix socket transport
 - `image_conversion.rs`: RGB→NV12変換
-- `pipeline.rs`: panel crop、2-model実行、bbox変換・merge
+- `pipeline.rs`: YOLO26l raw-first実行、pet未検出時の4-panel fallback、bbox変換・merge
+
+Local detectorはpetcameraと同じ6 COCO class（person、cat、dog、cup、bowl、chair）だけを
+argmax前に評価する。YOLO11sとアスペクト比変形は使用しない。Level 2がpanel内のcatを
+検出できなかった場合、DB queryはpetcamera由来のLevel 1 catをfallbackとして返す。
 
 ### PhotoWatcher (ingest/watcher.rs)
 
