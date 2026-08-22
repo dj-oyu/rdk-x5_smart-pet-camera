@@ -10,7 +10,7 @@
 
 - HTTP/SSE/MCP、SQLite、Unix socket、ファイル名、環境変数の既存契約を固定する
 - `main.rs`、`server/mod.rs`、training、local detector、VLM、EventDetail の責務を分離する
-- GitHub CI で format、lint、test、coverage、aarch64 build を自動評価する
+- GitHub CI で format、lint、test、aarch64 build を自動評価し、coverageは導入可能な範囲を明示する
 - CI artifact をデバイスへ配置し、systemd と実データで回帰確認する
 - 今後の変更が一つの巨大ファイルへ集中しない構造にする
 
@@ -31,7 +31,7 @@
 - 既存SQLite DBのmigrationと読み書き
 - `ax_yolo_daemon` の16-byte request、12-byte response/detection protocol
 - OpenAI互換VLM APIと日次summaryのモデル切替・復旧動作
-- training用NV12/JSON命名、SSH/SCP/ffmpeg入出力
+- training用frame/JSON命名、SSH/SCP/ffmpeg入出力（raw NV12とlossless WebPを受け付ける）
 - CLI、環境変数、TLS、systemd unit、embedded UI URL
 
 ## 3. Current Test Coverage Audit
@@ -101,21 +101,35 @@ src/
     protocol.rs            packed wire types and encode/decode
     client.rs              Unix socket I/O
     pipeline.rs            panel/two-pass orchestration
-    image.rs               crop, RGB/NV12 and bbox transforms
+    image_conversion.rs    crop, RGB/NV12 and bbox transforms
   vlm/
     mod.rs                 public facade and types
     parser.rs
     client.rs
     supervisor.rs          systemd model swap/readiness/recovery
 
-ui/src/components/event-detail/
-  index.tsx
-  comic-view.tsx
-  panel-carousel.tsx
-  detection-list.tsx
-  editor.tsx
-  zoom.ts
+ui/src/components/
+  event-detail.tsx         composition root
+  event-detail/
+    comic-view.tsx
+    panel-carousel.tsx
+    detection-list.tsx
+    metadata-editor.tsx
+    use-panel-view.ts
+    presentation.ts        presentation helpers
+
+  training/
+    annotate-page.tsx      page composition
+    annotate-canvas.tsx    bbox描画・pointer interaction
+    training-frame-card.tsx
+    training-dialogs.tsx
+    annotation-model.ts
+    annotation-toolbar.tsx
+    annotation-sidebar.tsx
 ```
+
+上記はcore refactorとUI follow-up完了後の責務境界を示す。実際のmodule topologyは
+`docs/architecture.md`を正とする。
 
 `application/commands.rs`、`queries.rs`、`repository.rs` と MCP は既に責務が明確なので、必要なimport更新以外は再設計しない。
 
@@ -212,7 +226,7 @@ Phase 2で安定した公開constructorを使い、競合しやすいcomposition
 1. `DbCommand` とdispatchをalbum/training domainへ分割
 2. `main.rs`からconfig解決とdependency constructionを`bootstrap`へ抽出
 3. root router、event bridge、TLS起動を組み立て直す
-4. staleな `docs/SPEC-refactor.md` を削除または現行計画へ誘導する
+4. staleな `docs/SPEC-refactor.md` を現行計画へ誘導する短いarchiveへ置換する
 5. architecture documentを新しいmodule topologyへ更新する
 
 Gate: `main.rs`はCLI parseとbootstrap呼出しを中心に約100行、各moduleの責務を1文で説明できること。全CI成功。
@@ -222,6 +236,8 @@ Gate: `main.rs`はCLI parseとbootstrap呼出しを中心に約100行、各modul
 - [x] DB dispatchをalbum 22 command / training 15 commandへ分割
 - [x] 全37 commandを網羅列挙し、新variant追加漏れをcompile error化
 - [x] `main.rs`を332行から9行へ縮小、起動構成を`bootstrap`へ抽出
+- [x] `docs/SPEC-refactor.md`を本計画へのarchive linkへ置換
+- [x] architecture documentを現行module topologyとNV12/WebP contractへ更新
 - [x] GitHub Rust CI `32593481852` 成功（fmt、Clippy、107 tests）
 
 ### Phase 4 — GitHub CI and device validation
@@ -248,7 +264,20 @@ Gate: `main.rs`はCLI parseとbootstrap呼出しを中心に約100行、各modul
 - [x] ingest成功、invalid timestamp 400、登録event/detections readbackを確認
 - [x] 稼働中`pet-album.service`とproduction DB/binaryは未変更
 - [x] SHM profilerは対象外（ai-pyramidはSHMを直接読み書きせず、SHM module変更なし）
-- [ ] productionへのinstall、service restart、実データ連携確認（main統合前には実施しない）
+- [x] main統合後のartifact install、service restart、health/API確認
+- [x] Level 2再検出を実データ43件で実行（37件合格、Layer 1にもpetがない6件は要目視確認）
+- [ ] VLM caption、daily summary、MCP、WebP training preview/exportの実データsmoke test
+
+### Follow-up backlog (2026-08-23)
+
+core refactorとは別の、小さく独立したPRで扱う。
+
+- [ ] Rust line/branch coverageをreport-onlyでCIへ追加し、妥当なbaseline確定後に低下をgateする
+- [ ] `ingest_with_detections`と`record_empty_level2`をtransaction化し、中途失敗のrollbackをテストする
+- [x] `event-detail.tsx`のcomic view、carousel、zoom/navigationを責務別componentへ分割する
+- [x] `training/annotate-page.tsx`のannotation state、navigation、toolbarを分割する
+- [ ] training DBの反復static SQLを、計測で有効な箇所だけ`prepare_cached`へ変更する
+- [ ] 動的WHERE句の固定query化は、p50/p95とquery planで改善を確認できた場合だけ実施する
 
 ## 6. Acceptance Criteria
 
@@ -256,15 +285,15 @@ Gate: `main.rs`はCLI parseとbootstrap呼出しを中心に約100行、各modul
 - GitHub CIのformat、clippy、Rust testsと、ローカルのBun tests/buildが成功
 - aarch64 artifact buildと隔離環境でのdevice smoke testが成功
 - main統合前に、既存SQLite DBをコピーしたfixtureでmigrationが成功し、件数と主要値が不変
-- main統合前に、systemd restart後にserviceがactive、panicなし
-- main統合前に、local detector、VLM、daily summary、MCPを実データで確認する
+- main統合後に、systemd restart後にserviceがactive、panicなし
+- local detector、VLM、daily summary、MCPを実データで確認する
 - pure logicとHTTP contractsのcoverage baselineを記録する（Rust coverage CIは別作業）
 - UI coverageが一部ファイルだけでなく対象source一覧を正しく含む
 - 意図的なfeature、schema、protocol、UI変更が含まれない
 
 ## 7. Commit Strategy
 
-mainへ統合する場合は一つのrefactoring PRとするが、現段階ではPRを作成しない。branch内では次のcheckpoint commitを維持する。
+core refactorはPR #224としてmainへ統合済み。履歴上のcheckpointは次の責務に対応する。
 
 1. `test: characterize ai-pyramid external contracts`
 2. `ci: add backend and frontend coverage reporting`

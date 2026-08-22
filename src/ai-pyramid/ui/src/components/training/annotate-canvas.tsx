@@ -5,13 +5,19 @@ import {
   frameImageUrl,
   saveAnnotations,
   type TrainingFrame,
-  type TrainingAnnotation,
   type AnnotationInput,
 } from "../../lib/training-api";
-
-const DEFAULT_CLASSES = ["cat", "mike", "chatora", "other"];
-
-type BBox = AnnotationInput & { id?: number };
+import {
+  annotationToBBox,
+  bboxToInput,
+  classColor,
+  DEFAULT_CLASSES,
+  type BBox,
+  withBoxClass,
+  withoutBox,
+} from "./annotation-model";
+import { AnnotationSidebar } from "./annotation-sidebar";
+import { AnnotationToolbar } from "./annotation-toolbar";
 
 export function AnnotateCanvas({
   frame,
@@ -48,14 +54,7 @@ export function AnnotateCanvas({
   // Load existing annotations — frame.id is a prop (not a signal), runs once
   useSignalEffect(() => {
     fetchFrame(frame.id).then((data) => {
-      bboxes.value = data.annotations.map((a: TrainingAnnotation) => ({
-        class_label: a.class_label,
-        x_center: a.x_center,
-        y_center: a.y_center,
-        width: a.width,
-        height: a.height,
-        id: a.id,
-      }));
+      bboxes.value = data.annotations.map(annotationToBBox);
     });
   });
 
@@ -217,16 +216,14 @@ export function AnnotateCanvas({
 
   const handleDelete = () => {
     if (selectedIdx.value === null) return;
-    bboxes.value = bboxes.value.filter((_, i) => i !== selectedIdx.value);
+    bboxes.value = withoutBox(bboxes.value, selectedIdx.value);
     selectedIdx.value = null;
     dirty.value = true;
   };
 
   const handleClassChange = (cls: string) => {
     if (selectedIdx.value !== null) {
-      bboxes.value = bboxes.value.map((b, i) =>
-        i === selectedIdx.value ? { ...b, class_label: cls } : b,
-      );
+      bboxes.value = withBoxClass(bboxes.value, selectedIdx.value, cls);
       dirty.value = true;
     }
     currentClass.value = cls;
@@ -235,13 +232,7 @@ export function AnnotateCanvas({
   const handleSave = async () => {
     saving.value = true;
     try {
-      const inputs: AnnotationInput[] = bboxes.value.map((b) => ({
-        class_label: b.class_label,
-        x_center: b.x_center,
-        y_center: b.y_center,
-        width: b.width,
-        height: b.height,
-      }));
+      const inputs: AnnotationInput[] = bboxes.value.map(bboxToInput);
       await saveAnnotations(frame.id, inputs);
       dirty.value = false;
     } catch (e) {
@@ -309,76 +300,24 @@ export function AnnotateCanvas({
 
   return (
     <div class="annotate-view">
-      <div class="annotate-toolbar">
-        <button class="btn-back" onClick={onDone}>
-          Back
-        </button>
-        <div class="nav-btns">
-          <button
-            class="btn-nav"
-            onClick={onPrev}
-            disabled={!onPrev || navigating}
-            title="Previous frame (←)"
-          >
-            ←
-          </button>
-          {frameIndex != null && frameTotal != null && (
-            <span class="nav-counter">
-              {frameIndex} / {frameTotal}
-            </span>
-          )}
-          <button
-            class="btn-nav"
-            onClick={onNext}
-            disabled={!onNext || navigating}
-            title="Next frame (→)"
-          >
-            →
-          </button>
-        </div>
-        <span class="annotate-filename">{frame.filename}</span>
-        <div class="class-selector">
-          {DEFAULT_CLASSES.map((cls) => (
-            <button
-              key={cls}
-              class={`class-btn ${currentClass.value === cls ? "active" : ""}`}
-              style={{ borderColor: classColor(cls) }}
-              onClick={() => handleClassChange(cls)}
-            >
-              {cls}
-            </button>
-          ))}
-        </div>
-        <button
-          class="btn-delete"
-          onClick={handleDelete}
-          disabled={selectedIdx.value === null}
-        >
-          Delete bbox
-        </button>
-        <span class="bbox-count">{bboxes.value.length} boxes</span>
-        <button
-          class="btn-save"
-          onClick={handleSave}
-          disabled={saving.value || !dirty.value}
-        >
-          {saving.value ? "Saving..." : "Save"}
-        </button>
-        <div class="status-btns">
-          <button
-            class={`btn-approve ${frame.status === "approved" ? "active" : ""}`}
-            onClick={() => onStatusChange(frame, "approved")}
-          >
-            Approve
-          </button>
-          <button
-            class={`btn-reject ${frame.status === "rejected" ? "active" : ""}`}
-            onClick={() => onStatusChange(frame, "rejected")}
-          >
-            Reject
-          </button>
-        </div>
-      </div>
+      <AnnotationToolbar
+        frame={frame}
+        currentClass={currentClass.value}
+        selected={selectedIdx.value !== null}
+        boxCount={bboxes.value.length}
+        dirty={dirty.value}
+        saving={saving.value}
+        navigating={navigating}
+        frameIndex={frameIndex}
+        frameTotal={frameTotal}
+        onDone={onDone}
+        onPrev={onPrev}
+        onNext={onNext}
+        onClassChange={handleClassChange}
+        onDelete={handleDelete}
+        onSave={handleSave}
+        onStatusChange={onStatusChange}
+      />
       <div class="annotate-canvas-wrap">
         <canvas
           ref={canvasRef}
@@ -387,66 +326,16 @@ export function AnnotateCanvas({
           onMouseUp={handleMouseUp}
         />
       </div>
-      <div class="annotate-sidebar">
-        <h3>Annotations</h3>
-        {bboxes.value.length === 0 ? (
-          <p class="hint">Click and drag on the image to draw a bounding box.</p>
-        ) : (
-          <ul class="bbox-list">
-            {bboxes.value.map((box, i) => (
-              <li
-                key={i}
-                class={`bbox-item ${selectedIdx.value === i ? "selected" : ""}`}
-                onClick={() => (selectedIdx.value = i)}
-              >
-                <span
-                  class="bbox-color"
-                  style={{ background: classColor(box.class_label) }}
-                />
-                <span class="bbox-label">{box.class_label}</span>
-                <span class="bbox-coords">
-                  ({box.x_center.toFixed(3)}, {box.y_center.toFixed(3)})
-                </span>
-                <button
-                  class="bbox-del"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    bboxes.value = bboxes.value.filter((_, j) => j !== i);
-                    if (selectedIdx.value === i) selectedIdx.value = null;
-                    dirty.value = true;
-                  }}
-                >
-                  x
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-        <div class="annotate-help">
-          <h4>Shortcuts</h4>
-          <p>Drag: draw bbox</p>
-          <p>Click bbox: select</p>
-          <p>Delete/BS: remove selected</p>
-          <p>Ctrl+S: save</p>
-          <p>← →: prev / next</p>
-          <p>Esc: back</p>
-        </div>
-      </div>
+      <AnnotationSidebar
+        boxes={bboxes.value}
+        selectedIndex={selectedIdx.value}
+        onSelect={(index) => (selectedIdx.value = index)}
+        onDelete={(index) => {
+          bboxes.value = withoutBox(bboxes.value, index);
+          if (selectedIdx.value === index) selectedIdx.value = null;
+          dirty.value = true;
+        }}
+      />
     </div>
   );
-}
-
-function classColor(cls: string): string {
-  switch (cls) {
-    case "cat":
-      return "#4caf50";
-    case "mike":
-      return "#ff9800";
-    case "chatora":
-      return "#f44336";
-    case "other":
-      return "#9c27b0";
-    default:
-      return "#2196f3";
-  }
 }
