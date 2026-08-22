@@ -75,7 +75,7 @@ pub struct DetectionInput {
     /// 1=RDK X5 realtime, 2=AI Pyramid high-precision
     #[serde(default = "default_det_level")]
     pub det_level: i32,
-    /// Model identifier (e.g. "yolo26n-bpu", "yolo11s-ax650")
+    /// Model identifier (e.g. "yolo26n-bpu", "yolo26l-ax650-raw-first")
     #[serde(default)]
     pub model: Option<String>,
 }
@@ -383,17 +383,70 @@ impl PhotoStore {
             ])?;
         }
 
+        // Level 2 enriches the object list, but it must not erase a pet that
+        // Level 1 already detected from the higher-quality live camera frame.
+        // Only inherit pet rows when the new highest level found no pet at all;
+        // non-pet Level 1 objects remain excluded.
+        let highest_level_has_pet = detections.iter().any(|d| {
+            d.det_level == max_new_level && matches!(d.yolo_class.as_deref(), Some("cat" | "dog"))
+        });
+        if max_new_level >= 2 && !highest_level_has_pet {
+            self.inherit_l1_pet_detections(photo_id, max_new_level)?;
+        }
+
         Ok(photo_id)
     }
 
-    /// Return detections for a photo, preferring highest det_level available.
+    fn inherit_l1_pet_detections(
+        &self,
+        photo_id: i64,
+        target_level: i32,
+    ) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "INSERT INTO detections (
+                 photo_id, panel_index, bbox_x, bbox_y, bbox_w, bbox_h,
+                 yolo_class, pet_class, pet_id_override, confidence,
+                 detected_at, color_metrics, det_level, model
+             )
+             SELECT photo_id, panel_index, bbox_x, bbox_y, bbox_w, bbox_h,
+                    yolo_class, pet_class, pet_id_override, confidence,
+                    detected_at, color_metrics, ?2, 'level1-inherited'
+             FROM detections
+             WHERE photo_id = ?1
+               AND det_level = 1
+               AND yolo_class IN ('cat', 'dog')",
+            params![photo_id, target_level],
+        )
+    }
+
+    /// Return the highest detection level plus an L1 cat fallback for panels
+    /// where a higher level found objects but missed the cat.
     pub fn get_detections(&self, photo_id: i64) -> rusqlite::Result<Vec<Detection>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, photo_id, panel_index, bbox_x, bbox_y, bbox_w, bbox_h, yolo_class, pet_class, pet_id_override, confidence, detected_at, color_metrics, det_level, model
-             FROM detections
-             WHERE photo_id = ?1
-               AND det_level = (SELECT COALESCE(MAX(det_level), 1) FROM detections WHERE photo_id = ?1)
-             ORDER BY panel_index",
+             FROM detections d
+             WHERE d.photo_id = ?1
+               AND (
+                   d.det_level = (
+                       SELECT COALESCE(MAX(d2.det_level), 1)
+                       FROM detections d2 WHERE d2.photo_id = d.photo_id
+                   )
+                   OR (
+                       d.det_level = 1
+                       AND d.yolo_class = 'cat'
+                       AND NOT EXISTS (
+                           SELECT 1 FROM detections higher
+                           WHERE higher.photo_id = d.photo_id
+                             AND higher.det_level > d.det_level
+                             AND higher.yolo_class = 'cat'
+                             AND (
+                                 higher.panel_index = d.panel_index
+                                 OR (higher.panel_index IS NULL AND d.panel_index IS NULL)
+                             )
+                       )
+                   )
+               )
+             ORDER BY d.panel_index, d.det_level DESC",
         )?;
         let dets = stmt
             .query_map(params![photo_id], Self::map_detection_row)?
@@ -435,11 +488,27 @@ impl PhotoStore {
             "SELECT d.photo_id, d.bbox_x, d.bbox_y, d.bbox_w, d.bbox_h \
              FROM detections d \
              WHERE d.photo_id IN ({placeholders}) \
-               AND d.det_level = ( \
-                   SELECT COALESCE(MAX(d2.det_level), 1) \
-                   FROM detections d2 WHERE d2.photo_id = d.photo_id \
+               AND ( \
+                   d.det_level = ( \
+                       SELECT COALESCE(MAX(d2.det_level), 1) \
+                       FROM detections d2 WHERE d2.photo_id = d.photo_id \
+                   ) \
+                   OR ( \
+                       d.det_level = 1 \
+                       AND d.yolo_class = 'cat' \
+                       AND NOT EXISTS ( \
+                           SELECT 1 FROM detections higher \
+                           WHERE higher.photo_id = d.photo_id \
+                             AND higher.det_level > d.det_level \
+                             AND higher.yolo_class = 'cat' \
+                             AND ( \
+                                 higher.panel_index = d.panel_index \
+                                 OR (higher.panel_index IS NULL AND d.panel_index IS NULL) \
+                             ) \
+                       ) \
+                   ) \
                ) \
-             ORDER BY d.photo_id"
+             ORDER BY d.photo_id, d.panel_index, d.det_level DESC"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let params: Vec<Box<dyn rusqlite::types::ToSql>> = photo_ids
@@ -716,10 +785,15 @@ impl PhotoStore {
         Ok(behaviors)
     }
 
-    /// Return captions for valid photos on a given date (YYYY-MM-DD).
+    /// Return captions for valid photos on a given date (YYYY-MM-DD), each
+    /// prefixed with `HH:MM ` so the consumer (`VlmClient::summarize_day`)
+    /// can include a timeline without re-querying.
     pub fn captions_for_date(&self, date: &str) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT caption FROM photos WHERE is_valid = 1 AND caption IS NOT NULL AND captured_at LIKE ? || '%' ORDER BY captured_at ASC LIMIT 200",
+            "SELECT substr(captured_at, 12, 5) || ' ' || caption \
+             FROM photos \
+             WHERE is_valid = 1 AND caption IS NOT NULL AND captured_at LIKE ? || '%' \
+             ORDER BY captured_at ASC LIMIT 200",
         )?;
         let captions = stmt
             .query_map(params![date], |row| row.get(0))?
@@ -734,6 +808,17 @@ impl PhotoStore {
             "UPDATE photos SET detected_at = ?1 WHERE id = ?2",
             params![now, photo_id],
         )
+    }
+
+    /// Record a completed Level 2 run that returned no objects. Any stale
+    /// Level 2 result is replaced with only the pet rows detected at Level 1.
+    pub fn record_empty_level2(&self, photo_id: i64) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "DELETE FROM detections WHERE photo_id = ?1 AND det_level >= 2",
+            params![photo_id],
+        )?;
+        self.inherit_l1_pet_detections(photo_id, 2)?;
+        self.mark_detected(photo_id)
     }
 
     /// Return photos that have not yet been through detection.
@@ -1360,5 +1445,297 @@ mod tests {
         let l1_bboxes = map.get(&l1only_id).unwrap();
         assert_eq!(l1_bboxes.len(), 1);
         assert_eq!(l1_bboxes[0].bbox_x, 30);
+    }
+
+    #[test]
+    fn l1_cat_falls_back_per_panel_when_l2_misses_it() {
+        let store = setup();
+        let ts = dt(2026, 8, 22, 23, 4, 27);
+        let l1_dets = vec![
+            DetectionInput {
+                panel_index: Some(0),
+                bbox_x: 93,
+                bbox_y: 119,
+                bbox_w: 68,
+                bbox_h: 46,
+                yolo_class: Some("cat".into()),
+                pet_class: Some("mike".into()),
+                confidence: Some(0.657),
+                detected_at: "2026-08-22T23:04:27".into(),
+                color_metrics: None,
+                det_level: 1,
+                model: Some("yolo26n-bpu".into()),
+            },
+            DetectionInput {
+                panel_index: Some(1),
+                bbox_x: 520,
+                bbox_y: 120,
+                bbox_w: 90,
+                bbox_h: 90,
+                yolo_class: Some("cat".into()),
+                pet_class: Some("mike".into()),
+                confidence: Some(0.61),
+                detected_at: "2026-08-22T23:04:27".into(),
+                color_metrics: None,
+                det_level: 1,
+                model: Some("yolo26n-bpu".into()),
+            },
+        ];
+        let photo_id = store
+            .ingest_with_detections("comic_20260822_230427_mike.jpg", ts, Some("mike"), &l1_dets)
+            .unwrap();
+
+        let l2_dets = vec![
+            DetectionInput {
+                panel_index: Some(0),
+                bbox_x: 98,
+                bbox_y: 141,
+                bbox_w: 39,
+                bbox_h: 29,
+                yolo_class: Some("bowl".into()),
+                pet_class: None,
+                confidence: Some(0.54),
+                detected_at: "2026-08-22T23:04:27".into(),
+                color_metrics: None,
+                det_level: 2,
+                model: Some("yolo26l-ax650-raw-first".into()),
+            },
+            DetectionInput {
+                panel_index: Some(1),
+                bbox_x: 525,
+                bbox_y: 125,
+                bbox_w: 85,
+                bbox_h: 85,
+                yolo_class: Some("cat".into()),
+                pet_class: None,
+                confidence: Some(0.82),
+                detected_at: "2026-08-22T23:04:27".into(),
+                color_metrics: None,
+                det_level: 2,
+                model: Some("yolo26l-ax650-raw-first".into()),
+            },
+        ];
+        store
+            .ingest_with_detections("comic_20260822_230427_mike.jpg", ts, Some("mike"), &l2_dets)
+            .unwrap();
+
+        let detections = store.get_detections(photo_id).unwrap();
+        assert_eq!(detections.len(), 3);
+        assert_eq!(detections[0].yolo_class.as_deref(), Some("bowl"));
+        assert_eq!(detections[0].det_level, 2);
+        assert_eq!(detections[1].yolo_class.as_deref(), Some("cat"));
+        assert_eq!(detections[1].det_level, 1);
+        assert_eq!(detections[2].yolo_class.as_deref(), Some("cat"));
+        assert_eq!(detections[2].det_level, 2);
+
+        let bboxes = store.get_bboxes_for_photos(&[photo_id]).unwrap();
+        assert_eq!(bboxes.get(&photo_id).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn l2_without_pet_inherits_only_l1_pet_detections() {
+        let store = setup();
+        let ts = dt(2026, 8, 22, 23, 4, 27);
+        let l1_dets = vec![
+            DetectionInput {
+                panel_index: Some(0),
+                bbox_x: 93,
+                bbox_y: 119,
+                bbox_w: 68,
+                bbox_h: 46,
+                yolo_class: Some("cat".into()),
+                pet_class: Some("mike".into()),
+                confidence: Some(0.657),
+                detected_at: "2026-08-22T23:04:27".into(),
+                color_metrics: Some(serde_json::json!({"orange_ratio": 0.42})),
+                det_level: 1,
+                model: Some("yolo26n-bpu".into()),
+            },
+            DetectionInput {
+                panel_index: Some(1),
+                bbox_x: 500,
+                bbox_y: 110,
+                bbox_w: 80,
+                bbox_h: 60,
+                yolo_class: Some("dog".into()),
+                pet_class: Some("mike".into()),
+                confidence: Some(0.61),
+                detected_at: "2026-08-22T23:04:27".into(),
+                color_metrics: None,
+                det_level: 1,
+                model: Some("yolo26n-bpu".into()),
+            },
+            DetectionInput {
+                panel_index: Some(2),
+                bbox_x: 50,
+                bbox_y: 100,
+                bbox_w: 40,
+                bbox_h: 30,
+                yolo_class: Some("cup".into()),
+                pet_class: None,
+                confidence: Some(0.72),
+                detected_at: "2026-08-22T23:04:27".into(),
+                color_metrics: None,
+                det_level: 1,
+                model: Some("yolo26n-bpu".into()),
+            },
+        ];
+        let photo_id = store
+            .ingest_with_detections("no_l2_pet.jpg", ts, Some("mike"), &l1_dets)
+            .unwrap();
+
+        let l2_dets = vec![
+            DetectionInput {
+                panel_index: Some(0),
+                bbox_x: 98,
+                bbox_y: 141,
+                bbox_w: 39,
+                bbox_h: 29,
+                yolo_class: Some("bowl".into()),
+                pet_class: None,
+                confidence: Some(0.54),
+                detected_at: "2026-08-22T23:04:27".into(),
+                color_metrics: None,
+                det_level: 2,
+                model: Some("yolo26l-ax650-raw-first".into()),
+            },
+            DetectionInput {
+                panel_index: Some(1),
+                bbox_x: 490,
+                bbox_y: 90,
+                bbox_w: 100,
+                bbox_h: 140,
+                yolo_class: Some("person".into()),
+                pet_class: None,
+                confidence: Some(0.48),
+                detected_at: "2026-08-22T23:04:27".into(),
+                color_metrics: None,
+                det_level: 2,
+                model: Some("yolo26l-ax650-raw-first".into()),
+            },
+        ];
+        store
+            .ingest_with_detections("no_l2_pet.jpg", ts, Some("mike"), &l2_dets)
+            .unwrap();
+
+        let inherited: Vec<(String, Option<String>, Option<f32>, Option<String>)> = {
+            let mut stmt = store
+                .conn
+                .prepare(
+                    "SELECT yolo_class, pet_class, confidence, color_metrics
+                     FROM detections
+                     WHERE photo_id = ?1 AND det_level = 2 AND model = 'level1-inherited'
+                     ORDER BY yolo_class",
+                )
+                .unwrap();
+            stmt.query_map(params![photo_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+        };
+        assert_eq!(inherited.len(), 2);
+        assert_eq!(inherited[0].0, "cat");
+        assert_eq!(inherited[0].1.as_deref(), Some("mike"));
+        assert_eq!(inherited[0].2, Some(0.657));
+        assert!(inherited[0].3.as_deref().unwrap().contains("orange_ratio"));
+        assert_eq!(inherited[1].0, "dog");
+
+        let inherited_cup_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM detections
+                 WHERE photo_id = ?1 AND det_level = 2
+                   AND model = 'level1-inherited' AND yolo_class = 'cup'",
+                params![photo_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(inherited_cup_count, 0);
+
+        let detections = store.get_detections(photo_id).unwrap();
+        assert_eq!(detections.len(), 4);
+        assert!(detections.iter().all(|d| d.det_level == 2));
+        assert!(
+            detections
+                .iter()
+                .any(|d| d.yolo_class.as_deref() == Some("cat"))
+        );
+        assert!(
+            detections
+                .iter()
+                .any(|d| d.yolo_class.as_deref() == Some("dog"))
+        );
+    }
+
+    #[test]
+    fn l2_with_pet_does_not_persist_l1_inheritance() {
+        let store = setup();
+        let ts = dt(2026, 8, 22, 23, 4, 27);
+        let l1_dets = vec![DetectionInput {
+            panel_index: Some(0),
+            bbox_x: 93,
+            bbox_y: 119,
+            bbox_w: 68,
+            bbox_h: 46,
+            yolo_class: Some("cat".into()),
+            pet_class: Some("mike".into()),
+            confidence: Some(0.657),
+            detected_at: "2026-08-22T23:04:27".into(),
+            color_metrics: None,
+            det_level: 1,
+            model: Some("yolo26n-bpu".into()),
+        }];
+        let photo_id = store
+            .ingest_with_detections("has_l2_pet.jpg", ts, Some("mike"), &l1_dets)
+            .unwrap();
+        let l2_dets = vec![DetectionInput {
+            panel_index: Some(0),
+            bbox_x: 95,
+            bbox_y: 120,
+            bbox_w: 70,
+            bbox_h: 48,
+            yolo_class: Some("cat".into()),
+            pet_class: None,
+            confidence: Some(0.81),
+            detected_at: "2026-08-22T23:04:27".into(),
+            color_metrics: None,
+            det_level: 2,
+            model: Some("yolo26l-ax650-raw-first".into()),
+        }];
+        store
+            .ingest_with_detections("has_l2_pet.jpg", ts, Some("mike"), &l2_dets)
+            .unwrap();
+
+        let inherited_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM detections
+                 WHERE photo_id = ?1 AND model = 'level1-inherited'",
+                params![photo_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(inherited_count, 0);
+
+        store.record_empty_level2(photo_id).unwrap();
+        let remaining_l2: Vec<(String, String)> = {
+            let mut stmt = store
+                .conn
+                .prepare(
+                    "SELECT yolo_class, model FROM detections
+                     WHERE photo_id = ?1 AND det_level = 2",
+                )
+                .unwrap();
+            stmt.query_map(params![photo_id], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(
+            remaining_l2,
+            vec![("cat".into(), "level1-inherited".into())]
+        );
     }
 }

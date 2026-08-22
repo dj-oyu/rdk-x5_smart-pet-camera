@@ -207,11 +207,11 @@ pub fn load_model(path: &Path) -> Result<BackgroundModel, String> {
 
     let mean_end = HEADER_LEN + n_pixels * 4;
     let mean: Vec<f32> = data[HEADER_LEN..mean_end]
-        .chunks_exact(4)
+        .chunks(4)
         .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
         .collect();
     let std: Vec<f32> = data[mean_end..expected]
-        .chunks_exact(4)
+        .chunks(4)
         .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
         .collect();
 

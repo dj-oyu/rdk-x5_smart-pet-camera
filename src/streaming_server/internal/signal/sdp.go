@@ -21,6 +21,7 @@ type Offer struct {
 	MID         string // media ID (e.g., "0" or "video")
 	PayloadType int    // dynamic PT for H.265
 	FmtpLine    string // raw "a=fmtp:<pt> ..." line for H.265, echoed back in answer
+	Candidates  []OfferCandidate
 }
 
 var (
@@ -29,7 +30,9 @@ var (
 	reFingerprint = regexp.MustCompile(`a=fingerprint:sha-256\s+(\S+)`)
 	reSetup       = regexp.MustCompile(`a=setup:(\S+)`)
 	reMID         = regexp.MustCompile(`a=mid:(\S+)`)
-	reRtpmap      = regexp.MustCompile(`a=rtpmap:(\d+)\s+H265/90000`)
+	// (?i): Android/libwebrtc stacks send lowercase `h265/90000`; without the
+	// case-insensitive flag the PT match misses and we fall back to PT=96 → no video.
+	reRtpmap = regexp.MustCompile(`(?i)a=rtpmap:(\d+)\s+H265/90000`)
 )
 
 // ParseOffer extracts relevant fields from a browser SDP offer.
@@ -83,6 +86,8 @@ func ParseOffer(sdp string) (*Offer, error) {
 		}
 	}
 
+	offer.Candidates = parseOfferCandidates(sdp)
+
 	return offer, nil
 }
 
@@ -100,6 +105,10 @@ type AnswerParams struct {
 	StreamID        string // msid stream identifier (e.g. "pet-camera")
 	TrackID         string // msid track identifier (e.g. "video0")
 	CNAME           string // RTCP CNAME for the SSRC
+	// ICEFull turns off the "a=ice-lite" attribute so the server acts as a
+	// full ICE agent that originates connectivity checks. Default false
+	// retains the long-standing ICE-lite passive behaviour.
+	ICEFull bool
 }
 
 // GenerateAnswer creates an SDP answer string for send-only H.265 video.
@@ -108,7 +117,16 @@ func GenerateAnswer(p *AnswerParams) string {
 	if len(p.CandidateIPs) == 0 {
 		p.CandidateIPs = []net.IP{net.IPv4(127, 0, 0, 1)}
 	}
-	primaryIP := p.CandidateIPs[0].String()
+	primary := p.CandidateIPs[0]
+	primaryIP := primary.String()
+	// SDP RFC 4566: "c=IN <addrtype> ..." selects the address family of
+	// the *default* address — must match `primary`. The actual per-pair
+	// candidates each carry their own IP, so this only affects what a
+	// non-ICE peer would do; modern browsers honour candidates first.
+	connAddrType := "IP4"
+	if primary.To4() == nil {
+		connAddrType = "IP6"
+	}
 
 	streamID := p.StreamID
 	if streamID == "" {
@@ -134,13 +152,17 @@ func GenerateAnswer(p *AnswerParams) string {
 	// Media section. The c=/a=rtcp= lines are session defaults overridden
 	// by individual ICE candidates, so the first IP is fine.
 	sb.WriteString(fmt.Sprintf("m=video %d UDP/TLS/RTP/SAVPF %d\r\n", p.CandidatePort, p.PayloadType))
-	sb.WriteString(fmt.Sprintf("c=IN IP4 %s\r\n", primaryIP))
-	sb.WriteString(fmt.Sprintf("a=rtcp:%d IN IP4 %s\r\n", p.CandidatePort, primaryIP))
+	sb.WriteString(fmt.Sprintf("c=IN %s %s\r\n", connAddrType, primaryIP))
+	// RFC 5761 §5.1.3: with rtcp-mux the a=rtcp line must use the muxed
+	// placeholder, not a real RTCP port/address. Emit the fixed form.
+	sb.WriteString("a=rtcp:9 IN IP4 0.0.0.0\r\n")
 
 	// ICE
 	sb.WriteString(fmt.Sprintf("a=ice-ufrag:%s\r\n", p.ICEUfrag))
 	sb.WriteString(fmt.Sprintf("a=ice-pwd:%s\r\n", p.ICEPwd))
-	sb.WriteString("a=ice-lite\r\n")
+	if !p.ICEFull {
+		sb.WriteString("a=ice-lite\r\n")
+	}
 	sb.WriteString("a=ice-options:trickle\r\n")
 
 	// DTLS

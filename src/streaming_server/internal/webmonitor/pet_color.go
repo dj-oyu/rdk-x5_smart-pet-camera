@@ -1,8 +1,9 @@
 package webmonitor
 
 import (
-	"log"
 	"math"
+
+	"github.com/dj-oyu/rdk-x5_smart-pet-camera/streaming-server/internal/logger"
 )
 
 // PetColorResult holds classification output plus diagnostic features.
@@ -212,7 +213,7 @@ func classifyPetColor(nv12 []byte, w, h int, bbox BoundingBox) PetColorResult {
 		NumSamples: len(filtered),
 	}
 
-	log.Printf("[PetColor] pet_id=%s conf=%.2f scatter=%.2f meanU=%.1f meanV=%.1f meanY=%.1f uvDist=%.1f samples=%d bbox=%dx%d",
+	logger.Info("PetColor", "pet_id=%s conf=%.2f scatter=%.2f meanU=%.1f meanV=%.1f meanY=%.1f uvDist=%.1f samples=%d bbox=%dx%d",
 		result.PetID, result.Confidence, result.Scatter,
 		result.MeanU, result.MeanV, result.MeanY, result.UVDist,
 		result.NumSamples, bbox.W, bbox.H)

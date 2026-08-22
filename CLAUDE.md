@@ -17,6 +17,18 @@
 | `src/web/` | Preact | Frontend SPA |
 | `src/ai-pyramid/` | Rust | AI Pyramid album/VLM (axum + rusqlite) |
 
+## Module Boundaries
+- **`src/common/`** — 型と契約のみ (`DetectionClass`、共有スキーマ)。**アルゴリズムは所有モジュールに置く**。
+  検出ロジックは `src/detector/`、カメラ制御は `src/capture/`
+- **`src/mock/`** — 本番のアルゴリズムを import しない。mock の責務は「ハードなしで
+  下流にもっともらしいデータを流す」こと。共有するとアルゴリズム変更のたびに
+  mock 経由のテストフィクスチャが黙って変わり、mock が第二の本番経路になる
+- **SHM 定数・構造体** — `src/capture/shm_constants.h` と `shared_memory.h` が正。
+  Python は ctypes で手写ししているため `make check-shm` で照合すること (CI で blocking)。
+  Go は cgo でヘッダを直接 include しているので手写しなし
+- **`/opt/smart-pet-camera` は `/app/smart-pet-camera` へのシンボリックリンク**。
+  作業ツリー = 本番。チェックアウト中のブランチと `build/` の内容が、次の再起動で走る
+
 ## Known Blockers
 - **Bowl detection (feat/bowl-detection-test)**: 夜カメラの IR ノイズにより自動お皿検出が不安定。IRライト (850nm) 設置がブロッカー。手動 ROI + 差分モニターは動作中。詳細: `docs/bowl-detection-insights.md`
 

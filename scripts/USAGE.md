@@ -24,6 +24,23 @@ sudo ./scripts/install-services.sh rdk-x5       # rdk-x5 用サービス一式
 sudo ./scripts/install-services.sh ai-pyramid    # ai-pyramid 用サービス
 ```
 
+unit ファイルは `deploy/<target>/*.service.example` のように **`.example` テンプレート
+としてのみリポジトリに置く**。unit の中身はパス・モデル名・実行ユーザーなど機器ごとに
+異なるため、リポジトリはテンプレートを、機器は実体を持つ。install 時に `.example` を
+外して `/etc/systemd/system/` へ配置する。
+
+テンプレートに `__PLACEHOLDER__` が残っている場合、install は**中断する**（壊れた unit を
+書き込まないため）。置換してから実行する:
+
+```bash
+sed 's/__MODEL_DIR__/\/opt\/models/' deploy/ai-pyramid/ax-yolo-daemon.service.example \
+  > /tmp/ax-yolo-daemon.service
+sudo cp /tmp/ax-yolo-daemon.service /etc/systemd/system/
+```
+
+新しい unit を追加するときも `.example` を付けて追加する（`.gitignore` が実 unit を
+除外しているので、付け忘れると `git add` が警告して止まる）。
+
 インストール後の操作:
 
 ```bash
@@ -36,6 +53,26 @@ journalctl -u pet-camera-capture -f          # ログ (journald)
 # ai-pyramid
 sudo systemctl start pet-album.service
 journalctl -u pet-album -f
+
+# TLS 証明書の自動更新 (週次, install で登録済み)
+sudo systemctl start pet-album-cert-renew.timer   # 有効化
+sudo systemctl start pet-album-cert-renew.service  # 手動更新
+journalctl -u pet-album-cert-renew -n 20           # 更新ログ
+```
+
+### renew-album-cert.sh — pet-album TLS 証明書更新
+
+`pet-album` は起動時に一度だけ TLS 証明書を読むため、Tailscale 証明書 (有効期限90日)
+が失効するとブラウザに `NET::ERR_CERT_DATE_INVALID` が出てアルバム iframe が読めなくなる。
+`pet-album-cert-renew.timer` が週次で呼び出し、証明書が変わったときだけ `pet-album` を再起動する。
+手動更新は `tailscale cert` (要 root):
+
+```bash
+sudo tailscale cert \
+  --cert-file /opt/smart-pet-camera/m5stack-ai-pyramid.tail848eb5.ts.net.crt \
+  --key-file /opt/smart-pet-camera/m5stack-ai-pyramid.tail848eb5.ts.net.key \
+  m5stack-ai-pyramid.tail848eb5.ts.net
+sudo systemctl restart pet-album.service
 ```
 
 ### resolve-model.sh — YOLO モデルパス解決

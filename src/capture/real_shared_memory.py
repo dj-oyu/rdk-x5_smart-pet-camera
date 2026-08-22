@@ -52,6 +52,10 @@ except OSError:
         import logging
         logging.warning("Failed to load librt/libpthread for semaphore support")
 
+if librt is not None:
+    librt.sem_init.argtypes = [c_void_p, c_int, ctypes.c_uint]
+    librt.sem_init.restype = c_int
+
 # Constants (must match shm_constants.h)
 ZEROCOPY_MAX_PLANES = 2
 HB_MEM_GRAPHIC_BUF_SIZE = 160
@@ -119,6 +123,40 @@ class CLatestDetectionResult(Structure):
         ("detections", CDetection * MAX_DETECTIONS),
         ("version", c_uint32),
         ("detection_update_sem", c_uint8 * 32),
+    ]
+
+
+# ============================================================================
+# H.265 zero-copy structures (matching shared_memory.h H265ZeroCopyFrame /
+# H265ZeroCopyBuffer). Used read-only by scripts/profile_shm.py — no
+# production Python writer/reader exists for this SHM segment (the C
+# encoder writes it, the Go streaming server reads it). Defined here, not in
+# scripts/profile_shm.py, so there is exactly one ctypes mirror per C struct
+# (see scripts/check_shm_layout.py, which verifies this file's mirrors stay
+# in sync with shared_memory.h).
+# ============================================================================
+
+HB_MEM_COM_BUF_SIZE = 48  # sizeof(hb_mem_common_buf_t); shared_memory.h
+
+
+class CH265ZeroCopyFrame(Structure):
+    _fields_ = [
+        ("frame_number", c_uint64),
+        ("timestamp", CTimespec),
+        ("camera_id", c_int),
+        ("width", c_int),
+        ("height", c_int),
+        ("data_size", c_uint32),
+        ("hb_mem_buf_data", c_uint8 * HB_MEM_COM_BUF_SIZE),
+        ("version", c_uint32),
+    ]
+
+
+class CH265ZeroCopyBuffer(Structure):
+    _fields_ = [
+        ("new_frame_sem", c_uint8 * 32),  # sem_t
+        ("consumed_sem", c_uint8 * 32),  # sem_t
+        ("frame", CH265ZeroCopyFrame),
     ]
 
 
@@ -239,26 +277,53 @@ def open_roi_readers() -> list["ZeroCopySharedMemory"]:
 # DetectionWriter — writes YOLO results to detection SHM
 # ============================================================================
 
+# Byte range of the payload, i.e. everything up to detection_update_sem.
+# Writing the whole struct would overwrite a live semaphore that the Go
+# web_monitor is blocked on (see DetectionWriter.write_detection_result).
+_DETECTION_PAYLOAD_SIZE = CLatestDetectionResult.detection_update_sem.offset
+_DETECTION_SEM_OFFSET = CLatestDetectionResult.detection_update_sem.offset
+_DETECTION_SEM_SIZE = CLatestDetectionResult.detection_update_sem.size
+
+
 class DetectionWriter:
     def __init__(self, detection_shm_name: str = SHM_NAME_DETECTIONS):
         self.detection_shm_name = detection_shm_name
         self.detection_fd: Optional[int] = None
         self.detection_mmap: Optional[mmap.mmap] = None
         self.last_detection_version = 0
+        # ctypes view onto the semaphore inside the mapping. Held for the
+        # lifetime of the mapping so its address stays valid; must be released
+        # before mmap.close() or Python refuses to unmap an exported buffer.
+        self._sem_view: Optional[ctypes.Array] = None
+        self._sem_warned = False
+        self._negative_frame_warned = False
 
     def open(self) -> None:
         shm_path = f"/dev/shm{self.detection_shm_name}"
+        created = False
         try:
             self.detection_fd = os.open(shm_path, os.O_RDWR)
         except FileNotFoundError:
             self.detection_fd = os.open(shm_path, os.O_CREAT | os.O_RDWR, 0o666)
             os.ftruncate(self.detection_fd, sizeof(CLatestDetectionResult))
+            created = True
         self.detection_mmap = mmap.mmap(
             self.detection_fd, sizeof(CLatestDetectionResult),
             mmap.MAP_SHARED, mmap.PROT_WRITE | mmap.PROT_READ,
         )
+        self._sem_view = (c_uint8 * _DETECTION_SEM_SIZE).from_buffer(
+            self.detection_mmap, _DETECTION_SEM_OFFSET
+        )
+        if created and librt is not None:
+            # Only when this process created the segment. The C side calls
+            # sem_init in shm_detection_create; re-initialising a semaphore
+            # someone else already set up would discard their state.
+            librt.sem_init(addressof(self._sem_view), 1, 0)
 
     def close(self) -> None:
+        # Release the exported view first, otherwise mmap.close() raises
+        # BufferError ("cannot close exported pointers exist").
+        self._sem_view = None
         if self.detection_mmap:
             self.detection_mmap.close()
             self.detection_mmap = None
@@ -272,6 +337,22 @@ class DetectionWriter:
         if not self.detection_mmap:
             return
         c_det = CLatestDetectionResult()
+        if frame_number < 0:
+            # frame_number is uint64_t on the C side, so a negative value does
+            # not fail — it lands as 2**64-1. Readers match detections to frames
+            # by number (the web monitor draws an overlay only when the two are
+            # within 30 frames), so the mismatch is silent: detections keep
+            # flowing and simply stop being drawn. Say so instead.
+            if not self._negative_frame_warned:
+                self._negative_frame_warned = True
+                import logging
+
+                logging.warning(
+                    "DetectionWriter: negative frame_number %d — writing 0. "
+                    "Detections will not match any frame until this is fixed.",
+                    frame_number,
+                )
+            frame_number = 0
         c_det.frame_number = frame_number
         c_det.timestamp = timestamp_sec
         c_det.num_detections = min(len(detections), MAX_DETECTIONS)
@@ -288,6 +369,21 @@ class DetectionWriter:
             c_detection.bbox.h = det["bbox"]["h"]
         self.last_detection_version += 1
         c_det.version = self.last_detection_version
+        # Write the payload only. The trailing detection_update_sem must not be
+        # overwritten: the Go web_monitor blocks on it (sem_timedwait in
+        # internal/webmonitor/shm.go), so rewriting those bytes would corrupt a
+        # live synchronisation primitive and lose wakeups.
         self.detection_mmap.seek(0)
-        self.detection_mmap.write(bytes(c_det))
+        self.detection_mmap.write(bytes(c_det)[:_DETECTION_PAYLOAD_SIZE])
         self.detection_mmap.flush()
+        # Signal readers, matching the protocol that the C writer implements in
+        # shm_detection_write (shared_memory.c). Without this the reader's
+        # sem_timedwait always times out and falls back to version polling.
+        if librt is not None and self._sem_view is not None:
+            librt.sem_post(addressof(self._sem_view))
+        elif not self._sem_warned:
+            self._sem_warned = True
+            import logging
+            logging.warning(
+                "librt unavailable: detection readers fall back to version polling"
+            )

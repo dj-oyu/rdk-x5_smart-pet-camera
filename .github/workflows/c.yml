@@ -9,6 +9,8 @@ on:
     paths:
       - 'src/capture/**'
       - 'src/ai-pyramid/tools/**'
+      - 'src/streaming_server/**'
+      - 'scripts/check_shm_constants.py'
       - '.github/workflows/c.yml'
   workflow_dispatch:
 
@@ -49,3 +51,12 @@ jobs:
             exit 1
           fi
           echo "All C++ files formatted correctly"
+
+  shm-constants:
+    name: SHM constants agree
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check C / Python / Go copies against shm_constants.h
+        run: python3 scripts/check_shm_constants.py --verbose

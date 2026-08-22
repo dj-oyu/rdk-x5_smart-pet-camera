@@ -38,17 +38,39 @@ fi
 
 echo "[install] Installing ${TARGET} services from ${DEPLOY_DIR}/"
 
-# Copy all .service and .target files
+# Unit files are tracked as .example templates, never as ready-to-run units:
+# what a unit contains is device-specific (paths, model names, the user it runs
+# as), so the repository holds the template and the device holds the instance.
+# Installing strips the .example suffix.
+#
+# Templates may carry __PLACEHOLDER__ tokens. Those must be substituted before
+# installing — this script refuses rather than writing a broken unit.
 UNITS=()
-for f in "${DEPLOY_DIR}"/*.service "${DEPLOY_DIR}"/*.target; do
+for f in "${DEPLOY_DIR}"/*.example; do
   [[ -f "${f}" ]] || continue
-  unit="$(basename "${f}")"
+  unit="$(basename "${f}" .example)"
+
+  # Only systemd units are installed here; sudoers templates and the like are
+  # documented in scripts/USAGE.md and set up by hand.
+  case "${unit}" in
+    *.service | *.target | *.timer) ;;
+    *) continue ;;
+  esac
+
+  if grep -qE '__[A-Z_]+__' "${f}"; then
+    echo "[error] ${f} still contains placeholders:" >&2
+    grep -oE '__[A-Z_]+__' "${f}" | sort -u | sed 's/^/          /' >&2
+    echo "        Substitute them and re-run, e.g." >&2
+    echo "          sed 's/__USER__/youruser/' ${f} > /tmp/${unit} && sudo cp /tmp/${unit} ${SYSTEMD_DIR}/" >&2
+    exit 1
+  fi
+
   cp -v "${f}" "${SYSTEMD_DIR}/${unit}"
   UNITS+=("${unit}")
 done
 
 if [[ ${#UNITS[@]} -eq 0 ]]; then
-  echo "[warn] No service/target files found in ${DEPLOY_DIR}/"
+  echo "[warn] No unit templates (*.service.example, *.target.example, *.timer.example) found in ${DEPLOY_DIR}/"
   exit 0
 fi
 

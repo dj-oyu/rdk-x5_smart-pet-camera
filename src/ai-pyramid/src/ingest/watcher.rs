@@ -210,7 +210,14 @@ impl PhotoWatcher {
         while let Some(filename) = rx.recv().await {
             let jpeg_path = photos_dir.join(&filename);
             if !jpeg_path.exists() {
+                // Source jpeg was deleted (e.g. by GC) after its DB row was
+                // created. Bump vlm_attempts so the row eventually drops out of
+                // the pending set instead of being re-queued forever every
+                // rescan. A few retries still tolerate a transient race.
                 warn!("Observation source missing {filename}");
+                let _ = commands
+                    .record_observation_failure(&filename, "source file missing on disk")
+                    .await;
                 continue;
             }
 
@@ -324,4 +331,143 @@ async fn wait_file_stable(path: &Path) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::{ObservationInput, PhotoStoreRepository};
+    use crate::db::PhotoStore;
+    use chrono::NaiveDate;
+    use tokio::sync::broadcast;
+
+    fn test_watcher(photos_dir: &Path) -> PhotoWatcher {
+        let store = PhotoStore::open_in_memory().unwrap();
+        store.migrate().unwrap();
+        let (repository, _db) = PhotoStoreRepository::shared(store);
+        let (event_tx, _) = broadcast::channel(16);
+        let app = AppContext::new(
+            repository,
+            photos_dir.to_path_buf(),
+            event_tx,
+            None,
+            false,
+            VlmConfig::default(),
+            None,
+        );
+        PhotoWatcher::new(app, VlmConfig::default(), None, None)
+    }
+
+    fn observed_at(hour: u32) -> chrono::NaiveDateTime {
+        NaiveDate::from_ymd_opt(2026, 3, 21)
+            .unwrap()
+            .and_hms_opt(hour, 0, 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn jpeg_filter_matches_supported_extensions() {
+        assert!(is_jpeg("comic.jpg"));
+        assert!(is_jpeg("comic.JPG"));
+        assert!(is_jpeg("comic.jpeg"));
+        assert!(!is_jpeg("comic.JPEG"));
+        assert!(!is_jpeg("comic.png"));
+        assert!(!is_jpeg("comic.jpg.tmp"));
+    }
+
+    #[tokio::test]
+    async fn initial_scan_ingests_only_valid_comic_filenames() {
+        let photos = tempfile::tempdir().unwrap();
+        std::fs::write(
+            photos.path().join("comic_20260321_100000_mike.jpg"),
+            b"jpeg",
+        )
+        .unwrap();
+        std::fs::write(
+            photos.path().join("comic_20260321_110000_chatora.JPG"),
+            b"jpeg",
+        )
+        .unwrap();
+        std::fs::write(photos.path().join("not-a-comic.jpg"), b"jpeg").unwrap();
+        std::fs::write(photos.path().join("comic_20260321_120000_mike.png"), b"png").unwrap();
+
+        let watcher = test_watcher(photos.path());
+        watcher.initial_scan().await;
+        let queries = watcher.app.event_queries();
+
+        assert!(
+            queries
+                .get_event_by_source("comic_20260321_100000_mike.jpg")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            queries
+                .get_event_by_source("comic_20260321_110000_chatora.JPG")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            queries
+                .get_event_by_source("not-a-comic.jpg")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_pending_excludes_sources_at_retry_limit() {
+        let photos = tempfile::tempdir().unwrap();
+        let watcher = test_watcher(photos.path());
+        let commands = watcher.app.observation_commands();
+
+        for (filename, hour) in [("retry.jpg", 10), ("ready.jpg", 11)] {
+            commands
+                .ingest_source_photo(ObservationInput {
+                    source_filename: filename.to_string(),
+                    captured_at: observed_at(hour),
+                    pet_id: None,
+                })
+                .await
+                .unwrap();
+        }
+        for _ in 0..MAX_VLM_ATTEMPTS {
+            commands
+                .record_observation_failure("retry.jpg", "source missing")
+                .await
+                .unwrap();
+        }
+
+        let (tx, mut rx) = mpsc::channel(4);
+        watcher.queue_pending(&tx).await;
+
+        let queued = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("pending source was not queued");
+        assert_eq!(queued.as_deref(), Some("ready.jpg"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stable_file_check_rejects_missing_and_empty_files() {
+        let photos = tempfile::tempdir().unwrap();
+        let missing = photos.path().join("missing.jpg");
+        let empty = photos.path().join("empty.jpg");
+        std::fs::write(&empty, b"").unwrap();
+
+        assert!(!wait_file_stable(&missing).await);
+        assert!(!wait_file_stable(&empty).await);
+    }
+
+    #[tokio::test]
+    async fn stable_file_check_accepts_unchanged_nonempty_file() {
+        let photos = tempfile::tempdir().unwrap();
+        let image = photos.path().join("stable.jpg");
+        std::fs::write(&image, b"complete jpeg payload").unwrap();
+
+        assert!(wait_file_stable(&image).await);
+    }
 }

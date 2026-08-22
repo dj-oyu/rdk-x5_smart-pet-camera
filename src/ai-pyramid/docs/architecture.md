@@ -71,6 +71,25 @@ graph LR
 - リクエストは `mpsc::channel` 経由で逐次処理、ロック不要
 - `rusqlite::Connection` は `Send` だが `!Sync` → 単一スレッド所有が最適
 
+### DB command dispatch
+
+`application/db_thread.rs` は `Database`、公開 `DbCommand`、単一thread loopを保持する。
+store呼び出しはdomain別に分割され、album系22 commandを
+`application/db_thread/album.rs`、training/background系15 commandを
+`application/db_thread/training.rs` が処理する。`DbCommand::into_domain` と両dispatcherは
+全variantを明示列挙するため、variant追加時の振り分け漏れはコンパイル時に検出される。
+
+## Runtime composition
+
+- `main.rs`: dotenv読込、tracing初期化、CLI parse、bootstrap呼び出しのみ
+- `bootstrap/mod.rs`: DB・VLM・detector・watcher・training・router・TLS serverの構築と起動
+- `server/mod.rs`: `AppState` とroute composition
+- `server/album.rs`: photo/event/detection metadata REST
+- `server/detection.rs`: backfillとdetect-now workflow
+- `server/events.rs`: album/night-assist SSE
+- `server/summary.rs`: daily summary
+- `server/assets.rs` / `test_pages.rs`: embedded SPAと診断ページ
+
 ---
 
 ## API Endpoints
@@ -231,6 +250,11 @@ App
 └── BackfillButton     # detection backfill 実行ボタン (standalone sidebar)
 ```
 
+`EventDetail` のmetadata編集とdetection一覧は、それぞれ
+`components/event-detail/metadata-editor.tsx` と
+`components/event-detail/detection-list.tsx` に分離する。親componentはnavigation、canvas、
+zoom、API mutation orchestrationを保持する。
+
 ### API Client (api.ts)
 
 | Function | Endpoint |
@@ -251,13 +275,33 @@ SSE: `EventSource("/api/events")` でリアルタイム更新。
 
 ## External Integrations
 
-### VLM (vlm/mod.rs)
+### VLM (`vlm/`)
 
 - OpenAI 互換 Chat API (`/v1/chat/completions`)
 - base64 エンコードした JPEG を image_url で送信
 - レスポンス: `{is_valid, caption, behavior}` (JSON)
 - リトライ: 1回 (NoneType エラー対策)
 - デフォルト: `http://localhost:8000`, model `AXERA-TECH/Qwen3-VL-2B-Instruct-GPTQ-Int4-C256-P3584-CTX4095`, max_tokens 128
+- `mod.rs`: configと公開facade
+- `client.rs`: image encode、HTTP request、summary、model swap orchestration
+- `parser.rs`: JSON抽出・互換parse・出力sanitization
+- `supervisor.rs`: systemd操作とmodel readiness polling
+
+### Local detector (`detect/local/`)
+
+- `local.rs`: 公開facade、設定、画像file入力
+- `wire.rs`: 16-byte request、12-byte response/detection protocol（NV12はreserved fieldでrow strideを通知）
+- `client.rs`: Unix socket transport
+- `image_conversion.rs`: RGB→NV12変換（AX650 IVPS向け16-byte aligned stride）
+- `pipeline.rs`: YOLO26l raw-first実行、pet未検出時の4-panel fallback、bbox変換・merge
+
+Local detectorはpetcameraと同じ6 COCO class（person、cat、dog、cup、bowl、chair）だけを
+argmax前に評価する。YOLO11sとアスペクト比変形は使用しない。Level 2が写真全体で
+cat/dogを1件も検出できなかった場合は、comic化前の高解像度frameで得たLevel 1の
+cat/dog行だけを`det_level=2`、`model=level1-inherited`として保存する。bbox、confidence、
+pet identity、color metricsは引き継ぐが、Level 1の非pet classは引き継がない。Level 2が
+少なくとも1件のpetを検出した場合は、panel単位の欠落に限りDB queryがLevel 1 catを
+fallbackとして返す。
 
 ### PhotoWatcher (ingest/watcher.rs)
 

@@ -6,16 +6,18 @@
  *
  * When changing constants:
  * 1. Edit this file only
- * 2. Rebuild C (make -C src/capture)
- * 3. Rebuild Go (go build ./...)
- * 4. Update Python real_shared_memory.py RING_BUFFER_SIZE to match
+ * 2. Update the copies: Python src/capture/real_shared_memory.py and the
+ *    Go defaults (cmd/server/main.go, internal/webmonitor/config.go, ...)
+ * 3. Run `make check-shm` — it fails if any copy drifted
+ * 4. Rebuild C (make -C src/capture) and Go (go build ./...)
  * 5. rm /dev/shm/pet_camera_* before testing
  *
- * SHM layout (3 segments):
+ * SHM layout (4 primary segments + 2 ROI):
  *   /pet_camera_h265_zc    — H.265 stream zero-copy (encoder → Go streaming)
  *   /pet_camera_yolo_zc    — YOLO input zero-copy (camera → Python detector)
  *   /pet_camera_detections — Detection results (Python detector → Go web_monitor)
- *   /pet_camera_mjpeg_frame — MJPEG NV12 (camera → Go web_monitor, TODO: zero-copy)
+ *   /pet_camera_mjpeg_zc   — MJPEG NV12 zero-copy (camera → Go web_monitor)
+ *   /pet_camera_roi_zc_0,1 — Night camera pre-cropped 640x640 regions
  */
 
 #ifndef SHM_CONSTANTS_H

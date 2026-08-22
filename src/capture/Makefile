@@ -6,7 +6,7 @@ BUILD_DIR := ../../build
 
 LDFLAGS := -L/usr/hobot/lib
 
-DAEMON_SOURCES := camera_daemon_main.c camera_pipeline.c camera_switcher.c vio_lowlevel.c encoder_lowlevel.c encoder_thread.c tcp_relay.c shared_memory.c isp_brightness.c logger.c
+DAEMON_SOURCES := camera_daemon_main.c camera_pipeline.c camera_switcher.c switch_signal.c vio_lowlevel.c encoder_lowlevel.c encoder_thread.c tcp_relay.c shared_memory.c isp_brightness.c logger.c rotating_log.c
 JPEG_ENCODER_SOURCES := jpeg_encoder.c logger.c
 N2D_COMIC_SOURCES := n2d_comic.c logger.c
 RGN_OVERLAY_SOURCES := rgn_overlay.c
@@ -29,7 +29,10 @@ LDLIBS_DAEMON := $(LDLIBS_COMMON) -lpthread -lcam -lvpf -lhbmem -lmultimedia -lm
 
 DAEMON_ARGS ?= -C 0 -P 1
 
-.PHONY: all clean run run-daemon cleanup kill-processes help jpeg-encoder-lib format check-format lint
+TEST_SWITCHER_BINARY := $(BUILD_DIR)/test_camera_switcher
+TEST_ROTLOG_BINARY   := $(BUILD_DIR)/test_rotating_log
+
+.PHONY: all clean run run-daemon cleanup kill-processes help jpeg-encoder-lib format check-format lint test
 
 all: $(DAEMON_BINARY) $(JPEG_ENCODER_LIB) $(N2D_COMIC_LIB) $(RGN_OVERLAY_LIB) $(N2D_LETTERBOX_SO)
 
@@ -58,6 +61,19 @@ $(N2D_LETTERBOX_SO): $(N2D_LETTERBOX_SOURCES) | $(BUILD_DIR)
 
 jpeg-encoder-lib: $(JPEG_ENCODER_LIB)
 	@echo "[Build] JPEG encoder library: $(JPEG_ENCODER_LIB)"
+
+# Unit tests (pure logic, no camera hardware required)
+$(TEST_SWITCHER_BINARY): test_camera_switcher.c camera_switcher.c logger.c camera_switcher.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ test_camera_switcher.c camera_switcher.c logger.c -lpthread
+
+$(TEST_ROTLOG_BINARY): test_rotating_log.c rotating_log.c logger.c rotating_log.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ test_rotating_log.c rotating_log.c logger.c -lpthread
+
+test: $(TEST_SWITCHER_BINARY) $(TEST_ROTLOG_BINARY)
+	@echo "[Test] Running camera_switcher unit tests..."
+	@$(TEST_SWITCHER_BINARY)
+	@echo "[Test] Running rotating_log unit tests..."
+	@$(TEST_ROTLOG_BINARY)
 
 %.o: %.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
@@ -101,6 +117,7 @@ help:
 	@echo "  make cleanup         Remove camera processes and shared memory segments"
 	@echo "  make kill-processes  Kill running camera_daemon_drobotics and cam-service processes"
 	@echo "  make clean           Remove built binaries and object files"
+	@echo "  make test            Build and run unit tests (no hardware required)"
 	@echo "  make format          Format all C sources with clang-format"
 	@echo "  make check-format    Check formatting without modifying files (for CI)"
 	@echo "  make lint            Run clang-tidy static analysis (device only, needs vendor headers)"

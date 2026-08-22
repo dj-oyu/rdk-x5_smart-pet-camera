@@ -1,0 +1,12 @@
+[Unit]
+Description=Weekly GC of night_collect feeding frames
+PartOf=pet-camera.target
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1w
+Persistent=true
+Unit=pet-camera-night-gc.service
+
+[Install]
+WantedBy=pet-camera.target

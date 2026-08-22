@@ -67,12 +67,73 @@ func (ice *ICELite) HandleSTUN(data []byte, remoteAddr *net.UDPAddr) []byte {
 		return nil
 	}
 
+	// Authenticate the request before answering. Without this any host on
+	// the path could forge a Binding Request and hijack the ICE check
+	// (RFC 8445 §7.3). 認証に失敗したら無応答 (silently drop)。
+	if !ice.validateRequestAuth(data) {
+		return nil
+	}
+
 	// Extract transaction ID (bytes 8-20)
 	var txnID [12]byte
 	copy(txnID[:], data[8:20])
 
 	// Build Binding Response
 	return ice.buildBindingResponse(txnID, remoteAddr)
+}
+
+// validateRequestAuth verifies the short-term credentials on an inbound STUN
+// Binding Request (RFC 8445 §7.3 / RFC 5389 §10.1.2):
+//   - USERNAME must equal localUfrag:remoteUfrag (== STUNUsername()).
+//   - MESSAGE-INTEGRITY must be HMAC-SHA1(localPwd) over the message up to
+//     (but not including) the MI attribute, with the STUN length field fixed
+//     up to cover MI — same technique as ValidateBindingResponse.
+//
+// USERNAME か MESSAGE-INTEGRITY が欠落/不一致なら false を返す。
+func (ice *ICELite) validateRequestAuth(data []byte) bool {
+	// Walk attributes, recording USERNAME value and the MI attribute offset.
+	var username []byte
+	miOffset := -1 // start of MESSAGE-INTEGRITY attribute (incl. type/len)
+	offset := stunHeaderSize
+	for offset+4 <= len(data) {
+		attrType := binary.BigEndian.Uint16(data[offset : offset+2])
+		attrLen := int(binary.BigEndian.Uint16(data[offset+2 : offset+4]))
+		valStart := offset + 4
+		valEnd := valStart + attrLen
+		if valEnd > len(data) {
+			return false
+		}
+		switch attrType {
+		case stunAttrUsername:
+			username = data[valStart:valEnd]
+		case stunAttrMessageIntegrity:
+			miOffset = offset
+		}
+		// Pad to 4-byte boundary.
+		if pad := attrLen % 4; pad != 0 {
+			valEnd += 4 - pad
+		}
+		offset = valEnd
+	}
+
+	// USERNAME must match localUfrag:remoteUfrag exactly.
+	if username == nil || string(username) != ice.STUNUsername() {
+		return false
+	}
+
+	// MESSAGE-INTEGRITY must be present and valid under localPwd.
+	if miOffset < 0 || miOffset+4+20 > len(data) {
+		return false
+	}
+	miLen := miOffset - stunHeaderSize + 24
+	miSnapshot := make([]byte, miOffset)
+	copy(miSnapshot, data[:miOffset])
+	binary.BigEndian.PutUint16(miSnapshot[2:4], uint16(miLen))
+	mac := hmac.New(sha1.New, []byte(ice.localPwd))
+	mac.Write(miSnapshot)
+	wantMI := mac.Sum(nil)
+	gotMI := data[miOffset+4 : miOffset+4+20]
+	return hmac.Equal(wantMI, gotMI)
 }
 
 // buildBindingResponse creates a STUN Binding Response with:
@@ -123,15 +184,18 @@ func (ice *ICELite) buildBindingResponse(txnID [12]byte, addr *net.UDPAddr) []by
 func buildXORMappedAddress(addr *net.UDPAddr, txnID [12]byte) []byte {
 	ip4 := addr.IP.To4()
 	if ip4 == nil {
-		// IPv6 - simplified, XOR with magic cookie + txn ID
-		buf := []byte{0, 0x02} // Family: IPv6
-		binary.BigEndian.AppendUint16(buf, uint16(addr.Port)^uint16(stunMagicCookie>>16))
+		// IPv6: family + xor-port + xor-address(16). XOR key for the address
+		// is magic-cookie || txn-id (RFC 5389 §15.2).
 		ip := addr.IP.To16()
-		xorKey := make([]byte, 16)
+		buf := make([]byte, 4+16)
+		buf[0] = 0
+		buf[1] = 0x02 // Family: IPv6
+		binary.BigEndian.PutUint16(buf[2:4], uint16(addr.Port)^uint16(stunMagicCookie>>16))
+		var xorKey [16]byte
 		binary.BigEndian.PutUint32(xorKey[0:4], stunMagicCookie)
 		copy(xorKey[4:], txnID[:])
-		for i := range ip {
-			buf = append(buf, ip[i]^xorKey[i])
+		for i := 0; i < 16; i++ {
+			buf[4+i] = ip[i] ^ xorKey[i]
 		}
 		return buf
 	}

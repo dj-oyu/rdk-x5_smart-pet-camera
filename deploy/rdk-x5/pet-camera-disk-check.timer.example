@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly disk usage check for the camera stack
+PartOf=pet-camera.target
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+Persistent=true
+Unit=pet-camera-disk-check.service
+
+[Install]
+WantedBy=pet-camera.target

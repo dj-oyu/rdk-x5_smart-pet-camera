@@ -1,40 +1,16 @@
-use base64::Engine;
-use serde::{Deserialize, Serialize};
-use std::io::Cursor;
-use std::path::Path;
 use std::time::Duration;
 
-const VLM_PROMPT: &str = r#"Analyze this photo of a pet camera feed. Respond with valid JSON only, no markdown.
-{"is_valid": true if a cat is clearly visible else false,
- "caption": "one sentence describing the cat's appearance and action",
- "behavior": one of "eating","drinking","sleeping","playing","resting","moving","grooming","other"}"#;
+mod client;
+mod parser;
+mod supervisor;
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct VlmResponse {
-    pub is_valid: bool,
-    #[serde(default)]
-    pub caption: String,
-    #[serde(default)]
-    pub behavior: String,
-}
+pub use client::VlmClient;
+pub use parser::{VlmResponse, parse_vlm_response};
 
-pub fn parse_vlm_response(raw: &str) -> Result<VlmResponse, String> {
-    let text = raw.trim();
-    // Strip markdown fences if present
-    let json_str = if text.starts_with("```") {
-        let inner = text
-            .strip_prefix("```json")
-            .or_else(|| text.strip_prefix("```"))
-            .unwrap_or(text);
-        inner.strip_suffix("```").unwrap_or(inner).trim()
-    } else {
-        text
-    };
-
-    serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {e}, raw: {raw}"))
-}
-
-const DAY_SUMMARY_PROMPT: &str = "Summarize this cat's day based on these timestamped observations. Describe activity patterns and notable moments in 2-3 sentences. Respond in plain Japanese text, no JSON.";
+#[cfg(test)]
+use parser::strip_think;
+#[cfg(test)]
+use supervisor::wait_for_model;
 
 #[derive(Debug, Clone)]
 pub struct VlmConfig {
@@ -55,277 +31,32 @@ impl Default for VlmConfig {
     }
 }
 
-pub struct VlmClient {
-    config: VlmConfig,
-    http: reqwest::Client,
+/// Optional configuration for swapping the active axllm-serve model during a
+/// single inference call. The AX650 NPU is exclusive (one axllm process at a
+/// time, see `docs/ai-pyramid` notes), so the swap stops the vision unit,
+/// starts the text unit, runs inference against `text_model`, then restores
+/// the vision unit. Used by daily summary so we can borrow Gemma's clean
+/// Japanese while keeping Qwen as the captioning workhorse.
+/// `vision_*` names the multimodal model that serves per-photo captioning
+/// the rest of the day; `text_*` names the text-only model invoked once for
+/// the daily summary.
+#[derive(Debug, Clone)]
+pub struct VlmSwapConfig {
+    pub vision_unit: String,
+    pub text_unit: String,
+    pub text_model: String,
+    pub ready_timeout: Duration,
+    pub poll_interval: Duration,
 }
-
-#[derive(Serialize)]
-struct ChatRequest {
-    model: String,
-    messages: Vec<Message>,
-    max_tokens: u32,
-    temperature: f32,
-}
-
-#[derive(Serialize)]
-struct Message {
-    role: String,
-    content: Vec<ContentPart>,
-}
-
-#[derive(Serialize)]
-#[serde(tag = "type")]
-enum ContentPart {
-    #[serde(rename = "image_url")]
-    ImageUrl { image_url: ImageUrlData },
-    #[serde(rename = "text")]
-    Text { text: String },
-}
-
-#[derive(Serialize)]
-struct ImageUrlData {
-    url: String,
-}
-
-#[derive(Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
-}
-
-#[derive(Deserialize)]
-struct Choice {
-    message: ChoiceMessage,
-}
-
-#[derive(Deserialize)]
-struct ChoiceMessage {
-    content: String,
-}
-
-/// Resize a JPEG to target dimensions and return a data URL with base64 encoding.
-/// Writes directly into a pre-allocated String to minimize copies.
-fn encode_resized_jpeg(path: &Path, w: u32, h: u32) -> Result<String, String> {
-    let img = image::open(path).map_err(|e| format!("image open {}: {e}", path.display()))?;
-    let resized = img.resize_exact(w, h, image::imageops::FilterType::Triangle);
-    let mut jpeg_buf = Cursor::new(Vec::with_capacity(32 * 1024));
-    resized
-        .write_to(&mut jpeg_buf, image::ImageFormat::Jpeg)
-        .map_err(|e| format!("jpeg encode: {e}"))?;
-    let jpeg_bytes = jpeg_buf.into_inner();
-
-    // Build data URL in one allocation
-    let b64_len = jpeg_bytes.len().div_ceil(3) * 4;
-    let mut url = String::with_capacity("data:image/jpeg;base64,".len() + b64_len);
-    url.push_str("data:image/jpeg;base64,");
-    base64::engine::general_purpose::STANDARD.encode_string(&jpeg_bytes, &mut url);
-    Ok(url)
-}
-
-impl VlmClient {
-    pub fn new(config: VlmConfig) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(config.timeout)
-            .build()
-            .expect("failed to build HTTP client");
-        Self { config, http }
-    }
-
-    pub async fn analyze(&self, jpeg_path: &Path) -> Result<VlmResponse, String> {
-        // VLM vision encoder uses 384×384 — resize before encoding to save memory & bandwidth.
-        // Comic images are 848×496 (~100-300KB) → 384×384 JPEG (~15-30KB).
-        let data_url = encode_resized_jpeg(jpeg_path, 384, 384)?;
-
-        let request = ChatRequest {
-            model: self.config.model.clone(),
-            messages: vec![Message {
-                role: "user".into(),
-                content: vec![
-                    ContentPart::ImageUrl {
-                        image_url: ImageUrlData { url: data_url },
-                    },
-                    ContentPart::Text {
-                        text: VLM_PROMPT.into(),
-                    },
-                ],
-            }],
-            max_tokens: self.config.max_tokens,
-            temperature: 0.1,
-        };
-
-        let url = format!("{}/v1/chat/completions", self.config.base_url);
-
-        // Single retry for transient errors (known ax-llm NoneType issue)
-        let mut last_err = String::new();
-        for attempt in 0..2 {
-            match self.http.post(&url).json(&request).send().await {
-                Ok(resp) => {
-                    if !resp.status().is_success() {
-                        let status = resp.status();
-                        let body = resp.text().await.unwrap_or_default();
-                        last_err = format!("VLM API {status}: {body}");
-                        if attempt == 0 {
-                            continue;
-                        }
-                        return Err(last_err);
-                    }
-                    let chat_resp: ChatResponse = resp
-                        .json()
-                        .await
-                        .map_err(|e| format!("VLM response decode: {e}"))?;
-
-                    let content = chat_resp
-                        .choices
-                        .first()
-                        .map(|c| c.message.content.as_str())
-                        .unwrap_or("");
-
-                    return parse_vlm_response(content);
-                }
-                Err(e) => {
-                    last_err = format!("VLM request failed: {e}");
-                    if attempt == 0 {
-                        continue;
-                    }
-                }
-            }
-        }
-        Err(last_err)
-    }
-
-    /// Analyze with detection context injected into the prompt.
-    /// Detection descriptions like "cat (81%), bowl (50%)" help ground the VLM output.
-    pub async fn analyze_with_detections(
-        &self,
-        jpeg_path: &Path,
-        detection_context: &str,
-    ) -> Result<VlmResponse, String> {
-        let data_url = encode_resized_jpeg(jpeg_path, 384, 384)?;
-
-        let prompt = format!(
-            "Analyze this photo of a pet camera feed.\nDetected objects: {detection_context}\nUse these detections as reference. Respond with valid JSON only, no markdown.\n\
-             {{\"is_valid\": true if a cat is clearly visible else false,\n\
-             \"caption\": \"one sentence describing the cat's appearance and action\",\n\
-             \"behavior\": one of \"eating\",\"drinking\",\"sleeping\",\"playing\",\"resting\",\"moving\",\"grooming\",\"other\"}}"
-        );
-
-        let request = ChatRequest {
-            model: self.config.model.clone(),
-            messages: vec![Message {
-                role: "user".into(),
-                content: vec![
-                    ContentPart::ImageUrl {
-                        image_url: ImageUrlData { url: data_url },
-                    },
-                    ContentPart::Text { text: prompt },
-                ],
-            }],
-            max_tokens: self.config.max_tokens,
-            temperature: 0.1,
-        };
-
-        let url = format!("{}/v1/chat/completions", self.config.base_url);
-        let mut last_err = String::new();
-        for attempt in 0..2 {
-            match self.http.post(&url).json(&request).send().await {
-                Ok(resp) => {
-                    if !resp.status().is_success() {
-                        let status = resp.status();
-                        let body = resp.text().await.unwrap_or_default();
-                        last_err = format!("VLM API {status}: {body}");
-                        if attempt == 0 {
-                            continue;
-                        }
-                        return Err(last_err);
-                    }
-                    let chat_resp: ChatResponse = resp
-                        .json()
-                        .await
-                        .map_err(|e| format!("VLM response decode: {e}"))?;
-                    let content = chat_resp
-                        .choices
-                        .first()
-                        .map(|c| c.message.content.as_str())
-                        .unwrap_or("");
-                    return parse_vlm_response(content);
-                }
-                Err(e) => {
-                    last_err = format!("VLM request failed: {e}");
-                    if attempt == 0 {
-                        continue;
-                    }
-                }
-            }
-        }
-        Err(last_err)
-    }
-
-    /// Summarize a day's observations, optionally with a representative photo.
-    pub async fn summarize_day(
-        &self,
-        captions: &[String],
-        photo_path: Option<&Path>,
-    ) -> Result<String, String> {
-        // Limit to most recent 50 captions to stay within 3,584 token context
-        let recent: &[String] = if captions.len() > 50 {
-            &captions[captions.len() - 50..]
-        } else {
-            captions
-        };
-        let observations = recent.join("\n- ");
-        let user_text = format!("Observations:\n- {observations}\n\n{DAY_SUMMARY_PROMPT}");
-
-        let mut content = Vec::new();
-        if let Some(path) = photo_path
-            && let Ok(data_url) = encode_resized_jpeg(path, 384, 384)
-        {
-            content.push(ContentPart::ImageUrl {
-                image_url: ImageUrlData { url: data_url },
-            });
-        }
-        content.push(ContentPart::Text { text: user_text });
-
-        let request = ChatRequest {
-            model: self.config.model.clone(),
-            messages: vec![Message {
-                role: "user".into(),
-                content,
-            }],
-            max_tokens: 256,
-            temperature: 0.3,
-        };
-
-        let url = format!("{}/v1/chat/completions", self.config.base_url);
-        let resp = self
-            .http
-            .post(&url)
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| format!("VLM request failed: {e}"))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("VLM API {status}: {body}"));
-        }
-
-        let chat_resp: ChatResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("VLM response decode: {e}"))?;
-
-        Ok(chat_resp
-            .choices
-            .first()
-            .map(|c| c.message.content.trim().to_string())
-            .unwrap_or_default())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn jpeg_fixture() -> tempfile::NamedTempFile {
+        let tmp = tempfile::Builder::new().suffix(".jpg").tempfile().unwrap();
+        image::RgbImage::new(1, 1).save(tmp.path()).unwrap();
+        tmp
+    }
 
     #[test]
     fn parse_valid_json() {
@@ -359,6 +90,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_with_think_wrapper() {
+        let raw = "<think>\n\n</think>\n\n{\"is_valid\": true, \"caption\": \"cat eating\", \"behavior\": \"eating\"}";
+        let resp = parse_vlm_response(raw).unwrap();
+        assert!(resp.is_valid);
+        assert_eq!(resp.behavior, "eating");
+    }
+
+    #[test]
+    fn parse_with_think_and_fences() {
+        let raw = "<think>\nThinking...\n</think>\n\n```json\n{\"is_valid\": false, \"caption\": \"no cat\", \"behavior\": \"other\"}\n```";
+        let resp = parse_vlm_response(raw).unwrap();
+        assert!(!resp.is_valid);
+        assert_eq!(resp.behavior, "other");
+    }
+
+    #[test]
     fn parse_with_whitespace() {
         let raw =
             "  \n  {\"is_valid\": true, \"caption\": \"cat\", \"behavior\": \"eating\"}  \n  ";
@@ -366,14 +113,38 @@ mod tests {
         assert!(resp.is_valid);
     }
 
+    #[test]
+    fn strip_think_removes_well_formed_block() {
+        let raw = "<think>internal reasoning</think>\n猫はテーブルで食事をしていました。";
+        assert_eq!(strip_think(raw), "猫はテーブルで食事をしていました。");
+    }
+
+    #[test]
+    fn strip_think_handles_unterminated_block() {
+        // If the assistant produces an opening <think> but the response gets
+        // truncated before the closer, drop everything after the opener so we
+        // never surface raw reasoning to the user.
+        let raw = "前置き<think>unterminated reasoning that never closes";
+        assert_eq!(strip_think(raw), "前置き");
+    }
+
+    #[test]
+    fn strip_think_passes_through_clean_text() {
+        let raw = "猫は窓辺で日向ぼっこをしていました。";
+        assert_eq!(strip_think(raw), "猫は窓辺で日向ぼっこをしていました。");
+    }
+
+    #[test]
+    fn strip_think_handles_multiple_blocks() {
+        let raw = "<think>a</think>あ<think>b</think>い";
+        assert_eq!(strip_think(raw), "あい");
+    }
+
     #[tokio::test]
     async fn client_with_mock_server() {
         use axum::{Json, Router, routing::post};
 
-        // Create a valid 1x1 JPEG using image crate
-        let tmp = tempfile::Builder::new().suffix(".jpg").tempfile().unwrap();
-        let img = image::RgbImage::new(1, 1);
-        img.save(tmp.path()).unwrap();
+        let tmp = jpeg_fixture();
 
         // Mock VLM API using axum
         let app = Router::new().route("/v1/chat/completions", post(|| async {
@@ -401,5 +172,88 @@ mod tests {
         assert!(resp.is_valid);
         assert_eq!(resp.caption, "A ginger cat");
         assert_eq!(resp.behavior, "resting");
+    }
+
+    #[tokio::test]
+    async fn analyze_retries_once_after_http_error() {
+        use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let seen = attempts.clone();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let seen = seen.clone();
+                async move {
+                    if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                        return (StatusCode::SERVICE_UNAVAILABLE, "warming up").into_response();
+                    }
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "message": {
+                                "content": r#"{"is_valid": true, "caption": "Recovered", "behavior": "resting"}"#
+                            }
+                        }]
+                    }))
+                    .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let client = VlmClient::new(VlmConfig {
+            base_url: format!("http://{addr}"),
+            ..Default::default()
+        });
+
+        let tmp = jpeg_fixture();
+        let response = client.analyze(tmp.path()).await.unwrap();
+
+        assert_eq!(response.caption, "Recovered");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn wait_for_model_accepts_only_requested_model_id() {
+        use axum::{Json, Router, routing::get};
+
+        let app = Router::new().route(
+            "/v1/models",
+            get(|| async { Json(serde_json::json!({"data": [{"id": "vision-model"}]})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        let http = reqwest::Client::new();
+
+        wait_for_model(
+            &http,
+            &format!("http://{addr}"),
+            "vision-model",
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+        let error = wait_for_model(
+            &http,
+            &format!("http://{addr}"),
+            "other-model",
+            Duration::from_millis(10),
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("other-model"));
+        assert!(error.contains("not ready"));
     }
 }
