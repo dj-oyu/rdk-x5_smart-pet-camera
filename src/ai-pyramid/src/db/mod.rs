@@ -75,7 +75,7 @@ pub struct DetectionInput {
     /// 1=RDK X5 realtime, 2=AI Pyramid high-precision
     #[serde(default = "default_det_level")]
     pub det_level: i32,
-    /// Model identifier (e.g. "yolo26n-bpu", "yolo11s-ax650")
+    /// Model identifier (e.g. "yolo26n-bpu", "yolo26l-ax650-raw-first")
     #[serde(default)]
     pub model: Option<String>,
 }
@@ -386,14 +386,34 @@ impl PhotoStore {
         Ok(photo_id)
     }
 
-    /// Return detections for a photo, preferring highest det_level available.
+    /// Return the highest detection level plus an L1 cat fallback for panels
+    /// where a higher level found objects but missed the cat.
     pub fn get_detections(&self, photo_id: i64) -> rusqlite::Result<Vec<Detection>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, photo_id, panel_index, bbox_x, bbox_y, bbox_w, bbox_h, yolo_class, pet_class, pet_id_override, confidence, detected_at, color_metrics, det_level, model
-             FROM detections
-             WHERE photo_id = ?1
-               AND det_level = (SELECT COALESCE(MAX(det_level), 1) FROM detections WHERE photo_id = ?1)
-             ORDER BY panel_index",
+             FROM detections d
+             WHERE d.photo_id = ?1
+               AND (
+                   d.det_level = (
+                       SELECT COALESCE(MAX(d2.det_level), 1)
+                       FROM detections d2 WHERE d2.photo_id = d.photo_id
+                   )
+                   OR (
+                       d.det_level = 1
+                       AND d.yolo_class = 'cat'
+                       AND NOT EXISTS (
+                           SELECT 1 FROM detections higher
+                           WHERE higher.photo_id = d.photo_id
+                             AND higher.det_level > d.det_level
+                             AND higher.yolo_class = 'cat'
+                             AND (
+                                 higher.panel_index = d.panel_index
+                                 OR (higher.panel_index IS NULL AND d.panel_index IS NULL)
+                             )
+                       )
+                   )
+               )
+             ORDER BY d.panel_index, d.det_level DESC",
         )?;
         let dets = stmt
             .query_map(params![photo_id], Self::map_detection_row)?
@@ -435,11 +455,27 @@ impl PhotoStore {
             "SELECT d.photo_id, d.bbox_x, d.bbox_y, d.bbox_w, d.bbox_h \
              FROM detections d \
              WHERE d.photo_id IN ({placeholders}) \
-               AND d.det_level = ( \
-                   SELECT COALESCE(MAX(d2.det_level), 1) \
-                   FROM detections d2 WHERE d2.photo_id = d.photo_id \
+               AND ( \
+                   d.det_level = ( \
+                       SELECT COALESCE(MAX(d2.det_level), 1) \
+                       FROM detections d2 WHERE d2.photo_id = d.photo_id \
+                   ) \
+                   OR ( \
+                       d.det_level = 1 \
+                       AND d.yolo_class = 'cat' \
+                       AND NOT EXISTS ( \
+                           SELECT 1 FROM detections higher \
+                           WHERE higher.photo_id = d.photo_id \
+                             AND higher.det_level > d.det_level \
+                             AND higher.yolo_class = 'cat' \
+                             AND ( \
+                                 higher.panel_index = d.panel_index \
+                                 OR (higher.panel_index IS NULL AND d.panel_index IS NULL) \
+                             ) \
+                       ) \
+                   ) \
                ) \
-             ORDER BY d.photo_id"
+             ORDER BY d.photo_id, d.panel_index, d.det_level DESC"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let params: Vec<Box<dyn rusqlite::types::ToSql>> = photo_ids
@@ -1365,5 +1401,90 @@ mod tests {
         let l1_bboxes = map.get(&l1only_id).unwrap();
         assert_eq!(l1_bboxes.len(), 1);
         assert_eq!(l1_bboxes[0].bbox_x, 30);
+    }
+
+    #[test]
+    fn l1_cat_falls_back_per_panel_when_l2_misses_it() {
+        let store = setup();
+        let ts = dt(2026, 8, 22, 23, 4, 27);
+        let l1_dets = vec![
+            DetectionInput {
+                panel_index: Some(0),
+                bbox_x: 93,
+                bbox_y: 119,
+                bbox_w: 68,
+                bbox_h: 46,
+                yolo_class: Some("cat".into()),
+                pet_class: Some("mike".into()),
+                confidence: Some(0.657),
+                detected_at: "2026-08-22T23:04:27".into(),
+                color_metrics: None,
+                det_level: 1,
+                model: Some("yolo26n-bpu".into()),
+            },
+            DetectionInput {
+                panel_index: Some(1),
+                bbox_x: 520,
+                bbox_y: 120,
+                bbox_w: 90,
+                bbox_h: 90,
+                yolo_class: Some("cat".into()),
+                pet_class: Some("mike".into()),
+                confidence: Some(0.61),
+                detected_at: "2026-08-22T23:04:27".into(),
+                color_metrics: None,
+                det_level: 1,
+                model: Some("yolo26n-bpu".into()),
+            },
+        ];
+        let photo_id = store
+            .ingest_with_detections("comic_20260822_230427_mike.jpg", ts, Some("mike"), &l1_dets)
+            .unwrap();
+
+        let l2_dets = vec![
+            DetectionInput {
+                panel_index: Some(0),
+                bbox_x: 98,
+                bbox_y: 141,
+                bbox_w: 39,
+                bbox_h: 29,
+                yolo_class: Some("bowl".into()),
+                pet_class: None,
+                confidence: Some(0.54),
+                detected_at: "2026-08-22T23:04:27".into(),
+                color_metrics: None,
+                det_level: 2,
+                model: Some("yolo26l-ax650-raw-first".into()),
+            },
+            DetectionInput {
+                panel_index: Some(1),
+                bbox_x: 525,
+                bbox_y: 125,
+                bbox_w: 85,
+                bbox_h: 85,
+                yolo_class: Some("cat".into()),
+                pet_class: None,
+                confidence: Some(0.82),
+                detected_at: "2026-08-22T23:04:27".into(),
+                color_metrics: None,
+                det_level: 2,
+                model: Some("yolo26l-ax650-raw-first".into()),
+            },
+        ];
+        store
+            .ingest_with_detections("comic_20260822_230427_mike.jpg", ts, Some("mike"), &l2_dets)
+            .unwrap();
+
+        let detections = store.get_detections(photo_id).unwrap();
+        assert_eq!(detections.len(), 3);
+        assert_eq!(detections[0].yolo_class.as_deref(), Some("bowl"));
+        assert_eq!(detections[0].det_level, 2);
+        assert_eq!(detections[1].yolo_class.as_deref(), Some("cat"));
+        assert_eq!(detections[1].det_level, 1);
+        assert_eq!(detections[2].yolo_class.as_deref(), Some("cat"));
+        assert_eq!(detections[2].det_level, 2);
+
+        let bboxes = store.get_bboxes_for_photos(&[photo_id]).unwrap();
+        assert_eq!(bboxes.get(&photo_id).unwrap().len(), 3);
     }
 }
