@@ -120,12 +120,16 @@ pub(super) async fn handle_daily_summary(
                 photo_count,
             };
             let json = serde_json::to_value(&resp).unwrap();
-            state.daily_summary_cache.lock().await.replace(CachedSummary {
-                date,
-                cached_at: Instant::now(),
-                ttl: SUMMARY_TTL,
-                json,
-            });
+            state
+                .daily_summary_cache
+                .lock()
+                .await
+                .replace(CachedSummary {
+                    date,
+                    cached_at: Instant::now(),
+                    ttl: SUMMARY_TTL,
+                    json,
+                });
             Json(resp).into_response()
         }
         Err(e) => {
@@ -140,12 +144,16 @@ pub(super) async fn handle_daily_summary(
                 photo_count,
             };
             let json = serde_json::to_value(&resp).unwrap();
-            state.daily_summary_cache.lock().await.replace(CachedSummary {
-                date,
-                cached_at: Instant::now(),
-                ttl: SUMMARY_FAILURE_TTL,
-                json,
-            });
+            state
+                .daily_summary_cache
+                .lock()
+                .await
+                .replace(CachedSummary {
+                    date,
+                    cached_at: Instant::now(),
+                    ttl: SUMMARY_FAILURE_TTL,
+                    json,
+                });
             Json(resp).into_response()
         }
     }
