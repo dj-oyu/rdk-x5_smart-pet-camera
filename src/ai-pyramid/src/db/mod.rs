@@ -215,6 +215,13 @@ impl PhotoStore {
     /// twice however often it runs — which matters because it runs on every
     /// start rather than behind a schema version.
     fn migrate_timestamps_to_utc(&self) -> rusqlite::Result<()> {
+        /// One column's rows that still need converting.
+        struct LegacyColumn {
+            table: &'static str,
+            column: &'static str,
+            rows: Vec<(i64, String)>,
+        }
+
         // `training_frames.captured_at` was already UTC: it comes from a Unix
         // timestamp in the frame metadata (training/api/frames.rs), not from a
         // camera-local filename. It needs the suffix, never a shift.
@@ -224,6 +231,7 @@ impl PhotoStore {
             [],
         )?;
 
+        let mut pending: Vec<LegacyColumn> = Vec::new();
         for (table, column) in [
             ("photos", "captured_at"),
             ("photos", "detected_at"),
@@ -238,30 +246,52 @@ impl PhotoStore {
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?;
 
-            if legacy.is_empty() {
-                continue;
+            if !legacy.is_empty() {
+                pending.push(LegacyColumn {
+                    table,
+                    column,
+                    rows: legacy,
+                });
             }
+        }
 
-            let mut update = self
-                .conn
-                .prepare(&format!("UPDATE {table} SET {column} = ?1 WHERE id = ?2"))?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        // One transaction for the whole conversion. Row-at-a-time autocommit
+        // costs an fsync per row: on the first real run — 6.4k photos and 21.6k
+        // detections — that was ~100 rows/s, five minutes during which the
+        // album served nothing, because startup waits here.
+        let tx = self.conn.unchecked_transaction()?;
+        for LegacyColumn {
+            table,
+            column,
+            rows,
+        } in &pending
+        {
             let mut converted = 0usize;
-            for (id, stored) in &legacy {
-                // parse_db reads a suffix-less value as local, which is what
-                // these are.
-                if let Some(instant) = timestamps::parse_db(stored) {
-                    update.execute(params![timestamps::to_db(instant), id])?;
-                    converted += 1;
+            {
+                let mut update =
+                    tx.prepare(&format!("UPDATE {table} SET {column} = ?1 WHERE id = ?2"))?;
+                for (id, stored) in rows {
+                    // parse_db reads a suffix-less value as local, which is
+                    // what these are.
+                    if let Some(instant) = timestamps::parse_db(stored) {
+                        update.execute(params![timestamps::to_db(instant), id])?;
+                        converted += 1;
+                    }
                 }
             }
             tracing::info!(
                 table,
                 column,
                 converted,
-                skipped = legacy.len() - converted,
+                skipped = rows.len() - converted,
                 "migrated timestamps to UTC"
             );
         }
+        tx.commit()?;
 
         Ok(())
     }
@@ -977,6 +1007,46 @@ mod tests {
                 .and_hms_opt(h, mi, s)
                 .unwrap(),
         )
+    }
+
+    #[test]
+    fn legacy_timestamps_convert_once_and_stay_put() {
+        let store = PhotoStore::open_in_memory().unwrap();
+        store.migrate().unwrap();
+        // A row as written before crate::timestamps existed: no zone marker,
+        // camera-local. Inserted directly so it keeps that shape.
+        store
+            .conn
+            .execute(
+                "INSERT INTO photos (filename, captured_at, detected_at) \
+                 VALUES ('a.jpg', '2026-08-23T22:03:17', '2026-08-23T22:04:00')",
+                [],
+            )
+            .unwrap();
+
+        store.migrate_timestamps_to_utc().unwrap();
+        let converted: String = store
+            .conn
+            .query_row(
+                "SELECT captured_at FROM photos WHERE filename = 'a.jpg'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(converted, timestamps::to_db(dt(2026, 8, 23, 22, 3, 17)));
+
+        // Running again must not shift it a second time — the guard is the
+        // `Z`, not a schema version, so this happens on every start.
+        store.migrate_timestamps_to_utc().unwrap();
+        let after: String = store
+            .conn
+            .query_row(
+                "SELECT captured_at FROM photos WHERE filename = 'a.jpg'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, converted);
     }
 
     fn setup() -> PhotoStore {
