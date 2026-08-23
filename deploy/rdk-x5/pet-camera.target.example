@@ -10,4 +10,4 @@ Wants=comic-sync.service
 Wants=pet-camera-night-gc.timer
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=cam-service.service
