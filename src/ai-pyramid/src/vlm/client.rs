@@ -313,9 +313,13 @@ impl VlmClient {
         };
 
         let url = format!("{}/v1/chat/completions", self.config.base_url);
+        // Per-request override of the client-level captioning timeout: this
+        // single call carries a whole day of observations, so it needs a far
+        // longer budget than one 384x384 frame does.
         let resp = self
             .http
             .post(&url)
+            .timeout(self.config.summary_timeout)
             .json(&request)
             .send()
             .await

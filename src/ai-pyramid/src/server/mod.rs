@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
 use tokio::sync::Mutex;
 
 mod album;
@@ -55,7 +54,7 @@ pub struct AppState {
     pub local_detector: Option<Arc<crate::detect::local::LocalDetector>>,
     pub backfill_running: Arc<AtomicBool>,
     pub night_assist_host: Option<String>,
-    daily_summary_cache: Arc<Mutex<Option<(String, Instant, serde_json::Value)>>>,
+    daily_summary_cache: Arc<Mutex<Option<summary::CachedSummary>>>,
 }
 
 /// Load pet display names from environment variables.

@@ -44,6 +44,18 @@ pub struct Args {
     #[arg(long, default_value_t = 128)]
     vlm_max_tokens: u32,
 
+    /// Timeout (seconds) for the daily summary call, which sends a whole day
+    /// of observations in one request (~11s measured on an idle NPU, against
+    /// ~5-6s for a single frame). When it trips, the error text is what the
+    /// album shows in place of the summary, so keep it well above the
+    /// per-photo captioning timeout.
+    #[arg(
+        long,
+        env = "PET_ALBUM_VLM_SUMMARY_TIMEOUT_SECS",
+        default_value_t = 120
+    )]
+    vlm_summary_timeout_secs: u64,
+
     /// Systemd unit name of the vision (multimodal) axllm-serve instance —
     /// the one serving per-photo captioning. When `--vlm-swap-text-unit` is
     /// also set, daily summary will stop this unit, swap to the text-only
@@ -121,6 +133,7 @@ pub async fn run(args: Args) {
         model: args.vlm_model,
         max_tokens: args.vlm_max_tokens,
         timeout: Duration::from_secs(30),
+        summary_timeout: Duration::from_secs(args.vlm_summary_timeout_secs),
     };
 
     // Broadcast channels: PetEvent for application layer, PhotoEvent for SSE

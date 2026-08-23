@@ -17,7 +17,14 @@ pub struct VlmConfig {
     pub base_url: String,
     pub model: String,
     pub max_tokens: u32,
+    /// Per-photo captioning timeout. One 384x384 frame takes ~5-6s on the
+    /// AX650 with Qwen3.5-2B, so 30s is generous for that path.
     pub timeout: Duration,
+    /// Daily summary timeout. The summary sends up to `DAY_SUMMARY_OBS_LIMIT`
+    /// observations (plus a photo) in one request, which measured ~11s on an
+    /// idle NPU but exceeds the captioning timeout when the device is busy —
+    /// and a timeout there is surfaced to the UI as the summary text.
+    pub summary_timeout: Duration,
 }
 
 impl Default for VlmConfig {
@@ -27,6 +34,7 @@ impl Default for VlmConfig {
             model: "AXERA-TECH/Qwen3-VL-2B-Instruct-GPTQ-Int4-C256-P3584-CTX4095".into(),
             max_tokens: 128,
             timeout: Duration::from_secs(30),
+            summary_timeout: Duration::from_secs(120),
         }
     }
 }
@@ -218,6 +226,44 @@ mod tests {
 
         assert_eq!(response.caption, "Recovered");
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn summary_outlives_the_captioning_timeout() {
+        use axum::{Json, Router, routing::post};
+
+        // A server slower than the captioning budget but well inside the
+        // summary budget: captioning must give up, the summary must not.
+        async fn slow_summary() -> Json<serde_json::Value> {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            Json(serde_json::json!({
+                "choices": [{"message": {"content": "猫は窓辺にいました。日中は静かでした。"}}]
+            }))
+        }
+
+        let app = Router::new().route("/v1/chat/completions", post(slow_summary));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let client = VlmClient::new(VlmConfig {
+            base_url: format!("http://{addr}"),
+            timeout: Duration::from_millis(100),
+            summary_timeout: Duration::from_secs(10),
+            ..Default::default()
+        });
+
+        let summary = client
+            .summarize_day(&["12:00 a cat by the window".to_string()], None)
+            .await
+            .unwrap();
+        assert_eq!(summary, "猫は窓辺にいました。日中は静かでした。");
+
+        // Same client, captioning path: still bound by the short timeout.
+        let tmp = jpeg_fixture();
+        assert!(client.analyze(tmp.path()).await.is_err());
     }
 
     #[tokio::test]
