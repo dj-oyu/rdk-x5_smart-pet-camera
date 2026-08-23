@@ -7,11 +7,16 @@ export interface WebRTCState {
 export function useWebRTC(
   videoRef: preact.RefObject<HTMLVideoElement | null>,
   onError?: (error: Error) => void,
+  onFirstFrame?: () => void,
 ) {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const stateRef = useRef<string>('disconnected');
+  const firstFrameCleanupRef = useRef<(() => void) | null>(null);
 
   const stop = useCallback(() => {
+    firstFrameCleanupRef.current?.();
+    firstFrameCleanupRef.current = null;
+
     if (pcRef.current) {
       pcRef.current.close();
       pcRef.current = null;
@@ -42,6 +47,39 @@ export function useWebRTC(
       pc.ontrack = (event) => {
         if (event.track.kind === 'video') {
           video.srcObject = event.streams[0];
+
+          // connectionState=connected only means that the transport is ready.
+          // The browser still needs to receive and decode the first video
+          // frame before the player is actually usable. Detect that frame so
+          // the UI can dismiss its loading overlay at the right time.
+          let firstFrameSeen = false;
+          const markFirstFrame = () => {
+            if (firstFrameSeen) return;
+            firstFrameSeen = true;
+            firstFrameCleanupRef.current?.();
+            firstFrameCleanupRef.current = null;
+            onFirstFrame?.();
+          };
+
+          const onLoadedData = () => markFirstFrame();
+          const onPlaying = () => markFirstFrame();
+          video.addEventListener('loadeddata', onLoadedData);
+          video.addEventListener('playing', onPlaying);
+
+          // requestVideoFrameCallback is the most precise signal when
+          // available, while the events above cover older browsers.
+          let frameCallbackId: number | null = null;
+          if ('requestVideoFrameCallback' in video) {
+            frameCallbackId = video.requestVideoFrameCallback(() => markFirstFrame());
+          }
+
+          firstFrameCleanupRef.current = () => {
+            video.removeEventListener('loadeddata', onLoadedData);
+            video.removeEventListener('playing', onPlaying);
+            if (frameCallbackId !== null && 'cancelVideoFrameCallback' in video) {
+              video.cancelVideoFrameCallback(frameCallbackId);
+            }
+          };
         }
       };
 
@@ -57,28 +95,10 @@ export function useWebRTC(
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      // Wait until ICE gathering finishes so the SDP we POST contains all
-      // host/srflx candidates inline. The server's /offer endpoint is
-      // one-shot — no trickle channel — and Safari over LTE takes longer
-      // than LAN to gather, so without this wait the offer goes out with
-      // zero candidates and ICE never converges.
-      if (pc.iceGatheringState !== 'complete') {
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(() => {
-            pc.removeEventListener('icegatheringstatechange', handler);
-            resolve(); // proceed anyway — partial candidates beat hanging
-          }, 5000);
-          const handler = () => {
-            if (pc.iceGatheringState === 'complete') {
-              clearTimeout(timer);
-              pc.removeEventListener('icegatheringstatechange', handler);
-              resolve();
-            }
-          };
-          pc.addEventListener('icegatheringstatechange', handler);
-        });
-      }
-
+      // The server is ICE-lite and advertises its candidates in the answer.
+      // Send the offer immediately instead of blocking on local ICE gathering
+      // completion. This removes the startup wait; the browser continues its
+      // ICE checks after the answer arrives without adding media traffic.
       const localSDP = pc.localDescription?.sdp ?? offer.sdp;
       const response = await fetch(`${window.location.origin}/api/webrtc/offer`, {
         method: 'POST',
@@ -97,7 +117,7 @@ export function useWebRTC(
     } catch (error) {
       onError?.(error as Error);
     }
-  }, [videoRef, stop, onError]);
+  }, [videoRef, stop, onError, onFirstFrame]);
 
   const isConnected = useCallback(() => stateRef.current === 'connected', []);
 

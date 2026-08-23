@@ -150,10 +150,17 @@ export function App() {
               <div id="mjpeg-view" style={{ display: videoPlayer.mode.value === 'mjpeg' ? 'block' : 'none' }}>
                 <img
                   ref={videoPlayer.mjpegRef}
+                  onLoad={videoPlayer.onMJPEGFirstFrame}
                   alt="Camera stream"
                   style={{ width: '100%', height: 'auto', aspectRatio: '768/432', borderRadius: '8px 8px 0 0' }}
                 />
               </div>
+              {videoPlayer.loading.value && (
+                <div class="video-loading" role="status" aria-live="polite">
+                  <div class="video-loading-spinner" aria-hidden="true" />
+                  <span>{videoPlayer.loadingLabel.value}</span>
+                </div>
+              )}
             </div>
             <VideoControls
               mode={videoPlayer.mode.value}

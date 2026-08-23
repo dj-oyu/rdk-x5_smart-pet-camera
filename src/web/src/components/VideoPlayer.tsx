@@ -11,6 +11,8 @@ interface UseVideoPlayerOptions {
 
 export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
   const mode = useSignal<'webrtc' | 'mjpeg'>('webrtc');
+  const loading = useSignal(true);
+  const loadingLabel = useSignal('映像に接続中…');
   const videoRef = useRef<HTMLVideoElement>(null);
   const mjpegRef = useRef<HTMLImageElement>(null);
   const fallbackAttempted = useRef(false);
@@ -42,9 +44,27 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
     img.src = '/stream?t=' + Date.now();
   }, [stopMJPEG]);
 
+  const onMJPEGFirstFrame = useCallback(() => {
+    // stopMJPEG() briefly loads a 1px data URI to abort the previous
+    // multipart request. Ignore that synthetic image; only the new stream
+    // URL is a real first frame for the active mode.
+    const img = mjpegRef.current;
+    if (mode.peek() === 'mjpeg' && img?.src.includes('/stream?')) {
+      loading.value = false;
+    }
+  }, []);
+
+  const onWebRTCFirstFrame = useCallback(() => {
+    if (mode.peek() === 'webrtc') {
+      loading.value = false;
+    }
+  }, []);
+
   const onWebRTCError = useCallback(() => {
     if (!fallbackAttempted.current) {
       fallbackAttempted.current = true;
+      loading.value = true;
+      loadingLabel.value = 'Lite映像に切り替え中…';
       setTimeout(() => {
         // peek() で signal を読んでも subscription を作らない
         if (mode.peek() === 'webrtc') {
@@ -55,10 +75,12 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
     }
   }, [startMJPEG]);
 
-  const webrtc = useWebRTC(videoRef, onWebRTCError);
+  const webrtc = useWebRTC(videoRef, onWebRTCError, onWebRTCFirstFrame);
 
   const switchToMJPEG = useCallback(() => {
     if (mode.peek() === 'mjpeg') return;
+    loading.value = true;
+    loadingLabel.value = 'Lite映像に切り替え中…';
     mode.value = 'mjpeg';
     webrtc.stop();
     startMJPEG();
@@ -66,6 +88,8 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
 
   const switchToWebRTC = useCallback(async () => {
     if (mode.peek() === 'webrtc') return;
+    loading.value = true;
+    loadingLabel.value = 'HD映像に切り替え中…';
     mode.value = 'webrtc';
     stopMJPEG();
     fallbackAttempted.current = false;
@@ -76,6 +100,8 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
 
   // Expose startWebRTC for parent to call after DOM mount
   const startWebRTC = useCallback(() => {
+    loading.value = true;
+    loadingLabel.value = '映像に接続中…';
     webrtc.start().catch(() => {});
   }, [webrtc]);
 
@@ -107,10 +133,13 @@ export function useVideoPlayer(options: UseVideoPlayerOptions = {}) {
     videoRef,
     canvasRef,
     mode,
+    loading,
+    loadingLabel,
     startWebRTC,
     switchToWebRTC,
     switchToMJPEG,
     mjpegRef,
+    onMJPEGFirstFrame,
     handleDetection: wrappedDetection,
     handleStatus: wrappedStatus,
   };
