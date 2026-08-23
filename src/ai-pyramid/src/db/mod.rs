@@ -215,6 +215,13 @@ impl PhotoStore {
     /// twice however often it runs — which matters because it runs on every
     /// start rather than behind a schema version.
     fn migrate_timestamps_to_utc(&self) -> rusqlite::Result<()> {
+        /// One column's rows that still need converting.
+        struct LegacyColumn {
+            table: &'static str,
+            column: &'static str,
+            rows: Vec<(i64, String)>,
+        }
+
         // `training_frames.captured_at` was already UTC: it comes from a Unix
         // timestamp in the frame metadata (training/api/frames.rs), not from a
         // camera-local filename. It needs the suffix, never a shift.
@@ -224,7 +231,7 @@ impl PhotoStore {
             [],
         )?;
 
-        let mut pending: Vec<(&str, &str, Vec<(i64, String)>)> = Vec::new();
+        let mut pending: Vec<LegacyColumn> = Vec::new();
         for (table, column) in [
             ("photos", "captured_at"),
             ("photos", "detected_at"),
@@ -240,7 +247,11 @@ impl PhotoStore {
                 .collect::<rusqlite::Result<_>>()?;
 
             if !legacy.is_empty() {
-                pending.push((table, column, legacy));
+                pending.push(LegacyColumn {
+                    table,
+                    column,
+                    rows: legacy,
+                });
             }
         }
 
@@ -253,12 +264,17 @@ impl PhotoStore {
         // detections — that was ~100 rows/s, five minutes during which the
         // album served nothing, because startup waits here.
         let tx = self.conn.unchecked_transaction()?;
-        for (table, column, legacy) in &pending {
+        for LegacyColumn {
+            table,
+            column,
+            rows,
+        } in &pending
+        {
             let mut converted = 0usize;
             {
                 let mut update =
                     tx.prepare(&format!("UPDATE {table} SET {column} = ?1 WHERE id = ?2"))?;
-                for (id, stored) in legacy {
+                for (id, stored) in rows {
                     // parse_db reads a suffix-less value as local, which is
                     // what these are.
                     if let Some(instant) = timestamps::parse_db(stored) {
@@ -271,7 +287,7 @@ impl PhotoStore {
                 table,
                 column,
                 converted,
-                skipped = legacy.len() - converted,
+                skipped = rows.len() - converted,
                 "migrated timestamps to UTC"
             );
         }
@@ -1011,7 +1027,11 @@ mod tests {
         store.migrate_timestamps_to_utc().unwrap();
         let converted: String = store
             .conn
-            .query_row("SELECT captured_at FROM photos WHERE filename = 'a.jpg'", [], |row| row.get(0))
+            .query_row(
+                "SELECT captured_at FROM photos WHERE filename = 'a.jpg'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(converted, timestamps::to_db(dt(2026, 8, 23, 22, 3, 17)));
 
@@ -1020,7 +1040,11 @@ mod tests {
         store.migrate_timestamps_to_utc().unwrap();
         let after: String = store
             .conn
-            .query_row("SELECT captured_at FROM photos WHERE filename = 'a.jpg'", [], |row| row.get(0))
+            .query_row(
+                "SELECT captured_at FROM photos WHERE filename = 'a.jpg'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(after, converted);
     }
