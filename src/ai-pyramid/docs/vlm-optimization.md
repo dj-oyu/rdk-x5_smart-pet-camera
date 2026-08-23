@@ -119,11 +119,11 @@ axllmではリクエストごとに `max_tokens` を動的に制御できるた�
 
 ### 1. [中] daily summary キャッシュを単一エントリから日付辞書に拡張
 
-`server::AppState::daily_summary_cache` は `Option<(String, Instant, Value)>` で
-1 日分しか保持できない。連続して別日付を見ると最後にクエリした 1 件しか
-キャッシュされず、再表示でも毎回 hot-swap（~110s）が走る。実装案:
-`HashMap<String /* date */, (Instant, Value)>` に置き換え、TTL は同じ 2 時間、
-適当な上限（例 30 日）を超えたら古い順に落とす。
+`server::AppState::daily_summary_cache` は `Option<CachedSummary>`（date /
+cached_at / ttl / json）で 1 日分しか保持できない。連続して別日付を見ると
+最後にクエリした 1 件しかキャッシュされず、再表示でも毎回 VLM 呼び出しが走る。
+実装案: `HashMap<String /* date */, CachedSummary>` に置き換え、TTL は同じ
+（成功 2 時間 / 失敗 5 分）、適当な上限（例 30 日）を超えたら古い順に落とす。
 
 ### 2. [中] daily summary の数字を自然なローカライズに
 
