@@ -402,7 +402,8 @@ WebRTC SDP offer/answer exchange for real-time streaming.
 ```json
 {
   "type": "answer",
-  "sdp": "v=0\r\no=- 987654321 2 IN IP4 127.0.0.1\r\n..."
+  "sdp": "v=0\r\no=- 987654321 2 IN IP4 127.0.0.1\r\n...",
+  "session_id": "ws-20000"
 }
 ```
 
@@ -423,6 +424,23 @@ curl -X POST http://localhost:8080/api/webrtc/offer \
 **Notes**:
 - This endpoint proxies to the Go streaming server (default: `http://localhost:8081/offer`)
 - Requires WebRTC-compatible client (browser with RTCPeerConnection API)
+
+### POST /api/webrtc/close
+
+Immediately closes the WebRTC session identified by the `session_id` returned
+from `/api/webrtc/offer`. The operation is idempotent; closing a session that
+already timed out still returns success.
+
+**Request Body**:
+```json
+{
+  "session_id": "ws-20000"
+}
+```
+
+The web client sends this request when an `RTCPeerConnection` is stopped, for
+example during an HD/Lite mode switch, so the viewer count does not wait for
+the UDP keepalive timeout.
 
 ---
 

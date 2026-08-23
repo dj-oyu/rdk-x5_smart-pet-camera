@@ -164,6 +164,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/recordings", s.handleRecordingsList)
 	mux.HandleFunc("/api/recordings/", s.handleRecordingDownload)
 	mux.HandleFunc("/api/webrtc/offer", s.handleWebRTCOffer)
+	mux.HandleFunc("/api/webrtc/close", s.handleWebRTCClose)
 	mux.HandleFunc("/api/comics", s.handleComicsList)
 	mux.HandleFunc("/api/comics/", s.handleComicServe)
 	mux.HandleFunc("/api/comic-capture", s.handleComicCaptureNow)
@@ -575,6 +576,60 @@ func (s *Server) handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSONWithStatus(w, map[string]any{"error": "Go server unavailable"}, http.StatusBadGateway)
 		return
+	}
+
+	if resp.Header.Get("Content-Type") != "" {
+		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(respBody)
+}
+
+// handleWebRTCClose forwards an explicit session close to the WebRTC server.
+// This lets the browser release the UDP session immediately when it switches
+// between HD (WebRTC) and Lite (MJPEG), instead of waiting for keepalive
+// expiry.
+func (s *Server) handleWebRTCClose(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSONWithStatus(w, map[string]any{"error": "Invalid session close data"}, http.StatusBadRequest)
+		return
+	}
+
+	baseURL := strings.TrimRight(s.cfg.WebRTCBaseURL, "/")
+	targetURL := baseURL + "/close"
+	req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(body))
+	if err != nil {
+		writeJSONWithStatus(w, map[string]any{"error": "Go server unavailable"}, http.StatusBadGateway)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.webrtc.Do(req)
+	if err != nil {
+		writeJSONWithStatus(w, map[string]any{"error": "Go server unavailable"}, http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		writeJSONWithStatus(w, map[string]any{"error": "Go server unavailable"}, http.StatusBadGateway)
+		return
+	}
+
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && s.connectionBroadcaster != nil {
+		// The explicit close is complete at the WebRTC server now. Refresh the
+		// SSE viewer count immediately rather than waiting up to two seconds.
+		s.connectionBroadcaster.NotifyChange()
 	}
 
 	if resp.Header.Get("Content-Type") != "" {

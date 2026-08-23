@@ -187,14 +187,50 @@ func (s *Server) HandleOffer(offerJSON []byte) ([]byte, error) {
 
 	// Return answer in same JSON format as pion
 	answerJSON, err := json.Marshal(map[string]string{
-		"type": "answer",
-		"sdp":  answerSDP,
+		"type":       "answer",
+		"sdp":        answerSDP,
+		"session_id": sess.id,
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	return answerJSON, nil
+}
+
+// CloseSession immediately removes a WebRTC session created by HandleOffer.
+//
+// The browser cannot reliably signal a peer-connection close over the media
+// socket, so the HTTP signaling layer calls this method when a player is
+// stopped or switched to MJPEG. Closing the UDP socket also unblocks the
+// session lifecycle goroutine and prevents the session from waiting for the
+// keepalive timeout.
+//
+// Closing an already-removed session is intentionally a no-op. The browser
+// may race with the normal ICE/DTLS timeout, and cleanup requests should be
+// safe to retry.
+func (s *Server) CloseSession(id string) bool {
+	if id == "" {
+		return false
+	}
+
+	s.mu.Lock()
+	sess, ok := s.sessions[id]
+	if !ok {
+		s.mu.Unlock()
+		return false
+	}
+	delete(s.sessions, id)
+
+	sess.mu.Lock()
+	sess.closed = true
+	_ = sess.udpConn.Close()
+	sent := sess.framesSent
+	sess.mu.Unlock()
+	s.mu.Unlock()
+
+	logger.Info("Signal", "Session %s closed by client (sent: %d frames)", id, sent)
+	return true
 }
 
 // runSession handles the ICE→DTLS→SRTP lifecycle for a session.
