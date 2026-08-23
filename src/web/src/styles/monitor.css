@@ -137,6 +137,30 @@ a { color: inherit; }
     border-bottom: none;
 }
 
+/* Keep the media stage at a stable 16:9 size while a new stream negotiates.
+ * The video element has no reliable intrinsic dimensions before H.265 metadata
+ * arrives, so height:auto would cause a layout shift when switching modes. */
+.video-stage-layer {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+}
+.video-frame {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000;
+}
+.video-overlay {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+}
+
 /* Recordings Button (matching REC button style) */
 .btn-recordings {
     position: relative;
