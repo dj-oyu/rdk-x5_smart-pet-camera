@@ -34,7 +34,9 @@ pub fn select_observations(observations: &[Observation], limit: usize) -> Vec<&O
 
     let mut buckets: Vec<Vec<&Observation>> = vec![Vec::new(); limit];
     for observation in observations {
-        let offset = (observation.captured_at - first).num_seconds().clamp(0, span);
+        let offset = (observation.captured_at - first)
+            .num_seconds()
+            .clamp(0, span);
         // `span + 1` keeps the final observation inside the last bucket
         // instead of overflowing into a `limit`-th one.
         let index = (offset as i128 * limit as i128 / (span as i128 + 1)) as usize;
