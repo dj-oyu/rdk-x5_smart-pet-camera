@@ -39,7 +39,9 @@ impl InFlight {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
         // Nothing panics while holding this lock — it is only ever a set
         // insert or remove — so poisoning would mean a bug elsewhere.
-        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -554,7 +556,7 @@ mod tests {
         }
 
         let (tx, mut rx) = mpsc::channel(4);
-        watcher.queue_pending(&tx).await;
+        watcher.queue_pending(&tx, &InFlight::default()).await;
 
         let queued = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
