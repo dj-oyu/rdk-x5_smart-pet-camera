@@ -1,7 +1,7 @@
 use crate::application::{
     ActivityStats, AppResult, EventQuery, EventSummary, SharedEventRepository,
 };
-use crate::db::{Detection, EditHistoryEntry};
+use crate::db::{DayObservation, Detection, EditHistoryEntry};
 
 #[derive(Clone)]
 pub struct EventQueries {
@@ -58,8 +58,8 @@ impl EventQueries {
         self.repository.distinct_behaviors().await
     }
 
-    pub async fn captions_for_date(&self, date: &str) -> AppResult<Vec<String>> {
-        self.repository.captions_for_date(date).await
+    pub async fn observations_for_date(&self, date: &str) -> AppResult<Vec<DayObservation>> {
+        self.repository.observations_for_date(date).await
     }
 
     pub async fn list_undetected_photos(&self, limit: i64) -> AppResult<Vec<EventSummary>> {

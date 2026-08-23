@@ -79,8 +79,8 @@ pub(super) fn dispatch(store: &PhotoStore, command: DbCommand) {
         } => send_reply(reply, store.update_behavior(&filename, &behavior)),
         DbCommand::DistinctPetIds { reply } => send_reply(reply, store.distinct_pet_ids()),
         DbCommand::DistinctBehaviors { reply } => send_reply(reply, store.distinct_behaviors()),
-        DbCommand::CaptionsForDate { date, reply } => {
-            send_reply(reply, store.captions_for_date(&date))
+        DbCommand::ObservationsForDate { date, reply } => {
+            send_reply(reply, store.observations_for_date(&date))
         }
         DbCommand::ListUndetectedPhotos { limit, reply } => {
             send_reply(reply, store.list_undetected_photos(limit))

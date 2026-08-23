@@ -80,7 +80,7 @@ pub(super) fn dispatch(store: &PhotoStore, command: DbCommand) {
         | DbCommand::UpdateBehavior { .. }
         | DbCommand::DistinctPetIds { .. }
         | DbCommand::DistinctBehaviors { .. }
-        | DbCommand::CaptionsForDate { .. }
+        | DbCommand::ObservationsForDate { .. }
         | DbCommand::ListUndetectedPhotos { .. }
         | DbCommand::MarkDetected { .. }
         | DbCommand::RecordEmptyLevel2 { .. }
