@@ -3,7 +3,6 @@ use std::time::Duration;
 mod client;
 mod observations;
 mod parser;
-mod supervisor;
 
 pub use client::VlmClient;
 pub use observations::Observation;
@@ -11,8 +10,6 @@ pub use parser::{VlmResponse, parse_vlm_response};
 
 #[cfg(test)]
 use parser::strip_think;
-#[cfg(test)]
-use supervisor::wait_for_model;
 
 #[derive(Debug, Clone)]
 pub struct VlmConfig {
@@ -41,23 +38,6 @@ impl Default for VlmConfig {
     }
 }
 
-/// Optional configuration for swapping the active axllm-serve model during a
-/// single inference call. The AX650 NPU is exclusive (one axllm process at a
-/// time, see `docs/ai-pyramid` notes), so the swap stops the vision unit,
-/// starts the text unit, runs inference against `text_model`, then restores
-/// the vision unit. Used by daily summary so we can borrow Gemma's clean
-/// Japanese while keeping Qwen as the captioning workhorse.
-/// `vision_*` names the multimodal model that serves per-photo captioning
-/// the rest of the day; `text_*` names the text-only model invoked once for
-/// the daily summary.
-#[derive(Debug, Clone)]
-pub struct VlmSwapConfig {
-    pub vision_unit: String,
-    pub text_unit: String,
-    pub text_model: String,
-    pub ready_timeout: Duration,
-    pub poll_interval: Duration,
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,42 +252,5 @@ mod tests {
         // Same client, captioning path: still bound by the short timeout.
         let tmp = jpeg_fixture();
         assert!(client.analyze(tmp.path()).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn wait_for_model_accepts_only_requested_model_id() {
-        use axum::{Json, Router, routing::get};
-
-        let app = Router::new().route(
-            "/v1/models",
-            get(|| async { Json(serde_json::json!({"data": [{"id": "vision-model"}]})) }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.ok();
-        });
-        let http = reqwest::Client::new();
-
-        wait_for_model(
-            &http,
-            &format!("http://{addr}"),
-            "vision-model",
-            Duration::from_secs(1),
-            Duration::from_millis(1),
-        )
-        .await
-        .unwrap();
-        let error = wait_for_model(
-            &http,
-            &format!("http://{addr}"),
-            "other-model",
-            Duration::from_millis(10),
-            Duration::from_millis(1),
-        )
-        .await
-        .unwrap_err();
-        assert!(error.contains("other-model"));
-        assert!(error.contains("not ready"));
     }
 }
