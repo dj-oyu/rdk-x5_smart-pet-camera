@@ -3,7 +3,24 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// How long a generated summary is reused. Long, because generating one costs
+/// an NPU window that per-photo captioning would otherwise use.
+const SUMMARY_TTL: Duration = Duration::from_secs(2 * 3600);
+
+/// How long a *failed* summary is reused. Failures are cached too: the album
+/// requests the summary on every page load, and each attempt holds the NPU
+/// permit for the whole VLM timeout, so an un-cached failure lets refreshes
+/// stall photo ingest. Short enough that a recovered VLM is picked up soon.
+const SUMMARY_FAILURE_TTL: Duration = Duration::from_secs(5 * 60);
+
+pub(super) struct CachedSummary {
+    date: String,
+    cached_at: Instant,
+    ttl: Duration,
+    json: serde_json::Value,
+}
 
 #[derive(Deserialize)]
 pub(super) struct DailySummaryRequest {
@@ -25,14 +42,14 @@ pub(super) async fn handle_daily_summary(
         .date
         .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
 
-    // Check cache (2-hour TTL)
+    // Check cache — both successes and failures land here, with their own TTLs
     {
         let cache = state.daily_summary_cache.lock().await;
-        if let Some((ref d, cached_at, ref json)) = *cache
-            && d == &date
-            && cached_at.elapsed() < std::time::Duration::from_secs(2 * 3600)
+        if let Some(ref cached) = *cache
+            && cached.date == date
+            && cached.cached_at.elapsed() < cached.ttl
         {
-            return Json(json.clone()).into_response();
+            return Json(cached.json.clone()).into_response();
         }
     }
 
@@ -103,22 +120,33 @@ pub(super) async fn handle_daily_summary(
                 photo_count,
             };
             let json = serde_json::to_value(&resp).unwrap();
-            state
-                .daily_summary_cache
-                .lock()
-                .await
-                .replace((date, Instant::now(), json));
+            state.daily_summary_cache.lock().await.replace(CachedSummary {
+                date,
+                cached_at: Instant::now(),
+                ttl: SUMMARY_TTL,
+                json,
+            });
             Json(resp).into_response()
         }
         Err(e) => {
-            // Fallback: return captions list
+            // Fallback: return captions list. The album shows this string in
+            // place of the summary, so also record it server-side — otherwise
+            // a failed summary leaves no trace in the journal at all.
+            tracing::warn!(date = %date, photo_count, error = %e, "daily summary failed");
             let fallback = format!("{photo_count} observations recorded. VLM unavailable: {e}");
-            Json(DailySummaryResponse {
-                date,
+            let resp = DailySummaryResponse {
+                date: date.clone(),
                 summary: fallback,
                 photo_count,
-            })
-            .into_response()
+            };
+            let json = serde_json::to_value(&resp).unwrap();
+            state.daily_summary_cache.lock().await.replace(CachedSummary {
+                date,
+                cached_at: Instant::now(),
+                ttl: SUMMARY_FAILURE_TTL,
+                json,
+            });
+            Json(resp).into_response()
         }
     }
 }
