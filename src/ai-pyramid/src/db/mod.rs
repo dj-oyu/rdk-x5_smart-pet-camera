@@ -1,11 +1,12 @@
-use chrono::NaiveDateTime;
+use crate::timestamps;
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
 #[derive(Debug, Clone)]
 pub struct Photo {
     pub id: i64,
     pub filename: String,
-    pub captured_at: NaiveDateTime,
+    pub captured_at: DateTime<Utc>,
     pub caption: Option<String>,
     pub is_valid: Option<bool>,
     pub pet_id: Option<String>,
@@ -16,7 +17,7 @@ pub struct Photo {
 /// One captioned photo from a single day, as fed to the daily summary.
 #[derive(Debug, Clone)]
 pub struct DayObservation {
-    pub captured_at: NaiveDateTime,
+    pub captured_at: DateTime<Utc>,
     pub caption: String,
 }
 
@@ -203,16 +204,75 @@ impl PhotoStore {
         // Training dataset tables
         self.migrate_training()?;
 
+        self.migrate_timestamps_to_utc()?;
+
+        Ok(())
+    }
+
+    /// Convert timestamps written before `crate::timestamps` existed.
+    ///
+    /// Rows are selected by their missing `Z`, so this cannot shift a value
+    /// twice however often it runs — which matters because it runs on every
+    /// start rather than behind a schema version.
+    fn migrate_timestamps_to_utc(&self) -> rusqlite::Result<()> {
+        // `training_frames.captured_at` was already UTC: it comes from a Unix
+        // timestamp in the frame metadata (training/api/frames.rs), not from a
+        // camera-local filename. It needs the suffix, never a shift.
+        self.conn.execute(
+            "UPDATE training_frames SET captured_at = captured_at || 'Z' \
+             WHERE captured_at IS NOT NULL AND captured_at NOT LIKE '%Z'",
+            [],
+        )?;
+
+        for (table, column) in [
+            ("photos", "captured_at"),
+            ("photos", "detected_at"),
+            ("detections", "detected_at"),
+        ] {
+            let legacy: Vec<(i64, String)> = self
+                .conn
+                .prepare(&format!(
+                    "SELECT id, {column} FROM {table} \
+                     WHERE {column} IS NOT NULL AND {column} NOT LIKE '%Z'"
+                ))?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+
+            if legacy.is_empty() {
+                continue;
+            }
+
+            let mut update = self
+                .conn
+                .prepare(&format!("UPDATE {table} SET {column} = ?1 WHERE id = ?2"))?;
+            let mut converted = 0usize;
+            for (id, stored) in &legacy {
+                // parse_db reads a suffix-less value as local, which is what
+                // these are.
+                if let Some(instant) = timestamps::parse_db(stored) {
+                    update.execute(params![timestamps::to_db(instant), id])?;
+                    converted += 1;
+                }
+            }
+            tracing::info!(
+                table,
+                column,
+                converted,
+                skipped = legacy.len() - converted,
+                "migrated timestamps to UTC"
+            );
+        }
+
         Ok(())
     }
 
     pub fn insert(
         &self,
         filename: &str,
-        captured_at: NaiveDateTime,
+        captured_at: DateTime<Utc>,
         pet_id: Option<&str>,
     ) -> rusqlite::Result<i64> {
-        let ts = captured_at.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let ts = timestamps::to_db(captured_at);
         self.conn.execute(
             "INSERT OR IGNORE INTO photos (filename, captured_at, pet_id) VALUES (?1, ?2, ?3)",
             params![filename, ts, pet_id],
@@ -300,11 +360,11 @@ impl PhotoStore {
     pub fn ingest_with_detections(
         &self,
         filename: &str,
-        captured_at: NaiveDateTime,
+        captured_at: DateTime<Utc>,
         pet_id: Option<&str>,
         detections: &[DetectionInput],
     ) -> rusqlite::Result<i64> {
-        let ts = captured_at.format("%Y-%m-%dT%H:%M:%S").to_string();
+        let ts = timestamps::to_db(captured_at);
 
         // Upsert photo
         self.conn.execute(
@@ -326,7 +386,7 @@ impl PhotoStore {
         }
 
         // Mark as detected
-        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        let now = timestamps::now_db();
         self.conn.execute(
             "UPDATE photos SET detected_at = COALESCE(detected_at, ?1) WHERE id = ?2",
             params![now, photo_id],
@@ -796,14 +856,20 @@ impl PhotoStore {
     /// spread-out subset of these, so the timestamp is returned as its own
     /// field rather than baked into the caption text.
     pub fn observations_for_date(&self, date: &str) -> rusqlite::Result<Vec<DayObservation>> {
+        // A local day is a UTC range: stored values are UTC, but "2026-08-23"
+        // means the day the household lived through.
+        let Some((from, to)) = timestamps::local_day_bounds(date) else {
+            return Ok(Vec::new());
+        };
         let mut stmt = self.conn.prepare_cached(
             "SELECT captured_at, caption \
              FROM photos \
-             WHERE is_valid = 1 AND caption IS NOT NULL AND captured_at LIKE ? || '%' \
+             WHERE is_valid = 1 AND caption IS NOT NULL \
+               AND captured_at >= ?1 AND captured_at < ?2 \
              ORDER BY captured_at ASC LIMIT 200",
         )?;
         let rows = stmt
-            .query_map(params![date], |row| {
+            .query_map(params![from, to], |row| {
                 let captured_at: String = row.get(0)?;
                 let caption: String = row.get(1)?;
                 Ok((captured_at, caption))
@@ -812,19 +878,17 @@ impl PhotoStore {
         Ok(rows
             .into_iter()
             .filter_map(|(captured_at, caption)| {
-                NaiveDateTime::parse_from_str(&captured_at, "%Y-%m-%dT%H:%M:%S")
-                    .ok()
-                    .map(|captured_at| DayObservation {
-                        captured_at,
-                        caption,
-                    })
+                timestamps::parse_db(&captured_at).map(|captured_at| DayObservation {
+                    captured_at,
+                    caption,
+                })
             })
             .collect())
     }
 
     /// Mark a photo as having had detection run, even if zero detections found.
     pub fn mark_detected(&self, photo_id: i64) -> rusqlite::Result<usize> {
-        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        let now = timestamps::now_db();
         self.conn.execute(
             "UPDATE photos SET detected_at = ?1 WHERE id = ?2",
             params![now, photo_id],
@@ -887,8 +951,7 @@ pub struct Stats {
 
 fn row_to_photo(row: &rusqlite::Row) -> rusqlite::Result<Photo> {
     let captured_str: String = row.get(2)?;
-    let captured_at =
-        NaiveDateTime::parse_from_str(&captured_str, "%Y-%m-%dT%H:%M:%S").unwrap_or_default();
+    let captured_at = timestamps::parse_db(&captured_str).unwrap_or_else(timestamps::epoch);
     let is_valid_int: Option<i32> = row.get(4)?;
     Ok(Photo {
         id: row.get(0)?,
@@ -907,11 +970,13 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
 
-    fn dt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(y, m, d)
-            .unwrap()
-            .and_hms_opt(h, mi, s)
-            .unwrap()
+    fn dt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
+        timestamps::from_camera_local(
+            NaiveDate::from_ymd_opt(y, m, d)
+                .unwrap()
+                .and_hms_opt(h, mi, s)
+                .unwrap(),
+        )
     }
 
     fn setup() -> PhotoStore {

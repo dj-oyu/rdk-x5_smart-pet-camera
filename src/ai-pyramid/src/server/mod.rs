@@ -190,11 +190,13 @@ mod tests {
     use std::sync::atomic::Ordering;
     use tower::util::ServiceExt;
 
-    fn dt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> chrono::NaiveDateTime {
-        NaiveDate::from_ymd_opt(y, m, d)
-            .unwrap()
-            .and_hms_opt(h, mi, s)
-            .unwrap()
+    fn dt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> chrono::DateTime<chrono::Utc> {
+        crate::timestamps::from_camera_local(
+            NaiveDate::from_ymd_opt(y, m, d)
+                .unwrap()
+                .and_hms_opt(h, mi, s)
+                .unwrap(),
+        )
     }
 
     fn test_state() -> AppState {
@@ -687,7 +689,11 @@ mod tests {
         .unwrap();
         assert_eq!(json["id"], 1);
         assert_eq!(json["source_filename"], "event-by-id.jpg");
-        assert_eq!(json["observed_at"], "2026-04-02T08:30:00");
+        // Stored and served in UTC: 08:30 JST is 23:30 the previous day.
+        assert_eq!(
+            json["observed_at"],
+            crate::timestamps::to_db(dt(2026, 4, 2, 8, 30, 0))
+        );
         assert_eq!(json["summary"], "Mike is watching the window");
         assert_eq!(json["status"], "valid");
         assert_eq!(json["pet_id"], "mike");

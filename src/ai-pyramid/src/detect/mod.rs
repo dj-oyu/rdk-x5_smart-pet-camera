@@ -64,8 +64,8 @@ impl DetectClient {
 
         // Extract detected_at from filename, fallback to now
         let detected_at = parse_comic_filename(filename)
-            .map(|m| m.captured_at.format("%Y-%m-%dT%H:%M:%S").to_string())
-            .unwrap_or_else(|_| chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
+            .map(|m| crate::timestamps::to_db(m.captured_at))
+            .unwrap_or_else(|_| crate::timestamps::now_db());
 
         let mut all_inputs = Vec::new();
 

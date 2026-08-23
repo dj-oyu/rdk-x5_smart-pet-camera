@@ -1,8 +1,11 @@
-use chrono::NaiveDateTime;
+use crate::timestamps;
+use chrono::{DateTime, NaiveDateTime, Utc};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComicMeta {
-    pub captured_at: NaiveDateTime,
+    /// The camera renders the filename in its own local time; this is that
+    /// instant in UTC (see `crate::timestamps`).
+    pub captured_at: DateTime<Utc>,
     pub pet_id: Option<String>,
 }
 
@@ -26,6 +29,7 @@ pub fn parse_comic_filename(name: &str) -> Result<ComicMeta, String> {
 
     let datetime_str = format!("{}_{}", parts[0], parts[1]);
     let captured_at = NaiveDateTime::parse_from_str(&datetime_str, "%Y%m%d_%H%M%S")
+        .map(timestamps::from_camera_local)
         .map_err(|e| format!("invalid datetime in {name}: {e}"))?;
 
     let pet_id = if parts.len() == 3 && !parts[2].is_empty() {
@@ -50,11 +54,14 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
 
-    fn dt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(y, m, d)
-            .unwrap()
-            .and_hms_opt(h, mi, s)
-            .unwrap()
+    /// The instant a camera-local wall time refers to.
+    fn dt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
+        timestamps::from_camera_local(
+            NaiveDate::from_ymd_opt(y, m, d)
+                .unwrap()
+                .and_hms_opt(h, mi, s)
+                .unwrap(),
+        )
     }
 
     #[test]

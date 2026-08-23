@@ -358,11 +358,13 @@ mod tests {
         PhotoWatcher::new(app, VlmConfig::default(), None, None)
     }
 
-    fn observed_at(hour: u32) -> chrono::NaiveDateTime {
-        NaiveDate::from_ymd_opt(2026, 3, 21)
-            .unwrap()
-            .and_hms_opt(hour, 0, 0)
-            .unwrap()
+    fn observed_at(hour: u32) -> chrono::DateTime<chrono::Utc> {
+        crate::timestamps::from_camera_local(
+            NaiveDate::from_ymd_opt(2026, 3, 21)
+                .unwrap()
+                .and_hms_opt(hour, 0, 0)
+                .unwrap(),
+        )
     }
 
     #[test]

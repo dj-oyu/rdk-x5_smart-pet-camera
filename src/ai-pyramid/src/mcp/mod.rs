@@ -293,11 +293,13 @@ mod tests {
     use chrono::NaiveDate;
     use tower::util::ServiceExt;
 
-    fn dt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> chrono::NaiveDateTime {
-        NaiveDate::from_ymd_opt(y, m, d)
-            .unwrap()
-            .and_hms_opt(h, mi, s)
-            .unwrap()
+    fn dt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> chrono::DateTime<chrono::Utc> {
+        crate::timestamps::from_camera_local(
+            NaiveDate::from_ymd_opt(y, m, d)
+                .unwrap()
+                .and_hms_opt(h, mi, s)
+                .unwrap(),
+        )
     }
 
     fn test_state() -> McpState {
@@ -343,7 +345,7 @@ mod tests {
     async fn insert_test_photo(
         repo: &SharedEventRepository,
         filename: &str,
-        ts: chrono::NaiveDateTime,
+        ts: chrono::DateTime<chrono::Utc>,
         pet_id: &str,
         caption: &str,
         behavior: &str,

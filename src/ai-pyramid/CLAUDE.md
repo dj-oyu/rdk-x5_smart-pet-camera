@@ -40,6 +40,8 @@ ai-pyramid配下の変更をマージしたら、必ず以下を実行:
 - **VLM**: is_valid, caption, behavior only
 - **SQLite**: WAL mode, single db_thread (no Mutex)
 - **Concurrency**: VLM worker = 1 (NPU exclusive)
+- **Timestamps**: DB に入る時刻は UTC (`YYYY-MM-DDTHH:MM:SSZ`)。変換は `crate::timestamps` に集約。
+  ローカル時刻はコミックのファイル名と「1日」の境界 (`local_day_bounds`) だけ
 
 ## Docs
 → `docs/architecture.md`, `docs/pet-album-spec.md`, `docs/vlm_integration_spec.md`, `docs/detections-integration.md`

@@ -292,23 +292,24 @@ pub(super) async fn handle_ingest(
     State(state): State<AppState>,
     Json(body): Json<IngestRequest>,
 ) -> impl IntoResponse {
-    let captured_at =
-        match chrono::NaiveDateTime::parse_from_str(&body.captured_at, "%Y-%m-%dT%H:%M:%S") {
-            Ok(dt) => dt,
-            Err(_) => match chrono::NaiveDateTime::parse_from_str(
-                &body.captured_at,
-                "%Y-%m-%dT%H:%M:%S%.f",
-            ) {
-                Ok(dt) => dt,
-                Err(e) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": format!("invalid captured_at: {e}")})),
-                    )
-                        .into_response();
-                }
-            },
-        };
+    // Callers send either a stored-format UTC value or a bare local one; both
+    // land on the same instant through `timestamps::parse_db`.
+    let captured_at = match crate::timestamps::parse_db(&body.captured_at).or_else(|| {
+        chrono::NaiveDateTime::parse_from_str(&body.captured_at, "%Y-%m-%dT%H:%M:%S%.f")
+            .ok()
+            .map(crate::timestamps::from_camera_local)
+    }) {
+        Some(instant) => instant,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("invalid captured_at: {}", body.captured_at)
+                })),
+            )
+                .into_response();
+        }
+    };
 
     let safe_name = sanitize_filename(&body.filename);
     let commands = state.commands();

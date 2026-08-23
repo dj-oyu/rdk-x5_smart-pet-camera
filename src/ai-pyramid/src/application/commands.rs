@@ -2,7 +2,7 @@ use crate::application::{
     AppResult, ObservationInput, ObservationResult, PetEvent, SharedEventRepository,
 };
 use crate::db::DetectionInput;
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use tokio::sync::broadcast;
 
 #[derive(Clone)]
@@ -94,7 +94,7 @@ impl ObservationCommands {
     pub async fn ingest_with_detections(
         &self,
         source_filename: &str,
-        captured_at: NaiveDateTime,
+        captured_at: DateTime<Utc>,
         pet_id: Option<&str>,
         detections: &[DetectionInput],
     ) -> AppResult<i64> {

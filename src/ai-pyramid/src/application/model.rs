@@ -1,5 +1,5 @@
 use crate::db::{BboxSummary, Photo, PhotoFilter, Stats};
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +107,7 @@ impl From<Photo> for EventSummary {
         Self {
             id: photo.id,
             source_filename: photo.filename,
-            observed_at: photo.captured_at.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            observed_at: crate::timestamps::to_db(photo.captured_at),
             summary: photo.caption,
             status,
             pet_id: photo.pet_id,
@@ -139,7 +139,7 @@ impl From<Stats> for ActivityStats {
 #[derive(Debug, Clone)]
 pub struct ObservationInput {
     pub source_filename: String,
-    pub captured_at: NaiveDateTime,
+    pub captured_at: DateTime<Utc>,
     pub pet_id: Option<String>,
 }
 
