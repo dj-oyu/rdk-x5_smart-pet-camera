@@ -316,9 +316,8 @@ SSE: `EventSource("/api/events")` でリアルタイム更新。
 - リトライ: 1回 (NoneType エラー対策)
 - デフォルト: `http://localhost:8000`, model `AXERA-TECH/Qwen3-VL-2B-Instruct-GPTQ-Int4-C256-P3584-CTX4095`, max_tokens 128
 - `mod.rs`: configと公開facade
-- `client.rs`: image encode、HTTP request、summary、model swap orchestration
+- `client.rs`: image encode、HTTP request、summary
 - `parser.rs`: JSON抽出・互換parse・出力sanitization
-- `supervisor.rs`: systemd操作とmodel readiness polling
 
 ### Local detector (`detect/local/`)
 

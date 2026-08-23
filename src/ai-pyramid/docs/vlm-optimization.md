@@ -115,7 +115,23 @@ axllmではリクエストごとに `max_tokens` を動的に制御できるた�
 1. `summarize_day` のキャプション数を制限する（コンテキスト超過回避）
 2. （任意）画像リサイズの実装（メモリ効率改善、速度影響なし）
 
-## TODO（PR #212 後の宿題）
+## VLM hot-swap（PR #212）は廃止
+
+daily summary の日本語要約だけ Gemma E2B へ一時切り替えする hot-swap
+（vision unit を停止 → text-only unit を起動 → 要約 → vision unit を復旧）は
+**運用しない決定となり、実装ごと削除した**。
+
+- 理由: ストレージ節約のため、デバイス上の VLM は Qwen3.5-2B 一本に統一する
+- 現状: `/opt/m5stack/data/` に Gemma のモデルは存在しない
+- 稼働中の `pet-album.service` も `--vlm-swap-*` を一切渡していなかった
+
+削除したもの: `VlmSwapConfig`、`VlmClient::summarize_day_with_swap()`、
+`vlm/supervisor.rs`（systemctl 操作と `/v1/models` readiness polling）、
+`--vlm-swap-*` CLI 引数、`AppContext::vlm_swap_config()`、および `.env` の
+`PET_ALBUM_VLM_SWAP_*` 行。daily summary は `VlmClient::summarize_day()` の
+一本道になっている。
+
+## TODO
 
 ### 1. [中] daily summary キャッシュを単一エントリから日付辞書に拡張
 
@@ -125,11 +141,14 @@ cached_at / ttl / json）で 1 日分しか保持できない。連続して別�
 実装案: `HashMap<String /* date */, CachedSummary>` に置き換え、TTL は同じ
 （成功 2 時間 / 失敗 5 分）、適当な上限（例 30 日）を超えたら古い順に落とす。
 
-### 2. [中] daily summary の数字を自然なローカライズに
+### 2. [中] daily summary の数字を自然なローカライズに（要再確認）
 
-Gemma E2B + 現行 `DAY_SUMMARY_SYSTEM` プロンプトは観察件数が 1〜2 件のとき
-時刻を漢数字で書き出す（例: 「午後二時五十五分に猫が…」）。観察記録は
-`HH:MM` の半角数字で渡しているのに、プロンプトの「中国語・英語・ローマ字を
-混ぜない」ルールに過剰反応して漢数字へ変換していると推測される。文字種に
-こだわるあまり自然な現代日本語から離れている。アラビア数字を明示的に
-許容する一文を加えるか、自然な時刻表記を例示で誘導する方向で要調整。
+PR #212 の Gemma E2B 試用時、現行 `DAY_SUMMARY_SYSTEM` プロンプトは観察件数が
+1〜2 件のとき時刻を漢数字で書き出した（例: 「午後二時五十五分に猫が…」）。
+観察記録は `HH:MM` の半角数字で渡しているのに、プロンプトの「中国語・英語・
+ローマ字を混ぜない」ルールに過剰反応して漢数字へ変換していると推測される。
+
+**この挙動は Gemma で観測したもので、Qwen3.5-2B では未確認**。hot-swap を廃止し
+要約も Qwen3.5 が担うようになったため、まず Qwen3.5 で同じ現象が出るかを
+確認すること。再現する場合は、アラビア数字を明示的に許容する一文を加えるか、
+自然な時刻表記を例示で誘導する方向で調整する。

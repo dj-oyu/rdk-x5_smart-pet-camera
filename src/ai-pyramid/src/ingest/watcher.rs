@@ -416,7 +416,6 @@ mod tests {
             None,
             false,
             VlmConfig::default(),
-            None,
         );
         PhotoWatcher::new(app, VlmConfig::default(), None, None)
     }

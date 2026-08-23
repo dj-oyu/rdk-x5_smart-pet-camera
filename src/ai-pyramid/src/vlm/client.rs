@@ -1,6 +1,6 @@
+use super::VlmConfig;
 use super::observations::{Observation, select_observations};
 use super::parser::{VlmResponse, parse_vlm_response, strip_arabic, strip_think};
-use super::VlmConfig;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;

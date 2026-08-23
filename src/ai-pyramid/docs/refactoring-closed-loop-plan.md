@@ -49,7 +49,7 @@
 |---|---:|---|---|
 | `db` album operations | 14 | 中〜高 | migration fixture、failure/transaction paths |
 | `server` | 13 | 中 | panel、photo patch、event、backfill、detect-now、edit history、behaviors、daily summary、night-assist、test assets |
-| `vlm` | 12 | parserは高 | model swap、systemctl failure、restore failure、readiness timeout |
+| `vlm` | 12 | parserは高 | summary失敗時のfallback、timeout、observation選択 |
 | `mcp` | 10 | 高 | 現状維持でよい |
 | filename ingest | 9 | 高 | 現状維持でよい |
 | local detector | 6 | 低〜中 | socket errors、partial reads、two-pass orchestration、model swap |
@@ -106,7 +106,6 @@ src/
     mod.rs                 public facade and types
     parser.rs
     client.rs
-    supervisor.rs          systemd model swap/readiness/recovery
 
 ui/src/components/
   event-detail.tsx         composition root
@@ -169,7 +168,6 @@ Required test additions:
 - SQLite migrationを既存schema fixtureへ複数回適用
 - packed protocolのbyte-level golden testsとtruncated/error response tests
 - watcherのdeleted-file無限再queue、retry上限、stable-file判定
-- VLM model swapでvision復旧を必ず試みることをfake supervisorで固定
 - EventDetailのview transition、save、override、cancelをDOM testで固定
 
 Coverage gateの導入手順:
@@ -215,7 +213,7 @@ Gate: 各laneを統合した状態で全自動テストが成功し、取得可�
 - [x] serverをalbum/detection/events/summary/assets/test_pagesへ分割
 - [x] training APIをframes/annotations/background/testsへ分割
 - [x] local detectorをwire/client/image_conversion/pipelineへ分割
-- [x] VLMをclient/parser/supervisorへ分割
+- [x] VLMをclient/parser/supervisorへ分割（`supervisor.rs` はその後 VLM hot-swap 廃止に伴い削除済み）
 - [x] EventDetailからmetadata editorとdetection listを抽出
 - [x] GitHub Rust CI `32592676514` 成功
 
