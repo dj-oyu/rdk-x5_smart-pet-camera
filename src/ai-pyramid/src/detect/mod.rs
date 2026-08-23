@@ -253,14 +253,12 @@ mod tests {
         // local time; stored as the UTC instant that names.
         assert_eq!(
             dets[0].detected_at,
-            crate::timestamps::to_db(
-                crate::timestamps::from_camera_local(
-                    chrono::NaiveDate::from_ymd_opt(2026, 3, 21)
-                        .unwrap()
-                        .and_hms_opt(10, 45, 32)
-                        .unwrap()
-                )
-            )
+            crate::timestamps::to_db(crate::timestamps::from_camera_local(
+                chrono::NaiveDate::from_ymd_opt(2026, 3, 21)
+                    .unwrap()
+                    .and_hms_opt(10, 45, 32)
+                    .unwrap()
+            ))
         );
     }
 
