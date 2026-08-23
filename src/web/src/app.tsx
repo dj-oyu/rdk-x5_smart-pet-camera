@@ -116,44 +116,43 @@ export function App() {
             <div id="video-panel">
               <div
                 id="webrtc-view"
-                style={{
-                  position: 'relative',
-                  width: '100%',
-                  display: videoPlayer.mode.value === 'webrtc' ? 'block' : 'none',
-                }}
+                class="video-stage-layer"
+                style={{ display: videoPlayer.mode.value === 'webrtc' ? 'block' : 'none' }}
               >
                 <video
                   ref={videoPlayer.videoRef}
+                  class="video-frame"
                   autoplay
                   playsinline
                   muted
                   style={{
-                    width: '100%',
-                    height: 'auto',
-                    display: 'block',
-                    background: '#000',
                     borderRadius: '8px 8px 0 0',
                   }}
                 />
                 <canvas
                   ref={videoPlayer.canvasRef}
-                  style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    width: '100%',
-                    height: '100%',
-                    pointerEvents: 'none',
-                  }}
+                  class="video-overlay"
                 />
               </div>
-              <div id="mjpeg-view" style={{ display: videoPlayer.mode.value === 'mjpeg' ? 'block' : 'none' }}>
+              <div
+                id="mjpeg-view"
+                class="video-stage-layer"
+                style={{ display: videoPlayer.mode.value === 'mjpeg' ? 'block' : 'none' }}
+              >
                 <img
                   ref={videoPlayer.mjpegRef}
+                  onLoad={videoPlayer.onMJPEGFirstFrame}
+                  class="video-frame"
                   alt="Camera stream"
-                  style={{ width: '100%', height: 'auto', aspectRatio: '768/432', borderRadius: '8px 8px 0 0' }}
+                  style={{ borderRadius: '8px 8px 0 0' }}
                 />
               </div>
+              {videoPlayer.loading.value && (
+                <div class="video-loading" role="status" aria-live="polite">
+                  <div class="video-loading-spinner" aria-hidden="true" />
+                  <span>{videoPlayer.loadingLabel.value}</span>
+                </div>
+              )}
             </div>
             <VideoControls
               mode={videoPlayer.mode.value}
