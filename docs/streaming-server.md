@@ -300,6 +300,7 @@ func (r *Recorder) GetStatus() RecordingStatus
 | エンドポイント | メソッド | 説明 |
 |--------------|---------|------|
 | `/offer` | POST | WebRTC SDP offer → answer |
+| `/close` | POST | Explicitly close a WebRTC session |
 | `/start` | POST | 録画開始 |
 | `/stop` | POST | 録画停止 |
 | `/status` | GET | 録画状態 |
@@ -319,6 +320,11 @@ CORS: `Access-Control-Allow-Origin: *`
   "has_headers": true
 }
 ```
+
+`POST /offer` also returns a `session_id`. Clients should send that ID to
+`POST /close` when the peer connection is stopped or replaced. This removes
+the UDP session immediately instead of waiting for the 45-second keepalive
+timeout; repeated close requests are safe.
 
 **`GET /status`**:
 ```json

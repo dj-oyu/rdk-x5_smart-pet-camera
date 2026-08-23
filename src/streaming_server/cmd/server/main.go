@@ -436,6 +436,7 @@ func (s *Server) setupRoutes(mux *http.ServeMux) {
 
 	// WebRTC signaling
 	mux.HandleFunc("/offer", corsMiddleware(s.handleOffer))
+	mux.HandleFunc("/close", corsMiddleware(s.handleClose))
 
 	// Recording control
 	mux.HandleFunc("/start", corsMiddleware(s.handleStartRecording))
@@ -476,6 +477,32 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(answerJSON)
+}
+
+// handleClose handles an explicit WebRTC session close request. The
+// session_id is returned with the corresponding /offer response.
+func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// The close payload is tiny; cap it so this endpoint cannot be used for an
+	// unbounded body read.
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	var payload struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || strings.TrimSpace(payload.SessionID) == "" {
+		http.Error(w, "Invalid session close data", http.StatusBadRequest)
+		return
+	}
+
+	closed := s.signal.CloseSession(payload.SessionID)
+	w.Header().Set("Content-Type", "application/json")
+	// Closing an already-expired session is an idempotent success from the
+	// client's perspective, so return 200 in both cases.
+	_ = json.NewEncoder(w).Encode(map[string]bool{"closed": closed})
 }
 
 // handleStartRecording handles start recording request

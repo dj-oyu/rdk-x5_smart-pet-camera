@@ -1042,12 +1042,19 @@ func (cb *ConnectionBroadcaster) Subscribe() (int, <-chan []byte) {
 	cb.mu.Unlock()
 
 	// Trigger immediate update for the new subscriber
+	cb.NotifyChange()
+
+	return id, ch
+}
+
+// NotifyChange requests an immediate connection-count refresh. WebRTC lives
+// in a separate process, so explicit session close requests use this hook to
+// update the viewer indicator without waiting for the periodic poll.
+func (cb *ConnectionBroadcaster) NotifyChange() {
 	select {
 	case cb.onChange <- struct{}{}:
 	default:
 	}
-
-	return id, ch
 }
 
 // Unsubscribe removes a client.
