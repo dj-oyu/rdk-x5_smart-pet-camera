@@ -46,7 +46,11 @@ coverage.xml
 .pytest_cache/
 
 # Environments
-.env
+# .env* so that ad-hoc copies (.env.bak-*, .env.local) cannot slip in as
+# untracked-but-not-ignored files: this is a public repo and the real .env
+# holds device-specific paths. The sample stays tracked.
+.env*
+!.env.sample
 .venv
 env/
 venv/
