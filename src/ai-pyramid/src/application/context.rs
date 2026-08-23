@@ -1,5 +1,5 @@
 use crate::application::{EventQueries, ObservationCommands, PetEvent, SharedEventRepository};
-use crate::vlm::{VlmConfig, VlmSwapConfig};
+use crate::vlm::VlmConfig;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Semaphore, broadcast};
@@ -12,7 +12,6 @@ pub struct AppContext {
     base_url: Option<String>,
     is_tls: bool,
     vlm_config: VlmConfig,
-    vlm_swap_config: Option<VlmSwapConfig>,
     /// Single NPU gate shared between VLM (axllm) and YOLO daemon.
     /// Concurrent NPU access from two processes causes SEGV on AX650.
     /// Both vlm_semaphore() and yolo_semaphore() return this same permit.
@@ -27,7 +26,6 @@ impl AppContext {
         base_url: Option<String>,
         is_tls: bool,
         vlm_config: VlmConfig,
-        vlm_swap_config: Option<VlmSwapConfig>,
     ) -> Self {
         Self {
             repository,
@@ -36,7 +34,6 @@ impl AppContext {
             base_url,
             is_tls,
             vlm_config,
-            vlm_swap_config,
             npu_semaphore: Arc::new(Semaphore::new(1)),
         }
     }
@@ -71,10 +68,6 @@ impl AppContext {
 
     pub fn vlm_config(&self) -> VlmConfig {
         self.vlm_config.clone()
-    }
-
-    pub fn vlm_swap_config(&self) -> Option<&VlmSwapConfig> {
-        self.vlm_swap_config.as_ref()
     }
 
     pub fn vlm_semaphore(&self) -> &Arc<Semaphore> {
