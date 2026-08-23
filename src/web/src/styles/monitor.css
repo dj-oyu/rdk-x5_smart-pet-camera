@@ -1630,7 +1630,9 @@ body.lightbox-active .mobile-tab-bar {
     }
     #video-panel {
         border-radius: 0;
-        aspect-ratio: auto;
+        /* The media layers are absolutely positioned, so keep an explicit
+         * aspect ratio on mobile as well; auto would collapse the panel. */
+        aspect-ratio: 16 / 9;
     }
     .video-controls {
         border-radius: 0;
