@@ -249,7 +249,19 @@ mod tests {
         // Panel 2 origin: (14, 12+2+1*(228+4+8)) = (14, 254)
         assert_eq!(dets[1].yolo_class.as_deref(), Some("cup"));
         assert_eq!(dets[1].panel_index, Some(2));
-        assert_eq!(dets[0].detected_at, "2026-03-21T10:45:32");
+        // detected_at comes from the filename, which the camera writes in its
+        // local time; stored as the UTC instant that names.
+        assert_eq!(
+            dets[0].detected_at,
+            crate::timestamps::to_db(
+                crate::timestamps::from_camera_local(
+                    chrono::NaiveDate::from_ymd_opt(2026, 3, 21)
+                        .unwrap()
+                        .and_hms_opt(10, 45, 32)
+                        .unwrap()
+                )
+            )
+        );
     }
 
     #[tokio::test]

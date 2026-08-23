@@ -328,11 +328,10 @@ mod tests {
         assert_eq!(event["pet_id"], "chatora");
         assert_eq!(event["behavior"], "resting");
         assert_eq!(event["summary"], "tabby cat resting");
-        assert!(
-            event["observed_at"]
-                .as_str()
-                .unwrap()
-                .starts_with("2026-03-21T10:00:00")
+        // Served in the stored form: the UTC instant named by 10:00 local.
+        assert_eq!(
+            event["observed_at"],
+            crate::timestamps::to_db(dt(2026, 3, 21, 10, 0, 0))
         );
     }
 
