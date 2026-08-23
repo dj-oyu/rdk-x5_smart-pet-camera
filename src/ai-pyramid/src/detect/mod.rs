@@ -64,8 +64,8 @@ impl DetectClient {
 
         // Extract detected_at from filename, fallback to now
         let detected_at = parse_comic_filename(filename)
-            .map(|m| m.captured_at.format("%Y-%m-%dT%H:%M:%S").to_string())
-            .unwrap_or_else(|_| chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
+            .map(|m| crate::timestamps::to_db(m.captured_at))
+            .unwrap_or_else(|_| crate::timestamps::now_db());
 
         let mut all_inputs = Vec::new();
 
@@ -249,7 +249,17 @@ mod tests {
         // Panel 2 origin: (14, 12+2+1*(228+4+8)) = (14, 254)
         assert_eq!(dets[1].yolo_class.as_deref(), Some("cup"));
         assert_eq!(dets[1].panel_index, Some(2));
-        assert_eq!(dets[0].detected_at, "2026-03-21T10:45:32");
+        // detected_at comes from the filename, which the camera writes in its
+        // local time; stored as the UTC instant that names.
+        assert_eq!(
+            dets[0].detected_at,
+            crate::timestamps::to_db(crate::timestamps::from_camera_local(
+                chrono::NaiveDate::from_ymd_opt(2026, 3, 21)
+                    .unwrap()
+                    .and_hms_opt(10, 45, 32)
+                    .unwrap()
+            ))
+        );
     }
 
     #[tokio::test]

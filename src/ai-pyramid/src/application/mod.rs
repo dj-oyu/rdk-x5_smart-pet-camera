@@ -22,15 +22,17 @@ pub type AppResult<T> = Result<T, String>;
 mod tests {
     use super::*;
     use crate::db::PhotoStore;
-    use chrono::{NaiveDate, NaiveDateTime};
+    use chrono::{DateTime, NaiveDate, Utc};
     use std::path::PathBuf;
     use tokio::sync::broadcast;
 
-    fn dt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(y, m, d)
-            .unwrap()
-            .and_hms_opt(h, mi, s)
-            .unwrap()
+    fn dt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
+        crate::timestamps::from_camera_local(
+            NaiveDate::from_ymd_opt(y, m, d)
+                .unwrap()
+                .and_hms_opt(h, mi, s)
+                .unwrap(),
+        )
     }
 
     fn test_context() -> AppContext {

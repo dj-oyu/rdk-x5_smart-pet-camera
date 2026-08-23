@@ -73,11 +73,18 @@ Shifting moves photos captured in the 23:00 hour across the day boundary, so
 per-day counts change: 2026-08-22 went from 21 valid photos to 14, and
 2026-08-23 from 35 to 42.
 
-## Related, not fixed
+## Aftermath: one reference frame
 
-`training_frames.captured_at` is **UTC**, not local: it comes from a Unix
-timestamp in the frame's JSON metadata via `DateTime::from_timestamp`
-(`training/api/frames.rs:33`), so it was never affected by the camera's
-timezone — but it is 9 hours off from `photos.captured_at`, which is JST. Two
-tables in the same database use two different reference frames. Worth
-reconciling; the migration script deliberately leaves that table untouched.
+The investigation surfaced a second discrepancy. `training_frames.captured_at`
+was **UTC** — it comes from a Unix timestamp in the frame's JSON metadata via
+`DateTime::from_timestamp` (`training/api/frames.rs:33`), so the camera's
+timezone never touched it — while `photos.captured_at` was local. Two tables in
+the same database, nine hours apart, with nothing in either value saying which
+was which. That is the same failure mode as the bug above, so timestamps were
+moved to a single stored form: UTC, suffixed `Z`, via `crate::timestamps`.
+`PhotoStore::migrate()` converts pre-existing rows, keyed on the missing `Z` so
+it cannot shift a value twice.
+
+Local time now survives in exactly two deliberate places: comic filenames (the
+camera writes them) and the album's notion of a day (`local_day_bounds`), since
+nobody thinks of their cat's morning in UTC.

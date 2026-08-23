@@ -6,7 +6,7 @@ use crate::db::{
 use crate::training::db::{
     AnnotationInput, ExportEntry, TrainingAnnotation, TrainingFrame, TrainingStats,
 };
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use std::sync::mpsc;
 use std::thread;
 use tokio::sync::oneshot;
@@ -47,7 +47,7 @@ impl Database {
 pub enum DbCommand {
     InsertPhoto {
         filename: String,
-        captured_at: NaiveDateTime,
+        captured_at: DateTime<Utc>,
         pet_id: Option<String>,
         reply: oneshot::Sender<AppResult<i64>>,
     },
@@ -93,7 +93,7 @@ pub enum DbCommand {
     },
     IngestWithDetections {
         filename: String,
-        captured_at: NaiveDateTime,
+        captured_at: DateTime<Utc>,
         pet_id: Option<String>,
         detections: Vec<DetectionInput>,
         reply: oneshot::Sender<AppResult<i64>>,

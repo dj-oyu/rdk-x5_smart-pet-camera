@@ -258,10 +258,12 @@ mod tests {
         });
 
         let day = vec![Observation {
-            captured_at: chrono::NaiveDate::from_ymd_opt(2026, 8, 23)
-                .unwrap()
-                .and_hms_opt(12, 0, 0)
-                .unwrap(),
+            captured_at: crate::timestamps::from_camera_local(
+                chrono::NaiveDate::from_ymd_opt(2026, 8, 23)
+                    .unwrap()
+                    .and_hms_opt(12, 0, 0)
+                    .unwrap(),
+            ),
             caption: "a cat by the window".to_string(),
         }];
         let summary = client.summarize_day(&day, None).await.unwrap();

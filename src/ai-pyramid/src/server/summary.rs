@@ -39,9 +39,9 @@ pub(super) async fn handle_daily_summary(
     State(state): State<AppState>,
     Json(body): Json<DailySummaryRequest>,
 ) -> impl IntoResponse {
-    let date = body
-        .date
-        .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
+    // A day stays local here: stored timestamps are UTC, but "today" means the
+    // day the household is living through.
+    let date = body.date.unwrap_or_else(crate::timestamps::today_local);
 
     // Check cache — both successes and failures land here, with their own TTLs
     {

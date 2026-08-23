@@ -107,8 +107,8 @@ impl LocalDetector {
         }
 
         let detected_at = parse_comic_filename(filename)
-            .map(|metadata| metadata.captured_at.format("%Y-%m-%dT%H:%M:%S").to_string())
-            .unwrap_or_else(|_| chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
+            .map(|metadata| crate::timestamps::to_db(metadata.captured_at))
+            .unwrap_or_else(|_| crate::timestamps::now_db());
         let image = image::open(&jpeg_path)
             .map_err(|error| format!("open {}: {error}", jpeg_path.display()))?;
         let detections =

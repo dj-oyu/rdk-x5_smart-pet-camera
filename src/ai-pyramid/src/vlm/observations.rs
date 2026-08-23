@@ -1,9 +1,9 @@
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 
 /// One captioned frame from a day, as fed to the daily summary.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Observation {
-    pub captured_at: NaiveDateTime,
+    pub captured_at: DateTime<Utc>,
     pub caption: String,
 }
 
@@ -73,10 +73,12 @@ mod tests {
 
     fn observation(hour: u32, minute: u32, caption: &str) -> Observation {
         Observation {
-            captured_at: NaiveDate::from_ymd_opt(2026, 8, 23)
-                .unwrap()
-                .and_hms_opt(hour, minute, 0)
-                .unwrap(),
+            captured_at: crate::timestamps::from_camera_local(
+                NaiveDate::from_ymd_opt(2026, 8, 23)
+                    .unwrap()
+                    .and_hms_opt(hour, minute, 0)
+                    .unwrap(),
+            ),
             caption: caption.to_string(),
         }
     }

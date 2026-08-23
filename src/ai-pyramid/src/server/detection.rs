@@ -78,7 +78,7 @@ pub(super) async fn handle_backfill(State(state): State<AppState>) -> impl IntoR
                 Ok(dets) if !dets.is_empty() => {
                     let captured_at = parse_comic_filename(&photo.source_filename)
                         .map(|m| m.captured_at)
-                        .unwrap_or_default();
+                        .unwrap_or_else(|_| crate::timestamps::epoch());
                     if let Err(e) = commands
                         .ingest_with_detections(
                             &photo.source_filename,
@@ -209,7 +209,7 @@ pub(super) async fn handle_detect_now(
             if !dets.is_empty() {
                 let captured_at = parse_comic_filename(&safe_name)
                     .map(|m| m.captured_at)
-                    .unwrap_or_default();
+                    .unwrap_or_else(|_| crate::timestamps::epoch());
                 if let Err(e) = commands
                     .ingest_with_detections(&safe_name, captured_at, None, &dets)
                     .await

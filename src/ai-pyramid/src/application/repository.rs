@@ -2,7 +2,7 @@ use crate::application::db_thread::{Database, DbCommand};
 use crate::application::{ActivityStats, AppResult, EventQuery, EventSummary};
 use crate::db::{DayObservation, Detection, DetectionInput, EditHistoryEntry, PhotoStore};
 use async_trait::async_trait;
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use std::sync::Arc;
 
 #[async_trait]
@@ -10,7 +10,7 @@ pub trait EventRepositoryPort: Send + Sync {
     async fn store_source_photo(
         &self,
         source_filename: &str,
-        captured_at: NaiveDateTime,
+        captured_at: DateTime<Utc>,
         pet_id: Option<&str>,
     ) -> AppResult<i64>;
     async fn get_event_by_source(&self, source_filename: &str) -> AppResult<Option<EventSummary>>;
@@ -39,7 +39,7 @@ pub trait EventRepositoryPort: Send + Sync {
     async fn ingest_with_detections(
         &self,
         source_filename: &str,
-        captured_at: NaiveDateTime,
+        captured_at: DateTime<Utc>,
         pet_id: Option<&str>,
         detections: &[DetectionInput],
     ) -> AppResult<i64>;
@@ -81,7 +81,7 @@ impl EventRepositoryPort for PhotoStoreRepository {
     async fn store_source_photo(
         &self,
         source_filename: &str,
-        captured_at: NaiveDateTime,
+        captured_at: DateTime<Utc>,
         pet_id: Option<&str>,
     ) -> AppResult<i64> {
         self.db
@@ -215,7 +215,7 @@ impl EventRepositoryPort for PhotoStoreRepository {
     async fn ingest_with_detections(
         &self,
         source_filename: &str,
-        captured_at: NaiveDateTime,
+        captured_at: DateTime<Utc>,
         pet_id: Option<&str>,
         detections: &[DetectionInput],
     ) -> AppResult<i64> {

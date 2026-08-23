@@ -276,7 +276,15 @@ impl VlmClient {
         let n = selected.len();
         let observations = selected
             .iter()
-            .map(|o| format!("- {} {}", o.captured_at.format("%H:%M"), o.caption))
+            // The model reads these as the household's clock, so render local
+            // time even though the value is stored in UTC.
+            .map(|o| {
+                format!(
+                    "- {} {}",
+                    o.captured_at.with_timezone(&chrono::Local).format("%H:%M"),
+                    o.caption
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let user_text =
