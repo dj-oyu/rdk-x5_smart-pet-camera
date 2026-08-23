@@ -13,6 +13,13 @@ pub struct Photo {
     pub detected_at: Option<String>,
 }
 
+/// One captioned photo from a single day, as fed to the daily summary.
+#[derive(Debug, Clone)]
+pub struct DayObservation {
+    pub captured_at: NaiveDateTime,
+    pub caption: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Detection {
     pub id: i64,
@@ -785,20 +792,34 @@ impl PhotoStore {
         Ok(behaviors)
     }
 
-    /// Return captions for valid photos on a given date (YYYY-MM-DD), each
-    /// prefixed with `HH:MM ` so the consumer (`VlmClient::summarize_day`)
-    /// can include a timeline without re-querying.
-    pub fn captions_for_date(&self, date: &str) -> rusqlite::Result<Vec<String>> {
+    /// Captioned photos of one day (YYYY-MM-DD), oldest first. The summary picks a
+    /// spread-out subset of these, so the timestamp is returned as its own
+    /// field rather than baked into the caption text.
+    pub fn observations_for_date(&self, date: &str) -> rusqlite::Result<Vec<DayObservation>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT substr(captured_at, 12, 5) || ' ' || caption \
+            "SELECT captured_at, caption \
              FROM photos \
              WHERE is_valid = 1 AND caption IS NOT NULL AND captured_at LIKE ? || '%' \
              ORDER BY captured_at ASC LIMIT 200",
         )?;
-        let captions = stmt
-            .query_map(params![date], |row| row.get(0))?
-            .collect::<rusqlite::Result<Vec<String>>>()?;
-        Ok(captions)
+        let rows = stmt
+            .query_map(params![date], |row| {
+                let captured_at: String = row.get(0)?;
+                let caption: String = row.get(1)?;
+                Ok((captured_at, caption))
+            })?
+            .collect::<rusqlite::Result<Vec<(String, String)>>>()?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(captured_at, caption)| {
+                NaiveDateTime::parse_from_str(&captured_at, "%Y-%m-%dT%H:%M:%S")
+                    .ok()
+                    .map(|captured_at| DayObservation {
+                        captured_at,
+                        caption,
+                    })
+            })
+            .collect())
     }
 
     /// Mark a photo as having had detection run, even if zero detections found.

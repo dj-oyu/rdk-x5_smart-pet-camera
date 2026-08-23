@@ -1,4 +1,5 @@
 use super::AppState;
+use crate::vlm::Observation;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
@@ -53,8 +54,8 @@ pub(super) async fn handle_daily_summary(
         }
     }
 
-    let captions = match state.queries().captions_for_date(&date).await {
-        Ok(c) => c,
+    let rows = match state.queries().observations_for_date(&date).await {
+        Ok(rows) => rows,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -64,7 +65,7 @@ pub(super) async fn handle_daily_summary(
         }
     };
 
-    if captions.is_empty() {
+    if rows.is_empty() {
         return Json(DailySummaryResponse {
             date,
             summary: "No observations for this date.".into(),
@@ -73,7 +74,14 @@ pub(super) async fn handle_daily_summary(
         .into_response();
     }
 
-    let photo_count = captions.len();
+    let photo_count = rows.len();
+    let day: Vec<Observation> = rows
+        .into_iter()
+        .map(|row| Observation {
+            captured_at: row.captured_at,
+            caption: row.caption,
+        })
+        .collect();
 
     // Pick a random photo from the day for visual context
     let random_photo = {
@@ -103,12 +111,12 @@ pub(super) async fn handle_daily_summary(
     let summary_result = match state.context.vlm_swap_config() {
         Some(swap) => {
             vlm_client
-                .summarize_day_with_swap(swap, &captions, random_photo.as_deref())
+                .summarize_day_with_swap(swap, &day, random_photo.as_deref())
                 .await
         }
         None => {
             vlm_client
-                .summarize_day(&captions, random_photo.as_deref())
+                .summarize_day(&day, random_photo.as_deref())
                 .await
         }
     };

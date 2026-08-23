@@ -1,6 +1,6 @@
 use crate::application::db_thread::{Database, DbCommand};
 use crate::application::{ActivityStats, AppResult, EventQuery, EventSummary};
-use crate::db::{Detection, DetectionInput, EditHistoryEntry, PhotoStore};
+use crate::db::{DayObservation, Detection, DetectionInput, EditHistoryEntry, PhotoStore};
 use async_trait::async_trait;
 use chrono::NaiveDateTime;
 use std::sync::Arc;
@@ -49,7 +49,7 @@ pub trait EventRepositoryPort: Send + Sync {
     async fn update_behavior(&self, source_filename: &str, behavior: &str) -> AppResult<usize>;
     async fn distinct_pet_ids(&self) -> AppResult<Vec<String>>;
     async fn distinct_behaviors(&self) -> AppResult<Vec<String>>;
-    async fn captions_for_date(&self, date: &str) -> AppResult<Vec<String>>;
+    async fn observations_for_date(&self, date: &str) -> AppResult<Vec<DayObservation>>;
     async fn list_undetected_photos(&self, limit: i64) -> AppResult<Vec<EventSummary>>;
     async fn mark_detected(&self, photo_id: i64) -> AppResult<usize>;
     async fn record_empty_level2(&self, photo_id: i64) -> AppResult<usize>;
@@ -278,9 +278,9 @@ impl EventRepositoryPort for PhotoStoreRepository {
             .await
     }
 
-    async fn captions_for_date(&self, date: &str) -> AppResult<Vec<String>> {
+    async fn observations_for_date(&self, date: &str) -> AppResult<Vec<DayObservation>> {
         self.db
-            .request(|reply| DbCommand::CaptionsForDate {
+            .request(|reply| DbCommand::ObservationsForDate {
                 date: date.to_string(),
                 reply,
             })

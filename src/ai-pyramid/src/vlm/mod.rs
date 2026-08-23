@@ -1,10 +1,12 @@
 use std::time::Duration;
 
 mod client;
+mod observations;
 mod parser;
 mod supervisor;
 
 pub use client::VlmClient;
+pub use observations::Observation;
 pub use parser::{VlmResponse, parse_vlm_response};
 
 #[cfg(test)]
@@ -255,10 +257,14 @@ mod tests {
             ..Default::default()
         });
 
-        let summary = client
-            .summarize_day(&["12:00 a cat by the window".to_string()], None)
-            .await
-            .unwrap();
+        let day = vec![Observation {
+            captured_at: chrono::NaiveDate::from_ymd_opt(2026, 8, 23)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap(),
+            caption: "a cat by the window".to_string(),
+        }];
+        let summary = client.summarize_day(&day, None).await.unwrap();
         assert_eq!(summary, "猫は窓辺にいました。日中は静かでした。");
 
         // Same client, captioning path: still bound by the short timeout.

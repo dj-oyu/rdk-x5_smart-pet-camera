@@ -1,6 +1,7 @@
 use crate::application::AppResult;
 use crate::db::{
-    BboxSummary, Detection, DetectionInput, EditHistoryEntry, Photo, PhotoFilter, PhotoStore, Stats,
+    BboxSummary, DayObservation, Detection, DetectionInput, EditHistoryEntry, Photo, PhotoFilter,
+    PhotoStore, Stats,
 };
 use crate::training::db::{
     AnnotationInput, ExportEntry, TrainingAnnotation, TrainingFrame, TrainingStats,
@@ -122,9 +123,9 @@ pub enum DbCommand {
     DistinctBehaviors {
         reply: oneshot::Sender<AppResult<Vec<String>>>,
     },
-    CaptionsForDate {
+    ObservationsForDate {
         date: String,
-        reply: oneshot::Sender<AppResult<Vec<String>>>,
+        reply: oneshot::Sender<AppResult<Vec<DayObservation>>>,
     },
     ListUndetectedPhotos {
         limit: i64,
@@ -238,7 +239,7 @@ impl DbCommand {
             | DbCommand::UpdateBehavior { .. }
             | DbCommand::DistinctPetIds { .. }
             | DbCommand::DistinctBehaviors { .. }
-            | DbCommand::CaptionsForDate { .. }
+            | DbCommand::ObservationsForDate { .. }
             | DbCommand::ListUndetectedPhotos { .. }
             | DbCommand::MarkDetected { .. }
             | DbCommand::RecordEmptyLevel2 { .. }

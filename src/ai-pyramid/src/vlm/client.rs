@@ -1,3 +1,4 @@
+use super::observations::{Observation, select_observations};
 use super::parser::{VlmResponse, parse_vlm_response, strip_arabic, strip_think};
 use super::supervisor::{systemctl, wait_for_model};
 use super::{VlmConfig, VlmSwapConfig};
@@ -261,24 +262,21 @@ impl VlmClient {
 
     /// Summarize a day's observations, optionally with a representative photo.
     ///
-    /// Captions should already be prefixed with `HH:MM` (see
-    /// `PhotoStore::captions_for_date`); we forward them verbatim so the model
-    /// sees the timeline that the system prompt's "observations only" rule
-    /// refers to.
+    /// `day` must be ordered by capture time (see
+    /// `PhotoStore::observations_for_date`). Only a spread-out subset is sent
+    /// — see `select_observations` — and each line is prefixed with its `HH:MM`
+    /// so the model sees the timeline that the system prompt's "observations
+    /// only" rule refers to.
     pub async fn summarize_day(
         &self,
-        captions: &[String],
+        day: &[Observation],
         photo_path: Option<&Path>,
     ) -> Result<String, String> {
-        let recent: &[String] = if captions.len() > DAY_SUMMARY_OBS_LIMIT {
-            &captions[captions.len() - DAY_SUMMARY_OBS_LIMIT..]
-        } else {
-            captions
-        };
-        let n = recent.len();
-        let observations = recent
+        let selected = select_observations(day, DAY_SUMMARY_OBS_LIMIT);
+        let n = selected.len();
+        let observations = selected
             .iter()
-            .map(|c| format!("- {c}"))
+            .map(|o| format!("- {} {}", o.captured_at.format("%H:%M"), o.caption))
             .collect::<Vec<_>>()
             .join("\n");
         let user_text =
@@ -354,7 +352,7 @@ impl VlmClient {
     pub async fn summarize_day_with_swap(
         &self,
         swap: &VlmSwapConfig,
-        captions: &[String],
+        day: &[Observation],
         photo_path: Option<&Path>,
     ) -> Result<String, String> {
         info!(
@@ -363,7 +361,7 @@ impl VlmClient {
         );
         systemctl(&["stop", &swap.vision_unit]).await?;
 
-        let result = self.run_on_text_model(swap, captions, photo_path).await;
+        let result = self.run_on_text_model(swap, day, photo_path).await;
 
         info!(
             unit = swap.vision_unit.as_str(),
@@ -403,7 +401,7 @@ impl VlmClient {
     async fn run_on_text_model(
         &self,
         swap: &VlmSwapConfig,
-        captions: &[String],
+        day: &[Observation],
         photo_path: Option<&Path>,
     ) -> Result<String, String> {
         info!(
@@ -427,7 +425,7 @@ impl VlmClient {
             },
             http: self.http.clone(),
         };
-        let summary_result = text_client.summarize_day(captions, photo_path).await;
+        let summary_result = text_client.summarize_day(day, photo_path).await;
 
         // Stop the text model regardless of summary outcome so the vision
         // model can take back the NPU. We never want both axllm units running.
