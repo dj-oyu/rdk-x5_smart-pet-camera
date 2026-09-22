@@ -1441,7 +1441,8 @@ vdec_done:
                     }
                     fprintf(stderr, "[STREAM] Ended (sends=%d decoded=%d)\n", sends, decoded);
                 }
-                last_model_use = std::chrono::steady_clock::now(); // idle timer starts at stream end
+                // The idle timer starts when the stream ends.
+                last_model_use = std::chrono::steady_clock::now();
                 shutdown(stcp, SHUT_RDWR);
                 close(stcp);
             } break;
