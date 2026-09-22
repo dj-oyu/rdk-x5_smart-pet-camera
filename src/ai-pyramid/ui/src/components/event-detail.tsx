@@ -111,6 +111,9 @@ export function EventDetail({ event, petNames, onClose, onUpdated, initialPanel 
           <div class="detail-caption-row">
             <p class="detail-caption">{event.summary ?? "No summary"}</p>
             {store.scanning.value && <span class="detect-now-status">Scanning...</span>}
+            {store.scanError.value && (
+              <span class="detect-now-status" title={store.scanError.value}>Detect failed</span>
+            )}
             {store.viewMode.value === "comic" && (
               <>
                 <a class="pill dl" href={photoUrl(event.source_filename)} download={event.source_filename}>JPEG</a>

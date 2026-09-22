@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Parser)]
 #[command(name = "pet-album", about = "AI Pyramid Pro album service")]
@@ -187,16 +187,21 @@ pub async fn run(args: Args) {
     };
 
     // Local NPU detector (YOLO26l on AX650)
+    // Always enabled: ax_yolo_daemon starts after axllm is ready, so its socket
+    // routinely appears after pet-album boots. Deciding here would disable local
+    // detection until the next restart; instead each request reports connect errors.
     let local_detector = {
         let config = crate::detect::local::LocalDetectorConfig::default();
         let ld = crate::detect::local::LocalDetector::new(config);
         if ld.is_available() {
             info!("Local detection enabled (YOLO26l on NPU)");
-            Some(std::sync::Arc::new(ld))
         } else {
-            info!("Local detection unavailable (missing binaries or models)");
-            None
+            warn!(
+                "Local detection enabled, but {} does not exist yet (ax_yolo_daemon not started?)",
+                ld.socket_path().display()
+            );
         }
+        Some(std::sync::Arc::new(ld))
     };
 
     let watcher = PhotoWatcher::new(
