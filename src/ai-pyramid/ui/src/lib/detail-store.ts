@@ -59,6 +59,7 @@ export function createDetailStore(event: EventSummary, initPanel: number | null)
   const detLoading = signal(true);
   const smokeHits = signal<PartialDetection[]>([]);
   const scanning = signal(false);
+  const scanError = signal<string | null>(null);
 
   const hoveredDetId = signal<number | null>(null);
   const pinnedDetId = signal<number | null>(null);
@@ -136,8 +137,21 @@ export function createDetailStore(event: EventSummary, initPanel: number | null)
     if (detections.value.some(d => d.det_level >= 2)) return; // already scanned
     const timer = setTimeout(() => {
       scanning.value = true;
+      scanError.value = null;
       smokeHits.value = [];
-      detectNow(event.source_filename);
+      // The HTTP response is the authoritative end of the scan: on failure the
+      // server sends no detection-ready SSE, and the SSE stream may have dropped.
+      detectNow(event.source_filename)
+        .then(r => { if (!r.ok) scanError.value = r.error ?? "detection failed"; })
+        .catch(e => { scanError.value = String(e); })
+        .finally(() => {
+          if (!scanning.peek()) return; // detection-ready SSE already finished it
+          scanning.value = false;
+          smokeHits.value = [];
+          if (!scanError.peek()) {
+            fetchDetections(event.id).then(d => { detections.value = d; }).catch(() => {});
+          }
+        });
     }, 3000);
     return () => clearTimeout(timer);
   }));
@@ -254,7 +268,7 @@ export function createDetailStore(event: EventSummary, initPanel: number | null)
   }
 
   return {
-    detections, detLoading, smokeHits, scanning,
+    detections, detLoading, smokeHits, scanning, scanError,
     hoveredDetId, pinnedDetId, peekMode, activeDetId,
     viewMode, activePanel, zoomedDetId,
     upscaleState, hdLoading,
