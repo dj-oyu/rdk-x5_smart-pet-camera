@@ -1,5 +1,8 @@
 [Unit]
 Description=YOLO NPU Detection Daemon
+# axllm runs as the template instance axllm-serve@<model>.service, so this
+# After= does not match it. Order against the real instance (and wait for it
+# with ExecStartPre) in a device-local drop-in; see scripts/USAGE.md.
 After=network-online.target axllm-serve.service
 Wants=network-online.target
 
@@ -14,6 +17,11 @@ ExecStart=/opt/smart-pet-camera/build/ax_yolo_daemon \
 Restart=on-failure
 RestartSec=3
 WatchdogSec=30
+# Explicit because the AX650 image sets DefaultTimeoutStartSec/StopSec=5s.
+# Start: covers a drop-in ExecStartPre that waits up to 120s for axllm.
+# Stop: leaves time for AX_ENGINE/VDEC deinit; a SIGKILL leaks NPU (CMM) memory.
+TimeoutStartSec=150
+TimeoutStopSec=30
 
 [Install]
 WantedBy=ai-pyramid.target
