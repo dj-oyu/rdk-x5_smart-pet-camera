@@ -5,6 +5,12 @@
 //   2. Stream: CMD_STREAM connects TCP to rdk-x5, HW decodes H.265 via VDEC,
 //      applies CLAHE, preprocesses via IVPS HW, runs NPU, pushes detections
 //
+// The process stays resident (VDEC/ENGINE/IVPS init order is fragile), but the
+// model is unloaded after --idle-unload-sec without CMD_DETECT/CMD_LOAD/CMD_STREAM
+// and reloaded on the next request. Unloading in-process frees the NPU memory
+// cleanly; a killed process leaks it in the driver, so idleness must never look
+// like a hang to the systemd watchdog.
+//
 // Binary protocol over Unix socket. See protocol.h.
 //
 // BSD 3-Clause License (follows ax-pipeline conventions).
@@ -26,7 +32,6 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
-#include <future>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -57,8 +62,8 @@ static const char* const CMM_TOKEN = "ax_yolo_daemon";
 
 static constexpr int STREAM_RELAY_PORT = 9265;
 static constexpr int STREAM_HEARTBEAT_SEC = 10;
-static constexpr int NPU_TIMEOUT_MS = 5000;
-static constexpr int NPU_TIMEOUT_MAX_CONSECUTIVE = 3;
+static constexpr int ACCEPT_POLL_MS = 1000;
+static constexpr int DEFAULT_IDLE_UNLOAD_SEC = 300;
 
 // ---------------------------------------------------------------------------
 // Globals
@@ -71,8 +76,8 @@ static std::string g_default_model_path; // --model で指定された起動時�
 
 static void signal_handler(int /*sig*/) {
     g_running = 0;
-    // Shutdown listen socket to unblock accept(). Stream loop uses poll()
-    // with 1s timeout so it detects g_running=0 without fd close.
+    // Both the accept loop and the stream loop poll() with a 1s timeout, so
+    // they notice g_running=0 on their own; closing the fd just wakes them early.
     if (g_listen_fd >= 0) {
         shutdown(g_listen_fd, SHUT_RDWR);
         close(g_listen_fd);
@@ -111,9 +116,6 @@ struct AxModel {
     bool ivps_ready = false;
     bool vdec_ready = false;
     AX_POOL vdec_pool_id = AX_INVALID_POOLID;
-
-    // NPU timeout tracking.
-    int consecutive_timeouts = 0;
 
     // Mutex for NPU access (stream vs on-demand).
     std::mutex npu_mutex;
@@ -414,31 +416,19 @@ static void watchdog_ping() {
 }
 
 // ---------------------------------------------------------------------------
-// NPU inference with timeout
+// NPU inference
 // ---------------------------------------------------------------------------
 
 static int run_npu_and_postprocess(AxModel& m, const int orig_w, const int orig_h,
                                    std::vector<Detection>& results, double& elapsed_ms,
                                    const std::chrono::steady_clock::time_point t0) {
-    // Run inference in a separate thread with timeout to detect NPU hangs.
-    auto fut =
-        std::async(std::launch::async, [&]() { return AX_ENGINE_RunSync(m.handle, &m.io_data); });
-    if (fut.wait_for(std::chrono::milliseconds(NPU_TIMEOUT_MS)) == std::future_status::timeout) {
-        fprintf(stderr, "[ERROR] NPU RunSync timeout (%dms), possible NPU deadlock\n",
-                NPU_TIMEOUT_MS);
-        m.consecutive_timeouts++;
-        if (m.consecutive_timeouts >= NPU_TIMEOUT_MAX_CONSECUTIVE) {
-            fprintf(stderr, "[FATAL] %d consecutive NPU timeouts, requesting exit\n",
-                    m.consecutive_timeouts);
-            g_running = 0;
-        }
-        return -1;
-    }
-    const int ret = fut.get();
+    // Called on the main thread on purpose. A hung RunSync stops watchdog_ping(),
+    // so systemd's watchdog is what detects NPU hangs. (A std::async timeout
+    // cannot: the future's destructor blocks until RunSync returns anyway.)
+    const int ret = AX_ENGINE_RunSync(m.handle, &m.io_data);
     if (ret != 0) {
         return ret;
     }
-    m.consecutive_timeouts = 0;
     for (uint32_t i = 0; i < m.io_data.nOutputSize; ++i) {
         AX_SYS_MinvalidateCache(m.io_data.pOutputs[i].phyAddr, m.io_data.pOutputs[i].pVirAddr,
                                 m.io_data.pOutputs[i].nSize);
@@ -695,7 +685,12 @@ static constexpr int FRAME_H = 720;
 // On-demand handlers
 // ---------------------------------------------------------------------------
 
+static void restore_default_model(AxModel& m);
+
 static void handle_detect(const int fd, AxModel& m, const RequestHeader& req) {
+    if (!m.handle) {
+        restore_default_model(m); // lazy reload after idle unload
+    }
     if (!m.handle) {
         send_error(fd, "no model loaded");
         return;
@@ -952,8 +947,10 @@ static void print_usage(const char* const prog) {
             "  --model-dir <path>       Directory to search for models (default: "
             "/home/admin-user/models)\n"
             "  --socket <path>          Unix socket (default: /run/ax_yolo_daemon.sock)\n"
-            "  --input-size <WxH>       Model input (default: 640x640)\n",
-            prog);
+            "  --input-size <WxH>       Model input (default: 640x640)\n"
+            "  --idle-unload-sec <N>    Unload model after N idle seconds, 0=never (default: "
+            "%d)\n",
+            prog, DEFAULT_IDLE_UNLOAD_SEC);
 }
 
 int main(int argc, char** argv) {
@@ -962,6 +959,7 @@ int main(int argc, char** argv) {
     std::string socket_path = env_sock ? env_sock : "/run/ax_yolo_daemon.sock";
     int input_w = DEFAULT_INPUT_W;
     int input_h = DEFAULT_INPUT_H;
+    int idle_unload_sec = DEFAULT_IDLE_UNLOAD_SEC;
 
     const char* const env_model_dir = getenv("AX_YOLO_MODEL_DIR");
     if (env_model_dir) {
@@ -973,12 +971,13 @@ int main(int argc, char** argv) {
         {"model-dir", required_argument, nullptr, 'd'},
         {"socket", required_argument, nullptr, 's'},
         {"input-size", required_argument, nullptr, 'i'},
+        {"idle-unload-sec", required_argument, nullptr, 'u'},
         {"help", no_argument, nullptr, 'h'},
         {nullptr, 0, nullptr, 0},
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "m:d:s:i:h", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "m:d:s:i:u:h", long_opts, nullptr)) != -1) {
         switch (opt) {
         case 'm':
             model_path = optarg;
@@ -992,6 +991,12 @@ int main(int argc, char** argv) {
         case 'i':
             if (sscanf(optarg, "%dx%d", &input_w, &input_h) != 2) {
                 fprintf(stderr, "[ERROR] Invalid --input-size\n");
+                return 1;
+            }
+            break;
+        case 'u':
+            if (sscanf(optarg, "%d", &idle_unload_sec) != 1 || idle_unload_sec < 0) {
+                fprintf(stderr, "[ERROR] Invalid --idle-unload-sec\n");
                 return 1;
             }
             break;
@@ -1164,8 +1169,26 @@ vdec_done:
         }
     }
 
+    // Only requests that need the model keep it resident (not STATUS/HELP).
+    auto last_model_use = std::chrono::steady_clock::now();
     while (g_running) {
+        // Ping every poll timeout so an idle daemon is never mistaken for a hung one.
         watchdog_ping();
+        struct pollfd lp = {g_listen_fd, POLLIN, 0};
+        const int pr = poll(&lp, 1, ACCEPT_POLL_MS);
+        if (pr <= 0) {
+            if (pr < 0 && errno != EINTR) {
+                perror("poll");
+            }
+            if (idle_unload_sec > 0 && model.handle &&
+                std::chrono::steady_clock::now() - last_model_use >=
+                    std::chrono::seconds(idle_unload_sec)) {
+                std::lock_guard<std::mutex> lock(model.npu_mutex);
+                unload_model(model);
+                fprintf(stderr, "[INFO] Model unloaded after %ds idle\n", idle_unload_sec);
+            }
+            continue;
+        }
         const int cfd = accept(g_listen_fd, nullptr, nullptr);
         if (cfd < 0) {
             if (!g_running || errno == EINTR) {
@@ -1177,6 +1200,9 @@ vdec_done:
 
         RequestHeader req = {};
         if (read_exact(cfd, &req, sizeof(req))) {
+            if (req.cmd == CMD_DETECT || req.cmd == CMD_LOAD || req.cmd == CMD_STREAM) {
+                last_model_use = std::chrono::steady_clock::now();
+            }
             switch (req.cmd) {
             case CMD_DETECT:
                 handle_detect(cfd, model, req);
@@ -1205,6 +1231,9 @@ vdec_done:
                 if (shost.empty() || !model.vdec_ready) {
                     send_error(cfd, shost.empty() ? "missing host" : "vdec not ready");
                     break;
+                }
+                if (!model.handle) {
+                    restore_default_model(model); // lazy reload after idle unload
                 }
                 fprintf(stderr, "[STREAM] Connecting to %s:%d\n", shost.c_str(), STREAM_RELAY_PORT);
                 const int stcp = tcp_connect(shost.c_str(), STREAM_RELAY_PORT);
@@ -1412,6 +1441,8 @@ vdec_done:
                     }
                     fprintf(stderr, "[STREAM] Ended (sends=%d decoded=%d)\n", sends, decoded);
                 }
+                // The idle timer starts when the stream ends.
+                last_model_use = std::chrono::steady_clock::now();
                 shutdown(stcp, SHUT_RDWR);
                 close(stcp);
             } break;
