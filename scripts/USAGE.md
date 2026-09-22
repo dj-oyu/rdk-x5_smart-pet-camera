@@ -175,3 +175,39 @@ sudo chmod 440 /etc/sudoers.d/pet-camera
   ExecStart=/bin/sh -c '[ -n "$${MY_VAR}" ] && ...'
   ```
 - `Environment=` で定義した変数は `$` のままでよい (systemd が展開する)
+
+### ai-pyramid: systemd のタイムアウトが既定で 5 秒
+
+AI Pyramid の OS イメージは `/etc/systemd/system.conf` で `DefaultTimeoutStartSec=5s` /
+`DefaultTimeoutStopSec=5s` を設定している (systemd の既定は 90s)。明示しない unit は
+起動・停止とも 5 秒で打ち切られる。
+
+- 起動: `ExecStartPre` での待機も 5 秒で `start-pre operation timed out` になる
+- 停止: 5 秒で SIGKILL される。NPU を使うプロセスが後始末前に殺されると、CMM が
+  ドライバ側にリークして再起動まで戻らない
+
+`ax-yolo-daemon.service.example` は `TimeoutStartSec` / `TimeoutStopSec` を明示している。
+リポジトリ管理外の unit は機器側の drop-in で延ばす:
+
+```bash
+# axllm の準備完了を待つ (インスタンス名はモデルごとに異なる)
+sudo mkdir -p /etc/systemd/system/ax-yolo-daemon.service.d
+sudo tee /etc/systemd/system/ax-yolo-daemon.service.d/vlm-order.conf <<'EOF'
+[Unit]
+Wants=axllm-serve@<model>.service
+After=axllm-serve@<model>.service
+
+[Service]
+ExecStartPre=/usr/bin/bash -c 'for i in $(seq 1 120); do /usr/bin/curl -sf http://127.0.0.1:8000/v1/models >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+EOF
+
+# axllm (M5Stack 提供): NPU メモリ解放の時間を確保
+sudo mkdir -p /etc/systemd/system/axllm-serve@.service.d
+printf '[Service]\nTimeoutStopSec=30\n' | sudo tee /etc/systemd/system/axllm-serve@.service.d/zz-timeouts.conf
+
+# dmesg.service (Ubuntu 標準): 起動時のカーネルログ保存が 5 秒を超える
+sudo mkdir -p /etc/systemd/system/dmesg.service.d
+printf '[Service]\nTimeoutStartSec=60\n' | sudo tee /etc/systemd/system/dmesg.service.d/zz-timeouts.conf
+
+sudo systemctl daemon-reload
+```
